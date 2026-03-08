@@ -356,25 +356,30 @@ Runs alongside scanning with no user interaction. Saves posed camera frames to `
 - **Per frame**: JPEG (1280x960, quality 90) + one JSON line in `frames.jsonl` with:
   - Position (px, py, pz), rotation quaternion (qx, qy, qz, qw)
   - Intrinsics (fx, fy, cx, cy), sensor resolution, current resolution
-- **I/O**: `AsyncGPUReadback` -> JPEG encode -> `Task.Run` file write (zero frame stalls)
+- **I/O**: `AsyncGPUReadback` → JPEG encode → `Task.Run` file write (zero frame stalls)
+- **Deduplication**: Multiple pose entries per image ID may occur; the PC pipeline keeps only the last pose per image
 - **Typical output**: 100-300 keyframes, 10-30MB total
 
 ### PointCloudExporter (Quest side, periodic)
 Exports TSDF mesh vertices as binary PLY to `GSExport/points3d.ply`:
 - Iterates all populated chunks, transforms vertices to world space
-- Writes position (float3), normal (float3), color (uchar3) per vertex
+- Writes position (float3), normal (float3), color (uchar3) per vertex in Unity coordinates (left-handed Y-up)
 - Runs every 30s automatically
 - Provides dense initialization for GS training (10-100x more points than SfM)
 
-### PC Pipeline (`tools/gs_pipeline.py`)
-Single-command pipeline: `python tools/gs_pipeline.py`
+### PC Pipeline (`Tools~/gs_pipeline.py`)
+Single-command pipeline: `python Tools~/gs_pipeline.py --package com.your.app`
 
-1. **Pull**: `adb pull` GSExport directory from Quest
-2. **Convert**: `frames.jsonl` to COLMAP text format (`cameras.txt`, `images.txt`, `points3D.txt`)
-   - Coordinate transform: Unity (left-handed Y-up) to COLMAP (right-handed Y-down)
-   - Single PINHOLE camera model from Quest passthrough intrinsics
-3. **Train**: Runs `gsplat` or `3DGS` with dense point cloud initialization (~7000 iterations)
-4. **Output**: Trained `point_cloud.ply` ready for Unity import
+1. **Pull**: `adb pull` GSExport directory from Quest, symlinks `captures/latest`
+2. **Convert**: `frames.jsonl` → COLMAP binary format (`cameras.bin`, `images.bin`, `points3D.bin`)
+   - Coordinate transform: Unity (left-handed Y-up) → COLMAP (right-handed Y-down) via `diag(1,-1,1)` flip
+   - Single PINHOLE camera model from Quest passthrough intrinsics, with principal point crop adjustment
+   - Deduplicates frames by image ID, validates image existence
+3. **Train**: Auto-detects best backend — msplat (Metal), gsplat (CUDA), or original 3DGS repo
+4. **Output**: Trained `splat.ply` ready for Unity import via any Gaussian Splat renderer
 
-### Import (Unity editor)
-Use existing `Tools > Gaussian Splats > Create GaussianSplatAsset` to convert trained PLY to `.asset` + `.bytes` files for `GaussianSplatRenderer`.
+### Coordinate Conversion Detail
+Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The conversion:
+- **Positions**: Negate Y component
+- **Rotations**: Apply `flip @ R_unity @ flip` where `flip = diag(1, -1, 1)` (determinant = -1, changes handedness)
+- **Intrinsics**: Adjust principal point (cx, cy) for center crop from sensor resolution to JPEG resolution
