@@ -8,12 +8,11 @@ Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Dista
 DepthCapture (AR depth frames → normals → dilation)
        │
 VolumeIntegrator (TSDF integrate → warmup clear → prune)
-       │
-ChunkManager (spatial chunking → async GPU readback)
-       │
-SurfaceNetsMesher (Surface Nets → mesh with vertex colors)
-       │
-ScanMeshVertexColor.shader (fragment camera projection + vertex color fallback)
+       ├── ChunkManager → SurfaceNetsMesher (mesh + vertex colors)
+       ├── TriplanarCache (bake camera → 3 world-space textures, persistent)
+       └── KeyframeStore (ring buffer of camera frames, live quality)
+                │
+ScanMeshVertexColor.shader (keyframes → triplanar → vertex color fallback)
 ```
 
 ## 1. Volume Layout
@@ -164,20 +163,46 @@ The mesher uses a **confidence gate**: voxels with weight below `minMeshWeight` 
 - Form quad from 4 neighboring vertices, split into 2 triangles
 - Winding order based on TSDF sign
 
-## 7. Camera Projection
+## 7. Camera Projection & Persistent Texturing
 
-### Volume-based color (vertex colors)
-Camera colors are accumulated into the color volume during TSDF integration. Each near-surface voxel projects to camera UV using a pinhole model, samples the camera texture, and blends into the volume. This gives stable but low-resolution color (one color per voxel).
+Three layers of texturing, in priority order:
 
-### Fragment shader projection (full resolution)
-`ScanMeshVertexColor.shader` projects the camera texture per-pixel in the fragment shader:
-1. Vertex shader passes world-space position
-2. Fragment shader projects world position to camera UV using the same pinhole model
-3. If UV is valid (within [0.01, 0.99]), sample camera texture at full 1280×960 resolution
-4. Apply exposure boost
-5. Fall back to vertex color if outside camera frustum
+### Layer 1: Keyframe Ring Buffer (live, pixel-level, runtime-only)
+`KeyframeStore` maintains a ring buffer of N camera frames (default 8) in a `Texture2DArray`:
+- **Slot 0**: Always the latest camera frame, updated every integration frame
+- **Slots 1–7**: Historical keyframes, inserted when camera moves >0.3m or rotates >20°
+- **Eviction**: Oldest historical slot is overwritten when buffer is full
+- **Shader**: Fragment shader iterates all keyframes, projects via pinhole model, picks best match by `dot(viewDir, surfaceNormal)`, samples from the Texture2DArray
+- **Memory**: 8 × 1280 × 960 × 4 bytes ≈ 40MB
+- **NOT persisted**: Keyframes are lost on save/load
 
-### Pinhole Projection Model
+### Layer 2: Triplanar World-Space Textures (persistent, ~4mm/texel, saveable)
+`TriplanarCache` maintains 3 axis-aligned 2D textures (2048×2048 RGBA8 each):
+- **XZ texture**: For Y-dominant normals (floors, ceilings)
+- **XY texture**: For Z-dominant normals (front/back walls)
+- **YZ texture**: For X-dominant normals (side walls)
+- **Memory**: 3 × 2048 × 2048 × 4 bytes ≈ 48MB
+- **Baking**: `TriplanarBake.compute` runs at integration rate, iterating over depth pixels:
+  1. Unproject depth pixel to world position
+  2. Sample surface normal from depth normals
+  3. Project to camera UV, sample camera color
+  4. Determine dominant triplanar axis from `abs(normal)`
+  5. Map to triplanar UV via `gsWorldToVoxelUVW(worldPos)` (same 0–1 range as volume)
+  6. Quality-weighted running average blend into the triplanar texel
+- **Shader**: Fragment shader samples all 3 textures using triplanar blending, weighted by `abs(normal)`
+- **Persisted**: Save/load as raw RGBA8 data files
+
+### Layer 3: Vertex Colors (fallback, ~5cm/voxel)
+Camera colors accumulated into the 3D color volume during TSDF integration. Sampled per-vertex during mesh extraction.
+
+### Fragment Shader Priority Chain
+```
+_DEBUG_SOLID → _SHOW_NORMALS → _TRIPLANAR_ONLY check →
+  Keyframe match (pixel-level) → Triplanar color (~4mm) → Vertex colors (~5cm)
+```
+The `_TRIPLANAR_ONLY` toggle skips keyframes to evaluate persistence quality in isolation.
+
+### Pinhole Projection Model (shared by all layers)
 ```
 localPos = camInvRot * (worldPos - camPos)
 sensorPt = (localPos.xy / localPos.z) * focalLength + principalPoint
@@ -185,8 +210,6 @@ scaleFactor = currentRes / sensorRes, normalized
 cropMin = sensorRes * (1 - scaleFactor) / 2
 uv = (sensorPt - cropMin) / (sensorRes * scaleFactor)
 ```
-
-Global shader properties (`_RSCam*`) are updated at integration rate.
 
 ## 8. Exclusion Zones
 
@@ -226,8 +249,8 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Seeding & Pruning (compute shader constants)
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `MIN_QUALITY_SEED` | 0.30 | Min quality to seed an empty voxel |
-| `SEED_WEIGHT` | 0.06 | Initial weight for seeded voxels |
+| `MIN_QUALITY_SEED` | 0.25 | Min quality to seed an empty voxel |
+| `SEED_WEIGHT` | 0.10 | Initial weight for seeded voxels |
 | `PRUNE_WEIGHT` | 0.05 | Weight below which voxels are pruned |
 | `MIN_DOT` | 0.3 | Min view-normal dot product |
 | `COLOR_SURFACE_BAND` | 0.5 | TSDF band for color integration |
@@ -235,7 +258,7 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Meshing
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `minMeshWeight` | 0.15 | Min voxel weight for Surface Nets to consider |
+| `minMeshWeight` | 0.08 | Min voxel weight for Surface Nets to consider |
 | `chunkWorldSize` | 4m³ | Spatial chunk dimensions |
 | `overlap` | 0.25m | Extra voxels per chunk edge |
 | `numMeshWorkers` | 2 | Background mesher threads |
@@ -252,3 +275,21 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 |------|-------------|-----------------|---------|
 | Passive | 3 Hz | 1 Hz | 5 Hz |
 | Guided | 8 Hz | 3 Hz | 15 Hz |
+
+### Texture Persistence
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `textureResolution` | 2048 | Triplanar texture resolution (per plane) |
+| `maxKeyframes` | 8 | Ring buffer size (slot 0 = live, rest historical) |
+| `moveThreshold` | 0.3m | Min camera displacement for new keyframe |
+| `rotateThresholdDeg` | 20° | Min camera rotation for new keyframe |
+| `exposure` (KeyframeStore) | 3.0 | Keyframe display exposure boost |
+
+### Memory Budget (Quest 3)
+| Component | Memory |
+|-----------|--------|
+| TSDF volume (160x128x160 RG8) | ~6.5 MB |
+| Color volume (160x128x160 RGBA8) | ~13 MB |
+| Triplanar textures (3x 2048x2048 RGBA8) | ~48 MB |
+| Keyframe array (8x 1280x960 RGBA8) | ~40 MB |
+| **Total** | **~108 MB** |

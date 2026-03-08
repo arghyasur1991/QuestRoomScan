@@ -1,0 +1,151 @@
+// Genesis RoomScan - Triplanar texture baking compute shader
+// Iterates over depth pixels, unprojects to world, projects to camera for color,
+// and splats into triplanar world-space textures with quality-weighted blending.
+//
+// Each triplanar texture is split into two halves by normal sign:
+//   upper half (v 0.5-1.0) = positive normal direction
+//   lower half (v 0.0-0.5) = negative normal direction
+// This prevents opposite-facing walls from sharing the same texels.
+#include "DepthKit.hlsl"
+#include "VolumeHelpers.hlsl"
+
+RWTexture2D<float4> gsTriXZ_RW;
+RWTexture2D<float4> gsTriXY_RW;
+RWTexture2D<float4> gsTriYZ_RW;
+uint2 gsTriSize;
+
+Texture2D<float4> gsCamRGB;
+float3 gsCamPos;
+float4x4 gsCamInvRot;
+float2 gsCamFocalLen;
+float2 gsCamPrincipalPt;
+float2 gsCamSensorRes;
+float2 gsCamCurrentRes;
+float gsCamExposure;
+float gsMaxUpdateDist;
+
+float2 ProjectToCameraUV(float3 worldPos)
+{
+    float3 localPos = mul(gsCamInvRot, float4(worldPos - gsCamPos, 1.0)).xyz;
+    if (localPos.z <= 0.001) return float2(-1, -1);
+
+    float2 sensorPt = float2(
+        (localPos.x / localPos.z) * gsCamFocalLen.x + gsCamPrincipalPt.x,
+        (localPos.y / localPos.z) * gsCamFocalLen.y + gsCamPrincipalPt.y);
+
+    float2 scaleFactor = gsCamCurrentRes / gsCamSensorRes;
+    scaleFactor /= max(scaleFactor.x, scaleFactor.y);
+    float2 cropMin = gsCamSensorRes * (1.0 - scaleFactor) * 0.5;
+    float2 cropSize = gsCamSensorRes * scaleFactor;
+    return (sensorPt - cropMin) / cropSize;
+}
+
+float2 SignedTriUV(float2 baseUV, float normalComponent)
+{
+    return float2(baseUV.x, normalComponent > 0 ? baseUV.y * 0.5 + 0.5 : baseUV.y * 0.5);
+}
+
+#define EXCLUSION_TOP 0.25
+#define EXCLUSION_BOTTOM 1.7
+#define EXCLUSION_RADIUS 0.6
+#define MIN_DOT 0.3
+
+#pragma kernel ClearTriplanar
+
+[numthreads(8, 8, 1)]
+void ClearTriplanar(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= gsTriSize)) return;
+    gsTriXZ_RW[id.xy] = float4(0, 0, 0, 0);
+    gsTriXY_RW[id.xy] = float4(0, 0, 0, 0);
+    gsTriYZ_RW[id.xy] = float4(0, 0, 0, 0);
+}
+
+#pragma kernel BakeTriplanar
+
+[numthreads(8, 8, 1)]
+void BakeTriplanar(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= gsDepthTexSize)) return;
+
+    float2 uv = ((float2)id.xy + 0.5) / (float2)gsDepthTexSize;
+    float depthNDC = gsDepthSample(uv);
+    if (depthNDC <= 0.001 || depthNDC >= 0.999) return;
+
+    float3 worldPos = gsDepthNDCtoWorld(float3(uv, depthNDC));
+    float3 normal = gsDepthNormalSample(uv).xyz;
+    if (length(normal) < 0.1) return;
+    normal = normalize(normal);
+
+    float3 eyePos = gsDepthEyePos();
+    float3 toVox = worldPos - eyePos;
+    float dist = length(toVox);
+    if (dist > gsMaxUpdateDist || dist < 0.3) return;
+
+    float normDot = -dot(normalize(toVox), normal);
+    if (normDot < MIN_DOT) return;
+
+    bool outsideExclusions = true;
+    for (int p = 0; p < gsNumExclusions; p++)
+    {
+        float3 headPos = gsExclusionHeads[p];
+        float2 diff = worldPos.xz - headPos.xz;
+        if (dot(diff, diff) < EXCLUSION_RADIUS * EXCLUSION_RADIUS &&
+            worldPos.y < headPos.y + EXCLUSION_TOP &&
+            worldPos.y > headPos.y - EXCLUSION_BOTTOM)
+        {
+            outsideExclusions = false;
+        }
+    }
+    if (!outsideExclusions) return;
+
+    float2 camUV = ProjectToCameraUV(worldPos);
+    if (camUV.x < 0.02 || camUV.x > 0.98 || camUV.y < 0.02 || camUV.y > 0.98)
+        return;
+
+    float4 camColor = gsCamRGB.SampleLevel(gsBilinearClampSampler, camUV, 0);
+    float3 color = saturate(camColor.rgb * gsCamExposure);
+
+    float distFactor = saturate(1.0 - dist / gsMaxUpdateDist);
+    float angleFactor = saturate(normDot);
+    float quality = distFactor * angleFactor;
+
+    float3 uvw = gsWorldToVoxelUVW(worldPos);
+    if (any(uvw < 0.001) || any(uvw > 0.999)) return;
+
+    float3 absN = abs(normal);
+
+    if (absN.y >= absN.x && absN.y >= absN.z)
+    {
+        float2 triUV = SignedTriUV(uvw.xz, normal.y);
+        uint2 texel = (uint2)(triUV * gsTriSize);
+        if (any(texel >= gsTriSize)) return;
+        float4 old = gsTriXZ_RW[texel];
+        float blend = old.a < 0.01 ? 1.0 : quality * 0.4;
+        float3 rgb = lerp(old.rgb, color, blend);
+        float a = min(old.a + quality * 0.1, 1.0);
+        gsTriXZ_RW[texel] = float4(rgb, a);
+    }
+    else if (absN.z >= absN.x)
+    {
+        float2 triUV = SignedTriUV(uvw.xy, normal.z);
+        uint2 texel = (uint2)(triUV * gsTriSize);
+        if (any(texel >= gsTriSize)) return;
+        float4 old = gsTriXY_RW[texel];
+        float blend = old.a < 0.01 ? 1.0 : quality * 0.4;
+        float3 rgb = lerp(old.rgb, color, blend);
+        float a = min(old.a + quality * 0.1, 1.0);
+        gsTriXY_RW[texel] = float4(rgb, a);
+    }
+    else
+    {
+        float2 triUV = SignedTriUV(uvw.yz, normal.x);
+        uint2 texel = (uint2)(triUV * gsTriSize);
+        if (any(texel >= gsTriSize)) return;
+        float4 old = gsTriYZ_RW[texel];
+        float blend = old.a < 0.01 ? 1.0 : quality * 0.4;
+        float3 rgb = lerp(old.rgb, color, blend);
+        float a = min(old.a + quality * 0.1, 1.0);
+        gsTriYZ_RW[texel] = float4(rgb, a);
+    }
+}

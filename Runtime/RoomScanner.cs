@@ -31,6 +31,8 @@ namespace Genesis.RoomScan
         [SerializeField] private VolumeIntegrator volumeIntegrator;
         [SerializeField] private ChunkManager chunkManager;
         [SerializeField] private TextureProjector textureProjector;
+        [SerializeField] private TriplanarCache triplanarCache;
+        [SerializeField] private KeyframeStore keyframeStore;
 
         [Header("Camera")]
         [SerializeField] private PassthroughCameraProvider cameraProvider;
@@ -89,6 +91,7 @@ namespace Genesis.RoomScan
         private void Awake()
         {
             Instance = this;
+            SetSafeShaderDefaults();
         }
 
         private void Start()
@@ -208,6 +211,7 @@ namespace Genesis.RoomScan
         {
             volumeIntegrator.Clear();
             chunkManager.ClearAllChunks();
+            if (triplanarCache != null) triplanarCache.Clear();
         }
 
         /// <summary>
@@ -242,6 +246,8 @@ namespace Genesis.RoomScan
             if (volumeIntegrator == null) volumeIntegrator = FindFirstObjectByType<VolumeIntegrator>();
             if (chunkManager == null) chunkManager = FindFirstObjectByType<ChunkManager>();
             if (textureProjector == null) textureProjector = FindFirstObjectByType<TextureProjector>();
+            if (triplanarCache == null) triplanarCache = FindFirstObjectByType<TriplanarCache>();
+            if (keyframeStore == null) keyframeStore = FindFirstObjectByType<KeyframeStore>();
 
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");
@@ -264,6 +270,16 @@ namespace Genesis.RoomScan
             }
         }
 
+        private void SetSafeShaderDefaults()
+        {
+            Shader.SetGlobalInt(Shader.PropertyToID("_RSKeyframeCount"), 0);
+            Shader.SetGlobalFloat(Shader.PropertyToID("_RSCamExposure"), 3f);
+            Shader.SetGlobalFloat(Shader.PropertyToID("_RSTriAvailable"), 0f);
+
+            var dummyVecs = new Vector4[112];
+            Shader.SetGlobalVectorArray(Shader.PropertyToID("_RSKeyframeData"), dummyVecs);
+        }
+
         private void ProvideColorFrame()
         {
             if (!enableTextureProjection || volumeIntegrator == null) return;
@@ -275,14 +291,31 @@ namespace Genesis.RoomScan
                 if (frame != null)
                 {
                     Pose pose = pcp.CameraPose;
+                    Vector2 focal = pcp.FocalLength;
+                    Vector2 principal = pcp.PrincipalPoint;
+                    Vector2 sensor = pcp.SensorResolution;
+                    Vector2 current = pcp.CurrentResolution;
+
                     volumeIntegrator.SetCameraData(
                         frame, pose.position, pose.rotation,
-                        pcp.FocalLength, pcp.PrincipalPoint,
-                        pcp.SensorResolution, pcp.CurrentResolution);
-                    volumeIntegrator.UpdateFragmentProjection(
-                        frame, pose.position, pose.rotation,
-                        pcp.FocalLength, pcp.PrincipalPoint,
-                        pcp.SensorResolution, pcp.CurrentResolution);
+                        focal, principal, sensor, current);
+
+                    if (keyframeStore != null)
+                    {
+                        keyframeStore.SetLiveFrame(frame, pose.position, pose.rotation,
+                            focal, principal, sensor, current);
+                        keyframeStore.TryInsertKeyframe(frame, pose.position, pose.rotation,
+                            focal, principal, sensor, current);
+                    }
+
+                    if (triplanarCache != null)
+                    {
+                        triplanarCache.DispatchBake(frame, pose.position, pose.rotation,
+                            focal, principal, sensor, current,
+                            volumeIntegrator.CameraExposure,
+                            volumeIntegrator.ExclusionZones);
+                    }
+
                     return;
                 }
             }

@@ -28,8 +28,10 @@ namespace Genesis.RoomScan.Editor
         PassthroughCameraAccess _pcaComponent;
         CameraDebugOverlay _cameraDebug;
         DepthDebugOverlay _depthDebug;
+        TriplanarCache _triplanarCache;
+        KeyframeStore _keyframeStore;
 
-        bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired;
+        bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired, _triplanarWired;
 
         // Style
         static readonly Color COL_OK   = new(0.25f, 0.82f, 0.35f);
@@ -90,6 +92,8 @@ namespace Genesis.RoomScan.Editor
             _pcaComponent = FindAny<PassthroughCameraAccess>();
             _cameraDebug = FindAny<CameraDebugOverlay>();
             _depthDebug = FindAny<DepthDebugOverlay>();
+            _triplanarCache = FindAny<TriplanarCache>();
+            _keyframeStore = FindAny<KeyframeStore>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -99,6 +103,8 @@ namespace Genesis.RoomScan.Editor
                 "projectionCompute");
             _chunkMatWired = _chunkManager != null && AreFieldsAssigned(_chunkManager,
                 "scanMeshMaterial");
+            _triplanarWired = _triplanarCache != null && AreFieldsAssigned(_triplanarCache,
+                "bakeCompute");
         }
 
         // =================================================================
@@ -228,11 +234,14 @@ namespace Genesis.RoomScan.Editor
             StatusRow("PassthroughCameraAccess", _pcaComponent != null);
             StatusRow("CameraDebugOverlay", _cameraDebug != null);
             StatusRow("DepthDebugOverlay", _depthDebug != null);
+            StatusRow("TriplanarCache", _triplanarCache != null);
+            StatusRow("KeyframeStore", _keyframeStore != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _chunkManager == null || _textureProjector == null ||
                               _roomScanner == null || _cameraProvider == null ||
-                              _pcaComponent == null || _cameraDebug == null;
+                              _pcaComponent == null || _cameraDebug == null ||
+                              _triplanarCache == null || _keyframeStore == null;
 
             if (anyMissing)
             {
@@ -284,6 +293,10 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<CameraDebugOverlay>(root);
             if (root.GetComponent<DepthDebugOverlay>() == null)
                 Undo.AddComponent<DepthDebugOverlay>(root);
+            if (root.GetComponent<TriplanarCache>() == null)
+                Undo.AddComponent<TriplanarCache>(root);
+            if (root.GetComponent<KeyframeStore>() == null)
+                Undo.AddComponent<KeyframeStore>(root);
 
             MarkDirty();
             Refresh();
@@ -299,9 +312,10 @@ namespace Genesis.RoomScan.Editor
             StatusRow("VolumeIntegrator compute shader", _volumeWired);
             StatusRow("TextureProjector compute shader", _projectorWired);
             StatusRow("ChunkManager scan material", _chunkMatWired);
+            StatusRow("TriplanarCache bake compute", _triplanarWired);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
-                            !_projectorWired || !_chunkMatWired;
+                            !_projectorWired || !_chunkMatWired || !_triplanarWired;
             if (needsFix)
             {
                 GUILayout.Space(2);
@@ -343,6 +357,15 @@ namespace Genesis.RoomScan.Editor
                 AssignCompute(so, "projectionCompute", PKG + "TextureProjection.compute");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_textureProjector);
+            }
+
+            // TriplanarCache
+            if (_triplanarCache != null)
+            {
+                var so = new SerializedObject(_triplanarCache);
+                AssignCompute(so, "bakeCompute", PKG + "TriplanarBake.compute");
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_triplanarCache);
             }
 
             // ChunkManager — needs a Material
@@ -446,6 +469,8 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "chunkManager", _chunkManager);
                 SetRef(so, "textureProjector", _textureProjector);
                 SetRef(so, "cameraProvider", _cameraProvider);
+                SetRef(so, "triplanarCache", _triplanarCache);
+                SetRef(so, "keyframeStore", _keyframeStore);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }

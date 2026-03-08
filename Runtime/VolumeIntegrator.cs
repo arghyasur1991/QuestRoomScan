@@ -79,15 +79,7 @@ namespace Genesis.RoomScan
         private static readonly int CamCurrentResID = Shader.PropertyToID("gsCamCurrentRes");
         private static readonly int CamExposureID = Shader.PropertyToID("gsCamExposure");
 
-        private static readonly int GCamTexID = Shader.PropertyToID("_RSCamTex");
-        private static readonly int GCamPosID = Shader.PropertyToID("_RSCamPos");
-        private static readonly int GCamInvRotID = Shader.PropertyToID("_RSCamInvRot");
-        private static readonly int GCamFocalLenID = Shader.PropertyToID("_RSCamFocalLen");
-        private static readonly int GCamPrincipalPtID = Shader.PropertyToID("_RSCamPrincipalPt");
-        private static readonly int GCamSensorResID = Shader.PropertyToID("_RSCamSensorRes");
-        private static readonly int GCamCurrentResID = Shader.PropertyToID("_RSCamCurrentRes");
-        private static readonly int GCamExposureID = Shader.PropertyToID("_RSCamExposure");
-        private static readonly int GCamAvailableID = Shader.PropertyToID("_RSCamAvailable");
+        public float CameraExposure => cameraExposure;
 
         [Header("Warmup")]
         [Tooltip("Clear the volume after this many integrations to discard sensor startup noise. 0 = disabled.")]
@@ -121,7 +113,6 @@ namespace Genesis.RoomScan
         private Vector2 _pendingSensorRes;
         private Vector2 _pendingCurrentRes;
         private RenderTexture _camFrameCopy;
-        private bool _fragProjectionActive;
 
         private void Awake()
         {
@@ -237,17 +228,14 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Update the global shader properties for fragment-level camera projection.
-        /// Call every frame (not throttled) for smooth texture rendering.
-        /// Blits the PCA external texture to a regular RT that fragment shaders can sample.
+        /// Ensures _camFrameCopy exists and blits the pending frame to it.
+        /// Called internally before Integrate() uses it for compute shader color integration.
         /// </summary>
-        public void UpdateFragmentProjection(Texture frame, Vector3 camPos, Quaternion camRot,
-            Vector2 focalLength, Vector2 principalPoint, Vector2 sensorRes, Vector2 currentRes)
+        private void EnsureCamFrameCopy()
         {
-            if (frame == null) return;
-
-            int w = frame.width;
-            int h = frame.height;
+            if (_pendingCamFrame == null) return;
+            int w = _pendingCamFrame.width;
+            int h = _pendingCamFrame.height;
             if (_camFrameCopy == null || _camFrameCopy.width != w || _camFrameCopy.height != h)
             {
                 if (_camFrameCopy) Destroy(_camFrameCopy);
@@ -259,19 +247,7 @@ namespace Genesis.RoomScan
                 };
                 _camFrameCopy.Create();
             }
-            Graphics.Blit(frame, _camFrameCopy);
-
-            var invRot = Matrix4x4.Rotate(Quaternion.Inverse(camRot));
-            Shader.SetGlobalTexture(GCamTexID, _camFrameCopy);
-            Shader.SetGlobalVector(GCamPosID, camPos);
-            Shader.SetGlobalMatrix(GCamInvRotID, invRot);
-            Shader.SetGlobalVector(GCamFocalLenID, (Vector4)focalLength);
-            Shader.SetGlobalVector(GCamPrincipalPtID, (Vector4)principalPoint);
-            Shader.SetGlobalVector(GCamSensorResID, (Vector4)sensorRes);
-            Shader.SetGlobalVector(GCamCurrentResID, (Vector4)currentRes);
-            Shader.SetGlobalFloat(GCamExposureID, cameraExposure);
-            Shader.SetGlobalFloat(GCamAvailableID, 1f);
-            _fragProjectionActive = true;
+            Graphics.Blit(_pendingCamFrame, _camFrameCopy);
         }
 
         public void SetupFrustumVolume()
@@ -355,6 +331,7 @@ namespace Genesis.RoomScan
             compute.SetFloat(WeightGrowthID, weightGrowth);
             compute.SetFloat(MaxWeightID, maxWeight);
 
+            EnsureCamFrameCopy();
             if (_pendingCamFrame != null && _camFrameCopy != null)
             {
                 compute.SetTexture(_integrateKernel.KernelIndex, CamRGBID, _camFrameCopy);
