@@ -11,7 +11,9 @@ namespace Genesis.RoomScan
         public static TriplanarCache Instance { get; private set; }
 
         [SerializeField] private ComputeShader bakeCompute;
-        [SerializeField, Range(512, 4096)] private int textureResolution = 1024;
+        [SerializeField, Range(512, 8192)] private int textureResolution = 4096;
+        [SerializeField, Tooltip("Auto-calculated if 0. Higher = faster fill but more GPU work per pixel")]
+        private int splatRadiusOverride = 0;
 
         private RenderTexture _triXZ, _triXY, _triYZ;
         private RenderTexture _camFrameCopy;
@@ -57,7 +59,11 @@ namespace Genesis.RoomScan
             UpdateShaderGlobals();
 
             long bytes = (long)textureResolution * textureResolution * 4 * 3;
-            Debug.Log($"[RoomScan] Triplanar cache: 3x {textureResolution}x{textureResolution} RGBA8 = {bytes / (1024 * 1024)}MB");
+            long mb = bytes / (1024 * 1024);
+            int splatR = splatRadiusOverride > 0 ? splatRadiusOverride : Mathf.Max(1, textureResolution / 2048);
+            Debug.Log($"[RoomScan] Triplanar cache: 3x {textureResolution}x{textureResolution} RGBA8 = {mb}MB, splatR={splatR}");
+            if (mb > 300)
+                Debug.LogWarning($"[RoomScan] Triplanar memory {mb}MB is very high! Consider reducing textureResolution (4096 = 192MB).");
         }
 
         private void OnDestroy()
@@ -106,14 +112,23 @@ namespace Genesis.RoomScan
             Shader.SetGlobalFloat(TriAvailableID, _triXZ != null ? 1f : 0f);
         }
 
+        private int _bakeCount;
         public void DispatchBake(Texture camFrame, Vector3 camPos, Quaternion camRot,
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes,
             float exposure, List<Transform> exclusionZones)
         {
-            if (!_kernelsReady || camFrame == null) return;
+            if (!_kernelsReady || camFrame == null)
+            {
+                if (_bakeCount < 3) Debug.Log($"[RoomScan] TriBake skip: kernels={_kernelsReady}, frame={camFrame != null}");
+                return;
+            }
 
             var dc = DepthCapture.Instance;
-            if (dc == null || !DepthCapture.DepthAvailable || dc.DepthTex == null) return;
+            if (dc == null || !DepthCapture.DepthAvailable || dc.DepthTex == null)
+            {
+                if (_bakeCount < 3) Debug.Log($"[RoomScan] TriBake skip: dc={dc != null}, depthAvail={DepthCapture.DepthAvailable}, depthTex={dc?.DepthTex != null}");
+                return;
+            }
 
             EnsureCamCopy(camFrame.width, camFrame.height);
             Graphics.Blit(camFrame, _camFrameCopy);
@@ -152,6 +167,8 @@ namespace Genesis.RoomScan
             bakeCompute.SetVectorArray(Shader.PropertyToID("gsExclusionHeads"), excPositions);
 
             bakeCompute.SetInts(TriSizeID, textureResolution, textureResolution);
+            int splatR = splatRadiusOverride > 0 ? splatRadiusOverride : Mathf.Max(1, textureResolution / 2048);
+            bakeCompute.SetInt(Shader.PropertyToID("gsSplatRadius"), splatR);
             _bakeKernel.Set(TriXZRWID, _triXZ);
             _bakeKernel.Set(TriXYRWID, _triXY);
             _bakeKernel.Set(TriYZRWID, _triYZ);
@@ -162,6 +179,11 @@ namespace Genesis.RoomScan
             _bakeKernel.DispatchFit(dc.DepthTex.width, dc.DepthTex.height);
 
             Shader.SetGlobalFloat(TriAvailableID, 1f);
+
+            _bakeCount++;
+            if (_bakeCount <= 3 || _bakeCount % 100 == 0)
+                Debug.Log($"[RoomScan] TriBake #{_bakeCount}: depth={dc.DepthTex.width}x{dc.DepthTex.height}, " +
+                    $"cam={camFrame.width}x{camFrame.height}, triAvail=1");
         }
 
         private void EnsureCamCopy(int w, int h)
@@ -194,7 +216,7 @@ namespace Genesis.RoomScan
             return (ReadRTBytes(_triXZ), ReadRTBytes(_triXY), ReadRTBytes(_triYZ));
         }
 
-        private static byte[] ReadRTBytes(RenderTexture rt)
+        public static byte[] ReadRTBytes(RenderTexture rt)
         {
             var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
             var prev = RenderTexture.active;

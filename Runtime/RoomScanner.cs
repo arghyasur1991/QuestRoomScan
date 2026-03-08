@@ -334,6 +334,7 @@ namespace Genesis.RoomScan
             Shader.SetGlobalVectorArray(Shader.PropertyToID("_RSKeyframeData"), dummyVecs);
         }
 
+        private int _colorFrameLog;
         private void ProvideColorFrame()
         {
             if (!enableTextureProjection || volumeIntegrator == null) return;
@@ -370,9 +371,23 @@ namespace Genesis.RoomScan
                             volumeIntegrator.ExclusionZones);
                     }
 
+                    _colorFrameLog++;
+                    if (_colorFrameLog <= 3 || _colorFrameLog % 50 == 0)
+                        Debug.Log($"[RoomScan] ColorFrame #{_colorFrameLog}: " +
+                            $"frame={frame.width}x{frame.height}, " +
+                            $"triCache={triplanarCache != null}, " +
+                            $"keyframes={keyframeStore != null}");
+
                     return;
                 }
             }
+
+            _colorFrameLog++;
+            if (_colorFrameLog <= 5)
+                Debug.Log($"[RoomScan] ColorFrame #{_colorFrameLog}: NO CAMERA " +
+                    $"provider={provider?.GetType().Name ?? "null"}, " +
+                    $"isPcp={provider is PassthroughCameraProvider}, " +
+                    $"isReady={((provider as PassthroughCameraProvider)?.IsReady ?? false)}");
 
             volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);

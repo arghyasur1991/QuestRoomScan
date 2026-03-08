@@ -92,28 +92,22 @@ namespace Genesis.RoomScan
 
                 var tc = TriplanarCache.Instance;
                 int triRes = 0;
-                byte[] triXZ = null, triXY = null, triYZ = null;
                 if (tc != null && tc.TriXZ != null)
-                {
                     triRes = tc.TriXZ.width;
-                    (triXZ, triXY, triYZ) = tc.ReadRawBytes();
-                }
 
                 string savePath = SaveFilePath;
                 string triDir = TriplanarDirectory;
-                await Task.Run(() =>
-                {
-                    WriteBinary(savePath, s, vi.VoxelSize,
-                        vi.IntegrationCount, tsdfBytes, colorBytes, triRes);
+                await Task.Run(() => WriteBinary(savePath, s, vi.VoxelSize,
+                    vi.IntegrationCount, tsdfBytes, colorBytes, triRes));
 
-                    if (triRes > 0 && triXZ != null)
-                    {
-                        if (!Directory.Exists(triDir)) Directory.CreateDirectory(triDir);
-                        File.WriteAllBytes(Path.Combine(triDir, "tri_xz.raw"), triXZ);
-                        File.WriteAllBytes(Path.Combine(triDir, "tri_xy.raw"), triXY);
-                        File.WriteAllBytes(Path.Combine(triDir, "tri_yz.raw"), triYZ);
-                    }
-                });
+                tsdfBytes = null;
+                colorBytes = null;
+
+                if (tc != null && triRes > 0)
+                {
+                    if (!Directory.Exists(triDir)) Directory.CreateDirectory(triDir);
+                    await SaveTriplanarOneAtATime(tc, triDir);
+                }
 
                 float sizeMB = new FileInfo(savePath).Length / (1024f * 1024f);
                 Debug.Log($"[RoomScan] Persistence: saved to {savePath} ({sizeMB:F1}MB), triplanar={triRes > 0}");
@@ -213,6 +207,22 @@ namespace Genesis.RoomScan
             if (Directory.Exists(TriplanarDirectory))
                 Directory.Delete(TriplanarDirectory, true);
             Debug.Log("[RoomScan] Persistence: saved scan deleted");
+        }
+
+        private static async Task SaveTriplanarOneAtATime(TriplanarCache tc, string dir)
+        {
+            var planes = new[] {
+                (tc.TriXZ, "tri_xz.raw"),
+                (tc.TriXY, "tri_xy.raw"),
+                (tc.TriYZ, "tri_yz.raw")
+            };
+            foreach (var (rt, filename) in planes)
+            {
+                byte[] data = TriplanarCache.ReadRTBytes(rt);
+                string path = Path.Combine(dir, filename);
+                await Task.Run(() => File.WriteAllBytes(path, data));
+                data = null;
+            }
         }
 
         private static void WriteBinary(string path, int3 voxCount, float voxSize,

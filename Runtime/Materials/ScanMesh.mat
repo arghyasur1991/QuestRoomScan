@@ -32,6 +32,7 @@ Material:
     - _Smoothness: 0.3
     - _TriplanarOnly: 1
     - _Unlit: 1
+    - _VertexOnly: 0
     m_Colors: []
   m_BuildTextureStacks: []
   m_AllowLocking: 1

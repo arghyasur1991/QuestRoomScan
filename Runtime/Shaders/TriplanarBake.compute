@@ -13,6 +13,7 @@ RWTexture2D<float4> gsTriXZ_RW;
 RWTexture2D<float4> gsTriXY_RW;
 RWTexture2D<float4> gsTriYZ_RW;
 uint2 gsTriSize;
+int gsSplatRadius;
 
 Texture2D<float4> gsCamRGB;
 float3 gsCamPos;
@@ -48,7 +49,10 @@ float2 SignedTriUV(float2 baseUV, float normalComponent)
 #define EXCLUSION_TOP 0.25
 #define EXCLUSION_BOTTOM 1.7
 #define EXCLUSION_RADIUS 0.6
-#define MIN_DOT 0.3
+#define MIN_DOT 0.5
+#define MIN_QUALITY 0.2
+#define HARD_FREEZE_ALPHA 0.8
+#define DEPTH_EDGE_THRESH 0.05
 
 #pragma kernel ClearTriplanar
 
@@ -71,6 +75,16 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
     float2 uv = ((float2)id.xy + 0.5) / (float2)gsDepthTexSize;
     float depthNDC = gsDepthSample(uv);
     if (depthNDC <= 0.001 || depthNDC >= 0.999) return;
+
+    // Reject depth edge pixels (large depth discontinuity with neighbors)
+    float2 texelSize = 1.0 / (float2)gsDepthTexSize;
+    float dL = gsDepthSample(uv + float2(-texelSize.x, 0));
+    float dR = gsDepthSample(uv + float2( texelSize.x, 0));
+    float dU = gsDepthSample(uv + float2(0,  texelSize.y));
+    float dD = gsDepthSample(uv + float2(0, -texelSize.y));
+    float maxDelta = max(max(abs(depthNDC - dL), abs(depthNDC - dR)),
+                         max(abs(depthNDC - dU), abs(depthNDC - dD)));
+    if (maxDelta > DEPTH_EDGE_THRESH) return;
 
     float3 worldPos = gsDepthNDCtoWorld(float3(uv, depthNDC));
     float3 normal = gsDepthNormalSample(uv).xyz;
@@ -110,46 +124,57 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
     float distFactor = saturate(1.0 - dist / gsMaxUpdateDist);
     float angleFactor = saturate(normDot);
     float quality = distFactor * angleFactor;
+    if (quality < MIN_QUALITY) return;
 
     float3 uvw = gsWorldToVoxelUVW(worldPos);
     if (any(uvw < 0.001) || any(uvw > 0.999)) return;
 
     float3 absN = abs(normal);
 
+    float2 triUV;
     if (absN.y >= absN.x && absN.y >= absN.z)
-    {
-        float2 triUV = SignedTriUV(uvw.xz, normal.y);
-        uint2 texel = (uint2)(triUV * gsTriSize);
-        if (any(texel >= gsTriSize)) return;
-        float4 old = gsTriXZ_RW[texel];
-        float freeze = 1.0 - old.a * 0.8;
-        float blend = old.a < 0.01 ? 1.0 : quality * 0.4 * freeze;
-        float3 rgb = lerp(old.rgb, color, blend);
-        float a = min(old.a + quality * 0.1 * (1.0 - old.a * 0.5), 1.0);
-        gsTriXZ_RW[texel] = float4(rgb, a);
-    }
+        triUV = SignedTriUV(uvw.xz, normal.y);
     else if (absN.z >= absN.x)
-    {
-        float2 triUV = SignedTriUV(uvw.xy, normal.z);
-        uint2 texel = (uint2)(triUV * gsTriSize);
-        if (any(texel >= gsTriSize)) return;
-        float4 old = gsTriXY_RW[texel];
-        float freeze = 1.0 - old.a * 0.8;
-        float blend = old.a < 0.01 ? 1.0 : quality * 0.4 * freeze;
-        float3 rgb = lerp(old.rgb, color, blend);
-        float a = min(old.a + quality * 0.1 * (1.0 - old.a * 0.5), 1.0);
-        gsTriXY_RW[texel] = float4(rgb, a);
-    }
+        triUV = SignedTriUV(uvw.xy, normal.z);
     else
+        triUV = SignedTriUV(uvw.yz, normal.x);
+
+    int2 center = (int2)(triUV * gsTriSize);
+    if (center.x < 0 || center.y < 0 || (uint)center.x >= gsTriSize.x || (uint)center.y >= gsTriSize.y)
+        return;
+
+    for (int dy = -gsSplatRadius; dy <= gsSplatRadius; dy++)
+    for (int dx = -gsSplatRadius; dx <= gsSplatRadius; dx++)
     {
-        float2 triUV = SignedTriUV(uvw.yz, normal.x);
-        uint2 texel = (uint2)(triUV * gsTriSize);
-        if (any(texel >= gsTriSize)) return;
-        float4 old = gsTriYZ_RW[texel];
+        int2 t = center + int2(dx, dy);
+        if (t.x < 0 || t.y < 0 || (uint)t.x >= gsTriSize.x || (uint)t.y >= gsTriSize.y)
+            continue;
+        uint2 tc = (uint2)t;
+        bool isCenter = (dx == 0 && dy == 0);
+
+        float4 old;
+        if (absN.y >= absN.x && absN.y >= absN.z)
+            old = gsTriXZ_RW[tc];
+        else if (absN.z >= absN.x)
+            old = gsTriXY_RW[tc];
+        else
+            old = gsTriYZ_RW[tc];
+
+        // Neighbors only fill empty texels; center gets full blend
+        if (!isCenter && old.a > 0.05) continue;
+        // Hard freeze: fully converged texels are locked
+        if (old.a > HARD_FREEZE_ALPHA) continue;
+
         float freeze = 1.0 - old.a * 0.8;
         float blend = old.a < 0.01 ? 1.0 : quality * 0.4 * freeze;
         float3 rgb = lerp(old.rgb, color, blend);
         float a = min(old.a + quality * 0.1 * (1.0 - old.a * 0.5), 1.0);
-        gsTriYZ_RW[texel] = float4(rgb, a);
+
+        if (absN.y >= absN.x && absN.y >= absN.z)
+            gsTriXZ_RW[tc] = float4(rgb, a);
+        else if (absN.z >= absN.x)
+            gsTriXY_RW[tc] = float4(rgb, a);
+        else
+            gsTriYZ_RW[tc] = float4(rgb, a);
     }
 }

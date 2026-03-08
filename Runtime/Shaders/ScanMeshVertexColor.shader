@@ -6,6 +6,7 @@ Shader "Genesis/ScanMeshVertexColor"
         [Toggle(_DEBUG_SOLID)] _DebugSolid ("Debug Solid Color", Float) = 0
         [Toggle(_SHOW_NORMALS)] _ShowNormals ("Show Normals", Float) = 0
         [Toggle(_TRIPLANAR_ONLY)] _TriplanarOnly ("Triplanar Only (persistence eval)", Float) = 0
+        [Toggle(_VERTEX_ONLY)] _VertexOnly ("Vertex Colors Only", Float) = 0
     }
     SubShader
     {
@@ -26,6 +27,7 @@ Shader "Genesis/ScanMeshVertexColor"
             #pragma shader_feature_local _DEBUG_SOLID
             #pragma shader_feature_local _SHOW_NORMALS
             #pragma shader_feature_local _TRIPLANAR_ONLY
+            #pragma shader_feature_local _VERTEX_ONLY
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
@@ -34,6 +36,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 float _DebugSolid;
                 float _ShowNormals;
                 float _TriplanarOnly;
+                float _VertexOnly;
             CBUFFER_END
 
             // Keyframe data (uniform array, max 16 keyframes × 7 float4s = 112)
@@ -164,6 +167,10 @@ Shader "Genesis/ScanMeshVertexColor"
 
                 #ifdef _SHOW_NORMALS
                 return half4(normal * 0.5 + 0.5, 1);
+                #endif
+
+                #ifdef _VERTEX_ONLY
+                return half4(IN.color.rgb, 1);
                 #endif
 
                 // Priority 1: Best keyframe match (skipped in triplanar-only eval mode)
