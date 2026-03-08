@@ -212,7 +212,7 @@ namespace Genesis.RoomScan
                 MeshFilter = mf,
                 Mesh = mesh,
                 Extents = chunkWorldSize + overlap,
-                Mesher = new SurfaceNetsMesher()
+                Mesher = new SurfaceNetsMesher { MinMeshWeight = _volume.MinMeshWeight }
             };
         }
 
@@ -272,6 +272,12 @@ namespace Genesis.RoomScan
                     chunk.VolumeData = new NativeArray<sbyte>(totalSize, Allocator.Persistent);
                 }
 
+                if (!chunk.WeightData.IsCreated || chunk.WeightData.Length < totalSize)
+                {
+                    if (chunk.WeightData.IsCreated) chunk.WeightData.Dispose();
+                    chunk.WeightData = new NativeArray<sbyte>(totalSize, Allocator.Persistent);
+                }
+
                 if (!chunk.ColorData.IsCreated || chunk.ColorData.Length < totalSize)
                 {
                     if (chunk.ColorData.IsCreated) chunk.ColorData.Dispose();
@@ -300,7 +306,8 @@ namespace Genesis.RoomScan
                     var copier = new CopySliceRG8Job
                     {
                         Source = tsdfSlice,
-                        Destination = chunk.VolumeData,
+                        TsdfDest = chunk.VolumeData,
+                        WeightDest = chunk.WeightData,
                         DestOffset = dstOffset
                     };
                     copier.ScheduleParallelByRef(sliceSize, 64, default).Complete();
@@ -335,7 +342,7 @@ namespace Genesis.RoomScan
                 ctkn.ThrowIfCancellationRequested();
 
                 bool populated = await chunk.Mesher.CreateMesh(
-                    chunk.VolumeData,
+                    chunk.VolumeData, chunk.WeightData,
                     hasColorData ? chunk.ColorData : default,
                     size, _volume.VoxelSize, chunk.Mesh, ctkn);
                 chunk.IsPopulated = populated;
@@ -429,11 +436,14 @@ namespace Genesis.RoomScan
             [ReadOnly] public NativeArray<sbyte> Source;
             public int DestOffset;
             [NativeDisableParallelForRestriction] [WriteOnly]
-            public NativeArray<sbyte> Destination;
+            public NativeArray<sbyte> TsdfDest;
+            [NativeDisableParallelForRestriction] [WriteOnly]
+            public NativeArray<sbyte> WeightDest;
 
             public void Execute(int i)
             {
-                Destination[DestOffset + i] = Source[i * 2];
+                TsdfDest[DestOffset + i] = Source[i * 2];
+                WeightDest[DestOffset + i] = Source[i * 2 + 1];
             }
         }
     }
@@ -448,12 +458,14 @@ namespace Genesis.RoomScan
         public bool Dirty;
         public bool IsPopulated;
         public NativeArray<sbyte> VolumeData;
+        public NativeArray<sbyte> WeightData;
         public NativeArray<Color32> ColorData;
         public SurfaceNetsMesher Mesher;
 
         public void Dispose()
         {
             if (VolumeData.IsCreated) VolumeData.Dispose();
+            if (WeightData.IsCreated) WeightData.Dispose();
             if (ColorData.IsCreated) ColorData.Dispose();
             Mesher?.Dispose();
             if (Mesh) UnityEngine.Object.Destroy(Mesh);

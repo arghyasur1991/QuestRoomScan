@@ -4,6 +4,7 @@ Shader "Genesis/ScanMeshVertexColor"
     {
         _Smoothness ("Smoothness", Range(0,1)) = 0.3
         [Toggle(_DEBUG_SOLID)] _DebugSolid ("Debug Solid Color", Float) = 0
+        [Toggle(_SHOW_NORMALS)] _ShowNormals ("Show Normals", Float) = 0
     }
     SubShader
     {
@@ -22,12 +23,14 @@ Shader "Genesis/ScanMeshVertexColor"
             #pragma multi_compile_instancing
             #pragma multi_compile _ DOTS_INSTANCING_ON
             #pragma shader_feature_local _DEBUG_SOLID
+            #pragma shader_feature_local _SHOW_NORMALS
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
                 float _Smoothness;
                 float _DebugSolid;
+                float _ShowNormals;
             CBUFFER_END
 
             TEXTURE2D(_RSCamTex);
@@ -60,6 +63,7 @@ Shader "Genesis/ScanMeshVertexColor"
             struct Attributes
             {
                 float4 positionOS : POSITION;
+                float3 normalOS : NORMAL;
                 float4 color : COLOR;
                 UNITY_VERTEX_INPUT_INSTANCE_ID
             };
@@ -69,6 +73,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 float4 positionHCS : SV_POSITION;
                 float4 color : COLOR;
                 float3 positionWS : TEXCOORD0;
+                float3 normalWS : TEXCOORD1;
                 UNITY_VERTEX_INPUT_INSTANCE_ID
                 UNITY_VERTEX_OUTPUT_STEREO
             };
@@ -82,6 +87,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 float3 ws = TransformObjectToWorld(IN.positionOS.xyz);
                 OUT.positionHCS = TransformWorldToHClip(ws);
                 OUT.positionWS = ws;
+                OUT.normalWS = TransformObjectToWorldNormal(IN.normalOS);
                 OUT.color = IN.color;
                 return OUT;
             }
@@ -93,6 +99,11 @@ Shader "Genesis/ScanMeshVertexColor"
 
                 #ifdef _DEBUG_SOLID
                 return half4(1, 0.2, 0.1, 1);
+                #endif
+
+                #ifdef _SHOW_NORMALS
+                float3 n = normalize(IN.normalWS);
+                return half4(n * 0.5 + 0.5, 1);
                 #endif
 
                 if (_RSCamAvailable > 0.5)

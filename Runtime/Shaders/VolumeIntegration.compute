@@ -18,9 +18,9 @@ float gsMaxUpdateDist;
 #define EXCLUSION_RADIUS 0.6
 #define MIN_DOT 0.3
 
-#define MIN_QUALITY_SEED 0.20
-#define SEED_WEIGHT 0.04
-#define PRUNE_WEIGHT 0.02
+#define MIN_QUALITY_SEED 0.25
+#define SEED_WEIGHT 0.10
+#define PRUNE_WEIGHT 0.05
 #define COLOR_SURFACE_BAND 0.5
 
 float gsBlendRate;

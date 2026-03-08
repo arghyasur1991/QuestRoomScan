@@ -22,6 +22,8 @@ namespace Genesis.RoomScan
         private bool _busy;
         public bool IsBusy => _busy;
 
+        public float MinMeshWeight { get; set; } = 0.15f;
+
         private const int InvalidVert = -1;
         private const float SbyteMax = sbyte.MaxValue;
 
@@ -64,9 +66,11 @@ namespace Genesis.RoomScan
         private struct VertexJob : IJob
         {
             [ReadOnly] public NativeArray<sbyte> Volume;
+            [ReadOnly] public NativeArray<sbyte> Weights;
             [ReadOnly] public NativeArray<Color32> Colors;
             [ReadOnly] public int3 VoxCount;
             [ReadOnly] public float VoxSize;
+            [ReadOnly] public float MinWeight;
 
             [WriteOnly] public NativeArray<int> CoordVertMap;
             public NativeList<Vertex> Verts;
@@ -95,15 +99,26 @@ namespace Genesis.RoomScan
                     byte numCrossings = 0;
                     byte numBadCrossings = 0;
 
+                    float weightThreshSbyte = MinWeight * SbyteMax;
+
                     for (int e = 0; e < 12; e++)
                     {
                         int3 coordA = coord + CornerOffs[CrnrOffsIdxA[e]];
                         int3 coordB = coord + CornerOffs[CrnrOffsIdxB[e]];
 
-                        sbyte rawA = Volume[CoordToIndex(coordA)];
-                        sbyte rawB = Volume[CoordToIndex(coordB)];
+                        int idxA = CoordToIndex(coordA);
+                        int idxB = CoordToIndex(coordB);
+                        sbyte rawA = Volume[idxA];
+                        sbyte rawB = Volume[idxB];
                         bool emptyA = rawA == sbyte.MinValue;
                         bool emptyB = rawB == sbyte.MinValue;
+
+                        if (Weights.IsCreated && Weights.Length > 0)
+                        {
+                            if (!emptyA && Weights[idxA] < weightThreshSbyte) emptyA = true;
+                            if (!emptyB && Weights[idxB] < weightThreshSbyte) emptyB = true;
+                        }
+
                         float valA = emptyA ? 0f : rawA / SbyteMax;
                         float valB = emptyB ? 0f : rawB / SbyteMax;
 
@@ -190,7 +205,9 @@ namespace Genesis.RoomScan
         private struct IndexJob : IJob
         {
             [ReadOnly] public NativeArray<sbyte> Volume;
+            [ReadOnly] public NativeArray<sbyte> Weights;
             [ReadOnly] public int3 VoxCount;
+            [ReadOnly] public float MinWeight;
             [ReadOnly] public NativeList<int3> VertCoords;
             [ReadOnly] public NativeArray<int> CoordVertMap;
             public NativeList<uint> Tris;
@@ -254,13 +271,18 @@ namespace Genesis.RoomScan
 
             private float ValueAt(int3 c)
             {
-                return Volume[Flatten(c)] / SbyteMax;
+                int idx = Flatten(c);
+                sbyte raw = Volume[idx];
+                if (raw == sbyte.MinValue) return 0f;
+                if (Weights.IsCreated && Weights.Length > 0 && Weights[idx] < MinWeight * SbyteMax)
+                    return 0f;
+                return raw / SbyteMax;
             }
         }
 
         public async Task<bool> CreateMesh(
-            NativeArray<sbyte> volume, NativeArray<Color32> colors, int3 voxCount, float voxSize,
-            Mesh mesh, CancellationToken ctkn = default)
+            NativeArray<sbyte> volume, NativeArray<sbyte> weights, NativeArray<Color32> colors,
+            int3 voxCount, float voxSize, Mesh mesh, CancellationToken ctkn = default)
         {
             if (_busy) throw new InvalidOperationException("Mesher is busy");
             _busy = true;
@@ -295,9 +317,11 @@ namespace Genesis.RoomScan
                 var vertJob = new VertexJob
                 {
                     Volume = volume,
+                    Weights = weights,
                     Colors = colors,
                     VoxCount = voxCount,
                     VoxSize = voxSize,
+                    MinWeight = MinMeshWeight,
                     CoordVertMap = _coordVertMap,
                     Verts = _verts,
                     VertCoords = _vertCoords,
@@ -320,7 +344,9 @@ namespace Genesis.RoomScan
                 var triJob = new IndexJob
                 {
                     Volume = volume,
+                    Weights = weights,
                     VoxCount = voxCount,
+                    MinWeight = MinMeshWeight,
                     VertCoords = _vertCoords,
                     CoordVertMap = _coordVertMap,
                     Tris = _tris

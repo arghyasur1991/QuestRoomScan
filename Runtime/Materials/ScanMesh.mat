@@ -12,8 +12,9 @@ Material:
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords:
+  - _SHOW_NORMALS
+  m_InvalidKeywords:
   - _UNLIT
-  m_InvalidKeywords: []
   m_LightmapFlags: 4
   m_EnableInstancingVariants: 1
   m_DoubleSidedGI: 0
@@ -27,6 +28,7 @@ Material:
     m_Ints: []
     m_Floats:
     - _DebugSolid: 0
+    - _ShowNormals: 1
     - _Smoothness: 0.3
     - _Unlit: 1
     m_Colors: []

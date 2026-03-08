@@ -53,7 +53,7 @@ namespace Genesis.RoomScan
         [SerializeField] private float guidedTextureProjectionHz = 15f;
 
         [Header("Mesh Quality")]
-        [SerializeField] private int minIntegrationsBeforeMesh = 15;
+        [SerializeField] private int minIntegrationsBeforeMesh = 5;
 
         [Header("Guided Mode")]
         [SerializeField] private float guidedTimeoutSeconds = 60f;
@@ -276,6 +276,10 @@ namespace Genesis.RoomScan
                 {
                     Pose pose = pcp.CameraPose;
                     volumeIntegrator.SetCameraData(
+                        frame, pose.position, pose.rotation,
+                        pcp.FocalLength, pcp.PrincipalPoint,
+                        pcp.SensorResolution, pcp.CurrentResolution);
+                    volumeIntegrator.UpdateFragmentProjection(
                         frame, pose.position, pose.rotation,
                         pcp.FocalLength, pcp.PrincipalPoint,
                         pcp.SensorResolution, pcp.CurrentResolution);

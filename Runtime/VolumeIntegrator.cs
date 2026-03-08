@@ -27,13 +27,18 @@ namespace Genesis.RoomScan
 
         [Header("Convergence")]
         [Tooltip("Blend strength. Higher = faster convergence and correction. (default 0.8)")]
-        [SerializeField, Range(0.1f, 2f)] private float blendRate = 1.8f;
+        [SerializeField, Range(0.1f, 2f)] private float blendRate = 0.8f;
         [Tooltip("Weight resistance to blending. Lower = faster corrections but less stable. (default 2.5)")]
         [SerializeField, Range(0.5f, 10f)] private float stability = 2.5f;
         [Tooltip("How fast weight accumulates per frame. Lower = bad data builds less confidence. (default 0.025)")]
         [SerializeField, Range(0.005f, 0.1f)] private float weightGrowth = 0.025f;
         [Tooltip("Maximum weight any voxel can reach. Lower = all areas correct equally fast. (default 0.5)")]
-        [SerializeField, Range(0.1f, 1f)] private float maxWeight = 0.1f;
+        [SerializeField, Range(0.1f, 1f)] private float maxWeight = 0.5f;
+
+        [Header("Meshing")]
+        [Tooltip("Min voxel confidence weight for Surface Nets to generate mesh. Higher = fewer phantom surfaces. (default 0.08)")]
+        [SerializeField, Range(0.01f, 0.5f)] private float minMeshWeight = 0.08f;
+        public float MinMeshWeight => minMeshWeight;
 
         [Header("Camera Color")]
         [Tooltip("Exposure boost for camera texture. Quest 3 passthrough cameras produce dim images. (default 3.0)")]
@@ -116,6 +121,7 @@ namespace Genesis.RoomScan
         private Vector2 _pendingSensorRes;
         private Vector2 _pendingCurrentRes;
         private RenderTexture _camFrameCopy;
+        private bool _fragProjectionActive;
 
         private void Awake()
         {
@@ -230,6 +236,44 @@ namespace Genesis.RoomScan
             _pendingCurrentRes = currentRes;
         }
 
+        /// <summary>
+        /// Update the global shader properties for fragment-level camera projection.
+        /// Call every frame (not throttled) for smooth texture rendering.
+        /// Blits the PCA external texture to a regular RT that fragment shaders can sample.
+        /// </summary>
+        public void UpdateFragmentProjection(Texture frame, Vector3 camPos, Quaternion camRot,
+            Vector2 focalLength, Vector2 principalPoint, Vector2 sensorRes, Vector2 currentRes)
+        {
+            if (frame == null) return;
+
+            int w = frame.width;
+            int h = frame.height;
+            if (_camFrameCopy == null || _camFrameCopy.width != w || _camFrameCopy.height != h)
+            {
+                if (_camFrameCopy) Destroy(_camFrameCopy);
+                _camFrameCopy = new RenderTexture(w, h, 0, GraphicsFormat.R8G8B8A8_SRGB, 0)
+                {
+                    enableRandomWrite = false,
+                    filterMode = FilterMode.Bilinear,
+                    wrapMode = TextureWrapMode.Clamp
+                };
+                _camFrameCopy.Create();
+            }
+            Graphics.Blit(frame, _camFrameCopy);
+
+            var invRot = Matrix4x4.Rotate(Quaternion.Inverse(camRot));
+            Shader.SetGlobalTexture(GCamTexID, _camFrameCopy);
+            Shader.SetGlobalVector(GCamPosID, camPos);
+            Shader.SetGlobalMatrix(GCamInvRotID, invRot);
+            Shader.SetGlobalVector(GCamFocalLenID, (Vector4)focalLength);
+            Shader.SetGlobalVector(GCamPrincipalPtID, (Vector4)principalPoint);
+            Shader.SetGlobalVector(GCamSensorResID, (Vector4)sensorRes);
+            Shader.SetGlobalVector(GCamCurrentResID, (Vector4)currentRes);
+            Shader.SetGlobalFloat(GCamExposureID, cameraExposure);
+            Shader.SetGlobalFloat(GCamAvailableID, 1f);
+            _fragProjectionActive = true;
+        }
+
         public void SetupFrustumVolume()
         {
             if (!DepthCapture.DepthAvailable) return;
@@ -311,50 +355,21 @@ namespace Genesis.RoomScan
             compute.SetFloat(WeightGrowthID, weightGrowth);
             compute.SetFloat(MaxWeightID, maxWeight);
 
-            if (_pendingCamFrame != null)
+            if (_pendingCamFrame != null && _camFrameCopy != null)
             {
-                int w = _pendingCamFrame.width;
-                int h = _pendingCamFrame.height;
-                if (_camFrameCopy == null || _camFrameCopy.width != w || _camFrameCopy.height != h)
-                {
-                    if (_camFrameCopy) Destroy(_camFrameCopy);
-                    _camFrameCopy = new RenderTexture(w, h, 0, GraphicsFormat.R8G8B8A8_SRGB, 0)
-                    {
-                        enableRandomWrite = false,
-                        filterMode = FilterMode.Bilinear,
-                        wrapMode = TextureWrapMode.Clamp
-                    };
-                    _camFrameCopy.Create();
-                    Debug.Log($"[RoomScan] Created camera frame copy RT: {w}x{h} sRGB format, " +
-                        $"srcType={_pendingCamFrame.GetType().Name}, srcFormat={_pendingCamFrame.graphicsFormat}");
-                }
-                Graphics.Blit(_pendingCamFrame, _camFrameCopy);
-
                 compute.SetTexture(_integrateKernel.KernelIndex, CamRGBID, _camFrameCopy);
                 compute.SetInt(CamAvailableID, 1);
-                var invRot = Matrix4x4.Rotate(Quaternion.Inverse(_pendingCamRot));
                 compute.SetVector(CamPosID, _pendingCamPos);
-                compute.SetMatrix(CamInvRotID, invRot);
+                compute.SetMatrix(CamInvRotID, Matrix4x4.Rotate(Quaternion.Inverse(_pendingCamRot)));
                 compute.SetVector(CamFocalLenID, _pendingFocalLen);
                 compute.SetVector(CamPrincipalPtID, _pendingPrincipalPt);
                 compute.SetVector(CamSensorResID, _pendingSensorRes);
                 compute.SetVector(CamCurrentResID, _pendingCurrentRes);
                 compute.SetFloat(CamExposureID, cameraExposure);
-
-                Shader.SetGlobalTexture(GCamTexID, _camFrameCopy);
-                Shader.SetGlobalVector(GCamPosID, _pendingCamPos);
-                Shader.SetGlobalMatrix(GCamInvRotID, invRot);
-                Shader.SetGlobalVector(GCamFocalLenID, (Vector4)_pendingFocalLen);
-                Shader.SetGlobalVector(GCamPrincipalPtID, (Vector4)_pendingPrincipalPt);
-                Shader.SetGlobalVector(GCamSensorResID, (Vector4)_pendingSensorRes);
-                Shader.SetGlobalVector(GCamCurrentResID, (Vector4)_pendingCurrentRes);
-                Shader.SetGlobalFloat(GCamExposureID, cameraExposure);
-                Shader.SetGlobalFloat(GCamAvailableID, 1f);
             }
             else
             {
                 compute.SetInt(CamAvailableID, 0);
-                Shader.SetGlobalFloat(GCamAvailableID, 0f);
             }
 
             _integrateKernel.Set(DepthCapture.DepthTexID, dc.DepthTex);
