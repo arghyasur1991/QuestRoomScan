@@ -34,6 +34,8 @@ namespace Genesis.RoomScan
         [SerializeField] private TriplanarCache triplanarCache;
         [SerializeField] private KeyframeStore keyframeStore;
         [SerializeField] private RoomScanPersistence persistence;
+        [SerializeField] private KeyframeCollector keyframeCollector;
+        [SerializeField] private PointCloudExporter pointCloudExporter;
 
         [Header("Camera")]
         [SerializeField] private PassthroughCameraProvider cameraProvider;
@@ -302,6 +304,8 @@ namespace Genesis.RoomScan
             if (triplanarCache == null) triplanarCache = FindFirstObjectByType<TriplanarCache>();
             if (keyframeStore == null) keyframeStore = FindFirstObjectByType<KeyframeStore>();
             if (persistence == null) persistence = FindFirstObjectByType<RoomScanPersistence>();
+            if (keyframeCollector == null) keyframeCollector = FindFirstObjectByType<KeyframeCollector>();
+            if (pointCloudExporter == null) pointCloudExporter = FindFirstObjectByType<PointCloudExporter>();
 
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");
@@ -360,6 +364,12 @@ namespace Genesis.RoomScan
                         keyframeStore.SetLiveFrame(frame, pose.position, pose.rotation,
                             focal, principal, sensor, current);
                         keyframeStore.TryInsertKeyframe(frame, pose.position, pose.rotation,
+                            focal, principal, sensor, current);
+                    }
+
+                    if (keyframeCollector != null)
+                    {
+                        keyframeCollector.TrySaveKeyframe(frame, pose.position, pose.rotation,
                             focal, principal, sensor, current);
                     }
 

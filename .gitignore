@@ -21,3 +21,6 @@
 *.VC.db
 *.DS_Store
 Thumbs.db
+
+# Unity ignores folders ending in ~ but we want them in git (PC-side tools)
+!Tools~/

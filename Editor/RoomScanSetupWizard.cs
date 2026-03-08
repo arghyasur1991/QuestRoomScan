@@ -31,6 +31,8 @@ namespace Genesis.RoomScan.Editor
         TriplanarCache _triplanarCache;
         KeyframeStore _keyframeStore;
         RoomScanPersistence _persistence;
+        KeyframeCollector _keyframeCollector;
+        PointCloudExporter _pointCloudExporter;
 
         bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired, _triplanarWired;
 
@@ -96,6 +98,8 @@ namespace Genesis.RoomScan.Editor
             _triplanarCache = FindAny<TriplanarCache>();
             _keyframeStore = FindAny<KeyframeStore>();
             _persistence = FindAny<RoomScanPersistence>();
+            _keyframeCollector = FindAny<KeyframeCollector>();
+            _pointCloudExporter = FindAny<PointCloudExporter>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -239,13 +243,16 @@ namespace Genesis.RoomScan.Editor
             StatusRow("TriplanarCache", _triplanarCache != null);
             StatusRow("KeyframeStore", _keyframeStore != null);
             StatusRow("RoomScanPersistence", _persistence != null);
+            StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
+            StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _chunkManager == null || _textureProjector == null ||
                               _roomScanner == null || _cameraProvider == null ||
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null || _keyframeStore == null ||
-                              _persistence == null;
+                              _persistence == null || _keyframeCollector == null ||
+                              _pointCloudExporter == null;
 
             if (anyMissing)
             {
@@ -303,6 +310,10 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<KeyframeStore>(root);
             if (root.GetComponent<RoomScanPersistence>() == null)
                 Undo.AddComponent<RoomScanPersistence>(root);
+            if (root.GetComponent<KeyframeCollector>() == null)
+                Undo.AddComponent<KeyframeCollector>(root);
+            if (root.GetComponent<PointCloudExporter>() == null)
+                Undo.AddComponent<PointCloudExporter>(root);
 
             MarkDirty();
             Refresh();
@@ -478,6 +489,8 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "triplanarCache", _triplanarCache);
                 SetRef(so, "keyframeStore", _keyframeStore);
                 SetRef(so, "persistence", _persistence);
+                SetRef(so, "keyframeCollector", _keyframeCollector);
+                SetRef(so, "pointCloudExporter", _pointCloudExporter);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }
