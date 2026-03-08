@@ -1,0 +1,50 @@
+// Genesis RoomScan - Derive world-space normals from depth via finite differences
+#include "DepthKit.hlsl"
+
+RWTexture2DArray<float4> gsDepthNormalTexRW;
+
+#pragma kernel DepthNorm
+
+[numthreads(8, 8, 1)]
+void DepthNorm(uint3 id : SV_DispatchThreadID)
+{
+    float2 texSizeF = (float2)gsDepthTexSize;
+    uint eye = id.z;
+
+    uint2 ind = id.xy;
+    float2 uv = id.xy / texSizeF;
+    float3 depthWorld = gsDepthNDCtoWorld(float3(uv, gsDepthTex[uint3(ind, eye)]), eye);
+
+    ind = id.xy + uint2(2, 0);
+    uv = ind / texSizeF;
+    float3 depthWorldH = gsDepthNDCtoWorld(float3(uv, gsDepthTex[uint3(ind, eye)]), eye);
+
+    ind = id.xy + uint2(0, 2);
+    uv = ind / texSizeF;
+    float3 depthWorldV = gsDepthNDCtoWorld(float3(uv, gsDepthTex[uint3(ind, eye)]), eye);
+
+    float3 hDeriv = depthWorldH - depthWorld;
+    float3 vDeriv = depthWorldV - depthWorld;
+
+    float3 worldNorm = -normalize(cross(hDeriv, vDeriv));
+
+    gsDepthNormalTexRW[id] = float4(worldNorm, 1.0);
+}
+
+// Editor simulation: convert mono linear depth to stereo NDC depth
+Texture2D<float> gsInputRawMonoDepth;
+RWTexture2DArray<float> gsDepthTexRW;
+
+#pragma kernel MonoRawDepthToStereo
+
+[numthreads(8, 8, 1)]
+void MonoRawDepthToStereo(uint2 id : SV_DispatchThreadID)
+{
+    float z = gsInputRawMonoDepth[id.xy];
+    float near = gsDepthZParams.x;
+    float far = gsDepthZParams.y;
+    float depth = (far / (far - near)) - (far * near) / ((far - near) * z);
+
+    gsDepthTexRW[uint3(id.xy, 0)] = depth;
+    gsDepthTexRW[uint3(id.xy, 1)] = depth;
+}

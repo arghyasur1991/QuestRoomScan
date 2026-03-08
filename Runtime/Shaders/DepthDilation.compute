@@ -1,0 +1,73 @@
+// Genesis RoomScan - Jump-flood depth dilation for hole-filling
+#include "DepthKit.hlsl"
+
+RWTexture2D<float4> gsDilateDest;
+RWTexture2D<float4> gsDilateSrc;
+int gsDilateStepSize;
+
+// Volume params needed for radius calculation
+float gsVoxDist;
+float gsVoxSize;
+
+#pragma kernel InitDepthDilation
+
+[numthreads(8, 8, 1)]
+void InitDepthDilation(uint2 coord : SV_DispatchThreadID)
+{
+    float depth = gsDepthTex[uint3(coord.xy, 0)];
+
+    float4 val = float4(0, 0, 0, 0);
+    val.xy = (float2)coord.xy;
+    val.z = depth;
+
+    gsDilateSrc[coord] = val;
+    gsDilateDest[coord] = val;
+}
+
+static const int2 kOffsets[8] =
+{
+    int2(1, 0),
+    int2(1, 1),
+    int2(0, 1),
+    int2(-1, 1),
+    int2(-1, 0),
+    int2(-1, -1),
+    int2(0, -1),
+    int2(1, -1)
+};
+
+#pragma kernel DilateDepthStep
+
+[numthreads(8, 8, 1)]
+void DilateDepthStep(uint2 coord : SV_DispatchThreadID)
+{
+    float4 val = gsDilateSrc[coord];
+    float focalLength = gsDepthProj[0]._m00;
+
+    [unroll]
+    for (int i = 0; i < 8; i++)
+    {
+        uint2 srcCoord = coord + kOffsets[i] * gsDilateStepSize;
+
+        bool withinTexBounds =
+            srcCoord.x < gsDepthTexSize.x &&
+            srcCoord.y < gsDepthTexSize.y;
+
+        float4 srcVal = gsDilateSrc[srcCoord];
+
+        float srcDepthLinear = gsDepthNDCToLinear(srcVal.z);
+        float pixelSize = 2.0 * srcDepthLinear / (focalLength * gsDepthTexSize.x);
+        float radius = (gsVoxDist + gsVoxSize) / pixelSize;
+
+        float2 diff = srcVal.xy - (float2)coord.xy;
+        bool withinRadius = dot(diff, diff) < radius * radius;
+
+        bool newMinimum = srcVal.z < val.z;
+        bool notZero = srcVal.z != 0;
+
+        if (withinTexBounds & withinRadius & newMinimum & notZero)
+            val = srcVal;
+    }
+
+    gsDilateDest[coord] = val;
+}

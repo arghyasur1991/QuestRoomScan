@@ -1,0 +1,83 @@
+// Genesis RoomScan - Project camera RGB onto mesh vertices
+
+struct VertexData
+{
+    float3 pos;
+    float3 norm;
+    uint packedColor; // RGBA8 packed
+};
+
+RWStructuredBuffer<VertexData> gsVertexBuffer;
+uint gsVertexCount;
+
+Texture2D<float4> gsCameraRGB;
+SamplerState linearClampSampler;
+
+float4x4 gsCameraVP;
+float3 gsCameraPos;
+float gsCameraWeight; // controls blending speed
+
+#pragma kernel ProjectColors
+
+[numthreads(256, 1, 1)]
+void ProjectColors(uint id : SV_DispatchThreadID)
+{
+    if (id >= gsVertexCount)
+        return;
+
+    VertexData v = gsVertexBuffer[id];
+
+    float3 viewDir = normalize(v.pos - gsCameraPos);
+    float nDotV = dot(v.norm, -viewDir);
+
+    // Skip backfacing vertices
+    if (nDotV < 0.1)
+        return;
+
+    // Project to clip space
+    float4 clipPos = mul(gsCameraVP, float4(v.pos, 1));
+
+    // Behind camera check
+    if (clipPos.w <= 0)
+        return;
+
+    float3 ndc = clipPos.xyz / clipPos.w;
+
+    // Frustum check
+    if (any(abs(ndc.xy) > 1.0))
+        return;
+
+    // NDC to UV
+    float2 uv = ndc.xy * 0.5 + 0.5;
+    uv.y = 1.0 - uv.y; // flip Y
+
+    // Sample camera color
+    float4 camColor = gsCameraRGB.SampleLevel(linearClampSampler, uv, 0);
+
+    // Weight by facing angle (favor head-on views)
+    float weight = nDotV * gsCameraWeight;
+
+    // Unpack existing color
+    uint packed = v.packedColor;
+    float4 existing = float4(
+        (packed & 0xFF) / 255.0,
+        ((packed >> 8) & 0xFF) / 255.0,
+        ((packed >> 16) & 0xFF) / 255.0,
+        ((packed >> 24) & 0xFF) / 255.0
+    );
+
+    // Running weighted average: use alpha channel to accumulate total weight
+    float totalWeight = existing.a * 10.0; // scale alpha to useful range
+    float newTotal = totalWeight + weight;
+    float3 blended = (existing.rgb * totalWeight + camColor.rgb * weight) / max(newTotal, 0.001);
+    float newAlpha = min(newTotal / 10.0, 1.0);
+
+    // Repack
+    uint r = (uint)(saturate(blended.r) * 255.0);
+    uint g = (uint)(saturate(blended.g) * 255.0);
+    uint b = (uint)(saturate(blended.b) * 255.0);
+    uint a = (uint)(saturate(newAlpha) * 255.0);
+    v.packedColor = r | (g << 8) | (b << 16) | (a << 24);
+
+    gsVertexBuffer[id] = v;
+}

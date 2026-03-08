@@ -1,0 +1,29 @@
+{
+  "name": "com.genesis.roomscan",
+  "version": "0.1.0",
+  "displayName": "Quest Room Scan",
+  "description": "On-device continuous room scanning for Quest 3. Produces a textured mesh from depth + RGB camera data using GPU TSDF volume integration and Surface Nets mesh extraction.",
+  "unity": "6000.0",
+  "dependencies": {
+    "com.unity.xr.arfoundation": "6.1.1",
+    "com.unity.burst": "1.8.18",
+    "com.unity.collections": "2.4.3",
+    "com.unity.mathematics": "1.3.2",
+    "com.unity.render-pipelines.universal": "17.0.3",
+    "com.meta.xr.mrutilitykit": "85.0.0"
+  },
+  "keywords": [
+    "xr",
+    "quest",
+    "scanning",
+    "mesh",
+    "depth",
+    "tsdf",
+    "reconstruction"
+  ],
+  "author": {
+    "name": "Genesis",
+    "url": "https://github.com/arghyasur1991"
+  },
+  "license": "MIT"
+}

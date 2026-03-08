@@ -1,0 +1,77 @@
+// Genesis RoomScan - TSDF volume integration compute shader
+#include "DepthKit.hlsl"
+#include "VolumeHelpers.hlsl"
+
+RWTexture3D<float> gsVolumeRW;
+float gsDepthDispThresh;
+
+#define EXCLUSION_TOP 0.2
+#define EXCLUSION_BOTTOM 1.7
+#define EXCLUSION_RADIUS 0.5
+#define MIN_DOT 0.3
+
+#pragma kernel Clear
+
+[numthreads(4, 4, 4)]
+void Clear(uint3 id : SV_DispatchThreadID)
+{
+    gsVolumeRW[id] = GS_EMPTY_VOXEL;
+}
+
+#pragma kernel Integrate
+
+[numthreads(64, 1, 1)]
+void Integrate(uint id : SV_DispatchThreadID)
+{
+    float3 vLocalPos = gsFrustumVolume[id];
+    float3 vWorldPos = mul(gsDepthViewInv[0], float4(vLocalPos, 1)).xyz;
+    uint3 coord = gsWorldToVoxel(vWorldPos);
+    float3 voxPos = gsVoxelToWorld(coord);
+
+    float3 eyePos = gsDepthEyePos();
+    float3 eyeToVox = voxPos - eyePos;
+    float voxEyeDist = length(eyeToVox);
+
+    float3 voxNDC = gsDepthWorldToNDC(voxPos);
+    float depthNDC = gsDepthSample(voxNDC.xy);
+    float3 depthNorm = gsDepthNormalSample(voxNDC.xy).xyz;
+    float3 depthPos = gsDepthNDCtoWorld(float3(voxNDC.xy, depthNDC));
+
+    float3 eyeToDepth = depthPos - eyePos;
+    float depthEyeDist = length(eyeToDepth);
+    float normDot = -dot(eyeToVox, depthNorm) / voxEyeDist;
+
+    float sDist = depthEyeDist - voxEyeDist;
+    sDist *= saturate(normDot);
+
+    bool empty = sDist >= 1.0;
+    float sDistNorm = min(sDist / gsVoxDist, 1);
+    bool withinBand = sDistNorm >= -gsVoxMin / gsVoxSize;
+
+    // Dilation test
+    float dilatedDepthNDC = gsSampleDilatedDepth(voxNDC.xy);
+    float dilatedDepthLinear = gsDepthNDCToLinear(dilatedDepthNDC);
+    float depthLinear = gsDepthNDCToLinear(depthNDC);
+    float3 voxView = mul(gsDepthView[0], float4(voxPos, 1)).xyz;
+    bool acceptableDepthDisparity = depthLinear < dilatedDepthLinear + gsDepthDispThresh;
+    bool unoccludedByDilation = abs(voxView.z) < dilatedDepthLinear || acceptableDepthDisparity;
+    bool validSurfaceNormal = empty || normDot > MIN_DOT;
+
+    // Exclusion zones (players, tracked objects)
+    bool outsideExclusions = true;
+    for (int p = 0; p < gsNumExclusions; p++)
+    {
+        float3 headPos = gsExclusionHeads[p];
+        float2 diff = vWorldPos.xz - headPos.xz;
+        if (dot(diff, diff) < EXCLUSION_RADIUS * EXCLUSION_RADIUS &&
+            vWorldPos.y < headPos.y + EXCLUSION_TOP &&
+            vWorldPos.y > headPos.y - EXCLUSION_BOTTOM)
+        {
+            outsideExclusions = false;
+        }
+    }
+
+    bool valid = withinBand & outsideExclusions & validSurfaceNormal & unoccludedByDilation;
+    if (valid)
+        gsVolumeRW[coord] = sDistNorm;
+}

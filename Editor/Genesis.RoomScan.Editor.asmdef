@@ -1,0 +1,21 @@
+{
+  "name": "Genesis.RoomScan.Editor",
+  "rootNamespace": "Genesis.RoomScan.Editor",
+  "references": [
+    "Genesis.RoomScan",
+    "Unity.XR.ARFoundation",
+    "Unity.XR.CoreUtils",
+    "meta.xr.mrutilitykit"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
