@@ -45,6 +45,13 @@ namespace Genesis.RoomScan
             if (_volume == null)
                 throw new Exception("[RoomScan] VolumeIntegrator not found");
 
+            var rpAsset = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline;
+            Debug.Log($"[RoomScan] ChunkManager Start: mat={scanMeshMaterial?.name ?? "NULL"}, " +
+                $"shader={scanMeshMaterial?.shader?.name ?? "NULL"}, " +
+                $"instancing={scanMeshMaterial?.enableInstancing}, " +
+                $"rp={rpAsset?.name ?? "NULL"}, " +
+                $"stereoMode={UnityEngine.XR.XRSettings.stereoRenderingMode}");
+
             StartWorkers();
         }
 
@@ -279,16 +286,18 @@ namespace Genesis.RoomScan
 
                 for (int z = 0; z < size.z; z++)
                 {
+                    // Volume is RG8_SNorm: 2 bytes per voxel (R=TSDF, G=weight).
+                    // Extract only the R channel (every other byte).
                     NativeArray<sbyte> slice = req.GetData<sbyte>(z);
                     int dstOffset = z * sliceSize;
 
-                    var copier = new CopySliceJob
+                    var copier = new CopySliceRG8Job
                     {
                         Source = slice,
                         Destination = chunk.VolumeData,
                         DestOffset = dstOffset
                     };
-                    copier.ScheduleParallelByRef(slice.Length, 64, default).Complete();
+                    copier.ScheduleParallelByRef(sliceSize, 64, default).Complete();
                 }
 
                 bool populated = await chunk.Mesher.CreateMesh(chunk.VolumeData, size, _volume.VoxelSize, chunk.Mesh, ctkn);
@@ -298,6 +307,21 @@ namespace Genesis.RoomScan
                 if (_meshAttempts <= 5 || _meshAttempts % 20 == 0)
                     Debug.Log($"[RoomScan] MeshChunk {chunk.Coord}: populated={populated}, " +
                               $"verts={chunk.Mesh.vertexCount}, attempts={_meshAttempts}, successes={_meshSuccesses}");
+
+                if (populated && (_meshSuccesses <= 3 || _meshSuccesses % 50 == 0))
+                {
+                    var mr = chunk.GameObject.GetComponent<MeshRenderer>();
+                    Debug.Log($"[RoomScan] ChunkDiag {chunk.Coord}: " +
+                        $"go.active={chunk.GameObject.activeSelf}, " +
+                        $"mr.enabled={mr.enabled}, " +
+                        $"mat={mr.sharedMaterial?.name ?? "NULL"}, " +
+                        $"shader={mr.sharedMaterial?.shader?.name ?? "NULL"}, " +
+                        $"worldPos={chunk.GameObject.transform.position}, " +
+                        $"localScale={chunk.GameObject.transform.localScale}, " +
+                        $"meshBounds={chunk.Mesh.bounds}, " +
+                        $"rendererBounds={mr.bounds}, " +
+                        $"layer={chunk.GameObject.layer}");
+                }
             }
             catch (Exception e) when (e is not OperationCanceledException)
             {
@@ -363,7 +387,7 @@ namespace Genesis.RoomScan
         }
 
         [BurstCompile]
-        private struct CopySliceJob : IJobFor
+        private struct CopySliceRG8Job : IJobFor
         {
             [ReadOnly] public NativeArray<sbyte> Source;
             public int DestOffset;
@@ -372,7 +396,7 @@ namespace Genesis.RoomScan
 
             public void Execute(int i)
             {
-                Destination[DestOffset + i] = Source[i];
+                Destination[DestOffset + i] = Source[i * 2];
             }
         }
     }

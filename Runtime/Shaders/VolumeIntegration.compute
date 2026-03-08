@@ -1,21 +1,49 @@
 // Genesis RoomScan - TSDF volume integration compute shader
+// Volume format: RG8_SNorm — R = signed distance, G = confidence weight [0,1]
+//
+// Uses quality^2 modulated running average with slow weight growth.
+// quality^2 strongly suppresses low-quality observations (noise, glancing angles,
+// distant surfaces) while keeping high-quality observations effective.
+// Slow weight growth prevents transient bad data from building significant
+// confidence. UV bounds check + body exclusion handle off-screen/body stability.
 #include "DepthKit.hlsl"
 #include "VolumeHelpers.hlsl"
 
-RWTexture3D<float> gsVolumeRW;
+RWTexture3D<float2> gsVolumeRW;
 float gsDepthDispThresh;
+float gsMaxUpdateDist;
 
-#define EXCLUSION_TOP 0.2
+#define EXCLUSION_TOP 0.25
 #define EXCLUSION_BOTTOM 1.7
-#define EXCLUSION_RADIUS 0.5
+#define EXCLUSION_RADIUS 0.6
 #define MIN_DOT 0.3
+
+#define MIN_QUALITY_SEED 0.20
+#define SEED_WEIGHT 0.04
+#define PRUNE_WEIGHT 0.02
+
+float gsBlendRate;    // 0.8 default — higher = faster convergence
+float gsStability;    // 2.5 default — higher = more resistance to change
+float gsWeightGrowth; // 0.025 default — higher = faster weight accumulation
+float gsMaxWeight;    // 0.5 default — caps how resistant any voxel can become
 
 #pragma kernel Clear
 
 [numthreads(4, 4, 4)]
 void Clear(uint3 id : SV_DispatchThreadID)
 {
-    gsVolumeRW[id] = GS_EMPTY_VOXEL;
+    gsVolumeRW[id] = float2(GS_EMPTY_VOXEL, 0);
+}
+
+#pragma kernel Prune
+
+[numthreads(4, 4, 4)]
+void Prune(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= gsVoxCount)) return;
+    float2 val = gsVolumeRW[id];
+    if (val.y > 0 && val.y < PRUNE_WEIGHT)
+        gsVolumeRW[id] = float2(GS_EMPTY_VOXEL, 0);
 }
 
 #pragma kernel Integrate
@@ -32,7 +60,14 @@ void Integrate(uint id : SV_DispatchThreadID)
     float3 eyeToVox = voxPos - eyePos;
     float voxEyeDist = length(eyeToVox);
 
+    float3 voxView = mul(gsDepthView[0], float4(voxPos, 1)).xyz;
+    if (voxView.z > -0.05) return;
+
     float3 voxNDC = gsDepthWorldToNDC(voxPos);
+
+    if (voxNDC.x < 0.01 || voxNDC.x > 0.99 || voxNDC.y < 0.01 || voxNDC.y > 0.99)
+        return;
+
     float depthNDC = gsDepthSample(voxNDC.xy);
     float3 depthNorm = gsDepthNormalSample(voxNDC.xy).xyz;
     float3 depthPos = gsDepthNDCtoWorld(float3(voxNDC.xy, depthNDC));
@@ -48,16 +83,13 @@ void Integrate(uint id : SV_DispatchThreadID)
     float sDistNorm = min(sDist / gsVoxDist, 1);
     bool withinBand = sDistNorm >= -gsVoxMin / gsVoxSize;
 
-    // Dilation test
     float dilatedDepthNDC = gsSampleDilatedDepth(voxNDC.xy);
     float dilatedDepthLinear = gsDepthNDCToLinear(dilatedDepthNDC);
     float depthLinear = gsDepthNDCToLinear(depthNDC);
-    float3 voxView = mul(gsDepthView[0], float4(voxPos, 1)).xyz;
     bool acceptableDepthDisparity = depthLinear < dilatedDepthLinear + gsDepthDispThresh;
     bool unoccludedByDilation = abs(voxView.z) < dilatedDepthLinear || acceptableDepthDisparity;
     bool validSurfaceNormal = empty || normDot > MIN_DOT;
 
-    // Exclusion zones (players, tracked objects)
     bool outsideExclusions = true;
     for (int p = 0; p < gsNumExclusions; p++)
     {
@@ -72,6 +104,30 @@ void Integrate(uint id : SV_DispatchThreadID)
     }
 
     bool valid = withinBand & outsideExclusions & validSurfaceNormal & unoccludedByDilation;
-    if (valid)
-        gsVolumeRW[coord] = sDistNorm;
+    if (!valid) return;
+
+    float distFactor = saturate(1.0 - voxEyeDist / gsMaxUpdateDist);
+    float angleFactor = saturate(normDot);
+    float quality = distFactor * angleFactor;
+    float q2 = quality * quality;
+
+    float2 old = gsVolumeRW[coord];
+    float oldVal = old.x;
+    float weight = max(old.y, 0);
+    bool wasEmpty = weight < 0.001;
+
+    if (wasEmpty)
+    {
+        if (quality >= MIN_QUALITY_SEED)
+            gsVolumeRW[coord] = float2(sDistNorm, SEED_WEIGHT);
+        return;
+    }
+
+    float blend = q2 * gsBlendRate / (1.0 + weight * gsStability);
+    blend = clamp(blend, 0.0, 0.7);
+    if (blend < 0.005) return;
+
+    float newTsdf = lerp(oldVal, sDistNorm, blend);
+    float newWeight = min(weight + q2 * gsWeightGrowth, gsMaxWeight);
+    gsVolumeRW[coord] = float2(newTsdf, newWeight);
 }

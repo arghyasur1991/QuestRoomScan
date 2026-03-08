@@ -14,16 +14,26 @@ namespace Genesis.RoomScan
         [SerializeField] private ComputeShader compute;
 
         [Header("Volume")]
-        [SerializeField] private int3 voxelCount = new(128, 64, 128);
+        [SerializeField] private int3 voxelCount = new(160, 128, 160);
         [SerializeField] private float voxelSize = 0.05f;
-        [SerializeField] private float voxelDistance = 0.2f;
+        [SerializeField] private float voxelDistance = 0.15f;
         [SerializeField] private float voxelMin = 0.1f;
 
         [Header("Integration")]
-        [SerializeField] private float depthDisparityThreshold = 1f;
-        [SerializeField] private float maxUpdateDist = 3.5f;
-        [SerializeField] private float minUpdateDist = 0.3f;
-        [SerializeField] private int maxFrustumPositions = 500000;
+        [SerializeField] private float depthDisparityThreshold = 0.5f;
+        [SerializeField] private float maxUpdateDist = 5f;
+        [SerializeField] private float minUpdateDist = 0.5f;
+        [SerializeField] private int maxFrustumPositions = 1000000;
+
+        [Header("Convergence")]
+        [Tooltip("Blend strength. Higher = faster convergence and correction. (default 0.8)")]
+        [SerializeField, Range(0.1f, 2f)] private float blendRate = 0.8f;
+        [Tooltip("Weight resistance to blending. Lower = faster corrections but less stable. (default 2.5)")]
+        [SerializeField, Range(0.5f, 10f)] private float stability = 2.5f;
+        [Tooltip("How fast weight accumulates per frame. Lower = bad data builds less confidence. (default 0.025)")]
+        [SerializeField, Range(0.005f, 0.1f)] private float weightGrowth = 0.025f;
+        [Tooltip("Maximum weight any voxel can reach. Lower = all areas correct equally fast. (default 0.5)")]
+        [SerializeField, Range(0.1f, 1f)] private float maxWeight = 0.5f;
 
         private RenderTexture _volume;
         public RenderTexture Volume => _volume;
@@ -42,15 +52,32 @@ namespace Genesis.RoomScan
         private static readonly int DepthDispThreshID = Shader.PropertyToID("gsDepthDispThresh");
         private static readonly int NumExclusionsID = Shader.PropertyToID("gsNumExclusions");
         private static readonly int ExclusionHeadsID = Shader.PropertyToID("gsExclusionHeads");
+        private static readonly int MaxUpdateDistID = Shader.PropertyToID("gsMaxUpdateDist");
+        private static readonly int BlendRateID = Shader.PropertyToID("gsBlendRate");
+        private static readonly int StabilityID = Shader.PropertyToID("gsStability");
+        private static readonly int WeightGrowthID = Shader.PropertyToID("gsWeightGrowth");
+        private static readonly int MaxWeightID = Shader.PropertyToID("gsMaxWeight");
+
+        [Header("Warmup")]
+        [Tooltip("Clear the volume after this many integrations to discard sensor startup noise. 0 = disabled.")]
+        [SerializeField] private int warmupIntegrations = 15;
+
+        [Header("Pruning")]
+        [SerializeField] private float pruneIntervalSeconds = 3f;
 
         private ComputeKernelHelper _clearKernel;
         private ComputeKernelHelper _integrateKernel;
+        private ComputeKernelHelper _pruneKernel;
 
         private ComputeBuffer _frustumVolume;
         private bool _frustumReady;
+        private float _lastPruneTime;
 
         public readonly List<Transform> ExclusionZones = new();
         private readonly Vector4[] _exclusionPositions = new Vector4[64];
+
+        public int IntegrationCount { get; private set; }
+        public int WarmupIntegrations => warmupIntegrations;
 
         public event Action Integrated;
         public event Action Cleared;
@@ -70,6 +97,9 @@ namespace Genesis.RoomScan
             _integrateKernel = new ComputeKernelHelper(compute, "Integrate");
             _integrateKernel.Set(VolumeRWID, _volume);
 
+            _pruneKernel = new ComputeKernelHelper(compute, "Prune");
+            _pruneKernel.Set(VolumeRWID, _volume);
+
             SetShaderConstants();
             Clear();
 
@@ -85,10 +115,10 @@ namespace Genesis.RoomScan
 
         private void CreateVolume()
         {
-            long texBytes = (long)voxelCount.x * voxelCount.y * voxelCount.z;
-            Debug.Log($"[RoomScan] TSDF volume: {voxelCount} = {texBytes / (1024 * 1024)}MB");
+            long texBytes = (long)voxelCount.x * voxelCount.y * voxelCount.z * 2;
+            Debug.Log($"[RoomScan] TSDF volume: {voxelCount} RG8_SNorm = {texBytes / (1024 * 1024)}MB (R=TSDF, G=weight)");
 
-            _volume = new RenderTexture(voxelCount.x, voxelCount.y, 0, GraphicsFormat.R8_SNorm, 0)
+            _volume = new RenderTexture(voxelCount.x, voxelCount.y, 0, GraphicsFormat.R8G8_SNorm, 0)
             {
                 dimension = TextureDimension.Tex3D,
                 volumeDepth = voxelCount.z,
@@ -113,6 +143,11 @@ namespace Genesis.RoomScan
             Shader.SetGlobalFloat(VoxDistID, voxelDistance);
 
             compute.SetFloat(DepthDispThreshID, depthDisparityThreshold);
+            compute.SetFloat(MaxUpdateDistID, maxUpdateDist);
+            compute.SetFloat(BlendRateID, blendRate);
+            compute.SetFloat(StabilityID, stability);
+            compute.SetFloat(WeightGrowthID, weightGrowth);
+            compute.SetFloat(MaxWeightID, maxWeight);
 
             Shader.SetGlobalTexture(VolumeID, _volume);
         }
@@ -208,11 +243,32 @@ namespace Genesis.RoomScan
             compute.SetInt(NumExclusionsID, numExclusions);
             compute.SetVectorArray(ExclusionHeadsID, _exclusionPositions);
 
+            compute.SetFloat(BlendRateID, blendRate);
+            compute.SetFloat(StabilityID, stability);
+            compute.SetFloat(WeightGrowthID, weightGrowth);
+            compute.SetFloat(MaxWeightID, maxWeight);
+
             _integrateKernel.Set(DepthCapture.DepthTexID, dc.DepthTex);
             _integrateKernel.Set(DepthCapture.NormTexID, dc.NormTex);
             _integrateKernel.Set(DepthCapture.DilatedDepthTexID, dc.DilatedDepthTex);
 
             _integrateKernel.DispatchFit(_frustumVolume.count, 1);
+
+            IntegrationCount++;
+
+            if (warmupIntegrations > 0 && IntegrationCount == warmupIntegrations)
+            {
+                Debug.Log($"[RoomScan] Warmup complete ({warmupIntegrations} frames), clearing volume to discard sensor startup noise");
+                Clear();
+            }
+
+            float t = Time.time;
+            if (t - _lastPruneTime >= pruneIntervalSeconds)
+            {
+                _lastPruneTime = t;
+                _pruneKernel.Set(VolumeRWID, _volume);
+                _pruneKernel.DispatchFit(_volume);
+            }
 
             Integrated?.Invoke();
         }

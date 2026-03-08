@@ -52,6 +52,9 @@ namespace Genesis.RoomScan
         [SerializeField] private float guidedMeshExtractionHz = 3f;
         [SerializeField] private float guidedTextureProjectionHz = 15f;
 
+        [Header("Mesh Quality")]
+        [SerializeField] private int minIntegrationsBeforeMesh = 15;
+
         [Header("Guided Mode")]
         [SerializeField] private float guidedTimeoutSeconds = 60f;
 
@@ -92,6 +95,7 @@ namespace Genesis.RoomScan
         {
             ValidateComponents();
             SetupCameraProvider();
+            SetupHeadExclusion();
 
             if (autoStartOnLoad)
                 StartScanning();
@@ -125,7 +129,9 @@ namespace Genesis.RoomScan
                 volumeIntegrator.Integrate();
                 _integrateCount++;
 
-                if (t - _lastMeshTime >= MeshInterval)
+                int effectiveCount = volumeIntegrator.IntegrationCount - volumeIntegrator.WarmupIntegrations;
+                if (effectiveCount >= minIntegrationsBeforeMesh
+                    && t - _lastMeshTime >= MeshInterval)
                 {
                     _lastMeshTime = t;
                     chunkManager.UpdateDirtyChunks();
@@ -237,6 +243,22 @@ namespace Genesis.RoomScan
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");
             if (chunkManager == null) Debug.LogError("[RoomScan] ChunkManager not found");
+        }
+
+        private void SetupHeadExclusion()
+        {
+            if (volumeIntegrator == null) return;
+
+            var cam = Camera.main;
+            if (cam != null)
+            {
+                AddExclusionZone(cam.transform);
+                Debug.Log($"[RoomScan] Head exclusion zone added: {cam.gameObject.name}");
+            }
+            else
+            {
+                Debug.LogWarning("[RoomScan] No main camera found for head exclusion zone");
+            }
         }
 
         private void SetupCameraProvider()
