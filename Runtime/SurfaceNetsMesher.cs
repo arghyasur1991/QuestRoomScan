@@ -64,6 +64,7 @@ namespace Genesis.RoomScan
         private struct VertexJob : IJob
         {
             [ReadOnly] public NativeArray<sbyte> Volume;
+            [ReadOnly] public NativeArray<Color32> Colors;
             [ReadOnly] public int3 VoxCount;
             [ReadOnly] public float VoxSize;
 
@@ -132,11 +133,23 @@ namespace Genesis.RoomScan
                     float3 pos = CoordToPos(posCoord);
                     float3 norm = math.normalize(dir);
 
+                    Color32 vertColor = new(20, 20, 25, 255);
+                    if (Colors.IsCreated && Colors.Length > 0)
+                    {
+                        int cIdx = CoordToIndex(coord);
+                        if (cIdx >= 0 && cIdx < Colors.Length)
+                        {
+                            Color32 c = Colors[cIdx];
+                            if (c.a > 10)
+                                vertColor = new Color32(c.r, c.g, c.b, 255);
+                        }
+                    }
+
                     Vertex vert = new()
                     {
                         pos = pos,
                         norm = norm,
-                        color = new Color32(128, 128, 128, 255)
+                        color = vertColor
                     };
 
                     bounds.Encapsulate(pos);
@@ -246,7 +259,7 @@ namespace Genesis.RoomScan
         }
 
         public async Task<bool> CreateMesh(
-            NativeArray<sbyte> volume, int3 voxCount, float voxSize,
+            NativeArray<sbyte> volume, NativeArray<Color32> colors, int3 voxCount, float voxSize,
             Mesh mesh, CancellationToken ctkn = default)
         {
             if (_busy) throw new InvalidOperationException("Mesher is busy");
@@ -282,6 +295,7 @@ namespace Genesis.RoomScan
                 var vertJob = new VertexJob
                 {
                     Volume = volume,
+                    Colors = colors,
                     VoxCount = voxCount,
                     VoxSize = voxSize,
                     CoordVertMap = _coordVertMap,
@@ -321,6 +335,7 @@ namespace Genesis.RoomScan
                 MinMaxAABB b = _boundsRef.Value;
                 float3 size = b.Max - b.Min;
                 Bounds bounds = new(b.Center, size);
+
                 ApplyToMesh(_verts.AsArray(), _tris.AsArray(), bounds, mesh);
                 hasTriangles = _tris.Length > 0;
             }

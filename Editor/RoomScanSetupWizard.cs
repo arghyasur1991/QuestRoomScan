@@ -26,6 +26,7 @@ namespace Genesis.RoomScan.Editor
         RoomScanner _roomScanner;
         PassthroughCameraProvider _cameraProvider;
         PassthroughCameraAccess _pcaComponent;
+        CameraDebugOverlay _cameraDebug;
 
         bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired;
 
@@ -86,6 +87,7 @@ namespace Genesis.RoomScan.Editor
             _roomScanner = FindAny<RoomScanner>();
             _cameraProvider = FindAny<PassthroughCameraProvider>();
             _pcaComponent = FindAny<PassthroughCameraAccess>();
+            _cameraDebug = FindAny<CameraDebugOverlay>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -222,11 +224,12 @@ namespace Genesis.RoomScan.Editor
             StatusRow("RoomScanner", _roomScanner != null);
             StatusRow("PassthroughCameraProvider", _cameraProvider != null);
             StatusRow("PassthroughCameraAccess", _pcaComponent != null);
+            StatusRow("CameraDebugOverlay", _cameraDebug != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _chunkManager == null || _textureProjector == null ||
                               _roomScanner == null || _cameraProvider == null ||
-                              _pcaComponent == null;
+                              _pcaComponent == null || _cameraDebug == null;
 
             if (anyMissing)
             {
@@ -274,6 +277,8 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<PassthroughCameraProvider>(root);
             if (root.GetComponent<RoomScanner>() == null)
                 Undo.AddComponent<RoomScanner>(root);
+            if (root.GetComponent<CameraDebugOverlay>() == null)
+                Undo.AddComponent<CameraDebugOverlay>(root);
 
             MarkDirty();
             Refresh();

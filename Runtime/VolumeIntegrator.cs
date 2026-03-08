@@ -27,23 +27,30 @@ namespace Genesis.RoomScan
 
         [Header("Convergence")]
         [Tooltip("Blend strength. Higher = faster convergence and correction. (default 0.8)")]
-        [SerializeField, Range(0.1f, 2f)] private float blendRate = 0.8f;
+        [SerializeField, Range(0.1f, 2f)] private float blendRate = 1.8f;
         [Tooltip("Weight resistance to blending. Lower = faster corrections but less stable. (default 2.5)")]
         [SerializeField, Range(0.5f, 10f)] private float stability = 2.5f;
         [Tooltip("How fast weight accumulates per frame. Lower = bad data builds less confidence. (default 0.025)")]
         [SerializeField, Range(0.005f, 0.1f)] private float weightGrowth = 0.025f;
         [Tooltip("Maximum weight any voxel can reach. Lower = all areas correct equally fast. (default 0.5)")]
-        [SerializeField, Range(0.1f, 1f)] private float maxWeight = 0.5f;
+        [SerializeField, Range(0.1f, 1f)] private float maxWeight = 0.1f;
+
+        [Header("Camera Color")]
+        [Tooltip("Exposure boost for camera texture. Quest 3 passthrough cameras produce dim images. (default 3.0)")]
+        [SerializeField, Range(1f, 10f)] private float cameraExposure = 3f;
 
         private RenderTexture _volume;
+        private RenderTexture _colorVolume;
         public RenderTexture Volume => _volume;
+        public RenderTexture ColorVolume => _colorVolume;
         public int3 VoxelCount => voxelCount;
         public float VoxelSize => voxelSize;
         public float VoxelDistance => voxelDistance;
 
-        // Shader IDs
         private static readonly int VolumeRWID = Shader.PropertyToID("gsVolumeRW");
         private static readonly int VolumeID = Shader.PropertyToID("gsVolume");
+        private static readonly int ColorVolumeRWID = Shader.PropertyToID("gsColorVolumeRW");
+        private static readonly int ColorVolumeID = Shader.PropertyToID("gsColorVolume");
         private static readonly int VoxCountID = Shader.PropertyToID("gsVoxCount");
         private static readonly int VoxSizeID = Shader.PropertyToID("gsVoxSize");
         private static readonly int VoxMinID = Shader.PropertyToID("gsVoxMin");
@@ -57,6 +64,25 @@ namespace Genesis.RoomScan
         private static readonly int StabilityID = Shader.PropertyToID("gsStability");
         private static readonly int WeightGrowthID = Shader.PropertyToID("gsWeightGrowth");
         private static readonly int MaxWeightID = Shader.PropertyToID("gsMaxWeight");
+        private static readonly int CamRGBID = Shader.PropertyToID("gsCamRGB");
+        private static readonly int CamAvailableID = Shader.PropertyToID("gsCamAvailable");
+        private static readonly int CamPosID = Shader.PropertyToID("gsCamPos");
+        private static readonly int CamInvRotID = Shader.PropertyToID("gsCamInvRot");
+        private static readonly int CamFocalLenID = Shader.PropertyToID("gsCamFocalLen");
+        private static readonly int CamPrincipalPtID = Shader.PropertyToID("gsCamPrincipalPt");
+        private static readonly int CamSensorResID = Shader.PropertyToID("gsCamSensorRes");
+        private static readonly int CamCurrentResID = Shader.PropertyToID("gsCamCurrentRes");
+        private static readonly int CamExposureID = Shader.PropertyToID("gsCamExposure");
+
+        private static readonly int GCamTexID = Shader.PropertyToID("_RSCamTex");
+        private static readonly int GCamPosID = Shader.PropertyToID("_RSCamPos");
+        private static readonly int GCamInvRotID = Shader.PropertyToID("_RSCamInvRot");
+        private static readonly int GCamFocalLenID = Shader.PropertyToID("_RSCamFocalLen");
+        private static readonly int GCamPrincipalPtID = Shader.PropertyToID("_RSCamPrincipalPt");
+        private static readonly int GCamSensorResID = Shader.PropertyToID("_RSCamSensorRes");
+        private static readonly int GCamCurrentResID = Shader.PropertyToID("_RSCamCurrentRes");
+        private static readonly int GCamExposureID = Shader.PropertyToID("_RSCamExposure");
+        private static readonly int GCamAvailableID = Shader.PropertyToID("_RSCamAvailable");
 
         [Header("Warmup")]
         [Tooltip("Clear the volume after this many integrations to discard sensor startup noise. 0 = disabled.")]
@@ -82,6 +108,15 @@ namespace Genesis.RoomScan
         public event Action Integrated;
         public event Action Cleared;
 
+        private Texture _pendingCamFrame;
+        private Vector3 _pendingCamPos;
+        private Quaternion _pendingCamRot;
+        private Vector2 _pendingFocalLen;
+        private Vector2 _pendingPrincipalPt;
+        private Vector2 _pendingSensorRes;
+        private Vector2 _pendingCurrentRes;
+        private RenderTexture _camFrameCopy;
+
         private void Awake()
         {
             Instance = this;
@@ -93,12 +128,15 @@ namespace Genesis.RoomScan
 
             _clearKernel = new ComputeKernelHelper(compute, "Clear");
             _clearKernel.Set(VolumeRWID, _volume);
+            _clearKernel.Set(ColorVolumeRWID, _colorVolume);
 
             _integrateKernel = new ComputeKernelHelper(compute, "Integrate");
             _integrateKernel.Set(VolumeRWID, _volume);
+            _integrateKernel.Set(ColorVolumeRWID, _colorVolume);
 
             _pruneKernel = new ComputeKernelHelper(compute, "Prune");
             _pruneKernel.Set(VolumeRWID, _volume);
+            _pruneKernel.Set(ColorVolumeRWID, _colorVolume);
 
             SetShaderConstants();
             Clear();
@@ -111,12 +149,16 @@ namespace Genesis.RoomScan
         {
             _frustumVolume?.Release();
             if (_volume) Destroy(_volume);
+            if (_colorVolume) Destroy(_colorVolume);
+            if (_camFrameCopy) Destroy(_camFrameCopy);
         }
 
         private void CreateVolume()
         {
-            long texBytes = (long)voxelCount.x * voxelCount.y * voxelCount.z * 2;
-            Debug.Log($"[RoomScan] TSDF volume: {voxelCount} RG8_SNorm = {texBytes / (1024 * 1024)}MB (R=TSDF, G=weight)");
+            long tsdfBytes = (long)voxelCount.x * voxelCount.y * voxelCount.z * 2;
+            long colorBytes = (long)voxelCount.x * voxelCount.y * voxelCount.z * 4;
+            Debug.Log($"[RoomScan] TSDF volume: {voxelCount} RG8_SNorm = {tsdfBytes / (1024 * 1024)}MB");
+            Debug.Log($"[RoomScan] Color volume: {voxelCount} RGBA8_UNorm = {colorBytes / (1024 * 1024)}MB");
 
             _volume = new RenderTexture(voxelCount.x, voxelCount.y, 0, GraphicsFormat.R8G8_SNorm, 0)
             {
@@ -127,6 +169,16 @@ namespace Genesis.RoomScan
                 wrapMode = TextureWrapMode.Clamp
             };
             _volume.Create();
+
+            _colorVolume = new RenderTexture(voxelCount.x, voxelCount.y, 0, GraphicsFormat.R8G8B8A8_UNorm, 0)
+            {
+                dimension = TextureDimension.Tex3D,
+                volumeDepth = voxelCount.z,
+                enableRandomWrite = true,
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            _colorVolume.Create();
         }
 
         private void SetShaderConstants()
@@ -150,19 +202,34 @@ namespace Genesis.RoomScan
             compute.SetFloat(MaxWeightID, maxWeight);
 
             Shader.SetGlobalTexture(VolumeID, _volume);
+            Shader.SetGlobalTexture(ColorVolumeID, _colorVolume);
         }
 
         public void Clear()
         {
             _clearKernel.Set(VolumeRWID, _volume);
+            _clearKernel.Set(ColorVolumeRWID, _colorVolume);
             _clearKernel.DispatchFit(_volume);
             Cleared?.Invoke();
         }
 
         /// <summary>
-        /// Build the frustum volume (froxel buffer) once we have depth data.
-        /// Must be called from the main thread after DepthCapture has produced at least one frame.
+        /// Provide a camera frame and intrinsics for color integration this tick.
+        /// Uses direct pinhole projection (matching Meta PCA samples) instead of VP matrix.
+        /// Call before Integrate() each frame. Pass null frame to skip color.
         /// </summary>
+        public void SetCameraData(Texture frame, Vector3 camPos, Quaternion camRot,
+            Vector2 focalLength, Vector2 principalPoint, Vector2 sensorRes, Vector2 currentRes)
+        {
+            _pendingCamFrame = frame;
+            _pendingCamPos = camPos;
+            _pendingCamRot = camRot;
+            _pendingFocalLen = focalLength;
+            _pendingPrincipalPt = principalPoint;
+            _pendingSensorRes = sensorRes;
+            _pendingCurrentRes = currentRes;
+        }
+
         public void SetupFrustumVolume()
         {
             if (!DepthCapture.DepthAvailable) return;
@@ -216,10 +283,6 @@ namespace Genesis.RoomScan
             _frustumReady = true;
         }
 
-        /// <summary>
-        /// Run one integration pass: dilate + integrate depth into the TSDF volume.
-        /// Called by RoomScanner at the configured frequency.
-        /// </summary>
         public void Integrate()
         {
             var dc = DepthCapture.Instance;
@@ -248,6 +311,52 @@ namespace Genesis.RoomScan
             compute.SetFloat(WeightGrowthID, weightGrowth);
             compute.SetFloat(MaxWeightID, maxWeight);
 
+            if (_pendingCamFrame != null)
+            {
+                int w = _pendingCamFrame.width;
+                int h = _pendingCamFrame.height;
+                if (_camFrameCopy == null || _camFrameCopy.width != w || _camFrameCopy.height != h)
+                {
+                    if (_camFrameCopy) Destroy(_camFrameCopy);
+                    _camFrameCopy = new RenderTexture(w, h, 0, GraphicsFormat.R8G8B8A8_SRGB, 0)
+                    {
+                        enableRandomWrite = false,
+                        filterMode = FilterMode.Bilinear,
+                        wrapMode = TextureWrapMode.Clamp
+                    };
+                    _camFrameCopy.Create();
+                    Debug.Log($"[RoomScan] Created camera frame copy RT: {w}x{h} sRGB format, " +
+                        $"srcType={_pendingCamFrame.GetType().Name}, srcFormat={_pendingCamFrame.graphicsFormat}");
+                }
+                Graphics.Blit(_pendingCamFrame, _camFrameCopy);
+
+                compute.SetTexture(_integrateKernel.KernelIndex, CamRGBID, _camFrameCopy);
+                compute.SetInt(CamAvailableID, 1);
+                var invRot = Matrix4x4.Rotate(Quaternion.Inverse(_pendingCamRot));
+                compute.SetVector(CamPosID, _pendingCamPos);
+                compute.SetMatrix(CamInvRotID, invRot);
+                compute.SetVector(CamFocalLenID, _pendingFocalLen);
+                compute.SetVector(CamPrincipalPtID, _pendingPrincipalPt);
+                compute.SetVector(CamSensorResID, _pendingSensorRes);
+                compute.SetVector(CamCurrentResID, _pendingCurrentRes);
+                compute.SetFloat(CamExposureID, cameraExposure);
+
+                Shader.SetGlobalTexture(GCamTexID, _camFrameCopy);
+                Shader.SetGlobalVector(GCamPosID, _pendingCamPos);
+                Shader.SetGlobalMatrix(GCamInvRotID, invRot);
+                Shader.SetGlobalVector(GCamFocalLenID, (Vector4)_pendingFocalLen);
+                Shader.SetGlobalVector(GCamPrincipalPtID, (Vector4)_pendingPrincipalPt);
+                Shader.SetGlobalVector(GCamSensorResID, (Vector4)_pendingSensorRes);
+                Shader.SetGlobalVector(GCamCurrentResID, (Vector4)_pendingCurrentRes);
+                Shader.SetGlobalFloat(GCamExposureID, cameraExposure);
+                Shader.SetGlobalFloat(GCamAvailableID, 1f);
+            }
+            else
+            {
+                compute.SetInt(CamAvailableID, 0);
+                Shader.SetGlobalFloat(GCamAvailableID, 0f);
+            }
+
             _integrateKernel.Set(DepthCapture.DepthTexID, dc.DepthTex);
             _integrateKernel.Set(DepthCapture.NormTexID, dc.NormTex);
             _integrateKernel.Set(DepthCapture.DilatedDepthTexID, dc.DilatedDepthTex);
@@ -255,6 +364,7 @@ namespace Genesis.RoomScan
             _integrateKernel.DispatchFit(_frustumVolume.count, 1);
 
             IntegrationCount++;
+            _pendingCamFrame = null;
 
             if (warmupIntegrations > 0 && IntegrationCount == warmupIntegrations)
             {
@@ -267,6 +377,7 @@ namespace Genesis.RoomScan
             {
                 _lastPruneTime = t;
                 _pruneKernel.Set(VolumeRWID, _volume);
+                _pruneKernel.Set(ColorVolumeRWID, _colorVolume);
                 _pruneKernel.DispatchFit(_volume);
             }
 

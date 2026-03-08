@@ -1,15 +1,15 @@
 // Genesis RoomScan - TSDF volume integration compute shader
 // Volume format: RG8_SNorm — R = signed distance, G = confidence weight [0,1]
+// Color volume: RGBA8_UNorm — RGB = accumulated color, A = coverage weight
 //
 // Uses quality^2 modulated running average with slow weight growth.
-// quality^2 strongly suppresses low-quality observations (noise, glancing angles,
-// distant surfaces) while keeping high-quality observations effective.
-// Slow weight growth prevents transient bad data from building significant
-// confidence. UV bounds check + body exclusion handle off-screen/body stability.
+// Camera projection uses direct pinhole model (matching Meta PCA samples)
+// instead of VP matrix, avoiding Z-convention and resolution mismatch bugs.
 #include "DepthKit.hlsl"
 #include "VolumeHelpers.hlsl"
 
 RWTexture3D<float2> gsVolumeRW;
+RWTexture3D<float4> gsColorVolumeRW;
 float gsDepthDispThresh;
 float gsMaxUpdateDist;
 
@@ -21,11 +21,40 @@ float gsMaxUpdateDist;
 #define MIN_QUALITY_SEED 0.20
 #define SEED_WEIGHT 0.04
 #define PRUNE_WEIGHT 0.02
+#define COLOR_SURFACE_BAND 0.5
 
-float gsBlendRate;    // 0.8 default — higher = faster convergence
-float gsStability;    // 2.5 default — higher = more resistance to change
-float gsWeightGrowth; // 0.025 default — higher = faster weight accumulation
-float gsMaxWeight;    // 0.5 default — caps how resistant any voxel can become
+float gsBlendRate;
+float gsStability;
+float gsWeightGrowth;
+float gsMaxWeight;
+
+Texture2D<float4> gsCamRGB;
+int gsCamAvailable;
+float3 gsCamPos;
+float4x4 gsCamInvRot;
+float2 gsCamFocalLen;
+float2 gsCamPrincipalPt;
+float2 gsCamSensorRes;
+float2 gsCamCurrentRes;
+float gsCamExposure;
+
+float2 ProjectToCameraUV(float3 worldPos)
+{
+    float3 localPos = mul(gsCamInvRot, float4(worldPos - gsCamPos, 1.0)).xyz;
+    if (localPos.z <= 0.001) return float2(-1, -1);
+
+    float2 sensorPt = float2(
+        (localPos.x / localPos.z) * gsCamFocalLen.x + gsCamPrincipalPt.x,
+        (localPos.y / localPos.z) * gsCamFocalLen.y + gsCamPrincipalPt.y);
+
+    float2 scaleFactor = gsCamCurrentRes / gsCamSensorRes;
+    scaleFactor /= max(scaleFactor.x, scaleFactor.y);
+    float2 cropMin = gsCamSensorRes * (1.0 - scaleFactor) * 0.5;
+    float2 cropSize = gsCamSensorRes * scaleFactor;
+    float2 uv = (sensorPt - cropMin) / cropSize;
+
+    return uv;
+}
 
 #pragma kernel Clear
 
@@ -33,6 +62,7 @@ float gsMaxWeight;    // 0.5 default — caps how resistant any voxel can become
 void Clear(uint3 id : SV_DispatchThreadID)
 {
     gsVolumeRW[id] = float2(GS_EMPTY_VOXEL, 0);
+    gsColorVolumeRW[id] = float4(0, 0, 0, 0);
 }
 
 #pragma kernel Prune
@@ -43,7 +73,10 @@ void Prune(uint3 id : SV_DispatchThreadID)
     if (any(id >= gsVoxCount)) return;
     float2 val = gsVolumeRW[id];
     if (val.y > 0 && val.y < PRUNE_WEIGHT)
+    {
         gsVolumeRW[id] = float2(GS_EMPTY_VOXEL, 0);
+        gsColorVolumeRW[id] = float4(0, 0, 0, 0);
+    }
 }
 
 #pragma kernel Integrate
@@ -119,7 +152,20 @@ void Integrate(uint id : SV_DispatchThreadID)
     if (wasEmpty)
     {
         if (quality >= MIN_QUALITY_SEED)
+        {
             gsVolumeRW[coord] = float2(sDistNorm, SEED_WEIGHT);
+
+            if (gsCamAvailable && abs(sDistNorm) < COLOR_SURFACE_BAND)
+            {
+                float2 uv = ProjectToCameraUV(voxPos);
+                if (uv.x > 0.02 && uv.x < 0.98 && uv.y > 0.02 && uv.y < 0.98)
+                {
+                    float4 camColor = gsCamRGB.SampleLevel(gsBilinearClampSampler, uv, 0);
+                    float3 boosted = saturate(camColor.rgb * gsCamExposure);
+                    gsColorVolumeRW[coord] = float4(boosted, quality * 0.1);
+                }
+            }
+        }
         return;
     }
 
@@ -130,4 +176,20 @@ void Integrate(uint id : SV_DispatchThreadID)
     float newTsdf = lerp(oldVal, sDistNorm, blend);
     float newWeight = min(weight + q2 * gsWeightGrowth, gsMaxWeight);
     gsVolumeRW[coord] = float2(newTsdf, newWeight);
+
+    if (gsCamAvailable && abs(sDistNorm) < COLOR_SURFACE_BAND)
+    {
+        float2 uv = ProjectToCameraUV(voxPos);
+        if (uv.x > 0.02 && uv.x < 0.98 && uv.y > 0.02 && uv.y < 0.98)
+        {
+            float4 camColor = gsCamRGB.SampleLevel(gsBilinearClampSampler, uv, 0);
+            float3 boosted = saturate(camColor.rgb * gsCamExposure);
+
+            float4 oldColor = gsColorVolumeRW[coord];
+            float colorBlend = quality * 0.3;
+            float3 rgb = oldColor.a < 0.01 ? boosted : lerp(oldColor.rgb, boosted, colorBlend);
+            float newAlpha = min(oldColor.a + quality * 0.05, 1.0);
+            gsColorVolumeRW[coord] = float4(rgb, newAlpha);
+        }
+    }
 }

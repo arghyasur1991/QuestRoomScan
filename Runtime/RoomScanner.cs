@@ -126,6 +126,7 @@ namespace Genesis.RoomScan
             if (t - _lastIntegrationTime >= IntegrationInterval)
             {
                 _lastIntegrationTime = t;
+                ProvideColorFrame();
                 volumeIntegrator.Integrate();
                 _integrateCount++;
 
@@ -141,7 +142,9 @@ namespace Genesis.RoomScan
             if (t - _lastScannerLog >= 5f)
             {
                 _lastScannerLog = t;
-                Debug.Log($"[RoomScan] Scanner: integrations={_integrateCount}, mode={mode}, depthAvail={DepthCapture.DepthAvailable}");
+                ICameraProvider camProv = GetActiveCameraProvider();
+                Debug.Log($"[RoomScan] Scanner: integrations={_integrateCount}, mode={mode}, " +
+                    $"depthAvail={DepthCapture.DepthAvailable}");
             }
 
             if (enableTextureProjection && t - _lastTextureTime >= TextureInterval)
@@ -259,6 +262,29 @@ namespace Genesis.RoomScan
             {
                 Debug.LogWarning("[RoomScan] No main camera found for head exclusion zone");
             }
+        }
+
+        private void ProvideColorFrame()
+        {
+            if (!enableTextureProjection || volumeIntegrator == null) return;
+            ICameraProvider provider = GetActiveCameraProvider();
+
+            if (provider is PassthroughCameraProvider pcp && pcp.IsReady)
+            {
+                Texture frame = pcp.CurrentFrame;
+                if (frame != null)
+                {
+                    Pose pose = pcp.CameraPose;
+                    volumeIntegrator.SetCameraData(
+                        frame, pose.position, pose.rotation,
+                        pcp.FocalLength, pcp.PrincipalPoint,
+                        pcp.SensorResolution, pcp.CurrentResolution);
+                    return;
+                }
+            }
+
+            volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
+                Vector2.one, Vector2.zero, Vector2.one, Vector2.one);
         }
 
         private void SetupCameraProvider()

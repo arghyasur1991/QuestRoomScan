@@ -1,5 +1,8 @@
 using Meta.XR;
 using UnityEngine;
+#if UNITY_ANDROID && !UNITY_EDITOR
+using UnityEngine.Android;
+#endif
 
 namespace Genesis.RoomScan
 {
@@ -31,6 +34,29 @@ namespace Genesis.RoomScan
             }
         }
 
+        public Pose CameraPose
+        {
+            get
+            {
+                if (_pca == null || !_pca.IsPlaying) return Pose.identity;
+                return _pca.GetCameraPose();
+            }
+        }
+
+        public Vector2 FocalLength =>
+            _pca != null && _pca.IsPlaying ? _pca.Intrinsics.FocalLength : Vector2.one;
+
+        public Vector2 PrincipalPoint =>
+            _pca != null && _pca.IsPlaying ? _pca.Intrinsics.PrincipalPoint : Vector2.zero;
+
+        public Vector2 SensorResolution =>
+            _pca != null && _pca.IsPlaying ? _pca.Intrinsics.SensorResolution : new Vector2(1280, 960);
+
+        public Vector2 CurrentResolution =>
+            _pca != null && _pca.IsPlaying
+                ? new Vector2(_pca.CurrentResolution.x, _pca.CurrentResolution.y)
+                : new Vector2(1280, 960);
+
         public Matrix4x4 ProjectionMatrix
         {
             get
@@ -42,13 +68,12 @@ namespace Genesis.RoomScan
                 float fy = intrinsics.FocalLength.y;
                 float cx = intrinsics.PrincipalPoint.x;
                 float cy = intrinsics.PrincipalPoint.y;
-                float w = _pca.CurrentResolution.x;
-                float h = _pca.CurrentResolution.y;
+                float w = intrinsics.SensorResolution.x;
+                float h = intrinsics.SensorResolution.y;
 
                 const float near = 0.1f;
                 const float far = 100f;
 
-                // Pinhole intrinsics → OpenGL projection matrix
                 Matrix4x4 proj = Matrix4x4.zero;
                 proj.m00 = 2f * fx / w;
                 proj.m11 = 2f * fy / h;
@@ -63,6 +88,14 @@ namespace Genesis.RoomScan
 
         public void StartCapture()
         {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            const string headsetCameraPerm = "horizonos.permission.HEADSET_CAMERA";
+            if (!Permission.HasUserAuthorizedPermission(headsetCameraPerm))
+            {
+                Debug.Log("[RoomScan] Requesting HEADSET_CAMERA permission");
+                Permission.RequestUserPermission(headsetCameraPerm);
+            }
+#endif
             if (_pca == null)
             {
                 _pca = gameObject.GetComponent<PassthroughCameraAccess>();
@@ -81,6 +114,8 @@ namespace Genesis.RoomScan
             if (_pca != null)
                 _pca.enabled = false;
         }
+
+        private void Update() { }
 
         private void OnDestroy()
         {

@@ -202,6 +202,7 @@ namespace Genesis.RoomScan
 
             var mesh = new Mesh { name = $"chunk_{coord}" };
             mesh.MarkDynamic();
+            mesh.vertexBufferTarget |= GraphicsBuffer.Target.Structured;
             mf.sharedMesh = mesh;
 
             return new MeshChunkData
@@ -262,19 +263,6 @@ namespace Genesis.RoomScan
                 if (_meshAttempts <= 5)
                     Debug.Log($"[RoomScan] MeshChunk {chunk.Coord}: readback start={start}, size={size}, origin={origin}");
 
-                AsyncGPUReadbackRequest req = await AsyncGPUReadback.RequestAsync(
-                    _volume.Volume, 0,
-                    start.x, size.x,
-                    start.y, size.y,
-                    start.z, size.z);
-
-                if (req.hasError)
-                {
-                    Debug.LogWarning($"[RoomScan] MeshChunk {chunk.Coord}: GPU readback error");
-                    return;
-                }
-                ctkn.ThrowIfCancellationRequested();
-
                 int sliceSize = size.x * size.y;
                 int totalSize = sliceSize * size.z;
 
@@ -284,23 +272,72 @@ namespace Genesis.RoomScan
                     chunk.VolumeData = new NativeArray<sbyte>(totalSize, Allocator.Persistent);
                 }
 
+                if (!chunk.ColorData.IsCreated || chunk.ColorData.Length < totalSize)
+                {
+                    if (chunk.ColorData.IsCreated) chunk.ColorData.Dispose();
+                    chunk.ColorData = new NativeArray<Color32>(totalSize, Allocator.Persistent);
+                }
+
+                // TSDF readback — copy data immediately before requesting color readback,
+                // because GetData NativeArrays are invalidated by subsequent readback requests.
+                AsyncGPUReadbackRequest tsdfReq = await AsyncGPUReadback.RequestAsync(
+                    _volume.Volume, 0,
+                    start.x, size.x,
+                    start.y, size.y,
+                    start.z, size.z);
+
+                if (tsdfReq.hasError)
+                {
+                    Debug.LogWarning($"[RoomScan] MeshChunk {chunk.Coord}: TSDF readback error");
+                    return;
+                }
+                ctkn.ThrowIfCancellationRequested();
+
                 for (int z = 0; z < size.z; z++)
                 {
-                    // Volume is RG8_SNorm: 2 bytes per voxel (R=TSDF, G=weight).
-                    // Extract only the R channel (every other byte).
-                    NativeArray<sbyte> slice = req.GetData<sbyte>(z);
+                    NativeArray<sbyte> tsdfSlice = tsdfReq.GetData<sbyte>(z);
                     int dstOffset = z * sliceSize;
-
                     var copier = new CopySliceRG8Job
                     {
-                        Source = slice,
+                        Source = tsdfSlice,
                         Destination = chunk.VolumeData,
                         DestOffset = dstOffset
                     };
                     copier.ScheduleParallelByRef(sliceSize, 64, default).Complete();
                 }
 
-                bool populated = await chunk.Mesher.CreateMesh(chunk.VolumeData, size, _volume.VoxelSize, chunk.Mesh, ctkn);
+                // Color volume readback — separate request, copy immediately.
+                // Wrapped in try-catch so color failure doesn't prevent mesh creation.
+                bool hasColorData = false;
+                try
+                {
+                    AsyncGPUReadbackRequest colorReq = await AsyncGPUReadback.RequestAsync(
+                        _volume.ColorVolume, 0,
+                        start.x, size.x,
+                        start.y, size.y,
+                        start.z, size.z);
+
+                    if (!colorReq.hasError)
+                    {
+                        for (int z = 0; z < size.z; z++)
+                        {
+                            NativeArray<Color32> colorSlice = colorReq.GetData<Color32>(z);
+                            NativeArray<Color32>.Copy(colorSlice, 0, chunk.ColorData, z * sliceSize, sliceSize);
+                        }
+                        hasColorData = true;
+                    }
+                }
+                catch (Exception colorEx)
+                {
+                    if (_meshAttempts <= 3)
+                        Debug.LogWarning($"[RoomScan] MeshChunk {chunk.Coord}: Color readback failed: {colorEx.Message}");
+                }
+                ctkn.ThrowIfCancellationRequested();
+
+                bool populated = await chunk.Mesher.CreateMesh(
+                    chunk.VolumeData,
+                    hasColorData ? chunk.ColorData : default,
+                    size, _volume.VoxelSize, chunk.Mesh, ctkn);
                 chunk.IsPopulated = populated;
                 if (populated) _meshSuccesses++;
 
@@ -411,11 +448,13 @@ namespace Genesis.RoomScan
         public bool Dirty;
         public bool IsPopulated;
         public NativeArray<sbyte> VolumeData;
+        public NativeArray<Color32> ColorData;
         public SurfaceNetsMesher Mesher;
 
         public void Dispose()
         {
             if (VolumeData.IsCreated) VolumeData.Dispose();
+            if (ColorData.IsCreated) ColorData.Dispose();
             Mesher?.Dispose();
             if (Mesh) UnityEngine.Object.Destroy(Mesh);
         }
