@@ -176,19 +176,20 @@ Three layers of texturing, in priority order:
 - **Memory**: 8 × 1280 × 960 × 4 bytes ≈ 40MB
 - **NOT persisted**: Keyframes are lost on save/load
 
-### Layer 2: Triplanar World-Space Textures (persistent, ~4mm/texel, saveable)
-`TriplanarCache` maintains 3 axis-aligned 2D textures (2048×2048 RGBA8 each):
+### Layer 2: Triplanar World-Space Textures (persistent, ~8mm/texel, saveable)
+`TriplanarCache` maintains 3 axis-aligned 2D textures (1024×1024 RGBA8 each):
 - **XZ texture**: For Y-dominant normals (floors, ceilings)
 - **XY texture**: For Z-dominant normals (front/back walls)
 - **YZ texture**: For X-dominant normals (side walls)
-- **Memory**: 3 × 2048 × 2048 × 4 bytes ≈ 48MB
+- **Sign-aware UV**: Each texture split in half by normal sign (upper = positive, lower = negative) to prevent opposite walls sharing texels
+- **Memory**: 3 × 1024 × 1024 × 4 bytes ≈ 12MB
 - **Baking**: `TriplanarBake.compute` runs at integration rate, iterating over depth pixels:
   1. Unproject depth pixel to world position
   2. Sample surface normal from depth normals
-  3. Project to camera UV, sample camera color
+  3. Project to camera UV, sample camera color with **Reinhard tone mapping** (`color * exposure / (color * exposure + 1)`) to prevent overexposure
   4. Determine dominant triplanar axis from `abs(normal)`
-  5. Map to triplanar UV via `gsWorldToVoxelUVW(worldPos)` (same 0–1 range as volume)
-  6. Quality-weighted running average blend into the triplanar texel
+  5. Map to triplanar UV via `SignedTriUV(gsWorldToVoxelUVW(worldPos), normalComponent)`
+  6. **Alpha-decaying blend**: `quality * 0.4 * (1 - alpha * 0.8)` — high-confidence texels become nearly immutable (auto-freeze)
 - **Shader**: Fragment shader samples all 3 textures using triplanar blending, weighted by `abs(normal)`
 - **Persisted**: Save/load as raw RGBA8 data files
 
@@ -211,7 +212,48 @@ cropMin = sensorRes * (1 - scaleFactor) / 2
 uv = (sensorPt - cropMin) / (sensorRes * scaleFactor)
 ```
 
-## 8. Exclusion Zones
+## 8. Mesh Freezing
+
+Chunks that have converged are automatically frozen to reduce GPU readback and CPU work:
+- After each mesh extraction, compare new vertex count to previous
+- **Distance gate**: freezing only progresses when the chunk has been observed from
+  within `freezeDistanceThreshold` (default 3m) at least `minCloseObservations` (default 3) times
+- Stable count only increments when delta < 5% AND the distance gate is satisfied
+- After `stableCyclesRequired` (default 5) consecutive stable extractions, mark chunk as `Frozen`
+- Frozen chunks are skipped in `UpdateDirtyChunks` — no readback, no remesh
+- Per-chunk tracking: `MinObserveDistance`, `CloseObservations` updated each frame in frustum
+- `UnfreezeAll()` resets all frozen state including observation counters
+
+Triplanar texels also auto-freeze via alpha-decaying blend rate (see Layer 2 above).
+
+## 9. Persistence
+
+`RoomScanPersistence` saves/loads the full scan state to disk.
+
+### Binary Format (`RMSH` v1)
+```
+Header: magic (RMSH) | version | timestamp
+Params: voxelCount (int3) | voxelSize (float) | integrationCount (int) | triplanarRes (int)
+TSDF:   length (int) | raw bytes (RG8_SNorm, ~6.2MB)
+Color:  length (int) | raw bytes (RGBA8_UNorm, ~12.5MB)
+```
+Triplanar textures saved separately as 3 raw RGBA8 files.
+
+### Save Pipeline
+1. `AsyncGPUReadback` full TSDF volume (slice-by-slice copy)
+2. `AsyncGPUReadback` full color volume
+3. `TriplanarCache.Save()` writes 3 raw texture files
+4. `BinaryWriter` writes header + volume bytes to `persistentDataPath/RoomScans/scan.bin`
+5. Triggered by: periodic autosave (every 60s), `OnApplicationPause`, `OnApplicationQuit`, or manual call
+
+### Load Pipeline
+1. Read binary, validate magic/version/voxel dimensions
+2. Create `Texture3D`, `SetPixelData`, `Graphics.CopyTexture` to upload TSDF and color to GPU
+3. `TriplanarCache.Load()` restores triplanar textures
+4. `ChunkManager.RemeshAll()` unfreezes all chunks and enqueues full re-extraction
+5. Resume scanning (new observations refine the loaded mesh)
+
+## 10. Exclusion Zones
 
 Cylindrical exclusion zones around tracked transforms (typically the user's head):
 - **Radius:** 0.6m (XZ plane)
@@ -220,7 +262,7 @@ Cylindrical exclusion zones around tracked transforms (typically the user's head
 
 Voxels inside any exclusion cylinder are skipped during integration, preventing the user's body from being reconstructed.
 
-## 9. Key Parameters
+## 11. Key Parameters
 
 ### Volume
 | Parameter | Default | Description |
@@ -262,6 +304,14 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | `chunkWorldSize` | 4m³ | Spatial chunk dimensions |
 | `overlap` | 0.25m | Extra voxels per chunk edge |
 | `numMeshWorkers` | 2 | Background mesher threads |
+| `updateDistance` | 6m | Max distance for chunk enqueuing |
+
+### Freezing
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `freezeDistanceThreshold` | 3m | Max eye-to-chunk distance for close-range observation |
+| `minCloseObservations` | 3 | Required close observations before freeze can begin |
+| `stableCyclesRequired` | 5 | Consecutive stable extractions to trigger freeze |
 
 ### Camera
 | Parameter | Default | Description |
@@ -279,7 +329,7 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Texture Persistence
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `textureResolution` | 2048 | Triplanar texture resolution (per plane) |
+| `textureResolution` | 1024 | Triplanar texture resolution (per plane) |
 | `maxKeyframes` | 8 | Ring buffer size (slot 0 = live, rest historical) |
 | `moveThreshold` | 0.3m | Min camera displacement for new keyframe |
 | `rotateThresholdDeg` | 20° | Min camera rotation for new keyframe |
@@ -290,6 +340,7 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 |-----------|--------|
 | TSDF volume (160x128x160 RG8) | ~6.5 MB |
 | Color volume (160x128x160 RGBA8) | ~13 MB |
-| Triplanar textures (3x 2048x2048 RGBA8) | ~48 MB |
+| Triplanar textures (3x 1024x1024 RGBA8) | ~12 MB |
 | Keyframe array (8x 1280x960 RGBA8) | ~40 MB |
-| **Total** | **~108 MB** |
+| **Total** | **~72 MB** |
+| **Persistence on disk** | **~31 MB** |

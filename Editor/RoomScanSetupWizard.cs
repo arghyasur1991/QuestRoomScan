@@ -30,6 +30,7 @@ namespace Genesis.RoomScan.Editor
         DepthDebugOverlay _depthDebug;
         TriplanarCache _triplanarCache;
         KeyframeStore _keyframeStore;
+        RoomScanPersistence _persistence;
 
         bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired, _triplanarWired;
 
@@ -94,6 +95,7 @@ namespace Genesis.RoomScan.Editor
             _depthDebug = FindAny<DepthDebugOverlay>();
             _triplanarCache = FindAny<TriplanarCache>();
             _keyframeStore = FindAny<KeyframeStore>();
+            _persistence = FindAny<RoomScanPersistence>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -236,12 +238,14 @@ namespace Genesis.RoomScan.Editor
             StatusRow("DepthDebugOverlay", _depthDebug != null);
             StatusRow("TriplanarCache", _triplanarCache != null);
             StatusRow("KeyframeStore", _keyframeStore != null);
+            StatusRow("RoomScanPersistence", _persistence != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _chunkManager == null || _textureProjector == null ||
                               _roomScanner == null || _cameraProvider == null ||
                               _pcaComponent == null || _cameraDebug == null ||
-                              _triplanarCache == null || _keyframeStore == null;
+                              _triplanarCache == null || _keyframeStore == null ||
+                              _persistence == null;
 
             if (anyMissing)
             {
@@ -297,6 +301,8 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<TriplanarCache>(root);
             if (root.GetComponent<KeyframeStore>() == null)
                 Undo.AddComponent<KeyframeStore>(root);
+            if (root.GetComponent<RoomScanPersistence>() == null)
+                Undo.AddComponent<RoomScanPersistence>(root);
 
             MarkDirty();
             Refresh();
@@ -471,6 +477,7 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "cameraProvider", _cameraProvider);
                 SetRef(so, "triplanarCache", _triplanarCache);
                 SetRef(so, "keyframeStore", _keyframeStore);
+                SetRef(so, "persistence", _persistence);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }

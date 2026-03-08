@@ -14,7 +14,7 @@ namespace Genesis.RoomScan
         [SerializeField] private ComputeShader compute;
 
         [Header("Volume")]
-        [SerializeField] private int3 voxelCount = new(160, 128, 160);
+        [SerializeField] private int3 voxelCount = new(256, 256, 256);
         [SerializeField] private float voxelSize = 0.05f;
         [SerializeField] private float voxelDistance = 0.15f;
         [SerializeField] private float voxelMin = 0.1f;
@@ -374,6 +374,47 @@ namespace Genesis.RoomScan
             }
 
             Integrated?.Invoke();
+        }
+
+        public void LoadVolumes(byte[] tsdfBytes, byte[] colorBytes, int integrationCount)
+        {
+            if (_volume == null || _colorVolume == null)
+            {
+                Debug.LogError("[RoomScan] Cannot load volumes: textures not created");
+                return;
+            }
+
+            int3 s = voxelCount;
+            int expectedTsdf = s.x * s.y * s.z * 2;
+            int expectedColor = s.x * s.y * s.z * 4;
+
+            if (tsdfBytes.Length != expectedTsdf)
+            {
+                Debug.LogError($"[RoomScan] TSDF size mismatch: got {tsdfBytes.Length}, expected {expectedTsdf}");
+                return;
+            }
+            if (colorBytes.Length != expectedColor)
+            {
+                Debug.LogError($"[RoomScan] Color volume size mismatch: got {colorBytes.Length}, expected {expectedColor}");
+                return;
+            }
+
+            var tsdfTex = new Texture3D(s.x, s.y, s.z, TextureFormat.RG16, false);
+            tsdfTex.SetPixelData(tsdfBytes, 0);
+            tsdfTex.Apply(false, false);
+            Graphics.CopyTexture(tsdfTex, _volume);
+            Destroy(tsdfTex);
+
+            var colorTex = new Texture3D(s.x, s.y, s.z, TextureFormat.RGBA32, false);
+            colorTex.SetPixelData(colorBytes, 0);
+            colorTex.Apply(false, false);
+            Graphics.CopyTexture(colorTex, _colorVolume);
+            Destroy(colorTex);
+
+            IntegrationCount = integrationCount;
+            _frustumReady = false;
+
+            Debug.Log($"[RoomScan] Volumes loaded: {s}, integrationCount={integrationCount}");
         }
 
         public float3 VoxelToWorld(uint3 indices)

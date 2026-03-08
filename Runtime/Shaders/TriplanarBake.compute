@@ -104,7 +104,8 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
         return;
 
     float4 camColor = gsCamRGB.SampleLevel(gsBilinearClampSampler, camUV, 0);
-    float3 color = saturate(camColor.rgb * gsCamExposure);
+    float3 exposed = camColor.rgb * gsCamExposure;
+    float3 color = exposed / (exposed + 1.0);
 
     float distFactor = saturate(1.0 - dist / gsMaxUpdateDist);
     float angleFactor = saturate(normDot);
@@ -121,9 +122,10 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
         uint2 texel = (uint2)(triUV * gsTriSize);
         if (any(texel >= gsTriSize)) return;
         float4 old = gsTriXZ_RW[texel];
-        float blend = old.a < 0.01 ? 1.0 : quality * 0.4;
+        float freeze = 1.0 - old.a * 0.8;
+        float blend = old.a < 0.01 ? 1.0 : quality * 0.4 * freeze;
         float3 rgb = lerp(old.rgb, color, blend);
-        float a = min(old.a + quality * 0.1, 1.0);
+        float a = min(old.a + quality * 0.1 * (1.0 - old.a * 0.5), 1.0);
         gsTriXZ_RW[texel] = float4(rgb, a);
     }
     else if (absN.z >= absN.x)
@@ -132,9 +134,10 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
         uint2 texel = (uint2)(triUV * gsTriSize);
         if (any(texel >= gsTriSize)) return;
         float4 old = gsTriXY_RW[texel];
-        float blend = old.a < 0.01 ? 1.0 : quality * 0.4;
+        float freeze = 1.0 - old.a * 0.8;
+        float blend = old.a < 0.01 ? 1.0 : quality * 0.4 * freeze;
         float3 rgb = lerp(old.rgb, color, blend);
-        float a = min(old.a + quality * 0.1, 1.0);
+        float a = min(old.a + quality * 0.1 * (1.0 - old.a * 0.5), 1.0);
         gsTriXY_RW[texel] = float4(rgb, a);
     }
     else
@@ -143,9 +146,10 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
         uint2 texel = (uint2)(triUV * gsTriSize);
         if (any(texel >= gsTriSize)) return;
         float4 old = gsTriYZ_RW[texel];
-        float blend = old.a < 0.01 ? 1.0 : quality * 0.4;
+        float freeze = 1.0 - old.a * 0.8;
+        float blend = old.a < 0.01 ? 1.0 : quality * 0.4 * freeze;
         float3 rgb = lerp(old.rgb, color, blend);
-        float a = min(old.a + quality * 0.1, 1.0);
+        float a = min(old.a + quality * 0.1 * (1.0 - old.a * 0.5), 1.0);
         gsTriYZ_RW[texel] = float4(rgb, a);
     }
 }

@@ -33,6 +33,7 @@ namespace Genesis.RoomScan
         [SerializeField] private TextureProjector textureProjector;
         [SerializeField] private TriplanarCache triplanarCache;
         [SerializeField] private KeyframeStore keyframeStore;
+        [SerializeField] private RoomScanPersistence persistence;
 
         [Header("Camera")]
         [SerializeField] private PassthroughCameraProvider cameraProvider;
@@ -82,7 +83,12 @@ namespace Genesis.RoomScan
         private float _lastMeshTime;
         private float _lastTextureTime;
         private float _guidedStartTime;
+        private float _lastAutoSaveTime;
         private bool _started;
+
+        [Header("Persistence")]
+        [SerializeField, Tooltip("Seconds between autosaves during scanning (0 = disabled)")]
+        private float autoSaveIntervalSeconds = 10f;
 
         private float IntegrationInterval => 1f / (mode == ScanMode.Guided ? guidedIntegrationHz : passiveIntegrationHz);
         private float MeshInterval => 1f / (mode == ScanMode.Guided ? guidedMeshExtractionHz : passiveMeshExtractionHz);
@@ -94,11 +100,17 @@ namespace Genesis.RoomScan
             SetSafeShaderDefaults();
         }
 
-        private void Start()
+        private async void Start()
         {
             ValidateComponents();
             SetupCameraProvider();
             SetupHeadExclusion();
+
+            if (persistence != null && persistence.HasSavedScan())
+            {
+                Debug.Log("[RoomScan] Found saved scan, loading...");
+                await persistence.LoadAsync();
+            }
 
             if (autoStartOnLoad)
                 StartScanning();
@@ -115,6 +127,37 @@ namespace Genesis.RoomScan
         private void OnDisable()
         {
             StopScanning();
+        }
+
+        private async void OnApplicationPause(bool paused)
+        {
+            if (!paused) return;
+
+            Debug.Log($"[RoomScan] OnApplicationPause: persistence={persistence != null}, " +
+                      $"started={_started}, vi={volumeIntegrator != null}, " +
+                      $"intCount={volumeIntegrator?.IntegrationCount ?? -1}, " +
+                      $"warmup={volumeIntegrator?.WarmupIntegrations ?? -1}");
+
+            if (persistence != null && _started && volumeIntegrator != null
+                && volumeIntegrator.IntegrationCount > volumeIntegrator.WarmupIntegrations)
+            {
+                Debug.Log("[RoomScan] App pausing, saving scan...");
+                await persistence.SaveAsync();
+            }
+        }
+
+        private async void OnApplicationQuit()
+        {
+            Debug.Log($"[RoomScan] OnApplicationQuit: persistence={persistence != null}, " +
+                      $"started={_started}, intCount={volumeIntegrator?.IntegrationCount ?? -1}");
+
+            if (persistence != null && _started && volumeIntegrator != null
+                && volumeIntegrator.IntegrationCount > volumeIntegrator.WarmupIntegrations
+                && !persistence.IsSaving)
+            {
+                Debug.Log("[RoomScan] App quitting, saving scan...");
+                await persistence.SaveAsync();
+            }
         }
 
         private float _lastScannerLog;
@@ -160,6 +203,15 @@ namespace Genesis.RoomScan
             {
                 SetMode(ScanMode.Passive);
             }
+
+            if (autoSaveIntervalSeconds > 0 && persistence != null && !persistence.IsSaving
+                && t - _lastAutoSaveTime >= autoSaveIntervalSeconds
+                && volumeIntegrator != null
+                && volumeIntegrator.IntegrationCount > volumeIntegrator.WarmupIntegrations)
+            {
+                _lastAutoSaveTime = t;
+                _ = persistence.SaveAsync();
+            }
         }
 
         public void StartScanning()
@@ -171,6 +223,7 @@ namespace Genesis.RoomScan
             _lastIntegrationTime = t;
             _lastMeshTime = t;
             _lastTextureTime = t;
+            _lastAutoSaveTime = t;
 
             ICameraProvider provider = GetActiveCameraProvider();
             if (enableTextureProjection && provider != null)
@@ -248,6 +301,7 @@ namespace Genesis.RoomScan
             if (textureProjector == null) textureProjector = FindFirstObjectByType<TextureProjector>();
             if (triplanarCache == null) triplanarCache = FindFirstObjectByType<TriplanarCache>();
             if (keyframeStore == null) keyframeStore = FindFirstObjectByType<KeyframeStore>();
+            if (persistence == null) persistence = FindFirstObjectByType<RoomScanPersistence>();
 
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");

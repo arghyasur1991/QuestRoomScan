@@ -185,6 +185,28 @@ namespace Genesis.RoomScan
             Debug.Log($"[RoomScan] Triplanar textures saved to {directory}");
         }
 
+        /// <summary>
+        /// Reads triplanar pixel data on main thread (required for ReadPixels),
+        /// returns raw bytes for background file I/O.
+        /// </summary>
+        public (byte[] xz, byte[] xy, byte[] yz) ReadRawBytes()
+        {
+            return (ReadRTBytes(_triXZ), ReadRTBytes(_triXY), ReadRTBytes(_triYZ));
+        }
+
+        private static byte[] ReadRTBytes(RenderTexture rt)
+        {
+            var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+            tex.Apply();
+            RenderTexture.active = prev;
+            byte[] data = tex.GetRawTextureData();
+            Destroy(tex);
+            return data;
+        }
+
         public void Load(string directory)
         {
             LoadRT(_triXZ, Path.Combine(directory, "tri_xz.raw"));

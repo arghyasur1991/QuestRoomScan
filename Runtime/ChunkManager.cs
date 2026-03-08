@@ -20,7 +20,15 @@ namespace Genesis.RoomScan
         [SerializeField] private float3 chunkWorldSize = new(4, 4, 4);
         [SerializeField] private float overlap = 0.25f;
         [SerializeField] private int numMeshWorkers = 2;
-        [SerializeField] private float updateDistance = 5f;
+        [SerializeField] private float updateDistance = 6f;
+
+        [Header("Freezing")]
+        [SerializeField, Tooltip("Max eye-to-chunk distance for a close-range observation")]
+        private float freezeDistanceThreshold = 1f;
+        [SerializeField, Tooltip("Close-range observations needed before freeze can trigger")]
+        private int minCloseObservations = 5;
+        [SerializeField, Tooltip("Consecutive stable extractions needed to freeze")]
+        private int stableCyclesRequired = 15;
 
         [Header("Rendering")]
         [SerializeField] private Material scanMeshMaterial;
@@ -31,6 +39,9 @@ namespace Genesis.RoomScan
         private readonly SemaphoreSlim _mesherSemaphore = new(0);
         private CancellationTokenSource _workerCts;
         private readonly Plane[] _frustumPlanes = new Plane[6];
+        private int _frozenChunkCount;
+
+        public int FrozenChunkCount => _frozenChunkCount;
 
         private VolumeIntegrator _volume;
 
@@ -156,6 +167,7 @@ namespace Genesis.RoomScan
             int tested = 0;
             int frustumFailed = 0;
             int alreadyQueued = 0;
+            int frozenSkipped = 0;
 
             for (int x = chunkMin.x; x <= chunkMax.x; x++)
             for (int y = chunkMin.y; y <= chunkMax.y; y++)
@@ -166,13 +178,27 @@ namespace Genesis.RoomScan
                 if (!ChunkInFrustum(coord)) { frustumFailed++; continue; }
                 if (_enqueuedCoords.Contains(coord)) { alreadyQueued++; continue; }
 
-                if (!_chunks.TryGetValue(coord, out MeshChunkData chunk))
+                float3 chunkCenter = ((float3)coord + 0.5f) * chunkWorldSize;
+                float distToChunk = math.distance((float3)eyePos, chunkCenter);
+
+                if (_chunks.TryGetValue(coord, out MeshChunkData existing))
                 {
-                    chunk = CreateChunk(coord);
-                    _chunks[coord] = chunk;
+                    existing.MinObserveDistance = math.min(existing.MinObserveDistance, distToChunk);
+                    if (distToChunk <= freezeDistanceThreshold)
+                        existing.CloseObservations++;
+
+                    if (existing.Frozen) { frozenSkipped++; continue; }
                 }
 
-                chunk.Dirty = true;
+                if (existing == null)
+                {
+                    existing = CreateChunk(coord);
+                    existing.MinObserveDistance = distToChunk;
+                    existing.CloseObservations = distToChunk <= freezeDistanceThreshold ? 1 : 0;
+                    _chunks[coord] = existing;
+                }
+
+                existing.Dirty = true;
                 _meshQueue.Enqueue(coord);
                 _enqueuedCoords.Add(coord);
                 _mesherSemaphore.Release();
@@ -185,8 +211,8 @@ namespace Genesis.RoomScan
                 Debug.Log($"[RoomScan] UpdateDirtyChunks #{_updateCallCount}: eye={eyePos:F2}, " +
                           $"box=[{boxMin:F1}→{boxMax:F1}], chunkRange=[{chunkMin}→{chunkMax}], " +
                           $"tested={tested}, frustumFail={frustumFailed}, alreadyQueued={alreadyQueued}, " +
-                          $"enqueued={enqueued}, totalEnqueued={_totalEnqueued}, " +
-                          $"chunks={_chunks.Count}, matAssigned={scanMeshMaterial != null}");
+                          $"frozen={frozenSkipped}, enqueued={enqueued}, totalEnqueued={_totalEnqueued}, " +
+                          $"chunks={_chunks.Count}, frozenTotal={_frozenChunkCount}");
             }
         }
 
@@ -348,6 +374,22 @@ namespace Genesis.RoomScan
                 chunk.IsPopulated = populated;
                 if (populated) _meshSuccesses++;
 
+                int newVerts = chunk.Mesh.vertexCount;
+                if (populated && chunk.PreviousVertexCount > 0)
+                {
+                    float delta = Mathf.Abs(newVerts - chunk.PreviousVertexCount) / (float)Mathf.Max(chunk.PreviousVertexCount, 1);
+                    bool closeEnough = chunk.CloseObservations >= minCloseObservations;
+                    chunk.StableCount = (delta < 0.05f && closeEnough) ? chunk.StableCount + 1 : 0;
+                    if (chunk.StableCount >= stableCyclesRequired && !chunk.Frozen)
+                    {
+                        chunk.Frozen = true;
+                        _frozenChunkCount++;
+                        Debug.Log($"[RoomScan] Chunk {chunk.Coord} frozen: verts={newVerts}, " +
+                                  $"minDist={chunk.MinObserveDistance:F2}, closeObs={chunk.CloseObservations}");
+                    }
+                }
+                chunk.PreviousVertexCount = newVerts;
+
                 if (_meshAttempts <= 5 || _meshAttempts % 20 == 0)
                     Debug.Log($"[RoomScan] MeshChunk {chunk.Coord}: populated={populated}, " +
                               $"verts={chunk.Mesh.vertexCount}, attempts={_meshAttempts}, successes={_meshSuccesses}");
@@ -403,13 +445,39 @@ namespace Genesis.RoomScan
             }
             _chunks.Clear();
             _enqueuedCoords.Clear();
+            _frozenChunkCount = 0;
             while (_meshQueue.TryDequeue(out _)) { }
             if (enabled) StartWorkers();
         }
 
-        /// <summary>
-        /// Returns all populated chunk meshes for texture projection.
-        /// </summary>
+        public void UnfreezeAll()
+        {
+            foreach (var chunk in _chunks.Values)
+            {
+                chunk.Frozen = false;
+                chunk.StableCount = 0;
+                chunk.PreviousVertexCount = 0;
+                chunk.MinObserveDistance = float.MaxValue;
+                chunk.CloseObservations = 0;
+            }
+            _frozenChunkCount = 0;
+        }
+
+        public void RemeshAll()
+        {
+            UnfreezeAll();
+            foreach (var kvp in _chunks)
+            {
+                int3 coord = kvp.Key;
+                if (_enqueuedCoords.Contains(coord)) continue;
+                kvp.Value.Dirty = true;
+                _meshQueue.Enqueue(coord);
+                _enqueuedCoords.Add(coord);
+                _mesherSemaphore.Release();
+            }
+            Debug.Log($"[RoomScan] RemeshAll: enqueued {_chunks.Count} chunks");
+        }
+
         public IEnumerable<MeshChunkData> GetPopulatedChunks()
         {
             foreach (var kvp in _chunks)
@@ -457,6 +525,11 @@ namespace Genesis.RoomScan
         public float3 Extents;
         public bool Dirty;
         public bool IsPopulated;
+        public bool Frozen;
+        public int StableCount;
+        public int PreviousVertexCount;
+        public float MinObserveDistance = float.MaxValue;
+        public int CloseObservations;
         public NativeArray<sbyte> VolumeData;
         public NativeArray<sbyte> WeightData;
         public NativeArray<Color32> ColorData;
