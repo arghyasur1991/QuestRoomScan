@@ -320,11 +320,20 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<RoomScanPersistence>() == null)
                 Undo.AddComponent<RoomScanPersistence>(root);
             if (root.GetComponent<KeyframeCollector>() == null)
-                Undo.AddComponent<KeyframeCollector>(root);
+            {
+                var keyframeCollector = Undo.AddComponent<KeyframeCollector>(root);
+                keyframeCollector.enabled = false;
+            }
             if (root.GetComponent<PointCloudExporter>() == null)
-                Undo.AddComponent<PointCloudExporter>(root);
+            {
+                var pointCloudExporter = Undo.AddComponent<PointCloudExporter>(root);
+                pointCloudExporter.enabled = false;
+            }
             if (root.GetComponent<PlaneDetector>() == null)
-                Undo.AddComponent<PlaneDetector>(root);
+            {
+                var planeDetector = Undo.AddComponent<PlaneDetector>(root);
+                planeDetector.enabled = false;
+            }
 
             MarkDirty();
             Refresh();
