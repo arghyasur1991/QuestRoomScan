@@ -65,7 +65,7 @@ namespace Genesis.RoomScan
 
         [Header("GPU Surface Nets")]
         [SerializeField, Tooltip("Use GPU compute-based Surface Nets instead of CPU Burst jobs.")]
-        private bool useGPUSurfaceNets;
+        private bool useGPUSurfaceNets = true;
         [SerializeField] private ComputeShader surfaceNetsCompute;
         [SerializeField, Tooltip("Max vertex fraction of total voxels (0.01-0.10).")]
         [Range(0.01f, 0.10f)] private float gpuVertexBudgetPercent = 0.05f;
