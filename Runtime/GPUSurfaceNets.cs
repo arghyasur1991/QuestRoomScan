@@ -232,12 +232,6 @@ namespace Genesis.RoomScan
             _compute.Dispatch(_kBuildIndirectArgs, 1, 1, 1);
         }
 
-        public Bounds GetVolumeBounds()
-        {
-            float3 halfExtent = (float3)_voxCount * _compute.GetFloat(ID_VoxSize) * 0.5f;
-            return new Bounds(Vector3.zero, (Vector3)(halfExtent * 2));
-        }
-
         public Bounds GetVolumeBounds(float voxelSize)
         {
             float3 halfExtent = (float3)_voxCount * voxelSize * 0.5f;
