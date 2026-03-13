@@ -54,8 +54,8 @@ namespace Genesis.RoomScan
         [SerializeField] private float passiveTextureProjectionHz = 5f;
 
         [Header("Guided Mode Rates")]
-        [SerializeField] private float guidedIntegrationHz = 8f;
-        [SerializeField] private float guidedMeshExtractionHz = 3f;
+        [SerializeField] private float guidedIntegrationHz = 10f;
+        [SerializeField] private float guidedMeshExtractionHz = 15f;
         [SerializeField] private float guidedTextureProjectionHz = 15f;
 
         [Header("Mesh Quality")]

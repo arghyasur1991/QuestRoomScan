@@ -35,7 +35,7 @@ namespace Genesis.RoomScan.Editor
         PointCloudExporter _pointCloudExporter;
         PlaneDetector _planeDetector;
 
-        bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired, _triplanarWired;
+        bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired, _triplanarWired, _gpuSurfaceNetsWired;
 
         // Style
         static readonly Color COL_OK   = new(0.25f, 0.82f, 0.35f);
@@ -113,6 +113,8 @@ namespace Genesis.RoomScan.Editor
                 "scanMeshMaterial");
             _triplanarWired = _triplanarCache != null && AreFieldsAssigned(_triplanarCache,
                 "bakeCompute");
+            _gpuSurfaceNetsWired = _chunkManager != null && AreFieldsAssigned(_chunkManager,
+                "surfaceNetsCompute");
         }
 
         // =================================================================
@@ -350,9 +352,11 @@ namespace Genesis.RoomScan.Editor
             StatusRow("TextureProjector compute shader", _projectorWired);
             StatusRow("ChunkManager scan material", _chunkMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
+            StatusRow("GPU Surface Nets compute shader", _gpuSurfaceNetsWired);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
-                            !_projectorWired || !_chunkMatWired || !_triplanarWired;
+                            !_projectorWired || !_chunkMatWired || !_triplanarWired ||
+                            !_gpuSurfaceNetsWired;
             if (needsFix)
             {
                 GUILayout.Space(2);
@@ -405,7 +409,7 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_triplanarCache);
             }
 
-            // ChunkManager — needs a Material
+            // ChunkManager — needs a Material + GPU Surface Nets compute shader
             if (_chunkManager != null)
             {
                 var so = new SerializedObject(_chunkManager);
@@ -416,6 +420,7 @@ namespace Genesis.RoomScan.Editor
                     if (mat != null)
                         prop.objectReferenceValue = mat;
                 }
+                AssignCompute(so, "surfaceNetsCompute", PKG + "SurfaceNetsExtract.compute");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_chunkManager);
             }

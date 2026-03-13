@@ -63,6 +63,19 @@ namespace Genesis.RoomScan
         [Header("Rendering")]
         [SerializeField] private Material scanMeshMaterial;
 
+        [Header("GPU Surface Nets")]
+        [SerializeField, Tooltip("Use GPU compute-based Surface Nets instead of CPU Burst jobs.")]
+        private bool useGPUSurfaceNets = true;
+        [SerializeField] private ComputeShader surfaceNetsCompute;
+        [SerializeField, Tooltip("Max vertex fraction of total voxels (0.01-0.10).")]
+        [Range(0.01f, 0.10f)] private float gpuVertexBudgetPercent = 0.05f;
+
+        private GPUSurfaceNets _gpuSurfaceNets;
+        private GPUMeshRenderer _gpuRenderer;
+        private int _gpuExtractCount;
+
+        public bool UseGPUSurfaceNets => useGPUSurfaceNets;
+
         private readonly Dictionary<int3, MeshChunkData> _chunks = new();
         private readonly ConcurrentQueue<int3> _meshQueue = new();
         private readonly HashSet<int3> _enqueuedCoords = new();
@@ -94,9 +107,28 @@ namespace Genesis.RoomScan
                 $"shader={scanMeshMaterial?.shader?.name ?? "NULL"}, " +
                 $"instancing={scanMeshMaterial?.enableInstancing}, " +
                 $"rp={rpAsset?.name ?? "NULL"}, " +
-                $"stereoMode={UnityEngine.XR.XRSettings.stereoRenderingMode}");
+                $"stereoMode={UnityEngine.XR.XRSettings.stereoRenderingMode}, " +
+                $"gpuSurfaceNets={useGPUSurfaceNets}");
 
-            StartWorkers();
+            if (useGPUSurfaceNets && surfaceNetsCompute != null)
+            {
+                try
+                {
+                    InitGPUSurfaceNets();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[RoomScan] GPU Surface Nets init failed, falling back to CPU: {ex.Message}");
+                    _gpuSurfaceNets?.Dispose();
+                    _gpuSurfaceNets = null;
+                    useGPUSurfaceNets = false;
+                    StartWorkers();
+                }
+            }
+            else
+            {
+                StartWorkers();
+            }
         }
 
         private void OnDisable()
@@ -110,6 +142,8 @@ namespace Genesis.RoomScan
             foreach (var chunk in _chunks.Values)
                 chunk.Dispose();
             _chunks.Clear();
+            _gpuSurfaceNets?.Dispose();
+            _gpuSurfaceNets = null;
         }
 
         private void StartWorkers()
@@ -145,6 +179,55 @@ namespace Genesis.RoomScan
             catch (OperationCanceledException) { }
         }
 
+        private void InitGPUSurfaceNets()
+        {
+            _gpuSurfaceNets = new GPUSurfaceNets(surfaceNetsCompute)
+            {
+                MinMeshWeight = _volume.MinMeshWeight,
+                SmoothIterations = meshSmoothIterations,
+                SmoothLambda = meshSmoothLambda,
+                SmoothBeta = meshSmoothBeta,
+                PlaneSnapThreshold = planeSnapThreshold,
+                TemporalAlphaMax = temporalAlphaMax,
+                TemporalAlphaMin = temporalAlphaMin,
+                TemporalDecayRate = temporalDecayRate,
+                ConvergenceThreshold = convergenceThreshold,
+                TemporalDeadzone = temporalDeadzone
+            };
+            _gpuSurfaceNets.EnsureBuffers(_volume.VoxelCount, gpuVertexBudgetPercent);
+
+            _gpuRenderer = gameObject.AddComponent<GPUMeshRenderer>();
+            _gpuRenderer.GpuMeshMaterial = scanMeshMaterial;
+            _gpuRenderer.Initialize(_gpuSurfaceNets, _gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
+
+            Debug.Log($"[RoomScan] GPU Surface Nets initialized: voxels={_volume.VoxelCount}, " +
+                      $"voxSize={_volume.VoxelSize}");
+        }
+
+        private void RunGPUExtraction()
+        {
+            _gpuExtractCount++;
+
+            _gpuSurfaceNets.MinMeshWeight = _volume.MinMeshWeight;
+
+            PlaneData[] planes = null;
+            int numPlanes = 0;
+            if (_planeDetector != null && _planeDetector.Planes.IsCreated && _planeDetector.PlaneCount > 0)
+            {
+                numPlanes = _planeDetector.PlaneCount;
+                planes = new PlaneData[numPlanes];
+                for (int i = 0; i < numPlanes; i++)
+                    planes[i] = _planeDetector.Planes[i];
+            }
+
+            _gpuSurfaceNets.Extract(
+                _volume.Volume, _volume.ColorVolume,
+                _volume.VoxelSize, planes, numPlanes);
+
+            if (_gpuExtractCount <= 3 || _gpuExtractCount % 50 == 0)
+                Debug.Log($"[RoomScan] GPU extraction #{_gpuExtractCount}");
+        }
+
         private int _updateCallCount;
         private int _totalEnqueued;
 
@@ -153,6 +236,11 @@ namespace Genesis.RoomScan
         /// </summary>
         public void UpdateDirtyChunks()
         {
+            if (useGPUSurfaceNets && _gpuSurfaceNets != null)
+            {
+                RunGPUExtraction();
+                return;
+            }
             if (!DepthCapture.DepthAvailable) return;
 
             _updateCallCount++;
@@ -503,7 +591,18 @@ namespace Genesis.RoomScan
             _enqueuedCoords.Clear();
             _frozenChunkCount = 0;
             while (_meshQueue.TryDequeue(out _)) { }
-            if (enabled) StartWorkers();
+
+            if (useGPUSurfaceNets && _gpuSurfaceNets != null)
+            {
+                _gpuSurfaceNets.Dispose();
+                _gpuSurfaceNets = null;
+                if (_gpuRenderer != null) Destroy(_gpuRenderer);
+                InitGPUSurfaceNets();
+            }
+            else if (enabled)
+            {
+                StartWorkers();
+            }
         }
 
         public void UnfreezeAll()
