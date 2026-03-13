@@ -2,7 +2,7 @@
 
 ## Overview
 
-Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Distance Field) volume, Surface Nets mesh extraction, and camera texture projection.
+Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Distance Field) volume and fully GPU-driven Surface Nets mesh extraction.
 
 ```
 DepthCapture (AR depth frames → normals → dilation)
@@ -182,7 +182,7 @@ After ClassifyAndEmit produces raw Surface Nets positions and normals, this kern
 
 Sequential RANSAC with axis-aligned bias detects dominant room planes from subsampled mesh vertices:
 
-1. **Vertex subsampling**: Collect positions/normals from all chunks with strided sampling, capped at `maxSampleVertices` (2048). This bounds RANSAC cost regardless of scene complexity.
+1. **Vertex subsampling**: Positions/normals are subsampled (strided) from GPU vertex buffer via periodic `AsyncGPUReadback`, capped at `maxSampleVertices` (2048). This bounds RANSAC cost regardless of scene complexity.
 2. For up to `maxPlanes` (6) iterations:
    - **RANSAC**: Sample 3 random non-inlier vertices, fit plane via cross product (80 iterations)
    - **Inlier test**: point-to-plane distance < 2cm AND normal alignment > 0.95
@@ -193,13 +193,14 @@ Sequential RANSAC with axis-aligned bias detects dominant room planes from subsa
 3. **Persistence across frames**: Detected planes merge with persistent planes if normal alignment > 0.95 and distance < 5cm. Merged planes blend parameters weighted by inlier count. Unmatched persistent planes decay by `confidenceDecay` per cycle and are removed at confidence 0.
 4. **Detection interval**: Runs every 3 mesh cycles (down from 5) since detection is now lightweight.
 
-#### PlaneSnapJob (Burst IJobFor)
+#### PlaneSnap (`PlaneSnap` compute kernel)
 
-For each vertex, finds the best-matching detected plane:
+For each vertex (dispatched indirectly), finds the best-matching detected plane:
 - Normal alignment: `|dot(vertexNormal, planeNormal)| > 0.9`
 - Proximity: `|dot(pos, normal) − d| < planeSnapThreshold`
 - Projects vertex onto plane: `pos -= signedDist × normal × confidence`
 - Snap strength scales with plane confidence (0.3 initial → 1.0 after many detections)
+- Plane data uploaded to GPU as a `StructuredBuffer<PlaneData>` each cycle
 
 ### Stage 4: Adaptive Temporal Vertex Damping (`TemporalBlend` kernel)
 
@@ -363,10 +364,10 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | `pruneIntervalSeconds` | 3.0s | Time between prune passes |
 
 ### Scan Rates
-| Mode | Integration | Mesh Extraction | Texture |
-|------|-------------|-----------------|---------|
-| Passive | 3 Hz | 1 Hz | 5 Hz |
-| Guided | 8 Hz | 3 Hz | 15 Hz |
+| Mode | Integration | Mesh Extraction |
+|------|-------------|-----------------|
+| Passive | 3 Hz | 1 Hz |
+| Guided | 10 Hz | 15 Hz |
 
 ### Texture Persistence
 | Parameter | Default | Description |
