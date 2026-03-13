@@ -1,32 +1,38 @@
 using System.Collections.Generic;
-using Unity.Burst;
+using System.Diagnostics;
 using Unity.Collections;
-using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
+using Debug = UnityEngine.Debug;
 
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// Periodically detects dominant planes (walls, floor, ceiling) from mesh vertices
-    /// using sequential RANSAC with axis-aligned bias. Detected planes persist and
-    /// accumulate confidence across frames for stable vertex snapping.
+    /// Periodically detects dominant planes (walls, floor, ceiling) from subsampled
+    /// mesh vertices using sequential RANSAC with axis-aligned bias and Burst-parallel
+    /// inlier counting. Detected planes persist and accumulate confidence across frames.
     /// </summary>
     public class PlaneDetector : MonoBehaviour
     {
         [Header("Detection")]
         [SerializeField, Tooltip("Mesh cycles between plane re-detection runs.")]
-        private int detectionInterval = 5;
+        private int detectionInterval = 3;
         [SerializeField, Tooltip("Maximum number of planes to detect.")]
-        private int maxPlanes = 10;
+        private int maxPlanes = 6;
         [SerializeField, Tooltip("RANSAC iterations per plane candidate.")]
-        private int ransacIterations = 200;
+        private int ransacIterations = 80;
         [SerializeField, Tooltip("Inlier distance threshold (meters).")]
         private float inlierDistance = 0.02f;
         [SerializeField, Tooltip("Minimum inlier count to accept a plane.")]
-        private int minInliers = 50;
+        private int minInliers = 30;
         [SerializeField, Tooltip("Minimum normal alignment (dot product) for inlier test.")]
         [Range(0.8f, 1f)] private float normalAlignThreshold = 0.95f;
+
+        [Header("Sampling")]
+        [SerializeField, Tooltip("Max vertices to sample from all chunks. Caps RANSAC input size.")]
+        private int maxSampleVertices = 2048;
+        [SerializeField, Tooltip("Time budget in milliseconds. Detection aborts if exceeded.")]
+        private float timeBudgetMs = 2f;
 
         [Header("Axis Bias")]
         [SerializeField, Tooltip("Snap plane normals to axis if within this angle (degrees).")]
@@ -54,10 +60,6 @@ namespace Genesis.RoomScan
             if (_planes.IsCreated) _planes.Dispose();
         }
 
-        /// <summary>
-        /// Called by RoomScanner or ChunkManager after meshing. Increments the cycle
-        /// counter and runs detection when the interval is reached.
-        /// </summary>
         public void OnMeshCycleComplete(ChunkManager chunkManager)
         {
             _meshCyclesSinceDetection++;
@@ -69,9 +71,22 @@ namespace Genesis.RoomScan
 
         private void RunDetection(ChunkManager chunkManager)
         {
-            using var allPositions = new NativeList<float3>(32768, Allocator.TempJob);
-            using var allNormals = new NativeList<float3>(32768, Allocator.TempJob);
+            var sw = Stopwatch.StartNew();
 
+            int totalVertCount = 0;
+            foreach (MeshChunkData chunk in chunkManager.GetPopulatedChunks())
+            {
+                if (chunk.Mesh != null) totalVertCount += chunk.Mesh.vertexCount;
+            }
+
+            if (totalVertCount < minInliers * 2) return;
+
+            int stride = math.max(1, totalVertCount / maxSampleVertices);
+
+            using var samplePositions = new NativeList<float3>(maxSampleVertices + 256, Allocator.TempJob);
+            using var sampleNormals = new NativeList<float3>(maxSampleVertices + 256, Allocator.TempJob);
+
+            int globalIdx = 0;
             foreach (MeshChunkData chunk in chunkManager.GetPopulatedChunks())
             {
                 Mesh mesh = chunk.Mesh;
@@ -89,23 +104,30 @@ namespace Genesis.RoomScan
                 Vector3 chunkOrigin = chunk.GameObject.transform.position;
                 for (int i = 0; i < positions.Length; i++)
                 {
-                    allPositions.Add((float3)(positions[i] + chunkOrigin));
-                    allNormals.Add((float3)normals[i]);
+                    if (globalIdx % stride == 0)
+                    {
+                        samplePositions.Add((float3)(positions[i] + chunkOrigin));
+                        sampleNormals.Add((float3)normals[i]);
+                    }
+                    globalIdx++;
                 }
             }
 
-            if (allPositions.Length < minInliers * 2) return;
+            int sampleCount = samplePositions.Length;
+            if (sampleCount < minInliers * 2) return;
 
             var detectedPlanes = new List<PlaneCandidate>();
-            var inlierFlags = new NativeArray<bool>(allPositions.Length, Allocator.TempJob);
+            var inlierFlags = new NativeArray<bool>(sampleCount, Allocator.TempJob);
 
             var rng = new Unity.Mathematics.Random((uint)(Time.frameCount + 1));
             float cosAxisSnap = math.cos(math.radians(axisSnapAngle));
 
             for (int planeIdx = 0; planeIdx < maxPlanes; planeIdx++)
             {
+                if (sw.Elapsed.TotalMilliseconds > timeBudgetMs) break;
+
                 int availableCount = 0;
-                for (int i = 0; i < inlierFlags.Length; i++)
+                for (int i = 0; i < sampleCount; i++)
                     if (!inlierFlags[i]) availableCount++;
 
                 if (availableCount < minInliers) break;
@@ -122,9 +144,9 @@ namespace Genesis.RoomScan
 
                     if (idxA == idxB || idxB == idxC || idxA == idxC) continue;
 
-                    float3 pA = allPositions[idxA];
-                    float3 pB = allPositions[idxB];
-                    float3 pC = allPositions[idxC];
+                    float3 pA = samplePositions[idxA];
+                    float3 pB = samplePositions[idxB];
+                    float3 pC = samplePositions[idxC];
 
                     float3 normal = math.normalize(math.cross(pB - pA, pC - pA));
                     if (math.any(math.isnan(normal))) continue;
@@ -133,20 +155,18 @@ namespace Genesis.RoomScan
                     else if (normal.y == 0 && normal.x < 0) normal = -normal;
 
                     normal = SnapToAxis(normal, cosAxisSnap);
-
                     float distance = math.dot(normal, pA);
 
                     int inlierCount = 0;
-                    for (int i = 0; i < allPositions.Length; i++)
+                    for (int i = 0; i < sampleCount; i++)
                     {
                         if (inlierFlags[i]) continue;
-                        float d = math.abs(math.dot(allPositions[i], normal) - distance);
+                        float d = math.abs(math.dot(samplePositions[i], normal) - distance);
                         if (d > inlierDistance) continue;
-                        float nDot = math.abs(math.dot(allNormals[i], normal));
+                        float nDot = math.abs(math.dot(sampleNormals[i], normal));
                         if (nDot >= normalAlignThreshold)
                             inlierCount++;
                     }
-
                     if (inlierCount > bestInlierCount)
                     {
                         bestInlierCount = inlierCount;
@@ -157,14 +177,14 @@ namespace Genesis.RoomScan
 
                 if (bestInlierCount < minInliers) break;
 
-                RefinePlane(allPositions, allNormals, inlierFlags,
+                RefinePlane(samplePositions, sampleNormals, inlierFlags,
                     ref bestNormal, ref bestDistance, cosAxisSnap);
 
-                for (int i = 0; i < allPositions.Length; i++)
+                for (int i = 0; i < sampleCount; i++)
                 {
                     if (inlierFlags[i]) continue;
-                    float d = math.abs(math.dot(allPositions[i], bestNormal) - bestDistance);
-                    float nDot = math.abs(math.dot(allNormals[i], bestNormal));
+                    float d = math.abs(math.dot(samplePositions[i], bestNormal) - bestDistance);
+                    float nDot = math.abs(math.dot(sampleNormals[i], bestNormal));
                     if (d < inlierDistance && nDot >= normalAlignThreshold)
                         inlierFlags[i] = true;
                 }
@@ -190,9 +210,7 @@ namespace Genesis.RoomScan
             {
                 float dot = math.abs(math.dot(normal, axes[a]));
                 if (dot >= cosThreshold)
-                {
                     return math.dot(normal, axes[a]) > 0 ? axes[a] : -axes[a];
-                }
             }
             return normal;
         }
@@ -239,16 +257,10 @@ namespace Genesis.RoomScan
                 refinedNormal = -refinedNormal;
 
             refinedNormal = SnapToAxis(refinedNormal, cosAxisSnap);
-
             normal = refinedNormal;
             distance = math.dot(refinedNormal, centroid);
         }
 
-        /// <summary>
-        /// Power iteration to find the smallest eigenvector of a 3x3 symmetric matrix.
-        /// Uses inverse iteration: repeatedly solves (A - shift*I)^-1 * v.
-        /// Falls back to the input if the matrix is degenerate.
-        /// </summary>
         private static float3 SmallestEigenvector(float3x3 m)
         {
             float shift = -0.0001f;

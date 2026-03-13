@@ -187,7 +187,7 @@ Runs before Surface Nets extraction on the CPU-side readback data. Smooths the s
 - **Ping-pong**: Two temp `NativeArray<sbyte>` buffers alternate as source/destination per iteration
 - **Border**: 1-voxel border is passed through unsmoothed (safe because Surface Nets skips boundary cells)
 - **Seam-free**: Chunk overlap (5 voxels) exceeds the 1-voxel kernel radius, so adjacent chunks produce identical values in the overlap zone
-- **Default**: 1 iteration, σ = 0.3
+- **Default**: 0 iterations (disabled); σ = 0.3 when enabled
 
 ### Stage 2: Normal-Aware Vertex Smoothing (`SmoothVerticesJob`, Burst IJobFor)
 
@@ -202,22 +202,24 @@ After VertexJob produces raw Surface Nets positions and normals, this stage smoo
   2. `result = q − β(q − original)` — pull back toward original position
   - `original` is the pre-smoothing position from VertexJob (fixed for all iterations)
 - **Ping-pong**: Two `NativeArray<float3>` position buffers alternate per iteration
-- **Default**: 3 iterations, λ = 0.6, β = 0.5
+- **Default**: 1 iteration, λ = 0.33, β = 0.5
 
 ### Stage 3: Plane Detection & Vertex Snapping
 
 #### PlaneDetector (MonoBehaviour, runs periodically)
 
-Sequential RANSAC with axis-aligned bias detects dominant room planes:
+Sequential RANSAC with axis-aligned bias detects dominant room planes from subsampled mesh vertices:
 
-1. Collect world-space positions and normals from all populated chunk meshes
-2. For up to `maxPlanes` (10) iterations:
-   - **RANSAC**: Sample 3 random non-inlier vertices, fit plane via cross product
+1. **Vertex subsampling**: Collect positions/normals from all chunks with strided sampling, capped at `maxSampleVertices` (2048). This bounds RANSAC cost regardless of scene complexity.
+2. For up to `maxPlanes` (6) iterations:
+   - **RANSAC**: Sample 3 random non-inlier vertices, fit plane via cross product (80 iterations)
    - **Inlier test**: point-to-plane distance < 2cm AND normal alignment > 0.95
    - **Axis bias**: If plane normal is within `axisSnapAngle` (10°) of an axis, snap to that axis
    - **Refinement**: PCA on inliers → recompute plane via smallest eigenvector of covariance matrix
-   - Accept plane if inlier count ≥ `minInliers` (50); mark inliers as consumed
+   - Accept plane if inlier count ≥ `minInliers` (30); mark inliers as consumed
+   - **Time budget**: Abort early if elapsed time exceeds `timeBudgetMs` (2ms) to prevent frame spikes
 3. **Persistence across frames**: Detected planes merge with persistent planes if normal alignment > 0.95 and distance < 5cm. Merged planes blend parameters weighted by inlier count. Unmatched persistent planes decay by `confidenceDecay` per cycle and are removed at confidence 0.
+4. **Detection interval**: Runs every 3 mesh cycles (down from 5) since detection is now lightweight.
 
 #### PlaneSnapJob (Burst IJobFor)
 
@@ -227,14 +229,18 @@ For each vertex, finds the best-matching detected plane:
 - Projects vertex onto plane: `pos -= signedDist × normal × confidence`
 - Snap strength scales with plane confidence (0.3 initial → 1.0 after many detections)
 
-### Stage 4: Temporal Vertex Damping (`TemporalBlendJob`, Burst IJob)
+### Stage 4: Adaptive Temporal Vertex Damping (`AdaptiveTemporalBlendJob`, Burst IJobFor)
 
-Per-mesher `NativeHashMap<int, float3>` caches final vertex positions keyed by flat voxel index. On subsequent mesh extractions:
-- **Lookup**: Each vertex checks the cache for its voxel coordinate
-- **Deadzone**: If position changed less than `temporalDeadzone` (1mm), old position is kept exactly
-- **Blend**: Otherwise `finalPos = lerp(prevPos, newPos, temporalAlpha)`
-- **Update**: After blending, cache is cleared and refilled with final positions
-- **Default**: α = 0.3 (slow convergence, very stable), deadzone = 1mm
+Per-mesher `NativeArray<float4>` stores previous position (xyz) and stability age (w) for every voxel in the chunk, indexed by flat voxel coordinate. On subsequent mesh extractions:
+
+- **New vertex** (age = −1): Placed instantly at extracted position (α = 1.0, no damping)
+- **Deadzone**: If position changed less than `temporalDeadzone` (1mm), old position is kept exactly and age increments
+- **Large displacement** (> `convergenceThreshold` = 5mm): α = `alphaMax` (0.85), age resets to 0 — fast convergence
+- **Small displacement** (< convergenceThreshold): Age increments, α = `alphaMin + (alphaMax − alphaMin) × exp(−age × decayRate)`
+  - Freshly converged (age ~0): α ≈ 0.7 (responsive)
+  - Stable for ~20 frames: α ≈ 0.1 (strongly resists regression)
+- **Parallelism**: Runs as `IJobFor` with one slot per voxel — no contention between threads since each vertex writes its own voxel slot
+- **Default**: αMax = 0.85, αMin = 0.1, decayRate = 0.15, convergenceThreshold = 5mm, deadzone = 1mm
 
 ## 7. Camera Projection & Persistent Texturing
 
@@ -382,15 +388,22 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Mesh Regularization
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `tsdfSmoothIterations` | 1 | Bilateral filter passes on TSDF before extraction (0 = off) |
+| `tsdfSmoothIterations` | 0 | Bilateral filter passes on TSDF before extraction (0 = off) |
 | `tsdfSmoothSigma` | 0.3 | Bilateral range sigma (lower = sharper edges) |
-| `meshSmoothIterations` | 3 | Post-extraction vertex smoothing passes (0 = off) |
-| `meshSmoothLambda` | 0.6 | Laplacian blend strength per iteration |
+| `meshSmoothIterations` | 1 | Post-extraction vertex smoothing passes (0 = off) |
+| `meshSmoothLambda` | 0.33 | Laplacian blend strength per iteration |
 | `meshSmoothBeta` | 0.5 | HC back-projection strength (prevents shrinkage) |
 | `planeSnapThreshold` | 0.03m | Max vertex-to-plane distance for snapping (0 = off) |
-| `planeDetectionInterval` | 5 | Mesh cycles between RANSAC plane detection runs |
-| `temporalAlpha` | 0.3 | Blend factor for new positions (lower = more stable) |
-| `temporalDeadzone` | 0.001m | Position changes below this are suppressed |
+| `planeDetectionInterval` | 3 | Mesh cycles between RANSAC plane detection runs |
+| `maxSampleVertices` | 2048 | Cap on vertices fed to RANSAC (strided subsampling) |
+| `ransacIterations` | 80 | RANSAC hypothesis iterations per plane candidate |
+| `maxPlanes` | 6 | Maximum planes to detect (typical room = floor + ceiling + 4 walls) |
+| `timeBudgetMs` | 2.0 | Max milliseconds for plane detection before aborting |
+| `temporalAlphaMax` | 0.85 | Blend factor for new/moving vertices (fast convergence) |
+| `temporalAlphaMin` | 0.1 | Blend factor for long-stable vertices (resists regression) |
+| `temporalDecayRate` | 0.15 | How quickly alpha decays from max to min as vertex stabilizes |
+| `convergenceThreshold` | 0.005m | Displacement threshold to consider a vertex still converging |
+| `temporalDeadzone` | 0.001m | Position changes below this are suppressed entirely |
 
 ### Freezing
 | Parameter | Default | Description |

@@ -304,9 +304,15 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<RoomScanner>() == null)
                 Undo.AddComponent<RoomScanner>(root);
             if (root.GetComponent<CameraDebugOverlay>() == null)
-                Undo.AddComponent<CameraDebugOverlay>(root);
+            {
+                var camDebug = Undo.AddComponent<CameraDebugOverlay>(root);
+                camDebug.enabled = false;
+            }
             if (root.GetComponent<DepthDebugOverlay>() == null)
-                Undo.AddComponent<DepthDebugOverlay>(root);
+            {
+                var depthDebug = Undo.AddComponent<DepthDebugOverlay>(root);
+                depthDebug.enabled = false;
+            }
             if (root.GetComponent<TriplanarCache>() == null)
                 Undo.AddComponent<TriplanarCache>(root);
             if (root.GetComponent<KeyframeStore>() == null)

@@ -34,23 +34,26 @@ namespace Genesis.RoomScan
         private NativeArray<float3> _origPositions;
         private NativeArray<float3> _normals;
 
-        private NativeHashMap<int, float3> _prevPositions;
+        private NativeArray<float4> _prevState;
 
         private bool _busy;
         public bool IsBusy => _busy;
 
         public float MinMeshWeight { get; set; } = 0.15f;
 
-        public int TsdfSmoothIterations { get; set; } = 1;
+        public int TsdfSmoothIterations { get; set; } = 0;
         public float TsdfSmoothSigma { get; set; } = 0.3f;
 
-        public int MeshSmoothIterations { get; set; } = 3;
-        public float MeshSmoothLambda { get; set; } = 0.6f;
+        public int MeshSmoothIterations { get; set; } = 1;
+        public float MeshSmoothLambda { get; set; } = 0.33f;
         public float MeshSmoothBeta { get; set; } = 0.5f;
 
         public float PlaneSnapThreshold { get; set; } = 0.03f;
 
-        public float TemporalAlpha { get; set; } = 0.3f;
+        public float TemporalAlphaMax { get; set; } = 0.85f;
+        public float TemporalAlphaMin { get; set; } = 0.1f;
+        public float TemporalDecayRate { get; set; } = 0.15f;
+        public float ConvergenceThreshold { get; set; } = 0.005f;
         public float TemporalDeadzone { get; set; } = 0.001f;
 
         private const int InvalidVert = -1;
@@ -284,41 +287,54 @@ namespace Genesis.RoomScan
 
         #endregion
 
-        #region Phase 4: Temporal Blend
+        #region Phase 4: Adaptive Temporal Blend
 
         [BurstCompile]
-        private struct TemporalBlendJob : IJob
+        private struct AdaptiveTemporalBlendJob : IJobFor
         {
+            [NativeDisableParallelForRestriction]
             public NativeList<Vertex> Verts;
             [ReadOnly] public NativeList<int3> VertCoords;
-            public NativeHashMap<int, float3> PrevPositions;
+            [NativeDisableParallelForRestriction]
+            public NativeArray<float4> PrevState;
             public int3 VoxCount;
-            public float Alpha;
+            public float AlphaMax;
+            public float AlphaMin;
+            public float DecayRate;
+            public float ConvergeThresh;
             public float Deadzone;
 
-            public void Execute()
+            public void Execute(int i)
             {
-                for (int i = 0; i < Verts.Length; i++)
-                {
-                    var v = Verts[i];
-                    int key = Flatten(VertCoords[i]);
+                var v = Verts[i];
+                int key = VertCoords[i].x + VertCoords[i].y * VoxCount.x
+                        + VertCoords[i].z * VoxCount.x * VoxCount.y;
 
-                    if (PrevPositions.TryGetValue(key, out float3 prev))
-                    {
-                        float dist = math.distance(v.pos, prev);
-                        v.pos = dist < Deadzone ? prev : math.lerp(prev, v.pos, Alpha);
-                        Verts[i] = v;
-                    }
+                float4 prev = PrevState[key];
+                float prevAge = prev.w;
+
+                if (prevAge < 0f)
+                {
+                    PrevState[key] = new float4(v.pos, 0f);
+                    return;
                 }
 
-                PrevPositions.Clear();
-                for (int i = 0; i < Verts.Length; i++)
-                    PrevPositions.TryAdd(Flatten(VertCoords[i]), Verts[i].pos);
-            }
+                float3 prevPos = prev.xyz;
+                float dist = math.distance(v.pos, prevPos);
 
-            private int Flatten(int3 c)
-            {
-                return c.x + c.y * VoxCount.x + c.z * VoxCount.x * VoxCount.y;
+                if (dist < Deadzone)
+                {
+                    v.pos = prevPos;
+                    Verts[i] = v;
+                    PrevState[key] = new float4(prevPos, prevAge + 1f);
+                    return;
+                }
+
+                float age = dist > ConvergeThresh ? 0f : prevAge + 1f;
+                float alpha = AlphaMin + (AlphaMax - AlphaMin) * math.exp(-age * DecayRate);
+                v.pos = math.lerp(prevPos, v.pos, alpha);
+                Verts[i] = v;
+                PrevState[key] = new float4(v.pos, age);
             }
         }
 
@@ -746,25 +762,31 @@ namespace Genesis.RoomScan
                     }
                 }
 
-                // ── Phase 4: Temporal vertex damping ──
-                if (TemporalAlpha < 1f)
+                // ── Phase 4: Adaptive temporal vertex damping ──
+                if (TemporalAlphaMax < 1f)
                 {
-                    if (!_prevPositions.IsCreated)
-                        _prevPositions = new NativeHashMap<int, float3>(
-                            math.max(vertCount * 2, 256), Allocator.Persistent);
-                    else if (_prevPositions.Capacity < vertCount)
-                        _prevPositions.Capacity = vertCount * 2;
+                    int totalVoxels = voxCount.x * voxCount.y * voxCount.z;
+                    if (!_prevState.IsCreated || _prevState.Length < totalVoxels)
+                    {
+                        if (_prevState.IsCreated) _prevState.Dispose();
+                        _prevState = new NativeArray<float4>(totalVoxels, Allocator.Persistent);
+                        for (int i = 0; i < totalVoxels; i++)
+                            _prevState[i] = new float4(0, 0, 0, -1f);
+                    }
 
-                    var temporalJob = new TemporalBlendJob
+                    var temporalJob = new AdaptiveTemporalBlendJob
                     {
                         Verts = _verts,
                         VertCoords = _vertCoords,
-                        PrevPositions = _prevPositions,
+                        PrevState = _prevState,
                         VoxCount = voxCount,
-                        Alpha = TemporalAlpha,
+                        AlphaMax = TemporalAlphaMax,
+                        AlphaMin = TemporalAlphaMin,
+                        DecayRate = TemporalDecayRate,
+                        ConvergeThresh = ConvergenceThreshold,
                         Deadzone = TemporalDeadzone
                     };
-                    JobHandle th = temporalJob.Schedule();
+                    JobHandle th = temporalJob.ScheduleParallelByRef(vertCount, 64, default);
                     while (!th.IsCompleted)
                         await Awaitable.NextFrameAsync(ctkn);
                     th.Complete();
@@ -862,7 +884,7 @@ namespace Genesis.RoomScan
             if (_posB.IsCreated) _posB.Dispose();
             if (_origPositions.IsCreated) _origPositions.Dispose();
             if (_normals.IsCreated) _normals.Dispose();
-            if (_prevPositions.IsCreated) _prevPositions.Dispose();
+            if (_prevState.IsCreated) _prevState.Dispose();
         }
     }
 }

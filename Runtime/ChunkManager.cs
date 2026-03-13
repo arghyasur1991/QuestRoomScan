@@ -32,15 +32,15 @@ namespace Genesis.RoomScan
 
         [Header("TSDF Smoothing")]
         [SerializeField, Tooltip("Bilateral filter passes on TSDF before mesh extraction. 0 = disabled.")]
-        [Range(0, 3)] private int tsdfSmoothIterations = 1;
+        [Range(0, 3)] private int tsdfSmoothIterations = 0;
         [SerializeField, Tooltip("Bilateral range sigma for edge preservation. Lower = sharper edges.")]
         [Range(0.05f, 1f)] private float tsdfSmoothSigma = 0.3f;
 
         [Header("Mesh Smoothing")]
         [SerializeField, Tooltip("Post-extraction vertex smoothing iterations. 0 = disabled.")]
-        [Range(0, 8)] private int meshSmoothIterations = 3;
+        [Range(0, 8)] private int meshSmoothIterations = 1;
         [SerializeField, Tooltip("Laplacian blend strength per iteration.")]
-        [Range(0.1f, 1f)] private float meshSmoothLambda = 0.6f;
+        [Range(0.1f, 1f)] private float meshSmoothLambda = 0.33f;
         [SerializeField, Tooltip("HC back-projection strength to prevent volume shrinkage.")]
         [Range(0f, 1f)] private float meshSmoothBeta = 0.5f;
 
@@ -49,8 +49,14 @@ namespace Genesis.RoomScan
         [Range(0f, 0.1f)] private float planeSnapThreshold = 0.03f;
 
         [Header("Temporal Stability")]
-        [SerializeField, Tooltip("Blend factor for new positions. Lower = more stable, slower convergence.")]
-        [Range(0.05f, 1f)] private float temporalAlpha = 0.3f;
+        [SerializeField, Tooltip("Alpha for large displacements (fast convergence).")]
+        [Range(0.1f, 1f)] private float temporalAlphaMax = 0.85f;
+        [SerializeField, Tooltip("Alpha for long-stable vertices (strong resistance to change).")]
+        [Range(0.01f, 0.5f)] private float temporalAlphaMin = 0.1f;
+        [SerializeField, Tooltip("How quickly alpha decays from max to min as vertex stabilizes.")]
+        [Range(0.01f, 1f)] private float temporalDecayRate = 0.15f;
+        [SerializeField, Tooltip("Displacement threshold (meters) to consider a vertex still converging.")]
+        [Range(0.001f, 0.02f)] private float convergenceThreshold = 0.005f;
         [SerializeField, Tooltip("Position changes below this (meters) are suppressed entirely.")]
         [Range(0f, 0.01f)] private float temporalDeadzone = 0.001f;
 
@@ -274,7 +280,10 @@ namespace Genesis.RoomScan
                     MeshSmoothLambda = meshSmoothLambda,
                     MeshSmoothBeta = meshSmoothBeta,
                     PlaneSnapThreshold = planeSnapThreshold,
-                    TemporalAlpha = temporalAlpha,
+                    TemporalAlphaMax = temporalAlphaMax,
+                    TemporalAlphaMin = temporalAlphaMin,
+                    TemporalDecayRate = temporalDecayRate,
+                    ConvergenceThreshold = convergenceThreshold,
                     TemporalDeadzone = temporalDeadzone
                 }
             };
