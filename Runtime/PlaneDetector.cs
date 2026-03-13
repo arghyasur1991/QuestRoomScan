@@ -9,6 +9,13 @@ using Debug = UnityEngine.Debug;
 
 namespace Genesis.RoomScan
 {
+    public struct PlaneData
+    {
+        public float3 Normal;
+        public float Distance;
+        public float Confidence;
+    }
+
     /// <summary>
     /// Detects dominant planes (walls, floor, ceiling) from mesh vertices using
     /// sequential RANSAC with axis-aligned bias. RANSAC runs on a background thread
@@ -80,19 +87,17 @@ namespace Genesis.RoomScan
             if (_planes.IsCreated) _planes.Dispose();
         }
 
-        public void OnMeshCycleComplete(ChunkManager chunkManager)
+        public void OnMeshCycleComplete()
         {
             _meshCyclesSinceDetection++;
             if (_meshCyclesSinceDetection < detectionInterval) return;
             if (_detectionRunning) return;
             _meshCyclesSinceDetection = 0;
-
-            CollectAndDetect(chunkManager);
         }
 
         /// <summary>
         /// Submit pre-collected vertex samples (e.g. from GPU readback).
-        /// Skips the Mesh sampling step and goes directly to background RANSAC.
+        /// Goes directly to background RANSAC.
         /// </summary>
         public void SubmitSamples(float3[] positions, float3[] normals, int count)
         {
@@ -113,56 +118,6 @@ namespace Genesis.RoomScan
             }
             sampleCount = idx;
 
-            LaunchBackgroundDetection(samplePos, sampleNrm, sampleCount);
-        }
-
-        private void CollectAndDetect(ChunkManager chunkManager)
-        {
-            int totalVertCount = 0;
-            foreach (MeshChunkData chunk in chunkManager.GetPopulatedChunks())
-            {
-                if (chunk.Mesh != null) totalVertCount += chunk.Mesh.vertexCount;
-            }
-
-            if (totalVertCount < minInliers * 2) return;
-
-            int stride = math.max(1, totalVertCount / maxSampleVertices);
-            int estimatedSamples = (totalVertCount / stride) + 256;
-            var samplePos = new float3[estimatedSamples];
-            var sampleNrm = new float3[estimatedSamples];
-            int sampleCount = 0;
-
-            int globalIdx = 0;
-            foreach (MeshChunkData chunk in chunkManager.GetPopulatedChunks())
-            {
-                Mesh mesh = chunk.Mesh;
-                if (mesh == null || mesh.vertexCount == 0) continue;
-
-                using var meshData = Mesh.AcquireReadOnlyMeshData(mesh);
-                var md = meshData[0];
-                if (md.vertexCount == 0) continue;
-
-                using var positions = new NativeArray<UnityEngine.Vector3>(md.vertexCount, Allocator.TempJob);
-                using var normals = new NativeArray<UnityEngine.Vector3>(md.vertexCount, Allocator.TempJob);
-                md.GetVertices(positions);
-                md.GetNormals(normals);
-
-                UnityEngine.Vector3 chunkOrigin = chunk.GameObject.transform.position;
-                for (int i = 0; i < positions.Length; i++)
-                {
-                    if (globalIdx % stride == 0 && sampleCount < estimatedSamples)
-                    {
-                        samplePos[sampleCount] = (float3)(positions[i] + chunkOrigin);
-                        sampleNrm[sampleCount] = (float3)normals[i];
-                        sampleCount++;
-                    }
-                    globalIdx++;
-                }
-            }
-
-            if (sampleCount < minInliers * 2) return;
-
-            _detectionRunning = true;
             LaunchBackgroundDetection(samplePos, sampleNrm, sampleCount);
         }
 

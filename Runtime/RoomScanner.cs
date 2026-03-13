@@ -19,7 +19,7 @@ namespace Genesis.RoomScan
 
     /// <summary>
     /// Top-level orchestrator for room scanning. Manages the scanning pipeline:
-    /// DepthCapture → VolumeIntegrator → ChunkManager → TextureProjector.
+    /// DepthCapture → VolumeIntegrator → MeshExtractor → TextureProjector.
     /// Supports passive (background) and guided (active) scan modes.
     /// </summary>
     public class RoomScanner : MonoBehaviour
@@ -29,7 +29,7 @@ namespace Genesis.RoomScan
         [Header("Components")]
         [SerializeField] private DepthCapture depthCapture;
         [SerializeField] private VolumeIntegrator volumeIntegrator;
-        [SerializeField] private ChunkManager chunkManager;
+        [SerializeField] private MeshExtractor meshExtractor;
         [SerializeField] private TextureProjector textureProjector;
         [SerializeField] private TriplanarCache triplanarCache;
         [SerializeField] private KeyframeStore keyframeStore;
@@ -184,10 +184,10 @@ namespace Genesis.RoomScan
                     && t - _lastMeshTime >= MeshInterval)
                 {
                     _lastMeshTime = t;
-                    chunkManager.UpdateDirtyChunks();
+                    meshExtractor.Extract();
 
                     if (planeDetector != null)
-                        planeDetector.OnMeshCycleComplete(chunkManager);
+                        planeDetector.OnMeshCycleComplete();
                 }
             }
 
@@ -269,7 +269,7 @@ namespace Genesis.RoomScan
         public void ClearScan()
         {
             volumeIntegrator.Clear();
-            chunkManager.ClearAllChunks();
+            meshExtractor.Reset();
             if (triplanarCache != null) triplanarCache.Clear();
         }
 
@@ -303,7 +303,7 @@ namespace Genesis.RoomScan
         {
             if (depthCapture == null) depthCapture = FindFirstObjectByType<DepthCapture>();
             if (volumeIntegrator == null) volumeIntegrator = FindFirstObjectByType<VolumeIntegrator>();
-            if (chunkManager == null) chunkManager = FindFirstObjectByType<ChunkManager>();
+            if (meshExtractor == null) meshExtractor = FindFirstObjectByType<MeshExtractor>();
             if (textureProjector == null) textureProjector = FindFirstObjectByType<TextureProjector>();
             if (triplanarCache == null) triplanarCache = FindFirstObjectByType<TriplanarCache>();
             if (keyframeStore == null) keyframeStore = FindFirstObjectByType<KeyframeStore>();
@@ -314,7 +314,7 @@ namespace Genesis.RoomScan
 
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");
-            if (chunkManager == null) Debug.LogError("[RoomScan] ChunkManager not found");
+            if (meshExtractor == null) Debug.LogError("[RoomScan] MeshExtractor not found");
         }
 
         private void SetupHeadExclusion()
@@ -423,32 +423,11 @@ namespace Genesis.RoomScan
 
         private void ApplyVisualization()
         {
-            // Visualization is applied by iterating chunk renderers
-            if (chunkManager == null) return;
+            if (meshExtractor == null) return;
+            var gpuRenderer = meshExtractor.GetComponent<GPUMeshRenderer>();
+            if (gpuRenderer == null) return;
 
-            foreach (MeshChunkData chunk in chunkManager.GetPopulatedChunks())
-            {
-                if (chunk.GameObject == null) continue;
-                var renderer = chunk.GameObject.GetComponent<MeshRenderer>();
-                if (renderer == null) continue;
-
-                switch (visualization)
-                {
-                    case ScanVisualization.VertexColored:
-                        renderer.enabled = true;
-                        break;
-                    case ScanVisualization.Hidden:
-                        renderer.enabled = false;
-                        break;
-                    case ScanVisualization.OcclusionOnly:
-                        renderer.enabled = true;
-                        // Consuming project should assign an occlusion material via ChunkManager
-                        break;
-                    case ScanVisualization.Wireframe:
-                        renderer.enabled = true;
-                        break;
-                }
-            }
+            gpuRenderer.enabled = visualization != ScanVisualization.Hidden;
         }
     }
 }

@@ -21,7 +21,7 @@ namespace Genesis.RoomScan.Editor
 
         DepthCapture _depthCapture;
         VolumeIntegrator _volumeIntegrator;
-        ChunkManager _chunkManager;
+        MeshExtractor _meshExtractor;
         TextureProjector _textureProjector;
         RoomScanner _roomScanner;
         PassthroughCameraProvider _cameraProvider;
@@ -35,7 +35,7 @@ namespace Genesis.RoomScan.Editor
         PointCloudExporter _pointCloudExporter;
         PlaneDetector _planeDetector;
 
-        bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired, _triplanarWired, _gpuSurfaceNetsWired;
+        bool _depthCaptureWired, _volumeWired, _projectorWired, _meshMatWired, _triplanarWired, _computeShaderWired;
 
         // Style
         static readonly Color COL_OK   = new(0.25f, 0.82f, 0.35f);
@@ -89,7 +89,7 @@ namespace Genesis.RoomScan.Editor
 
             _depthCapture = FindAny<DepthCapture>();
             _volumeIntegrator = FindAny<VolumeIntegrator>();
-            _chunkManager = FindAny<ChunkManager>();
+            _meshExtractor = FindAny<MeshExtractor>();
             _textureProjector = FindAny<TextureProjector>();
             _roomScanner = FindAny<RoomScanner>();
             _cameraProvider = FindAny<PassthroughCameraProvider>();
@@ -109,11 +109,11 @@ namespace Genesis.RoomScan.Editor
                 "compute");
             _projectorWired = _textureProjector != null && AreFieldsAssigned(_textureProjector,
                 "projectionCompute");
-            _chunkMatWired = _chunkManager != null && AreFieldsAssigned(_chunkManager,
+            _meshMatWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "scanMeshMaterial");
             _triplanarWired = _triplanarCache != null && AreFieldsAssigned(_triplanarCache,
                 "bakeCompute");
-            _gpuSurfaceNetsWired = _chunkManager != null && AreFieldsAssigned(_chunkManager,
+            _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
         }
 
@@ -237,7 +237,7 @@ namespace Genesis.RoomScan.Editor
 
             StatusRow("DepthCapture", _depthCapture != null);
             StatusRow("VolumeIntegrator", _volumeIntegrator != null);
-            StatusRow("ChunkManager", _chunkManager != null);
+            StatusRow("MeshExtractor", _meshExtractor != null);
             StatusRow("TextureProjector", _textureProjector != null);
             StatusRow("RoomScanner", _roomScanner != null);
             StatusRow("PassthroughCameraProvider", _cameraProvider != null);
@@ -252,7 +252,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
-                              _chunkManager == null || _textureProjector == null ||
+                              _meshExtractor == null || _textureProjector == null ||
                               _roomScanner == null || _cameraProvider == null ||
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null || _keyframeStore == null ||
@@ -295,8 +295,8 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<DepthCapture>(root);
             if (root.GetComponent<VolumeIntegrator>() == null)
                 Undo.AddComponent<VolumeIntegrator>(root);
-            if (root.GetComponent<ChunkManager>() == null)
-                Undo.AddComponent<ChunkManager>(root);
+            if (root.GetComponent<MeshExtractor>() == null)
+                Undo.AddComponent<MeshExtractor>(root);
             if (root.GetComponent<TextureProjector>() == null)
                 Undo.AddComponent<TextureProjector>(root);
             if (root.GetComponent<PassthroughCameraAccess>() == null)
@@ -350,13 +350,13 @@ namespace Genesis.RoomScan.Editor
             StatusRow("DepthCapture compute shaders", _depthCaptureWired);
             StatusRow("VolumeIntegrator compute shader", _volumeWired);
             StatusRow("TextureProjector compute shader", _projectorWired);
-            StatusRow("ChunkManager scan material", _chunkMatWired);
+            StatusRow("MeshExtractor scan material", _meshMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
-            StatusRow("GPU Surface Nets compute shader", _gpuSurfaceNetsWired);
+            StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
-                            !_projectorWired || !_chunkMatWired || !_triplanarWired ||
-                            !_gpuSurfaceNetsWired;
+                            !_projectorWired || !_meshMatWired || !_triplanarWired ||
+                            !_computeShaderWired;
             if (needsFix)
             {
                 GUILayout.Space(2);
@@ -409,10 +409,10 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_triplanarCache);
             }
 
-            // ChunkManager — needs a Material + GPU Surface Nets compute shader
-            if (_chunkManager != null)
+            // MeshExtractor — needs a Material + compute shader
+            if (_meshExtractor != null)
             {
-                var so = new SerializedObject(_chunkManager);
+                var so = new SerializedObject(_meshExtractor);
                 var prop = so.FindProperty("scanMeshMaterial");
                 if (prop != null && prop.objectReferenceValue == null)
                 {
@@ -422,7 +422,7 @@ namespace Genesis.RoomScan.Editor
                 }
                 AssignCompute(so, "surfaceNetsCompute", PKG + "SurfaceNetsExtract.compute");
                 so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_chunkManager);
+                EditorUtility.SetDirty(_meshExtractor);
             }
 
             MarkDirty();
@@ -508,7 +508,7 @@ namespace Genesis.RoomScan.Editor
                 var so = new SerializedObject(_roomScanner);
                 SetRef(so, "depthCapture", _depthCapture);
                 SetRef(so, "volumeIntegrator", _volumeIntegrator);
-                SetRef(so, "chunkManager", _chunkManager);
+                SetRef(so, "meshExtractor", _meshExtractor);
                 SetRef(so, "textureProjector", _textureProjector);
                 SetRef(so, "cameraProvider", _cameraProvider);
                 SetRef(so, "triplanarCache", _triplanarCache);

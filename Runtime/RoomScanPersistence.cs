@@ -136,7 +136,7 @@ namespace Genesis.RoomScan
             }
 
             var vi = VolumeIntegrator.Instance;
-            var cm = ChunkManager.Instance;
+            var cm = MeshExtractor.Instance;
             if (vi == null || vi.Volume == null)
             {
                 Debug.LogWarning("[RoomScan] Persistence: cannot load, no volume");
@@ -186,7 +186,7 @@ namespace Genesis.RoomScan
                     tc.Load(TriplanarDirectory);
 
                 if (cm != null)
-                    cm.RemeshAll();
+                    cm.Reset();
 
                 Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount})");
                 LoadCompleted?.Invoke();
