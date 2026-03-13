@@ -162,6 +162,7 @@ QuestRoomScan builds on that foundation with significant extensions:
 
 | | lasertag | QuestRoomScan |
 |-|----------|---------------|
+| **Mesh extraction** | CPU marching cubes from GPU volume | Fully GPU-driven Surface Nets via compute shaders — zero CPU readback, single indirect draw call |
 | **Texturing** | Geometry only — no camera RGB texturing | Full camera-based texturing at three resolution tiers: keyframe projection (pixel-level), triplanar world-space cache (~8mm/texel), and vertex colors (~5cm) — all sourced from passthrough camera RGB |
 | **Persistence** | None — mesh lost on restart | Save/load of TSDF + color volumes + triplanar textures to disk (experimental, not well tested) |
 | **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, GPU temporal stabilization, RANSAC plane detection & snapping |
