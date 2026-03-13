@@ -19,7 +19,7 @@ namespace Genesis.RoomScan
 
     /// <summary>
     /// Top-level orchestrator for room scanning. Manages the scanning pipeline:
-    /// DepthCapture → VolumeIntegrator → MeshExtractor → TextureProjector.
+    /// DepthCapture → VolumeIntegrator → MeshExtractor.
     /// Supports passive (background) and guided (active) scan modes.
     /// </summary>
     public class RoomScanner : MonoBehaviour
@@ -30,7 +30,6 @@ namespace Genesis.RoomScan
         [SerializeField] private DepthCapture depthCapture;
         [SerializeField] private VolumeIntegrator volumeIntegrator;
         [SerializeField] private MeshExtractor meshExtractor;
-        [SerializeField] private TextureProjector textureProjector;
         [SerializeField] private TriplanarCache triplanarCache;
         [SerializeField] private KeyframeStore keyframeStore;
         [SerializeField] private RoomScanPersistence persistence;
@@ -46,17 +45,14 @@ namespace Genesis.RoomScan
         [SerializeField] private ScanMode mode = ScanMode.Passive;
         [SerializeField] private ScanVisualization visualization = ScanVisualization.VertexColored;
         [SerializeField] private bool autoStartOnLoad = true;
-        [SerializeField] private bool enableTextureProjection = true;
 
         [Header("Passive Mode Rates")]
         [SerializeField] private float passiveIntegrationHz = 3f;
         [SerializeField] private float passiveMeshExtractionHz = 1f;
-        [SerializeField] private float passiveTextureProjectionHz = 5f;
 
         [Header("Guided Mode Rates")]
         [SerializeField] private float guidedIntegrationHz = 10f;
         [SerializeField] private float guidedMeshExtractionHz = 15f;
-        [SerializeField] private float guidedTextureProjectionHz = 15f;
 
         [Header("Mesh Quality")]
         [SerializeField] private int minIntegrationsBeforeMesh = 5;
@@ -84,7 +80,6 @@ namespace Genesis.RoomScan
 
         private float _lastIntegrationTime;
         private float _lastMeshTime;
-        private float _lastTextureTime;
         private float _guidedStartTime;
         private float _lastAutoSaveTime;
         private bool _started;
@@ -95,7 +90,6 @@ namespace Genesis.RoomScan
 
         private float IntegrationInterval => 1f / (mode == ScanMode.Guided ? guidedIntegrationHz : passiveIntegrationHz);
         private float MeshInterval => 1f / (mode == ScanMode.Guided ? guidedMeshExtractionHz : passiveMeshExtractionHz);
-        private float TextureInterval => 1f / (mode == ScanMode.Guided ? guidedTextureProjectionHz : passiveTextureProjectionHz);
 
         private void Awake()
         {
@@ -106,7 +100,6 @@ namespace Genesis.RoomScan
         private async void Start()
         {
             ValidateComponents();
-            SetupCameraProvider();
             SetupHeadExclusion();
 
             if (persistence != null && persistence.HasSavedScan())
@@ -199,12 +192,6 @@ namespace Genesis.RoomScan
                     $"depthAvail={DepthCapture.DepthAvailable}");
             }
 
-            if (enableTextureProjection && t - _lastTextureTime >= TextureInterval)
-            {
-                _lastTextureTime = t;
-                textureProjector.ProjectFrame();
-            }
-
             if (mode == ScanMode.Guided && t - _guidedStartTime >= guidedTimeoutSeconds)
             {
                 SetMode(ScanMode.Passive);
@@ -228,12 +215,10 @@ namespace Genesis.RoomScan
             float t = Time.time;
             _lastIntegrationTime = t;
             _lastMeshTime = t;
-            _lastTextureTime = t;
             _lastAutoSaveTime = t;
 
             ICameraProvider provider = GetActiveCameraProvider();
-            if (enableTextureProjection && provider != null)
-                provider.StartCapture();
+            provider?.StartCapture();
 
             ScanStarted?.Invoke();
         }
@@ -280,8 +265,6 @@ namespace Genesis.RoomScan
         public void SetCameraProvider(ICameraProvider provider)
         {
             _customCameraProvider = provider;
-            if (textureProjector != null)
-                textureProjector.SetCameraProvider(provider);
         }
 
         /// <summary>
@@ -304,7 +287,6 @@ namespace Genesis.RoomScan
             if (depthCapture == null) depthCapture = FindFirstObjectByType<DepthCapture>();
             if (volumeIntegrator == null) volumeIntegrator = FindFirstObjectByType<VolumeIntegrator>();
             if (meshExtractor == null) meshExtractor = FindFirstObjectByType<MeshExtractor>();
-            if (textureProjector == null) textureProjector = FindFirstObjectByType<TextureProjector>();
             if (triplanarCache == null) triplanarCache = FindFirstObjectByType<TriplanarCache>();
             if (keyframeStore == null) keyframeStore = FindFirstObjectByType<KeyframeStore>();
             if (persistence == null) persistence = FindFirstObjectByType<RoomScanPersistence>();
@@ -346,7 +328,7 @@ namespace Genesis.RoomScan
         private int _colorFrameLog;
         private void ProvideColorFrame()
         {
-            if (!enableTextureProjection || volumeIntegrator == null) return;
+            if (volumeIntegrator == null) return;
             ICameraProvider provider = GetActiveCameraProvider();
 
             if (provider is PassthroughCameraProvider pcp && pcp.IsReady)
@@ -406,13 +388,6 @@ namespace Genesis.RoomScan
 
             volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);
-        }
-
-        private void SetupCameraProvider()
-        {
-            ICameraProvider provider = GetActiveCameraProvider();
-            if (textureProjector != null && provider != null)
-                textureProjector.SetCameraProvider(provider);
         }
 
         private ICameraProvider GetActiveCameraProvider()

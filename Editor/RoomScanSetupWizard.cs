@@ -22,7 +22,6 @@ namespace Genesis.RoomScan.Editor
         DepthCapture _depthCapture;
         VolumeIntegrator _volumeIntegrator;
         MeshExtractor _meshExtractor;
-        TextureProjector _textureProjector;
         RoomScanner _roomScanner;
         PassthroughCameraProvider _cameraProvider;
         PassthroughCameraAccess _pcaComponent;
@@ -35,7 +34,7 @@ namespace Genesis.RoomScan.Editor
         PointCloudExporter _pointCloudExporter;
         PlaneDetector _planeDetector;
 
-        bool _depthCaptureWired, _volumeWired, _projectorWired, _meshMatWired, _triplanarWired, _computeShaderWired;
+        bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
 
         // Style
         static readonly Color COL_OK   = new(0.25f, 0.82f, 0.35f);
@@ -90,7 +89,6 @@ namespace Genesis.RoomScan.Editor
             _depthCapture = FindAny<DepthCapture>();
             _volumeIntegrator = FindAny<VolumeIntegrator>();
             _meshExtractor = FindAny<MeshExtractor>();
-            _textureProjector = FindAny<TextureProjector>();
             _roomScanner = FindAny<RoomScanner>();
             _cameraProvider = FindAny<PassthroughCameraProvider>();
             _pcaComponent = FindAny<PassthroughCameraAccess>();
@@ -107,8 +105,6 @@ namespace Genesis.RoomScan.Editor
                 "depthNormalCompute", "depthDilationCompute");
             _volumeWired = _volumeIntegrator != null && AreFieldsAssigned(_volumeIntegrator,
                 "compute");
-            _projectorWired = _textureProjector != null && AreFieldsAssigned(_textureProjector,
-                "projectionCompute");
             _meshMatWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "scanMeshMaterial");
             _triplanarWired = _triplanarCache != null && AreFieldsAssigned(_triplanarCache,
@@ -238,7 +234,6 @@ namespace Genesis.RoomScan.Editor
             StatusRow("DepthCapture", _depthCapture != null);
             StatusRow("VolumeIntegrator", _volumeIntegrator != null);
             StatusRow("MeshExtractor", _meshExtractor != null);
-            StatusRow("TextureProjector", _textureProjector != null);
             StatusRow("RoomScanner", _roomScanner != null);
             StatusRow("PassthroughCameraProvider", _cameraProvider != null);
             StatusRow("PassthroughCameraAccess", _pcaComponent != null);
@@ -252,7 +247,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
-                              _meshExtractor == null || _textureProjector == null ||
+                              _meshExtractor == null ||
                               _roomScanner == null || _cameraProvider == null ||
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null || _keyframeStore == null ||
@@ -297,8 +292,6 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<VolumeIntegrator>(root);
             if (root.GetComponent<MeshExtractor>() == null)
                 Undo.AddComponent<MeshExtractor>(root);
-            if (root.GetComponent<TextureProjector>() == null)
-                Undo.AddComponent<TextureProjector>(root);
             if (root.GetComponent<PassthroughCameraAccess>() == null)
                 Undo.AddComponent<PassthroughCameraAccess>(root);
             if (root.GetComponent<PassthroughCameraProvider>() == null)
@@ -349,13 +342,12 @@ namespace Genesis.RoomScan.Editor
 
             StatusRow("DepthCapture compute shaders", _depthCaptureWired);
             StatusRow("VolumeIntegrator compute shader", _volumeWired);
-            StatusRow("TextureProjector compute shader", _projectorWired);
             StatusRow("MeshExtractor scan material", _meshMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
-                            !_projectorWired || !_meshMatWired || !_triplanarWired ||
+                            !_meshMatWired || !_triplanarWired ||
                             !_computeShaderWired;
             if (needsFix)
             {
@@ -389,15 +381,6 @@ namespace Genesis.RoomScan.Editor
                 AssignCompute(so, "compute", PKG + "VolumeIntegration.compute");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_volumeIntegrator);
-            }
-
-            // TextureProjector
-            if (_textureProjector != null)
-            {
-                var so = new SerializedObject(_textureProjector);
-                AssignCompute(so, "projectionCompute", PKG + "TextureProjection.compute");
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_textureProjector);
             }
 
             // TriplanarCache
@@ -509,7 +492,6 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "depthCapture", _depthCapture);
                 SetRef(so, "volumeIntegrator", _volumeIntegrator);
                 SetRef(so, "meshExtractor", _meshExtractor);
-                SetRef(so, "textureProjector", _textureProjector);
                 SetRef(so, "cameraProvider", _cameraProvider);
                 SetRef(so, "triplanarCache", _triplanarCache);
                 SetRef(so, "keyframeStore", _keyframeStore);
