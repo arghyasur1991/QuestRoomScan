@@ -290,7 +290,7 @@ Triplanar textures saved separately as 3 raw RGBA8 files.
 1. Read binary, validate magic/version/voxel dimensions
 2. Create `Texture3D`, `SetPixelData`, `Graphics.CopyTexture` to upload TSDF and color to GPU
 3. `TriplanarCache.Load()` restores triplanar textures
-4. `MeshExtractor.Reset()` reinitializes GPU buffers and triggers full re-extraction
+4. `MeshExtractor.Reinitialize()` reinitializes GPU buffers and triggers full re-extraction
 5. Resume scanning (new observations refine the loaded mesh)
 
 ## 10. Exclusion Zones

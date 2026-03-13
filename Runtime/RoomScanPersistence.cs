@@ -186,7 +186,7 @@ namespace Genesis.RoomScan
                     tc.Load(TriplanarDirectory);
 
                 if (cm != null)
-                    cm.Reset();
+                    cm.Reinitialize();
 
                 Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount})");
                 LoadCompleted?.Invoke();

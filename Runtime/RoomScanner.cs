@@ -254,7 +254,7 @@ namespace Genesis.RoomScan
         public void ClearScan()
         {
             volumeIntegrator.Clear();
-            meshExtractor.Reset();
+            meshExtractor.Reinitialize();
             if (triplanarCache != null) triplanarCache.Clear();
         }
 

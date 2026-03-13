@@ -142,7 +142,7 @@ namespace Genesis.RoomScan
         /// <summary>
         /// Dispose GPU resources and reinitialize. Used after loading a saved scan.
         /// </summary>
-        public void Reset()
+        public void Reinitialize()
         {
             _gpuSurfaceNets?.Dispose();
             _gpuSurfaceNets = null;
