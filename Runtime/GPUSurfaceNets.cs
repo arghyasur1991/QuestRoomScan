@@ -1,6 +1,7 @@
 using System;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
@@ -20,6 +21,7 @@ namespace Genesis.RoomScan
         private readonly int _kTemporalBlend;
         private readonly int _kGenerateIndices;
         private readonly int _kBuildIndirectArgs;
+        private readonly int _kInitTemporal;
 
         // GPU buffers
         private GraphicsBuffer _coordVertMap;
@@ -30,7 +32,9 @@ namespace Genesis.RoomScan
         private GraphicsBuffer _drawIndirectArgs;
         private GraphicsBuffer _smoothPosA;
         private GraphicsBuffer _smoothPosB;
-        private GraphicsBuffer _temporalState;
+
+        // Temporal state as 3D texture (avoids 128MB structured buffer limit on Quest)
+        private RenderTexture _temporalState;
 
         // Sizing
         private int3 _voxCount;
@@ -39,7 +43,6 @@ namespace Genesis.RoomScan
         private int _maxIndices;
         private bool _temporalInitialized;
 
-        // Configurable parameters (set before Extract)
         public float MinMeshWeight { get; set; } = 0.08f;
         public int SmoothIterations { get; set; } = 1;
         public float SmoothLambda { get; set; } = 0.33f;
@@ -51,12 +54,10 @@ namespace Genesis.RoomScan
         public float ConvergenceThreshold { get; set; } = 0.005f;
         public float TemporalDeadzone { get; set; } = 0.001f;
 
-        // Public accessors for rendering
         public GraphicsBuffer VertexBuffer => _vertices;
         public GraphicsBuffer IndexBuffer => _indices;
         public GraphicsBuffer DrawIndirectArgs => _drawIndirectArgs;
 
-        // Shader property IDs
         private static readonly int ID_TsdfVolume = Shader.PropertyToID("_TsdfVolume");
         private static readonly int ID_ColorVolume = Shader.PropertyToID("_ColorVolume");
         private static readonly int ID_VoxCount = Shader.PropertyToID("_VoxCount");
@@ -86,9 +87,8 @@ namespace Genesis.RoomScan
         private static readonly int ID_SmoothPosB = Shader.PropertyToID("_SmoothPosB");
         private static readonly int ID_TemporalState = Shader.PropertyToID("_TemporalState");
 
-        private const int VertexStride = 32;   // sizeof(GPUVertex): float3 + float3 + uint + uint
+        private const int VertexStride = 32;
         private const int Float3Stride = 12;
-        private const int Float4Stride = 16;
 
         public GPUSurfaceNets(ComputeShader compute)
         {
@@ -104,6 +104,7 @@ namespace Genesis.RoomScan
             _kTemporalBlend = compute.FindKernel("TemporalBlend");
             _kGenerateIndices = compute.FindKernel("GenerateIndices");
             _kBuildIndirectArgs = compute.FindKernel("BuildIndirectArgs");
+            _kInitTemporal = compute.FindKernel("InitTemporal");
         }
 
         public void EnsureBuffers(int3 voxCount, float vertexBudgetPercent = 0.05f)
@@ -119,25 +120,38 @@ namespace Genesis.RoomScan
             _maxVertices = Mathf.Max(1024, (int)(totalVoxels * vertexBudgetPercent));
             _maxIndices = _maxVertices * 18;
 
+            const GraphicsBuffer.Target structuredIndirect =
+                GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.IndirectArguments;
+
             _coordVertMap = new GraphicsBuffer(GraphicsBuffer.Target.Structured, totalVoxels, 4);
             _vertices = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, VertexStride);
             _indices = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxIndices, 4);
             _counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 2, 4);
-            _dispatchArgs = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 3, 4);
-            _drawIndirectArgs = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 5, 4);
+            _dispatchArgs = new GraphicsBuffer(structuredIndirect, 3, 4);
+            _drawIndirectArgs = new GraphicsBuffer(structuredIndirect, 5, 4);
             _smoothPosA = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, Float3Stride);
             _smoothPosB = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, Float3Stride);
-            _temporalState = new GraphicsBuffer(GraphicsBuffer.Target.Structured, totalVoxels, Float4Stride);
+
+            // Temporal state as RWTexture3D<float4> -- avoids the 128MB structured buffer limit.
+            // 256^3 x RGBA32Float = 256MB as a 3D texture, which Quest supports (same as TSDF volume path).
+            _temporalState = new RenderTexture(voxCount.x, voxCount.y, 0, GraphicsFormat.R32G32B32A32_SFloat)
+            {
+                dimension = TextureDimension.Tex3D,
+                volumeDepth = voxCount.z,
+                enableRandomWrite = true,
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            _temporalState.Create();
 
             _temporalInitialized = false;
 
-            long totalBytes = (long)totalVoxels * 4          // coordVertMap
-                            + (long)_maxVertices * VertexStride  // vertices
-                            + (long)_maxIndices * 4           // indices
-                            + 2 * 4                            // counters
-                            + 3 * 4 + 5 * 4                   // dispatch + draw args
-                            + (long)_maxVertices * Float3Stride * 2 // smooth A+B
-                            + (long)totalVoxels * Float4Stride;    // temporal state
+            long totalBytes = (long)totalVoxels * 4
+                            + (long)_maxVertices * VertexStride
+                            + (long)_maxIndices * 4
+                            + 2 * 4 + 3 * 4 + 5 * 4
+                            + (long)_maxVertices * Float3Stride * 2
+                            + (long)totalVoxels * 16;
             Debug.Log($"[GPUSurfaceNets] Allocated buffers: vox={voxCount}, " +
                       $"maxVerts={_maxVertices}, maxIdx={_maxIndices}, " +
                       $"totalGPU={totalBytes / (1024 * 1024)}MB");
@@ -147,10 +161,12 @@ namespace Genesis.RoomScan
         {
             if (_temporalInitialized || _temporalState == null) return;
 
-            var init = new float4[_totalVoxels];
-            for (int i = 0; i < _totalVoxels; i++)
-                init[i] = new float4(0, 0, 0, -1);
-            _temporalState.SetData(init);
+            _compute.SetTexture(_kInitTemporal, ID_TemporalState, _temporalState);
+            _compute.SetInts(ID_VoxCount, _voxCount.x, _voxCount.y, _voxCount.z);
+            int gx = CeilDiv(_voxCount.x, 4);
+            int gy = CeilDiv(_voxCount.y, 4);
+            int gz = CeilDiv(_voxCount.z, 4);
+            _compute.Dispatch(_kInitTemporal, gx, gy, gz);
             _temporalInitialized = true;
         }
 
@@ -166,7 +182,6 @@ namespace Genesis.RoomScan
             SetGlobalParams(voxelSize);
             BindAllBuffers();
 
-            // Textures
             _compute.SetTexture(_kClassifyAndEmit, ID_TsdfVolume, tsdfVolume);
             _compute.SetTexture(_kClassifyAndEmit, ID_ColorVolume, colorVolume);
             _compute.SetTexture(_kGenerateIndices, ID_TsdfVolume, tsdfVolume);
@@ -203,7 +218,6 @@ namespace Genesis.RoomScan
                     _compute.DispatchIndirect(_kSmoothVertices, _dispatchArgs);
                 }
 
-                // Bind the buffer that has the final result as _SmoothPosA for ApplySmooth
                 if (SmoothIterations % 2 == 0)
                     _compute.SetBuffer(_kApplySmooth, ID_SmoothPosA, _smoothPosA);
                 else
@@ -222,6 +236,7 @@ namespace Genesis.RoomScan
             // 6. Temporal blend (optional)
             if (TemporalAlphaMax < 1f)
             {
+                _compute.SetTexture(_kTemporalBlend, ID_TemporalState, _temporalState);
                 _compute.DispatchIndirect(_kTemporalBlend, _dispatchArgs);
             }
 
@@ -284,7 +299,6 @@ namespace Genesis.RoomScan
             BindBuffer(_kPlaneSnap, ID_Counters, _counters);
 
             BindBuffer(_kTemporalBlend, ID_Vertices, _vertices);
-            BindBuffer(_kTemporalBlend, ID_TemporalState, _temporalState);
             BindBuffer(_kTemporalBlend, ID_Counters, _counters);
 
             BindBuffer(_kGenerateIndices, ID_Vertices, _vertices);
@@ -327,7 +341,12 @@ namespace Genesis.RoomScan
             _drawIndirectArgs?.Release();
             _smoothPosA?.Release();
             _smoothPosB?.Release();
-            _temporalState?.Release();
+
+            if (_temporalState != null)
+            {
+                _temporalState.Release();
+                UnityEngine.Object.Destroy(_temporalState);
+            }
 
             _coordVertMap = null;
             _vertices = null;

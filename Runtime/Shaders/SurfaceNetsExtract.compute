@@ -22,6 +22,7 @@
 #pragma kernel TemporalBlend
 #pragma kernel GenerateIndices
 #pragma kernel BuildIndirectArgs
+#pragma kernel InitTemporal
 
 // ──────────────────────────────────────────────────────────────────
 //  Volume textures (bound by VolumeIntegrator, read-only here)
@@ -77,7 +78,7 @@ RWStructuredBuffer<uint>      _DrawIndirectArgs; // [0..4]  = DrawProceduralIndi
 RWStructuredBuffer<float3>    _SmoothPosA;       // [maxVertices] ping-pong smoothing
 RWStructuredBuffer<float3>    _SmoothPosB;       // [maxVertices] ping-pong smoothing
 
-RWStructuredBuffer<float4>    _TemporalState;    // [totalVoxels] xyz = prev pos, w = age (-1 = uninit)
+RWTexture3D<float4>           _TemporalState;    // 3D texture: xyz = prev pos, w = age (-1 = uninit)
 
 // ──────────────────────────────────────────────────────────────────
 //  Corner / edge tables  (Surface Nets cell topology)
@@ -357,7 +358,8 @@ void PlaneSnap(uint3 id : SV_DispatchThreadID)
 
 // ══════════════════════════════════════════════════════════════════
 //  Kernel 7 : TemporalBlend
-//  Adaptive temporal damping keyed by voxel flat index
+//  Adaptive temporal damping keyed by voxel 3D coordinate
+//  _TemporalState is a RWTexture3D<float4>
 // ══════════════════════════════════════════════════════════════════
 [numthreads(64, 1, 1)]
 void TemporalBlend(uint3 id : SV_DispatchThreadID)
@@ -366,14 +368,14 @@ void TemporalBlend(uint3 id : SV_DispatchThreadID)
     if (id.x >= vertCount) return;
 
     GPUVertex v = _Vertices[id.x];
-    uint key    = v.voxelFlatIdx;
+    int3 coord  = Unflatten((int)v.voxelFlatIdx);
 
-    float4 prev    = _TemporalState[key];
+    float4 prev    = _TemporalState[coord];
     float  prevAge = prev.w;
 
     if (prevAge < 0.0)
     {
-        _TemporalState[key] = float4(v.pos, 0.0);
+        _TemporalState[coord] = float4(v.pos, 0.0);
         return;
     }
 
@@ -383,8 +385,8 @@ void TemporalBlend(uint3 id : SV_DispatchThreadID)
     if (dist < _TemporalDeadzone)
     {
         v.pos = prevPos;
-        _Vertices[id.x]    = v;
-        _TemporalState[key] = float4(prevPos, prevAge + 1.0);
+        _Vertices[id.x]     = v;
+        _TemporalState[coord] = float4(prevPos, prevAge + 1.0);
         return;
     }
 
@@ -393,8 +395,8 @@ void TemporalBlend(uint3 id : SV_DispatchThreadID)
                 + (_TemporalAlphaMax - _TemporalAlphaMin) * exp(-age * _TemporalDecayRate);
 
     v.pos = lerp(prevPos, v.pos, alpha);
-    _Vertices[id.x]    = v;
-    _TemporalState[key] = float4(v.pos, age);
+    _Vertices[id.x]     = v;
+    _TemporalState[coord] = float4(v.pos, age);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -465,4 +467,15 @@ void BuildIndirectArgs(uint3 id : SV_DispatchThreadID)
     _DrawIndirectArgs[2] = 0;            // startIndex
     _DrawIndirectArgs[3] = 0;            // baseVertex
     _DrawIndirectArgs[4] = 0;            // startInstance
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 10 : InitTemporal
+//  Sets all voxels in _TemporalState to (0,0,0,-1) (uninitialized)
+// ══════════════════════════════════════════════════════════════════
+[numthreads(4, 4, 4)]
+void InitTemporal(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= (uint3)_VoxCount)) return;
+    _TemporalState[id] = float4(0, 0, 0, -1);
 }

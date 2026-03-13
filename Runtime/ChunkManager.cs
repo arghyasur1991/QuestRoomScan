@@ -111,9 +111,24 @@ namespace Genesis.RoomScan
                 $"gpuSurfaceNets={useGPUSurfaceNets}");
 
             if (useGPUSurfaceNets && surfaceNetsCompute != null)
-                InitGPUSurfaceNets();
+            {
+                try
+                {
+                    InitGPUSurfaceNets();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[RoomScan] GPU Surface Nets init failed, falling back to CPU: {ex.Message}");
+                    _gpuSurfaceNets?.Dispose();
+                    _gpuSurfaceNets = null;
+                    useGPUSurfaceNets = false;
+                    StartWorkers();
+                }
+            }
             else
+            {
                 StartWorkers();
+            }
         }
 
         private void OnDisable()
