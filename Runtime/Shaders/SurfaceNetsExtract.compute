@@ -1,0 +1,467 @@
+// GPU Surface Nets mesh extraction from TSDF volume
+// Reads directly from RWTexture3D (no CPU readback), outputs compacted
+// vertex + index buffers for procedural rendering.
+//
+// Dispatch sequence (C# orchestrator):
+//   1. ClearCounters
+//   2. ClassifyAndEmit  (3D over volume)
+//   3. BuildVertexDispatchArgs  (1 thread)
+//   4. [optional] InitSmooth -> N x SmoothVertices -> ApplySmooth
+//   5. [optional] PlaneSnap
+//   6. [optional] TemporalBlend
+//   7. GenerateIndices  (indirect 1D over vertices)
+//   8. BuildIndirectArgs  (1 thread)
+
+#pragma kernel ClearCounters
+#pragma kernel ClassifyAndEmit
+#pragma kernel BuildVertexDispatchArgs
+#pragma kernel InitSmooth
+#pragma kernel SmoothVertices
+#pragma kernel ApplySmooth
+#pragma kernel PlaneSnap
+#pragma kernel TemporalBlend
+#pragma kernel GenerateIndices
+#pragma kernel BuildIndirectArgs
+
+// ──────────────────────────────────────────────────────────────────
+//  Volume textures (bound by VolumeIntegrator, read-only here)
+// ──────────────────────────────────────────────────────────────────
+Texture3D<float2> _TsdfVolume;     // R = signed distance [-1,1], G = weight [0,1]
+Texture3D<float4> _ColorVolume;    // RGBA8 UNorm
+
+// ──────────────────────────────────────────────────────────────────
+//  Parameters
+// ──────────────────────────────────────────────────────────────────
+uint3  _VoxCount;
+float  _VoxSize;
+float  _MinWeight;
+uint   _TotalVoxels;
+uint   _MaxVertices;
+
+float  _SmoothLambda;
+float  _SmoothBeta;
+
+uint   _NumPlanes;
+float  _SnapThreshold;
+float4 _PlaneNormals[8];     // xyz = normal
+float4 _PlaneParams[8];      // x = distance, y = confidence
+
+float  _TemporalAlphaMax;
+float  _TemporalAlphaMin;
+float  _TemporalDecayRate;
+float  _ConvergeThreshold;
+float  _TemporalDeadzone;
+
+// ──────────────────────────────────────────────────────────────────
+//  GPU Vertex (32 bytes, matches StructuredBuffer in render shader)
+// ──────────────────────────────────────────────────────────────────
+struct GPUVertex
+{
+    float3 pos;
+    float3 norm;
+    uint   packedColor;
+    uint   voxelFlatIdx;
+};
+
+// ──────────────────────────────────────────────────────────────────
+//  Buffers
+// ──────────────────────────────────────────────────────────────────
+RWStructuredBuffer<int>       _CoordVertMap;     // [totalVoxels] flat idx -> compact vert idx (-1 = none)
+RWStructuredBuffer<GPUVertex> _Vertices;         // [maxVertices] compact vertex output
+RWStructuredBuffer<uint>      _Indices;          // [maxIndices]  triangle index output
+
+RWStructuredBuffer<uint>      _Counters;         // [0] = vertex count, [1] = index count
+RWStructuredBuffer<uint>      _DispatchArgs;     // [0,1,2] = indirect dispatch group counts
+RWStructuredBuffer<uint>      _DrawIndirectArgs; // [0..4]  = DrawProceduralIndirect args
+
+RWStructuredBuffer<float3>    _SmoothPosA;       // [maxVertices] ping-pong smoothing
+RWStructuredBuffer<float3>    _SmoothPosB;       // [maxVertices] ping-pong smoothing
+
+RWStructuredBuffer<float4>    _TemporalState;    // [totalVoxels] xyz = prev pos, w = age (-1 = uninit)
+
+// ──────────────────────────────────────────────────────────────────
+//  Corner / edge tables  (Surface Nets cell topology)
+// ──────────────────────────────────────────────────────────────────
+static const int3 kCornerOffs[8] =
+{
+    int3(0,0,0), int3(1,0,0), int3(1,0,1), int3(0,0,1),
+    int3(0,1,0), int3(1,1,0), int3(1,1,1), int3(0,1,1)
+};
+static const uint kEdgeA[12] = { 0,1,2,3, 4,5,6,7, 0,1,2,3 };
+static const uint kEdgeB[12] = { 1,2,3,0, 5,6,7,4, 4,5,6,7 };
+
+// ──────────────────────────────────────────────────────────────────
+//  Helpers
+// ──────────────────────────────────────────────────────────────────
+int Flatten(int3 c)
+{
+    return c.x + c.y * (int)_VoxCount.x + c.z * (int)_VoxCount.x * (int)_VoxCount.y;
+}
+
+int3 Unflatten(int idx)
+{
+    int sliceXY = (int)_VoxCount.x * (int)_VoxCount.y;
+    int z = idx / sliceXY;
+    int rem = idx - z * sliceXY;
+    int y = rem / (int)_VoxCount.x;
+    int x = rem - y * (int)_VoxCount.x;
+    return int3(x, y, z);
+}
+
+float3 VoxelCoordToWorld(float3 c)
+{
+    return (c + 0.5 - (float3)_VoxCount / 2.0) * _VoxSize;
+}
+
+uint PackColor(float4 c)
+{
+    return (uint)(saturate(c.r) * 255.0)
+         | ((uint)(saturate(c.g) * 255.0) << 8)
+         | ((uint)(saturate(c.b) * 255.0) << 16)
+         | (255u << 24);
+}
+
+float SampleSDF(int3 coord)
+{
+    float2 s = _TsdfVolume[coord];
+    if (s.x <= -0.99) return 0.0;
+    if (s.y < _MinWeight) return 0.0;
+    return s.x;
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 0 : ClearCounters
+// ══════════════════════════════════════════════════════════════════
+[numthreads(1, 1, 1)]
+void ClearCounters(uint3 id : SV_DispatchThreadID)
+{
+    _Counters[0] = 0;
+    _Counters[1] = 0;
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 1 : ClassifyAndEmit
+//  3D dispatch: ceil(VoxCount / 4) per axis
+//  Per voxel: check 12 edges, emit vertex via atomic if surface
+// ══════════════════════════════════════════════════════════════════
+[numthreads(4, 4, 4)]
+void ClassifyAndEmit(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= _VoxCount))
+        return;
+
+    int flatIdx = Flatten((int3)id);
+
+    if (id.x >= _VoxCount.x - 1 ||
+        id.y >= _VoxCount.y - 1 ||
+        id.z >= _VoxCount.z - 1)
+    {
+        _CoordVertMap[flatIdx] = -1;
+        return;
+    }
+
+    float3 posCoord = 0;
+    float3 gradDir  = 0;
+    uint numCrossings    = 0;
+    uint numBadCrossings = 0;
+
+    [unroll]
+    for (uint e = 0; e < 12; e++)
+    {
+        int3 cA = (int3)id + kCornerOffs[kEdgeA[e]];
+        int3 cB = (int3)id + kCornerOffs[kEdgeB[e]];
+
+        float2 sA = _TsdfVolume[cA];
+        float2 sB = _TsdfVolume[cB];
+
+        bool emptyA = (sA.x <= -0.99);
+        bool emptyB = (sB.x <= -0.99);
+
+        if (!emptyA && sA.y < _MinWeight) emptyA = true;
+        if (!emptyB && sB.y < _MinWeight) emptyB = true;
+
+        float valA = emptyA ? 0.0 : sA.x;
+        float valB = emptyB ? 0.0 : sB.x;
+
+        float change = valA - valB;
+        gradDir += (float3)(cA - cB) * change;
+
+        bool crosses = (valA < 0) != (valB < 0);
+        if (crosses)
+        {
+            if (emptyA || emptyB) numBadCrossings++;
+            float t = valA / change;
+            posCoord += (float3)cA + t * (float3)(cB - cA);
+            numCrossings++;
+        }
+    }
+
+    if (numCrossings < 3 || numCrossings == numBadCrossings)
+    {
+        _CoordVertMap[flatIdx] = -1;
+        return;
+    }
+
+    posCoord /= (float)numCrossings;
+    float3 worldPos = VoxelCoordToWorld(posCoord);
+    float3 norm     = normalize(gradDir);
+
+    float4 col = _ColorVolume[(int3)id];
+    uint packed = (col.a > 0.04) ? PackColor(col) : PackColor(float4(0.078, 0.078, 0.098, 1.0));
+
+    uint compactIdx;
+    InterlockedAdd(_Counters[0], 1, compactIdx);
+
+    if (compactIdx >= _MaxVertices)
+        return;
+
+    GPUVertex v;
+    v.pos          = worldPos;
+    v.norm         = norm;
+    v.packedColor  = packed;
+    v.voxelFlatIdx = (uint)flatIdx;
+
+    _Vertices[compactIdx]     = v;
+    _CoordVertMap[flatIdx]    = (int)compactIdx;
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 2 : BuildVertexDispatchArgs
+//  Writes indirect dispatch dimensions for per-vertex kernels
+// ══════════════════════════════════════════════════════════════════
+[numthreads(1, 1, 1)]
+void BuildVertexDispatchArgs(uint3 id : SV_DispatchThreadID)
+{
+    uint vertCount = min(_Counters[0], _MaxVertices);
+    _DispatchArgs[0] = (vertCount + 63) / 64;
+    _DispatchArgs[1] = 1;
+    _DispatchArgs[2] = 1;
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 3 : InitSmooth
+//  Copies vertex positions into smooth ping buffer
+// ══════════════════════════════════════════════════════════════════
+[numthreads(64, 1, 1)]
+void InitSmooth(uint3 id : SV_DispatchThreadID)
+{
+    uint vertCount = min(_Counters[0], _MaxVertices);
+    if (id.x >= vertCount) return;
+    _SmoothPosA[id.x] = _Vertices[id.x].pos;
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 4 : SmoothVertices
+//  HC-Laplacian: reads _SmoothPosA, writes _SmoothPosB
+//  C# swaps buffer bindings between iterations
+// ══════════════════════════════════════════════════════════════════
+[numthreads(64, 1, 1)]
+void SmoothVertices(uint3 id : SV_DispatchThreadID)
+{
+    uint vertCount = min(_Counters[0], _MaxVertices);
+    if (id.x >= vertCount) return;
+
+    float3 pos  = _SmoothPosA[id.x];
+    float3 norm = _Vertices[id.x].norm;
+    int3   coord = Unflatten((int)_Vertices[id.x].voxelFlatIdx);
+
+    float3 laplacian    = 0;
+    float  totalWeight  = 0;
+
+    [unroll]
+    for (int axis = 0; axis < 3; axis++)
+    {
+        [unroll]
+        for (int dir = -1; dir <= 1; dir += 2)
+        {
+            int3 nc = coord;
+            nc[axis] += dir;
+            if (nc[axis] < 0 || nc[axis] >= (int)_VoxCount[axis]) continue;
+
+            int nbrVert = _CoordVertMap[Flatten(nc)];
+            if (nbrVert < 0 || (uint)nbrVert >= vertCount) continue;
+
+            float nw = max(0.0, dot(norm, _Vertices[nbrVert].norm));
+            laplacian   += _SmoothPosA[nbrVert] * nw;
+            totalWeight += nw;
+        }
+    }
+
+    if (totalWeight < 0.001)
+    {
+        _SmoothPosB[id.x] = pos;
+        return;
+    }
+
+    laplacian /= totalWeight;
+    float3 q        = lerp(pos, laplacian, _SmoothLambda);
+    float3 original = _Vertices[id.x].pos;
+    _SmoothPosB[id.x] = q - _SmoothBeta * (q - original);
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 5 : ApplySmooth
+//  Writes final smoothed positions from _SmoothPosA back to _Vertices
+//  C# ensures the correct buffer is bound as _SmoothPosA after iterations
+// ══════════════════════════════════════════════════════════════════
+[numthreads(64, 1, 1)]
+void ApplySmooth(uint3 id : SV_DispatchThreadID)
+{
+    uint vertCount = min(_Counters[0], _MaxVertices);
+    if (id.x >= vertCount) return;
+
+    GPUVertex v = _Vertices[id.x];
+    v.pos = _SmoothPosA[id.x];
+    _Vertices[id.x] = v;
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 6 : PlaneSnap
+// ══════════════════════════════════════════════════════════════════
+[numthreads(64, 1, 1)]
+void PlaneSnap(uint3 id : SV_DispatchThreadID)
+{
+    uint vertCount = min(_Counters[0], _MaxVertices);
+    if (id.x >= vertCount) return;
+
+    GPUVertex v = _Vertices[id.x];
+    float3 pos  = v.pos;
+    float3 norm = v.norm;
+
+    float bestDist  = _SnapThreshold;
+    int   bestPlane = -1;
+
+    for (uint p = 0; p < _NumPlanes; p++)
+    {
+        float3 pn = _PlaneNormals[p].xyz;
+        if (abs(dot(norm, pn)) < 0.9) continue;
+
+        float d = abs(dot(pos, pn) - _PlaneParams[p].x);
+        if (d < bestDist)
+        {
+            bestDist  = d;
+            bestPlane = (int)p;
+        }
+    }
+
+    if (bestPlane >= 0)
+    {
+        float3 pn   = _PlaneNormals[bestPlane].xyz;
+        float  sd   = dot(pos, pn) - _PlaneParams[bestPlane].x;
+        float  str  = saturate(_PlaneParams[bestPlane].y);
+        v.pos = pos - sd * pn * str;
+        _Vertices[id.x] = v;
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 7 : TemporalBlend
+//  Adaptive temporal damping keyed by voxel flat index
+// ══════════════════════════════════════════════════════════════════
+[numthreads(64, 1, 1)]
+void TemporalBlend(uint3 id : SV_DispatchThreadID)
+{
+    uint vertCount = min(_Counters[0], _MaxVertices);
+    if (id.x >= vertCount) return;
+
+    GPUVertex v = _Vertices[id.x];
+    uint key    = v.voxelFlatIdx;
+
+    float4 prev    = _TemporalState[key];
+    float  prevAge = prev.w;
+
+    if (prevAge < 0.0)
+    {
+        _TemporalState[key] = float4(v.pos, 0.0);
+        return;
+    }
+
+    float3 prevPos = prev.xyz;
+    float  dist    = distance(v.pos, prevPos);
+
+    if (dist < _TemporalDeadzone)
+    {
+        v.pos = prevPos;
+        _Vertices[id.x]    = v;
+        _TemporalState[key] = float4(prevPos, prevAge + 1.0);
+        return;
+    }
+
+    float age   = (dist > _ConvergeThreshold) ? 0.0 : prevAge + 1.0;
+    float alpha = _TemporalAlphaMin
+                + (_TemporalAlphaMax - _TemporalAlphaMin) * exp(-age * _TemporalDecayRate);
+
+    v.pos = lerp(prevPos, v.pos, alpha);
+    _Vertices[id.x]    = v;
+    _TemporalState[key] = float4(v.pos, age);
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 8 : GenerateIndices
+//  Per vertex: check 3 axes for quad emission
+// ══════════════════════════════════════════════════════════════════
+void TryEmitQuad(int3 coord, int3 axis, int3 d1, int3 d2)
+{
+    if (any(coord - d1 < 0))       return;
+    if (any(coord - d2 < 0))       return;
+    if (any(coord + axis >= (int3)_VoxCount)) return;
+
+    float va = SampleSDF(coord);
+    float vb = SampleSDF(coord + axis);
+    if ((va < 0) == (vb < 0)) return;
+
+    int a = _CoordVertMap[Flatten(coord)];
+    int b = _CoordVertMap[Flatten(coord - d1)];
+    int c = _CoordVertMap[Flatten(coord - (d1 + d2))];
+    int d = _CoordVertMap[Flatten(coord - d2)];
+    if (a < 0 || b < 0 || c < 0 || d < 0) return;
+
+    uint baseIdx;
+    InterlockedAdd(_Counters[1], 6, baseIdx);
+
+    if (va < 0)
+    {
+        _Indices[baseIdx    ] = (uint)c;
+        _Indices[baseIdx + 1] = (uint)b;
+        _Indices[baseIdx + 2] = (uint)a;
+        _Indices[baseIdx + 3] = (uint)d;
+        _Indices[baseIdx + 4] = (uint)c;
+        _Indices[baseIdx + 5] = (uint)a;
+    }
+    else
+    {
+        _Indices[baseIdx    ] = (uint)a;
+        _Indices[baseIdx + 1] = (uint)c;
+        _Indices[baseIdx + 2] = (uint)d;
+        _Indices[baseIdx + 3] = (uint)a;
+        _Indices[baseIdx + 4] = (uint)b;
+        _Indices[baseIdx + 5] = (uint)c;
+    }
+}
+
+[numthreads(64, 1, 1)]
+void GenerateIndices(uint3 id : SV_DispatchThreadID)
+{
+    uint vertCount = min(_Counters[0], _MaxVertices);
+    if (id.x >= vertCount) return;
+
+    int3 coord = Unflatten((int)_Vertices[id.x].voxelFlatIdx);
+
+    TryEmitQuad(coord, int3(1,0,0), int3(0,0,1), int3(0,1,0));
+    TryEmitQuad(coord, int3(0,1,0), int3(1,0,0), int3(0,0,1));
+    TryEmitQuad(coord, int3(0,0,1), int3(0,1,0), int3(1,0,0));
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 9 : BuildIndirectArgs
+//  Packs index count into DrawProceduralIndirect args
+// ══════════════════════════════════════════════════════════════════
+[numthreads(1, 1, 1)]
+void BuildIndirectArgs(uint3 id : SV_DispatchThreadID)
+{
+    _DrawIndirectArgs[0] = _Counters[1]; // indexCount
+    _DrawIndirectArgs[1] = 1;            // instanceCount
+    _DrawIndirectArgs[2] = 0;            // startIndex
+    _DrawIndirectArgs[3] = 0;            // baseVertex
+    _DrawIndirectArgs[4] = 0;            // startInstance
+}

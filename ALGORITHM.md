@@ -8,13 +8,19 @@ Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Dista
 DepthCapture (AR depth frames → normals → dilation)
        │
 VolumeIntegrator (TSDF integrate → warmup clear → prune)
-       ├── ChunkManager → SurfaceNetsMesher
-       │     (TSDF smooth → Surface Nets → vertex smooth → plane snap → temporal blend)
-       ├── PlaneDetector (periodic RANSAC → persistent plane list)
+       │
+       ├── [GPU path] GPUSurfaceNets (compute shader: classify → compact → smooth → snap → temporal → index)
+       │     └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
+       │
+       ├── [CPU path] ChunkManager → SurfaceNetsMesher
+       │     (AsyncGPUReadback → TSDF smooth → Surface Nets → vertex smooth → plane snap → temporal blend)
+       │
+       ├── PlaneDetector (periodic RANSAC on background thread → persistent plane list)
        ├── TriplanarCache (bake camera → 3 world-space textures, persistent)
        └── KeyframeStore (ring buffer of camera frames, live quality)
                 │
 ScanMeshVertexColor.shader (keyframes → triplanar → vertex color fallback)
+  └── _GPU_SURFACE_NETS variant (SV_VertexID + StructuredBuffer, no Mesh)
 ```
 
 ## 1. Volume Layout

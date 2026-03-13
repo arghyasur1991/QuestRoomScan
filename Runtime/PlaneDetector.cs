@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
-using System.Diagnostics;
+using System.Threading;
+using System.Threading.Tasks;
 using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
@@ -8,9 +10,9 @@ using Debug = UnityEngine.Debug;
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// Periodically detects dominant planes (walls, floor, ceiling) from subsampled
-    /// mesh vertices using sequential RANSAC with axis-aligned bias and Burst-parallel
-    /// inlier counting. Detected planes persist and accumulate confidence across frames.
+    /// Detects dominant planes (walls, floor, ceiling) from mesh vertices using
+    /// sequential RANSAC with axis-aligned bias. RANSAC runs on a background thread
+    /// to avoid blocking the main thread. Results are applied on LateUpdate.
     /// </summary>
     public class PlaneDetector : MonoBehaviour
     {
@@ -31,8 +33,6 @@ namespace Genesis.RoomScan
         [Header("Sampling")]
         [SerializeField, Tooltip("Max vertices to sample from all chunks. Caps RANSAC input size.")]
         private int maxSampleVertices = 2048;
-        [SerializeField, Tooltip("Time budget in milliseconds. Detection aborts if exceeded.")]
-        private float timeBudgetMs = 2f;
 
         [Header("Axis Bias")]
         [SerializeField, Tooltip("Snap plane normals to axis if within this angle (degrees).")]
@@ -52,8 +52,28 @@ namespace Genesis.RoomScan
 
         private readonly List<PlaneCandidate> _persistentPlanes = new();
 
+        // Background detection state
+        private volatile bool _detectionRunning;
+        private volatile bool _detectionReady;
+        private List<PlaneCandidate> _pendingResults;
+
         public NativeArray<PlaneData> Planes => _planes;
         public int PlaneCount => _planeCount;
+
+        private void LateUpdate()
+        {
+            if (!_detectionReady) return;
+            _detectionReady = false;
+
+            if (_pendingResults != null)
+            {
+                MergeWithPersistent(_pendingResults);
+                PublishPlanes();
+                _pendingResults = null;
+            }
+
+            _detectionRunning = false;
+        }
 
         private void OnDestroy()
         {
@@ -64,15 +84,40 @@ namespace Genesis.RoomScan
         {
             _meshCyclesSinceDetection++;
             if (_meshCyclesSinceDetection < detectionInterval) return;
+            if (_detectionRunning) return;
             _meshCyclesSinceDetection = 0;
 
-            RunDetection(chunkManager);
+            CollectAndDetect(chunkManager);
         }
 
-        private void RunDetection(ChunkManager chunkManager)
+        /// <summary>
+        /// Submit pre-collected vertex samples (e.g. from GPU readback).
+        /// Skips the Mesh sampling step and goes directly to background RANSAC.
+        /// </summary>
+        public void SubmitSamples(float3[] positions, float3[] normals, int count)
         {
-            var sw = Stopwatch.StartNew();
+            if (_detectionRunning) return;
+            if (count < minInliers * 2) return;
 
+            _detectionRunning = true;
+            int stride = math.max(1, count / maxSampleVertices);
+            int sampleCount = (count + stride - 1) / stride;
+            var samplePos = new float3[sampleCount];
+            var sampleNrm = new float3[sampleCount];
+            int idx = 0;
+            for (int i = 0; i < count && idx < sampleCount; i += stride)
+            {
+                samplePos[idx] = positions[i];
+                sampleNrm[idx] = normals[i];
+                idx++;
+            }
+            sampleCount = idx;
+
+            LaunchBackgroundDetection(samplePos, sampleNrm, sampleCount);
+        }
+
+        private void CollectAndDetect(ChunkManager chunkManager)
+        {
             int totalVertCount = 0;
             foreach (MeshChunkData chunk in chunkManager.GetPopulatedChunks())
             {
@@ -82,9 +127,10 @@ namespace Genesis.RoomScan
             if (totalVertCount < minInliers * 2) return;
 
             int stride = math.max(1, totalVertCount / maxSampleVertices);
-
-            using var samplePositions = new NativeList<float3>(maxSampleVertices + 256, Allocator.TempJob);
-            using var sampleNormals = new NativeList<float3>(maxSampleVertices + 256, Allocator.TempJob);
+            int estimatedSamples = (totalVertCount / stride) + 256;
+            var samplePos = new float3[estimatedSamples];
+            var sampleNrm = new float3[estimatedSamples];
+            int sampleCount = 0;
 
             int globalIdx = 0;
             foreach (MeshChunkData chunk in chunkManager.GetPopulatedChunks())
@@ -96,38 +142,70 @@ namespace Genesis.RoomScan
                 var md = meshData[0];
                 if (md.vertexCount == 0) continue;
 
-                using var positions = new NativeArray<Vector3>(md.vertexCount, Allocator.TempJob);
-                using var normals = new NativeArray<Vector3>(md.vertexCount, Allocator.TempJob);
+                using var positions = new NativeArray<UnityEngine.Vector3>(md.vertexCount, Allocator.TempJob);
+                using var normals = new NativeArray<UnityEngine.Vector3>(md.vertexCount, Allocator.TempJob);
                 md.GetVertices(positions);
                 md.GetNormals(normals);
 
-                Vector3 chunkOrigin = chunk.GameObject.transform.position;
+                UnityEngine.Vector3 chunkOrigin = chunk.GameObject.transform.position;
                 for (int i = 0; i < positions.Length; i++)
                 {
-                    if (globalIdx % stride == 0)
+                    if (globalIdx % stride == 0 && sampleCount < estimatedSamples)
                     {
-                        samplePositions.Add((float3)(positions[i] + chunkOrigin));
-                        sampleNormals.Add((float3)normals[i]);
+                        samplePos[sampleCount] = (float3)(positions[i] + chunkOrigin);
+                        sampleNrm[sampleCount] = (float3)normals[i];
+                        sampleCount++;
                     }
                     globalIdx++;
                 }
             }
 
-            int sampleCount = samplePositions.Length;
             if (sampleCount < minInliers * 2) return;
 
-            var detectedPlanes = new List<PlaneCandidate>();
-            var inlierFlags = new NativeArray<bool>(sampleCount, Allocator.TempJob);
+            _detectionRunning = true;
+            LaunchBackgroundDetection(samplePos, sampleNrm, sampleCount);
+        }
 
-            var rng = new Unity.Mathematics.Random((uint)(Time.frameCount + 1));
-            float cosAxisSnap = math.cos(math.radians(axisSnapAngle));
+        private void LaunchBackgroundDetection(float3[] positions, float3[] normals, int count)
+        {
+            int mPlanes = maxPlanes;
+            int mIter = ransacIterations;
+            float mInlierDist = inlierDistance;
+            int mMinInliers = minInliers;
+            float mNormalAlign = normalAlignThreshold;
+            float cosSnap = math.cos(math.radians(axisSnapAngle));
+            uint seed = (uint)(Time.frameCount + 1);
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    var detected = RunRansac(positions, normals, count,
+                        mPlanes, mIter, mInlierDist, mMinInliers, mNormalAlign, cosSnap, seed);
+                    _pendingResults = detected;
+                    _detectionReady = true;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[PlaneDetector] Background RANSAC failed: {ex.Message}");
+                    _detectionRunning = false;
+                }
+            });
+        }
+
+        private static List<PlaneCandidate> RunRansac(
+            float3[] positions, float3[] normals, int count,
+            int maxPlanes, int ransacIterations, float inlierDistance,
+            int minInliers, float normalAlignThreshold, float cosAxisSnap, uint seed)
+        {
+            var detected = new List<PlaneCandidate>();
+            var inlierFlags = new bool[count];
+            var rng = new Unity.Mathematics.Random(seed);
 
             for (int planeIdx = 0; planeIdx < maxPlanes; planeIdx++)
             {
-                if (sw.Elapsed.TotalMilliseconds > timeBudgetMs) break;
-
                 int availableCount = 0;
-                for (int i = 0; i < sampleCount; i++)
+                for (int i = 0; i < count; i++)
                     if (!inlierFlags[i]) availableCount++;
 
                 if (availableCount < minInliers) break;
@@ -138,15 +216,15 @@ namespace Genesis.RoomScan
 
                 for (int iter = 0; iter < ransacIterations; iter++)
                 {
-                    int idxA = SampleNonInlier(ref rng, inlierFlags);
-                    int idxB = SampleNonInlier(ref rng, inlierFlags);
-                    int idxC = SampleNonInlier(ref rng, inlierFlags);
+                    int idxA = SampleNonInlier(ref rng, inlierFlags, count);
+                    int idxB = SampleNonInlier(ref rng, inlierFlags, count);
+                    int idxC = SampleNonInlier(ref rng, inlierFlags, count);
 
                     if (idxA == idxB || idxB == idxC || idxA == idxC) continue;
 
-                    float3 pA = samplePositions[idxA];
-                    float3 pB = samplePositions[idxB];
-                    float3 pC = samplePositions[idxC];
+                    float3 pA = positions[idxA];
+                    float3 pB = positions[idxB];
+                    float3 pC = positions[idxC];
 
                     float3 normal = math.normalize(math.cross(pB - pA, pC - pA));
                     if (math.any(math.isnan(normal))) continue;
@@ -158,12 +236,12 @@ namespace Genesis.RoomScan
                     float distance = math.dot(normal, pA);
 
                     int inlierCount = 0;
-                    for (int i = 0; i < sampleCount; i++)
+                    for (int i = 0; i < count; i++)
                     {
                         if (inlierFlags[i]) continue;
-                        float d = math.abs(math.dot(samplePositions[i], normal) - distance);
+                        float d = math.abs(math.dot(positions[i], normal) - distance);
                         if (d > inlierDistance) continue;
-                        float nDot = math.abs(math.dot(sampleNormals[i], normal));
+                        float nDot = math.abs(math.dot(normals[i], normal));
                         if (nDot >= normalAlignThreshold)
                             inlierCount++;
                     }
@@ -177,19 +255,19 @@ namespace Genesis.RoomScan
 
                 if (bestInlierCount < minInliers) break;
 
-                RefinePlane(samplePositions, sampleNormals, inlierFlags,
-                    ref bestNormal, ref bestDistance, cosAxisSnap);
+                RefinePlaneStatic(positions, normals, inlierFlags, count,
+                    ref bestNormal, ref bestDistance, inlierDistance, normalAlignThreshold, cosAxisSnap);
 
-                for (int i = 0; i < sampleCount; i++)
+                for (int i = 0; i < count; i++)
                 {
                     if (inlierFlags[i]) continue;
-                    float d = math.abs(math.dot(samplePositions[i], bestNormal) - bestDistance);
-                    float nDot = math.abs(math.dot(sampleNormals[i], bestNormal));
+                    float d = math.abs(math.dot(positions[i], bestNormal) - bestDistance);
+                    float nDot = math.abs(math.dot(normals[i], bestNormal));
                     if (d < inlierDistance && nDot >= normalAlignThreshold)
                         inlierFlags[i] = true;
                 }
 
-                detectedPlanes.Add(new PlaneCandidate
+                detected.Add(new PlaneCandidate
                 {
                     Normal = bestNormal,
                     Distance = bestDistance,
@@ -197,10 +275,7 @@ namespace Genesis.RoomScan
                 });
             }
 
-            inlierFlags.Dispose();
-
-            MergeWithPersistent(detectedPlanes);
-            PublishPlanes();
+            return detected;
         }
 
         private static float3 SnapToAxis(float3 normal, float cosThreshold)
@@ -215,12 +290,14 @@ namespace Genesis.RoomScan
             return normal;
         }
 
-        private void RefinePlane(NativeList<float3> positions, NativeList<float3> normals,
-            NativeArray<bool> inlierFlags, ref float3 normal, ref float distance, float cosAxisSnap)
+        private static void RefinePlaneStatic(float3[] positions, float3[] normals,
+            bool[] inlierFlags, int count,
+            ref float3 normal, ref float distance,
+            float inlierDistance, float normalAlignThreshold, float cosAxisSnap)
         {
             float3 centroid = float3.zero;
-            int count = 0;
-            for (int i = 0; i < positions.Length; i++)
+            int cnt = 0;
+            for (int i = 0; i < count; i++)
             {
                 if (inlierFlags[i]) continue;
                 float d = math.abs(math.dot(positions[i], normal) - distance);
@@ -228,14 +305,14 @@ namespace Genesis.RoomScan
                 if (d < inlierDistance * 1.5f && nDot >= normalAlignThreshold * 0.95f)
                 {
                     centroid += positions[i];
-                    count++;
+                    cnt++;
                 }
             }
-            if (count < 3) return;
-            centroid /= count;
+            if (cnt < 3) return;
+            centroid /= cnt;
 
             float3x3 cov = float3x3.zero;
-            for (int i = 0; i < positions.Length; i++)
+            for (int i = 0; i < count; i++)
             {
                 if (inlierFlags[i]) continue;
                 float d = math.abs(math.dot(positions[i], normal) - distance);
@@ -248,9 +325,9 @@ namespace Genesis.RoomScan
                     cov.c2 += diff * diff.z;
                 }
             }
-            cov.c0 /= count;
-            cov.c1 /= count;
-            cov.c2 /= count;
+            cov.c0 /= cnt;
+            cov.c1 /= cnt;
+            cov.c2 /= cnt;
 
             float3 refinedNormal = SmallestEigenvector(cov);
             if (math.dot(refinedNormal, normal) < 0)
@@ -369,14 +446,14 @@ namespace Genesis.RoomScan
             }
         }
 
-        private static int SampleNonInlier(ref Unity.Mathematics.Random rng, NativeArray<bool> inlierFlags)
+        private static int SampleNonInlier(ref Unity.Mathematics.Random rng, bool[] inlierFlags, int count)
         {
             for (int attempt = 0; attempt < 100; attempt++)
             {
-                int idx = rng.NextInt(0, inlierFlags.Length);
+                int idx = rng.NextInt(0, count);
                 if (!inlierFlags[idx]) return idx;
             }
-            return rng.NextInt(0, inlierFlags.Length);
+            return rng.NextInt(0, count);
         }
 
         private struct PlaneCandidate
