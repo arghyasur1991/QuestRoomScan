@@ -159,8 +159,7 @@ Shader "Genesis/ScanMeshVertexColor"
 
             Varyings vert(uint vertID : SV_VertexID)
             {
-                Varyings OUT;
-                UNITY_INITIALIZE_OUTPUT(Varyings, OUT);
+                Varyings OUT = (Varyings)0;
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
 
                 uint idx = _SurfaceIndices[vertID];
@@ -304,8 +303,7 @@ Shader "Genesis/ScanMeshVertexColor"
             #ifdef _GPU_SURFACE_NETS
             Varyings vert(uint vertID : SV_VertexID)
             {
-                Varyings OUT;
-                UNITY_INITIALIZE_OUTPUT(Varyings, OUT);
+                Varyings OUT = (Varyings)0;
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
                 uint idx = _SurfaceIndices[vertID];
                 OUT.positionHCS = TransformWorldToHClip(_SurfaceVerts[idx].pos);
@@ -374,8 +372,7 @@ Shader "Genesis/ScanMeshVertexColor"
             #ifdef _GPU_SURFACE_NETS
             Varyings vert(uint vertID : SV_VertexID)
             {
-                Varyings OUT;
-                UNITY_INITIALIZE_OUTPUT(Varyings, OUT);
+                Varyings OUT = (Varyings)0;
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
                 uint idx = _SurfaceIndices[vertID];
                 GPUVertex gv = _SurfaceVerts[idx];

@@ -100,11 +100,12 @@ int Flatten(int3 c)
 
 int3 Unflatten(int idx)
 {
-    int sliceXY = (int)_VoxCount.x * (int)_VoxCount.y;
-    int z = idx / sliceXY;
-    int rem = idx - z * sliceXY;
-    int y = rem / (int)_VoxCount.x;
-    int x = rem - y * (int)_VoxCount.x;
+    uint uidx = (uint)idx;
+    uint sliceXY = _VoxCount.x * _VoxCount.y;
+    uint z = uidx / sliceXY;
+    uint rem = uidx - z * sliceXY;
+    uint y = rem / _VoxCount.x;
+    uint x = rem - y * _VoxCount.x;
     return int3(x, y, z);
 }
 
