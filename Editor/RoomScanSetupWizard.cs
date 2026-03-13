@@ -33,6 +33,7 @@ namespace Genesis.RoomScan.Editor
         RoomScanPersistence _persistence;
         KeyframeCollector _keyframeCollector;
         PointCloudExporter _pointCloudExporter;
+        PlaneDetector _planeDetector;
 
         bool _depthCaptureWired, _volumeWired, _projectorWired, _chunkMatWired, _triplanarWired;
 
@@ -100,6 +101,7 @@ namespace Genesis.RoomScan.Editor
             _persistence = FindAny<RoomScanPersistence>();
             _keyframeCollector = FindAny<KeyframeCollector>();
             _pointCloudExporter = FindAny<PointCloudExporter>();
+            _planeDetector = FindAny<PlaneDetector>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -245,6 +247,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("RoomScanPersistence", _persistence != null);
             StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
             StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
+            StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _chunkManager == null || _textureProjector == null ||
@@ -252,7 +255,7 @@ namespace Genesis.RoomScan.Editor
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null || _keyframeStore == null ||
                               _persistence == null || _keyframeCollector == null ||
-                              _pointCloudExporter == null;
+                              _pointCloudExporter == null || _planeDetector == null;
 
             if (anyMissing)
             {
@@ -314,6 +317,8 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<KeyframeCollector>(root);
             if (root.GetComponent<PointCloudExporter>() == null)
                 Undo.AddComponent<PointCloudExporter>(root);
+            if (root.GetComponent<PlaneDetector>() == null)
+                Undo.AddComponent<PlaneDetector>(root);
 
             MarkDirty();
             Refresh();
@@ -491,6 +496,7 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "persistence", _persistence);
                 SetRef(so, "keyframeCollector", _keyframeCollector);
                 SetRef(so, "pointCloudExporter", _pointCloudExporter);
+                SetRef(so, "planeDetector", _planeDetector);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }

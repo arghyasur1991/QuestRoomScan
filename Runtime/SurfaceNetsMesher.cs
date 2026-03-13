@@ -11,6 +11,13 @@ using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
 {
+    public struct PlaneData
+    {
+        public float3 Normal;
+        public float Distance;
+        public float Confidence;
+    }
+
     public class SurfaceNetsMesher : IDisposable
     {
         private NativeList<Vertex> _verts;
@@ -19,10 +26,32 @@ namespace Genesis.RoomScan
         private NativeList<uint> _tris;
         private NativeReference<MinMaxAABB> _boundsRef;
 
+        private NativeArray<sbyte> _smoothA;
+        private NativeArray<sbyte> _smoothB;
+
+        private NativeArray<float3> _posA;
+        private NativeArray<float3> _posB;
+        private NativeArray<float3> _origPositions;
+        private NativeArray<float3> _normals;
+
+        private NativeHashMap<int, float3> _prevPositions;
+
         private bool _busy;
         public bool IsBusy => _busy;
 
         public float MinMeshWeight { get; set; } = 0.15f;
+
+        public int TsdfSmoothIterations { get; set; } = 1;
+        public float TsdfSmoothSigma { get; set; } = 0.3f;
+
+        public int MeshSmoothIterations { get; set; } = 3;
+        public float MeshSmoothLambda { get; set; } = 0.6f;
+        public float MeshSmoothBeta { get; set; } = 0.5f;
+
+        public float PlaneSnapThreshold { get; set; } = 0.03f;
+
+        public float TemporalAlpha { get; set; } = 0.3f;
+        public float TemporalDeadzone { get; set; } = 0.001f;
 
         private const int InvalidVert = -1;
         private const float SbyteMax = sbyte.MaxValue;
@@ -61,6 +90,241 @@ namespace Genesis.RoomScan
                 new(VertexAttribute.Color, VertexAttributeFormat.UNorm8, 4)
             };
         }
+
+        #region Phase 1: TSDF Bilateral Smoothing
+
+        [BurstCompile]
+        private struct BilateralSmoothTsdfJob : IJobFor
+        {
+            [ReadOnly] public NativeArray<sbyte> Source;
+            [ReadOnly] public NativeArray<sbyte> Weights;
+            [WriteOnly] public NativeArray<sbyte> Dest;
+            public int3 VoxCount;
+            public float SigmaRange;
+            public float MinWeightSbyte;
+
+            public void Execute(int i)
+            {
+                sbyte rawVal = Source[i];
+                if (rawVal == sbyte.MinValue || Weights[i] < MinWeightSbyte)
+                {
+                    Dest[i] = rawVal;
+                    return;
+                }
+
+                int3 coord = new int3(
+                    i % VoxCount.x,
+                    i / VoxCount.x % VoxCount.y,
+                    i / (VoxCount.x * VoxCount.y));
+
+                if (coord.x < 1 || coord.y < 1 || coord.z < 1 ||
+                    coord.x >= VoxCount.x - 1 || coord.y >= VoxCount.y - 1 ||
+                    coord.z >= VoxCount.z - 1)
+                {
+                    Dest[i] = rawVal;
+                    return;
+                }
+
+                float centerVal = rawVal / SbyteMax;
+                float invSigSq2 = 1f / math.max(2f * SigmaRange * SigmaRange, 0.001f);
+                float sumTsdf = 0f;
+                float sumW = 0f;
+                int sliceXY = VoxCount.x * VoxCount.y;
+
+                for (int dz = -1; dz <= 1; dz++)
+                {
+                    int nz = i + dz * sliceXY;
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        int nzy = nz + dy * VoxCount.x;
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            int ni = nzy + dx;
+                            sbyte nRaw = Source[ni];
+                            if (nRaw == sbyte.MinValue) continue;
+                            float nWeight = Weights[ni];
+                            if (nWeight < MinWeightSbyte) continue;
+
+                            float nVal = nRaw / SbyteMax;
+                            float nConf = nWeight / SbyteMax;
+
+                            int manhattan = math.abs(dx) + math.abs(dy) + math.abs(dz);
+                            float spatialW = manhattan <= 1 ? 1f : (manhattan == 2 ? 0.7f : 0.5f);
+
+                            float diff = nVal - centerVal;
+                            float rangeW = math.exp(-diff * diff * invSigSq2);
+
+                            float w = spatialW * rangeW * nConf;
+                            sumTsdf += nVal * w;
+                            sumW += w;
+                        }
+                    }
+                }
+
+                if (sumW > 0.001f)
+                {
+                    float smoothed = sumTsdf / sumW;
+                    int rounded = (int)math.round(smoothed * SbyteMax);
+                    Dest[i] = (sbyte)math.clamp(rounded, -127, 127);
+                }
+                else
+                {
+                    Dest[i] = rawVal;
+                }
+            }
+        }
+
+        #endregion
+
+        #region Phase 2: Normal-Aware Vertex Smoothing
+
+        [BurstCompile]
+        private struct SmoothVerticesJob : IJobFor
+        {
+            [ReadOnly] public NativeArray<float3> InputPositions;
+            [ReadOnly] public NativeArray<float3> Normals;
+            [ReadOnly] public NativeArray<float3> OriginalPositions;
+            [WriteOnly] public NativeArray<float3> OutputPositions;
+            [ReadOnly] public NativeArray<int> CoordVertMap;
+            [ReadOnly] public NativeList<int3> VertCoords;
+            public int3 VoxCount;
+            public float Lambda;
+            public float Beta;
+
+            public void Execute(int i)
+            {
+                float3 pos = InputPositions[i];
+                float3 norm = Normals[i];
+                int3 coord = VertCoords[i];
+
+                float3 laplacian = float3.zero;
+                float totalWeight = 0f;
+
+                for (int axis = 0; axis < 3; axis++)
+                {
+                    for (int dir = -1; dir <= 1; dir += 2)
+                    {
+                        int3 nc = coord;
+                        nc[axis] += dir;
+
+                        if (nc[axis] < 0 || nc[axis] >= VoxCount[axis]) continue;
+
+                        int flatIdx = nc.x + nc.y * VoxCount.x + nc.z * VoxCount.x * VoxCount.y;
+                        if (flatIdx < 0 || flatIdx >= CoordVertMap.Length) continue;
+
+                        int neighborVert = CoordVertMap[flatIdx];
+                        if (neighborVert < 0 || neighborVert >= InputPositions.Length) continue;
+
+                        float normalDot = math.dot(norm, Normals[neighborVert]);
+                        float nw = math.max(0f, normalDot);
+
+                        laplacian += InputPositions[neighborVert] * nw;
+                        totalWeight += nw;
+                    }
+                }
+
+                if (totalWeight < 0.001f)
+                {
+                    OutputPositions[i] = pos;
+                    return;
+                }
+
+                laplacian /= totalWeight;
+
+                float3 q = math.lerp(pos, laplacian, Lambda);
+                float3 original = OriginalPositions[i];
+                OutputPositions[i] = q - Beta * (q - original);
+            }
+        }
+
+        #endregion
+
+        #region Phase 3: Plane Snap
+
+        [BurstCompile]
+        private struct PlaneSnapJob : IJobFor
+        {
+            [NativeDisableParallelForRestriction]
+            public NativeArray<float3> Positions;
+            [ReadOnly] public NativeArray<float3> Normals;
+            [ReadOnly] public NativeArray<PlaneData> Planes;
+            public int NumPlanes;
+            public float SnapThreshold;
+
+            public void Execute(int i)
+            {
+                float3 pos = Positions[i];
+                float3 norm = Normals[i];
+
+                float bestDist = SnapThreshold;
+                int bestPlane = -1;
+
+                for (int p = 0; p < NumPlanes; p++)
+                {
+                    float normalDot = math.abs(math.dot(norm, Planes[p].Normal));
+                    if (normalDot < 0.9f) continue;
+
+                    float dist = math.abs(math.dot(pos, Planes[p].Normal) - Planes[p].Distance);
+                    if (dist < bestDist)
+                    {
+                        bestDist = dist;
+                        bestPlane = p;
+                    }
+                }
+
+                if (bestPlane >= 0)
+                {
+                    PlaneData plane = Planes[bestPlane];
+                    float signedDist = math.dot(pos, plane.Normal) - plane.Distance;
+                    float strength = math.saturate(plane.Confidence);
+                    Positions[i] = pos - signedDist * plane.Normal * strength;
+                }
+            }
+        }
+
+        #endregion
+
+        #region Phase 4: Temporal Blend
+
+        [BurstCompile]
+        private struct TemporalBlendJob : IJob
+        {
+            public NativeList<Vertex> Verts;
+            [ReadOnly] public NativeList<int3> VertCoords;
+            public NativeHashMap<int, float3> PrevPositions;
+            public int3 VoxCount;
+            public float Alpha;
+            public float Deadzone;
+
+            public void Execute()
+            {
+                for (int i = 0; i < Verts.Length; i++)
+                {
+                    var v = Verts[i];
+                    int key = Flatten(VertCoords[i]);
+
+                    if (PrevPositions.TryGetValue(key, out float3 prev))
+                    {
+                        float dist = math.distance(v.pos, prev);
+                        v.pos = dist < Deadzone ? prev : math.lerp(prev, v.pos, Alpha);
+                        Verts[i] = v;
+                    }
+                }
+
+                PrevPositions.Clear();
+                for (int i = 0; i < Verts.Length; i++)
+                    PrevPositions.TryAdd(Flatten(VertCoords[i]), Verts[i].pos);
+            }
+
+            private int Flatten(int3 c)
+            {
+                return c.x + c.y * VoxCount.x + c.z * VoxCount.x * VoxCount.y;
+            }
+        }
+
+        #endregion
+
+        #region Existing: VertexJob
 
         [BurstCompile]
         private struct VertexJob : IJob
@@ -201,6 +465,10 @@ namespace Genesis.RoomScan
             }
         }
 
+        #endregion
+
+        #region Existing: IndexJob
+
         [BurstCompile]
         private struct IndexJob : IJob
         {
@@ -280,9 +548,13 @@ namespace Genesis.RoomScan
             }
         }
 
+        #endregion
+
         public async Task<bool> CreateMesh(
             NativeArray<sbyte> volume, NativeArray<sbyte> weights, NativeArray<Color32> colors,
-            int3 voxCount, float voxSize, Mesh mesh, CancellationToken ctkn = default)
+            int3 voxCount, float voxSize, Mesh mesh,
+            NativeArray<PlaneData> detectedPlanes = default, int numPlanes = 0,
+            CancellationToken ctkn = default)
         {
             if (_busy) throw new InvalidOperationException("Mesher is busy");
             _busy = true;
@@ -314,9 +586,44 @@ namespace Genesis.RoomScan
 
             try
             {
+                // ── Phase 1: TSDF bilateral smoothing ──
+                NativeArray<sbyte> meshVolume = volume;
+
+                if (TsdfSmoothIterations > 0)
+                {
+                    int len = volume.Length;
+                    EnsureNativeArray(ref _smoothA, len);
+                    if (TsdfSmoothIterations > 1) EnsureNativeArray(ref _smoothB, len);
+
+                    for (int iter = 0; iter < TsdfSmoothIterations; iter++)
+                    {
+                        NativeArray<sbyte> src = iter == 0 ? volume :
+                            (iter % 2 == 1 ? _smoothA : _smoothB);
+                        NativeArray<sbyte> dst = iter % 2 == 0 ? _smoothA : _smoothB;
+
+                        var smoothJob = new BilateralSmoothTsdfJob
+                        {
+                            Source = src,
+                            Weights = weights,
+                            Dest = dst,
+                            VoxCount = voxCount,
+                            SigmaRange = TsdfSmoothSigma,
+                            MinWeightSbyte = MinMeshWeight * SbyteMax
+                        };
+                        JobHandle handle = smoothJob.ScheduleParallelByRef(len, 256, default);
+                        while (!handle.IsCompleted)
+                            await Awaitable.NextFrameAsync(ctkn);
+                        handle.Complete();
+                        ctkn.ThrowIfCancellationRequested();
+                    }
+
+                    meshVolume = TsdfSmoothIterations % 2 == 1 ? _smoothA : _smoothB;
+                }
+
+                // ── Surface Nets: VertexJob ──
                 var vertJob = new VertexJob
                 {
-                    Volume = volume,
+                    Volume = meshVolume,
                     Weights = weights,
                     Colors = colors,
                     VoxCount = voxCount,
@@ -337,13 +644,149 @@ namespace Genesis.RoomScan
                 if (_verts.Length < 3)
                     return false;
 
+                int vertCount = _verts.Length;
+
+                // ── Phase 2: Normal-aware vertex smoothing ──
+                if (MeshSmoothIterations > 0)
+                {
+                    EnsureNativeArray(ref _posA, vertCount);
+                    EnsureNativeArray(ref _posB, vertCount);
+                    EnsureNativeArray(ref _origPositions, vertCount);
+                    EnsureNativeArray(ref _normals, vertCount);
+
+                    NativeArray<Vertex> vertArray = _verts.AsArray();
+                    for (int i = 0; i < vertCount; i++)
+                    {
+                        _posA[i] = vertArray[i].pos;
+                        _origPositions[i] = vertArray[i].pos;
+                        _normals[i] = vertArray[i].norm;
+                    }
+
+                    for (int iter = 0; iter < MeshSmoothIterations; iter++)
+                    {
+                        NativeArray<float3> src = iter % 2 == 0 ? _posA : _posB;
+                        NativeArray<float3> dst = iter % 2 == 0 ? _posB : _posA;
+
+                        var smoothVert = new SmoothVerticesJob
+                        {
+                            InputPositions = src,
+                            Normals = _normals,
+                            OriginalPositions = _origPositions,
+                            OutputPositions = dst,
+                            CoordVertMap = _coordVertMap,
+                            VertCoords = _vertCoords,
+                            VoxCount = voxCount,
+                            Lambda = MeshSmoothLambda,
+                            Beta = MeshSmoothBeta
+                        };
+                        JobHandle sh = smoothVert.ScheduleParallelByRef(vertCount, 64, default);
+                        while (!sh.IsCompleted)
+                            await Awaitable.NextFrameAsync(ctkn);
+                        sh.Complete();
+                        ctkn.ThrowIfCancellationRequested();
+                    }
+
+                    NativeArray<float3> finalPos = MeshSmoothIterations % 2 == 1 ? _posB : _posA;
+
+                    // ── Phase 3: Plane snapping ──
+                    if (detectedPlanes.IsCreated && numPlanes > 0 && PlaneSnapThreshold > 0f)
+                    {
+                        var snapJob = new PlaneSnapJob
+                        {
+                            Positions = finalPos,
+                            Normals = _normals,
+                            Planes = detectedPlanes,
+                            NumPlanes = numPlanes,
+                            SnapThreshold = PlaneSnapThreshold
+                        };
+                        JobHandle snapH = snapJob.ScheduleParallelByRef(vertCount, 64, default);
+                        while (!snapH.IsCompleted)
+                            await Awaitable.NextFrameAsync(ctkn);
+                        snapH.Complete();
+                        ctkn.ThrowIfCancellationRequested();
+                    }
+
+                    for (int i = 0; i < vertCount; i++)
+                    {
+                        var v = vertArray[i];
+                        v.pos = finalPos[i];
+                        vertArray[i] = v;
+                    }
+                }
+                else if (detectedPlanes.IsCreated && numPlanes > 0 && PlaneSnapThreshold > 0f)
+                {
+                    EnsureNativeArray(ref _posA, vertCount);
+                    EnsureNativeArray(ref _normals, vertCount);
+                    NativeArray<Vertex> vertArray = _verts.AsArray();
+                    for (int i = 0; i < vertCount; i++)
+                    {
+                        _posA[i] = vertArray[i].pos;
+                        _normals[i] = vertArray[i].norm;
+                    }
+
+                    var snapJob = new PlaneSnapJob
+                    {
+                        Positions = _posA,
+                        Normals = _normals,
+                        Planes = detectedPlanes,
+                        NumPlanes = numPlanes,
+                        SnapThreshold = PlaneSnapThreshold
+                    };
+                    JobHandle snapH = snapJob.ScheduleParallelByRef(vertCount, 64, default);
+                    while (!snapH.IsCompleted)
+                        await Awaitable.NextFrameAsync(ctkn);
+                    snapH.Complete();
+                    ctkn.ThrowIfCancellationRequested();
+
+                    for (int i = 0; i < vertCount; i++)
+                    {
+                        var v = vertArray[i];
+                        v.pos = _posA[i];
+                        vertArray[i] = v;
+                    }
+                }
+
+                // ── Phase 4: Temporal vertex damping ──
+                if (TemporalAlpha < 1f)
+                {
+                    if (!_prevPositions.IsCreated)
+                        _prevPositions = new NativeHashMap<int, float3>(
+                            math.max(vertCount * 2, 256), Allocator.Persistent);
+                    else if (_prevPositions.Capacity < vertCount)
+                        _prevPositions.Capacity = vertCount * 2;
+
+                    var temporalJob = new TemporalBlendJob
+                    {
+                        Verts = _verts,
+                        VertCoords = _vertCoords,
+                        PrevPositions = _prevPositions,
+                        VoxCount = voxCount,
+                        Alpha = TemporalAlpha,
+                        Deadzone = TemporalDeadzone
+                    };
+                    JobHandle th = temporalJob.Schedule();
+                    while (!th.IsCompleted)
+                        await Awaitable.NextFrameAsync(ctkn);
+                    th.Complete();
+                    ctkn.ThrowIfCancellationRequested();
+                }
+
+                // ── Recompute bounds after position modifications ──
+                MinMaxAABB finalBounds = new();
+                {
+                    NativeArray<Vertex> va = _verts.AsArray();
+                    for (int i = 0; i < va.Length; i++)
+                        finalBounds.Encapsulate(va[i].pos);
+                }
+
+                // ── IndexJob ──
                 int maxIndices = _verts.Length * 18;
                 if (_tris.Capacity < maxIndices)
                     _tris.Capacity = maxIndices;
 
                 var triJob = new IndexJob
                 {
-                    Volume = volume,
+                    Volume = meshVolume,
                     Weights = weights,
                     VoxCount = voxCount,
                     MinWeight = MinMeshWeight,
@@ -358,9 +801,8 @@ namespace Genesis.RoomScan
                 triHandle.Complete();
                 ctkn.ThrowIfCancellationRequested();
 
-                MinMaxAABB b = _boundsRef.Value;
-                float3 size = b.Max - b.Min;
-                Bounds bounds = new(b.Center, size);
+                float3 size = finalBounds.Max - finalBounds.Min;
+                Bounds bounds = new(finalBounds.Center, size);
 
                 ApplyToMesh(_verts.AsArray(), _tris.AsArray(), bounds, mesh);
                 hasTriangles = _tris.Length > 0;
@@ -371,6 +813,14 @@ namespace Genesis.RoomScan
             }
 
             return hasTriangles;
+        }
+
+        private static void EnsureNativeArray<T>(ref NativeArray<T> arr, int minLen)
+            where T : unmanaged
+        {
+            if (arr.IsCreated && arr.Length >= minLen) return;
+            if (arr.IsCreated) arr.Dispose();
+            arr = new NativeArray<T>(minLen, Allocator.Persistent);
         }
 
         private static void ApplyToMesh(NativeArray<Vertex> verts, NativeArray<uint> tris,
@@ -406,6 +856,13 @@ namespace Genesis.RoomScan
             if (_coordVertMap.IsCreated) _coordVertMap.Dispose();
             if (_tris.IsCreated) _tris.Dispose();
             if (_boundsRef.IsCreated) _boundsRef.Dispose();
+            if (_smoothA.IsCreated) _smoothA.Dispose();
+            if (_smoothB.IsCreated) _smoothB.Dispose();
+            if (_posA.IsCreated) _posA.Dispose();
+            if (_posB.IsCreated) _posB.Dispose();
+            if (_origPositions.IsCreated) _origPositions.Dispose();
+            if (_normals.IsCreated) _normals.Dispose();
+            if (_prevPositions.IsCreated) _prevPositions.Dispose();
         }
     }
 }

@@ -12,8 +12,10 @@ namespace Genesis.RoomScan
         public static RoomScanPersistence Instance { get; private set; }
 
         [Header("Settings")]
+#pragma warning disable CS0414
         [SerializeField] private bool autoSaveOnPause = true;
         [SerializeField] private bool autoLoadOnStart = true;
+#pragma warning restore CS0414
 
         private const uint Magic = 0x48534D52; // "RMSH"
         private const int FormatVersion = 1;

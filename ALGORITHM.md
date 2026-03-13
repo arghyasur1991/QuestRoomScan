@@ -8,7 +8,9 @@ Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Dista
 DepthCapture (AR depth frames → normals → dilation)
        │
 VolumeIntegrator (TSDF integrate → warmup clear → prune)
-       ├── ChunkManager → SurfaceNetsMesher (mesh + vertex colors)
+       ├── ChunkManager → SurfaceNetsMesher
+       │     (TSDF smooth → Surface Nets → vertex smooth → plane snap → temporal blend)
+       ├── PlaneDetector (periodic RANSAC → persistent plane list)
        ├── TriplanarCache (bake camera → 3 world-space textures, persistent)
        └── KeyframeStore (ring buffer of camera frames, live quality)
                 │
@@ -163,6 +165,77 @@ The mesher uses a **confidence gate**: voxels with weight below `minMeshWeight` 
 - Form quad from 4 neighboring vertices, split into 2 triangles
 - Winding order based on TSDF sign
 
+## 6b. Mesh Regularization Pipeline
+
+Four post-processing stages run between mesh extraction and final output to produce smooth, stable geometry. Each stage is independently configurable and can be disabled by setting its iteration/threshold to zero.
+
+```
+Readback → BilateralSmoothTsdf → VertexJob → SmoothVertices → PlaneSnap → TemporalBlend → IndexJob → Mesh
+                                                                    ↑
+                                                        PlaneDetector (periodic RANSAC)
+```
+
+### Stage 1: TSDF Bilateral Smoothing (`BilateralSmoothTsdfJob`, Burst IJobFor)
+
+Runs before Surface Nets extraction on the CPU-side readback data. Smooths the signed distance field while preserving zero-crossings at edges.
+
+- **Kernel**: 3×3×3 bilateral filter over the per-chunk TSDF `NativeArray<sbyte>`
+- **Bilateral weighting**: `w = spatialW × rangeW × confidence`
+  - `spatialW`: 1.0 (face-adjacent, manhattan ≤ 1), 0.7 (edge, manhattan = 2), 0.5 (corner, manhattan = 3)
+  - `rangeW`: `exp(-diff² / (2σ²))` where `diff` is the TSDF value difference and `σ = tsdfSmoothSigma`
+  - `confidence`: neighbor's weight channel value (high-weight neighbors dominate)
+- **Ping-pong**: Two temp `NativeArray<sbyte>` buffers alternate as source/destination per iteration
+- **Border**: 1-voxel border is passed through unsmoothed (safe because Surface Nets skips boundary cells)
+- **Seam-free**: Chunk overlap (5 voxels) exceeds the 1-voxel kernel radius, so adjacent chunks produce identical values in the overlap zone
+- **Default**: 1 iteration, σ = 0.3
+
+### Stage 2: Normal-Aware Vertex Smoothing (`SmoothVerticesJob`, Burst IJobFor)
+
+After VertexJob produces raw Surface Nets positions and normals, this stage smooths vertex positions using a bilateral HC-Laplacian.
+
+- **Adjacency**: 6-connected voxel grid neighbors via `CoordVertMap` lookup (O(1) per vertex, no triangle adjacency needed)
+- **Bilateral Laplacian**: `L(pᵢ) = Σ(wⱼ · pⱼ) / Σ(wⱼ)` where `wⱼ = max(0, dot(nᵢ, nⱼ))`
+  - On flat surfaces: all neighbor normals agree → full Laplacian smoothing
+  - At edges (wall-floor junctions): normals differ → smoothing suppressed
+- **HC correction** (Vollmer et al.): Prevents volume shrinkage
+  1. `q = lerp(pos, L(pos), λ)` — Laplacian step
+  2. `result = q − β(q − original)` — pull back toward original position
+  - `original` is the pre-smoothing position from VertexJob (fixed for all iterations)
+- **Ping-pong**: Two `NativeArray<float3>` position buffers alternate per iteration
+- **Default**: 3 iterations, λ = 0.6, β = 0.5
+
+### Stage 3: Plane Detection & Vertex Snapping
+
+#### PlaneDetector (MonoBehaviour, runs periodically)
+
+Sequential RANSAC with axis-aligned bias detects dominant room planes:
+
+1. Collect world-space positions and normals from all populated chunk meshes
+2. For up to `maxPlanes` (10) iterations:
+   - **RANSAC**: Sample 3 random non-inlier vertices, fit plane via cross product
+   - **Inlier test**: point-to-plane distance < 2cm AND normal alignment > 0.95
+   - **Axis bias**: If plane normal is within `axisSnapAngle` (10°) of an axis, snap to that axis
+   - **Refinement**: PCA on inliers → recompute plane via smallest eigenvector of covariance matrix
+   - Accept plane if inlier count ≥ `minInliers` (50); mark inliers as consumed
+3. **Persistence across frames**: Detected planes merge with persistent planes if normal alignment > 0.95 and distance < 5cm. Merged planes blend parameters weighted by inlier count. Unmatched persistent planes decay by `confidenceDecay` per cycle and are removed at confidence 0.
+
+#### PlaneSnapJob (Burst IJobFor)
+
+For each vertex, finds the best-matching detected plane:
+- Normal alignment: `|dot(vertexNormal, planeNormal)| > 0.9`
+- Proximity: `|dot(pos, normal) − d| < planeSnapThreshold`
+- Projects vertex onto plane: `pos -= signedDist × normal × confidence`
+- Snap strength scales with plane confidence (0.3 initial → 1.0 after many detections)
+
+### Stage 4: Temporal Vertex Damping (`TemporalBlendJob`, Burst IJob)
+
+Per-mesher `NativeHashMap<int, float3>` caches final vertex positions keyed by flat voxel index. On subsequent mesh extractions:
+- **Lookup**: Each vertex checks the cache for its voxel coordinate
+- **Deadzone**: If position changed less than `temporalDeadzone` (1mm), old position is kept exactly
+- **Blend**: Otherwise `finalPos = lerp(prevPos, newPos, temporalAlpha)`
+- **Update**: After blending, cache is cleared and refilled with final positions
+- **Default**: α = 0.3 (slow convergence, very stable), deadzone = 1mm
+
 ## 7. Camera Projection & Persistent Texturing
 
 Three layers of texturing, in priority order:
@@ -305,6 +378,19 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | `overlap` | 0.25m | Extra voxels per chunk edge |
 | `numMeshWorkers` | 2 | Background mesher threads |
 | `updateDistance` | 6m | Max distance for chunk enqueuing |
+
+### Mesh Regularization
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `tsdfSmoothIterations` | 1 | Bilateral filter passes on TSDF before extraction (0 = off) |
+| `tsdfSmoothSigma` | 0.3 | Bilateral range sigma (lower = sharper edges) |
+| `meshSmoothIterations` | 3 | Post-extraction vertex smoothing passes (0 = off) |
+| `meshSmoothLambda` | 0.6 | Laplacian blend strength per iteration |
+| `meshSmoothBeta` | 0.5 | HC back-projection strength (prevents shrinkage) |
+| `planeSnapThreshold` | 0.03m | Max vertex-to-plane distance for snapping (0 = off) |
+| `planeDetectionInterval` | 5 | Mesh cycles between RANSAC plane detection runs |
+| `temporalAlpha` | 0.3 | Blend factor for new positions (lower = more stable) |
+| `temporalDeadzone` | 0.001m | Position changes below this are suppressed |
 
 ### Freezing
 | Parameter | Default | Description |

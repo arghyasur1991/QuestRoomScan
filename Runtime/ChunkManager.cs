@@ -30,6 +30,30 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Consecutive stable extractions needed to freeze")]
         private int stableCyclesRequired = 15;
 
+        [Header("TSDF Smoothing")]
+        [SerializeField, Tooltip("Bilateral filter passes on TSDF before mesh extraction. 0 = disabled.")]
+        [Range(0, 3)] private int tsdfSmoothIterations = 1;
+        [SerializeField, Tooltip("Bilateral range sigma for edge preservation. Lower = sharper edges.")]
+        [Range(0.05f, 1f)] private float tsdfSmoothSigma = 0.3f;
+
+        [Header("Mesh Smoothing")]
+        [SerializeField, Tooltip("Post-extraction vertex smoothing iterations. 0 = disabled.")]
+        [Range(0, 8)] private int meshSmoothIterations = 3;
+        [SerializeField, Tooltip("Laplacian blend strength per iteration.")]
+        [Range(0.1f, 1f)] private float meshSmoothLambda = 0.6f;
+        [SerializeField, Tooltip("HC back-projection strength to prevent volume shrinkage.")]
+        [Range(0f, 1f)] private float meshSmoothBeta = 0.5f;
+
+        [Header("Plane Snapping")]
+        [SerializeField, Tooltip("Max vertex-to-plane distance for snapping. 0 = disabled.")]
+        [Range(0f, 0.1f)] private float planeSnapThreshold = 0.03f;
+
+        [Header("Temporal Stability")]
+        [SerializeField, Tooltip("Blend factor for new positions. Lower = more stable, slower convergence.")]
+        [Range(0.05f, 1f)] private float temporalAlpha = 0.3f;
+        [SerializeField, Tooltip("Position changes below this (meters) are suppressed entirely.")]
+        [Range(0f, 0.01f)] private float temporalDeadzone = 0.001f;
+
         [Header("Rendering")]
         [SerializeField] private Material scanMeshMaterial;
 
@@ -44,6 +68,7 @@ namespace Genesis.RoomScan
         public int FrozenChunkCount => _frozenChunkCount;
 
         private VolumeIntegrator _volume;
+        private PlaneDetector _planeDetector;
 
         private void Awake()
         {
@@ -55,6 +80,8 @@ namespace Genesis.RoomScan
             _volume = VolumeIntegrator.Instance;
             if (_volume == null)
                 throw new Exception("[RoomScan] VolumeIntegrator not found");
+
+            _planeDetector = GetComponent<PlaneDetector>();
 
             var rpAsset = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline;
             Debug.Log($"[RoomScan] ChunkManager Start: mat={scanMeshMaterial?.name ?? "NULL"}, " +
@@ -238,7 +265,18 @@ namespace Genesis.RoomScan
                 MeshFilter = mf,
                 Mesh = mesh,
                 Extents = chunkWorldSize + overlap,
-                Mesher = new SurfaceNetsMesher { MinMeshWeight = _volume.MinMeshWeight }
+                Mesher = new SurfaceNetsMesher
+                {
+                    MinMeshWeight = _volume.MinMeshWeight,
+                    TsdfSmoothIterations = tsdfSmoothIterations,
+                    TsdfSmoothSigma = tsdfSmoothSigma,
+                    MeshSmoothIterations = meshSmoothIterations,
+                    MeshSmoothLambda = meshSmoothLambda,
+                    MeshSmoothBeta = meshSmoothBeta,
+                    PlaneSnapThreshold = planeSnapThreshold,
+                    TemporalAlpha = temporalAlpha,
+                    TemporalDeadzone = temporalDeadzone
+                }
             };
         }
 
@@ -367,10 +405,19 @@ namespace Genesis.RoomScan
                 }
                 ctkn.ThrowIfCancellationRequested();
 
+                NativeArray<PlaneData> planes = default;
+                int numPlanes = 0;
+                if (_planeDetector != null)
+                {
+                    planes = _planeDetector.Planes;
+                    numPlanes = _planeDetector.PlaneCount;
+                }
+
                 bool populated = await chunk.Mesher.CreateMesh(
                     chunk.VolumeData, chunk.WeightData,
                     hasColorData ? chunk.ColorData : default,
-                    size, _volume.VoxelSize, chunk.Mesh, ctkn);
+                    size, _volume.VoxelSize, chunk.Mesh,
+                    planes, numPlanes, ctkn);
                 chunk.IsPopulated = populated;
                 if (populated) _meshSuccesses++;
 
