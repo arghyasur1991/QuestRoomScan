@@ -31,9 +31,6 @@ namespace Genesis.RoomScan
             _bounds = volumeBounds;
             _props = new MaterialPropertyBlock();
             _ready = true;
-
-            if (gpuMeshMaterial != null)
-                gpuMeshMaterial.EnableKeyword("_GPU_SURFACE_NETS");
         }
 
         public void UpdateBounds(Bounds bounds)

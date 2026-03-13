@@ -22,9 +22,6 @@ Shader "Genesis/ScanMeshVertexColor"
             HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            #pragma multi_compile_instancing
-            #pragma multi_compile _ DOTS_INSTANCING_ON
-            #pragma multi_compile _ _GPU_SURFACE_NETS
             #pragma shader_feature_local _DEBUG_SOLID
             #pragma shader_feature_local _SHOW_NORMALS
             #pragma shader_feature_local _TRIPLANAR_ONLY
@@ -40,8 +37,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 float _VertexOnly;
             CBUFFER_END
 
-            // ── GPU Surface Nets procedural buffers ──
-            #ifdef _GPU_SURFACE_NETS
             struct GPUVertex
             {
                 float3 pos;
@@ -60,7 +55,6 @@ Shader "Genesis/ScanMeshVertexColor"
                     ((packed >> 16)& 0xFF) / 255.0h,
                     ((packed >> 24)& 0xFF) / 255.0h);
             }
-            #endif
 
             // Keyframe data (uniform array, max 16 keyframes × 7 float4s = 112)
             TEXTURE2D_ARRAY(_RSKeyframeTex);
@@ -151,11 +145,8 @@ Shader "Genesis/ScanMeshVertexColor"
                 float4 color : COLOR;
                 float3 positionWS : TEXCOORD0;
                 float3 normalWS : TEXCOORD1;
-                UNITY_VERTEX_INPUT_INSTANCE_ID
                 UNITY_VERTEX_OUTPUT_STEREO
             };
-
-            #ifdef _GPU_SURFACE_NETS
 
             Varyings vert(uint vertID : SV_VertexID)
             {
@@ -172,37 +163,8 @@ Shader "Genesis/ScanMeshVertexColor"
                 return OUT;
             }
 
-            #else
-
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                float3 normalOS : NORMAL;
-                float4 color : COLOR;
-                UNITY_VERTEX_INPUT_INSTANCE_ID
-            };
-
-            Varyings vert(Attributes IN)
-            {
-                Varyings OUT;
-                UNITY_SETUP_INSTANCE_ID(IN);
-                UNITY_TRANSFER_INSTANCE_ID(IN, OUT);
-                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
-                float3 ws = TransformObjectToWorld(IN.positionOS.xyz);
-                OUT.positionHCS = TransformWorldToHClip(ws);
-                OUT.positionWS = ws;
-                OUT.normalWS = TransformObjectToWorldNormal(IN.normalOS);
-                OUT.color = IN.color;
-                return OUT;
-            }
-
-            #endif
-
             half4 frag(Varyings IN) : SV_Target
             {
-                #ifndef _GPU_SURFACE_NETS
-                UNITY_SETUP_INSTANCE_ID(IN);
-                #endif
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(IN);
 
                 #ifdef _DEBUG_SOLID
@@ -276,12 +238,9 @@ Shader "Genesis/ScanMeshVertexColor"
             HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            #pragma multi_compile_instancing
-            #pragma multi_compile _ _GPU_SURFACE_NETS
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            #ifdef _GPU_SURFACE_NETS
             struct GPUVertex
             {
                 float3 pos;
@@ -291,16 +250,13 @@ Shader "Genesis/ScanMeshVertexColor"
             };
             StructuredBuffer<GPUVertex> _SurfaceVerts;
             StructuredBuffer<uint>      _SurfaceIndices;
-            #endif
 
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
-                UNITY_VERTEX_INPUT_INSTANCE_ID
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
-            #ifdef _GPU_SURFACE_NETS
             Varyings vert(uint vertID : SV_VertexID)
             {
                 Varyings OUT = (Varyings)0;
@@ -309,23 +265,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 OUT.positionHCS = TransformWorldToHClip(_SurfaceVerts[idx].pos);
                 return OUT;
             }
-            #else
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                UNITY_VERTEX_INPUT_INSTANCE_ID
-            };
-
-            Varyings vert(Attributes IN)
-            {
-                Varyings OUT;
-                UNITY_SETUP_INSTANCE_ID(IN);
-                UNITY_TRANSFER_INSTANCE_ID(IN, OUT);
-                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
-                OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);
-                return OUT;
-            }
-            #endif
 
             half4 frag(Varyings IN) : SV_Target
             {
@@ -344,12 +283,9 @@ Shader "Genesis/ScanMeshVertexColor"
             HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            #pragma multi_compile_instancing
-            #pragma multi_compile _ _GPU_SURFACE_NETS
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            #ifdef _GPU_SURFACE_NETS
             struct GPUVertex
             {
                 float3 pos;
@@ -359,17 +295,14 @@ Shader "Genesis/ScanMeshVertexColor"
             };
             StructuredBuffer<GPUVertex> _SurfaceVerts;
             StructuredBuffer<uint>      _SurfaceIndices;
-            #endif
 
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
                 float3 normalWS : TEXCOORD0;
-                UNITY_VERTEX_INPUT_INSTANCE_ID
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
-            #ifdef _GPU_SURFACE_NETS
             Varyings vert(uint vertID : SV_VertexID)
             {
                 Varyings OUT = (Varyings)0;
@@ -380,25 +313,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 OUT.normalWS    = gv.norm;
                 return OUT;
             }
-            #else
-            struct Attributes
-            {
-                float4 positionOS : POSITION;
-                float3 normalOS : NORMAL;
-                UNITY_VERTEX_INPUT_INSTANCE_ID
-            };
-
-            Varyings vert(Attributes IN)
-            {
-                Varyings OUT;
-                UNITY_SETUP_INSTANCE_ID(IN);
-                UNITY_TRANSFER_INSTANCE_ID(IN, OUT);
-                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
-                OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);
-                OUT.normalWS = TransformObjectToWorldNormal(IN.normalOS);
-                return OUT;
-            }
-            #endif
 
             half4 frag(Varyings IN) : SV_Target
             {

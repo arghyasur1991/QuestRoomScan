@@ -1,13 +1,15 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
+using Unity.Collections;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// Exports the current TSDF mesh as a dense PLY point cloud for Gaussian Splat initialization.
-    /// Collects all world-space vertices with colors and normals from populated mesh chunks.
+    /// Exports the current GPU mesh as a dense PLY point cloud for Gaussian Splat initialization.
+    /// Reads vertices from the GPU Surface Nets vertex buffer via async readback.
     /// </summary>
     public class PointCloudExporter : MonoBehaviour
     {
@@ -32,7 +34,7 @@ namespace Genesis.RoomScan
         private void Update()
         {
             if (autoExportIntervalSeconds <= 0 || _exporting) return;
-            if (ChunkManager.Instance == null) return;
+            if (MeshExtractor.Instance == null) return;
 
             if (Time.time - _lastExportTime >= autoExportIntervalSeconds)
             {
@@ -41,6 +43,9 @@ namespace Genesis.RoomScan
             }
         }
 
+        // GPUVertex layout must match the compute shader: float3 pos, float3 norm, uint packedColor, uint voxelFlatIdx
+        private const int GpuVertexStride = 32;
+
         public async Task ExportAsync()
         {
             if (_exporting) return;
@@ -48,97 +53,37 @@ namespace Genesis.RoomScan
 
             try
             {
-                var chunks = ChunkManager.Instance?.GetPopulatedChunks();
-                if (chunks == null) { _exporting = false; return; }
-
-                int totalVerts = 0;
-                using var vertexStream = new MemoryStream();
-                using var writer = new BinaryWriter(vertexStream);
-
-                foreach (var chunk in chunks)
+                var gpuSN = MeshExtractor.Instance?.GpuSurfaceNets;
+                if (gpuSN == null || gpuSN.VertexBuffer == null)
                 {
-                    if (chunk.Mesh == null || chunk.GameObject == null) continue;
-                    var mesh = chunk.Mesh;
-                    var transform = chunk.GameObject.transform;
-
-                    Vector3[] verts = mesh.vertices;
-                    Vector3[] normals = mesh.normals;
-                    Color32[] colors = mesh.colors32;
-
-                    bool hasNormals = normals != null && normals.Length == verts.Length;
-                    bool hasColors = colors != null && colors.Length == verts.Length;
-
-                    for (int i = 0; i < verts.Length; i++)
-                    {
-                        Vector3 worldPos = transform.TransformPoint(verts[i]);
-                        writer.Write(worldPos.x);
-                        writer.Write(worldPos.y);
-                        writer.Write(worldPos.z);
-
-                        if (hasNormals)
-                        {
-                            Vector3 worldNormal = transform.TransformDirection(normals[i]).normalized;
-                            writer.Write(worldNormal.x);
-                            writer.Write(worldNormal.y);
-                            writer.Write(worldNormal.z);
-                        }
-                        else
-                        {
-                            writer.Write(0f); writer.Write(1f); writer.Write(0f);
-                        }
-
-                        if (hasColors)
-                        {
-                            writer.Write(colors[i].r);
-                            writer.Write(colors[i].g);
-                            writer.Write(colors[i].b);
-                        }
-                        else
-                        {
-                            writer.Write((byte)128);
-                            writer.Write((byte)128);
-                            writer.Write((byte)128);
-                        }
-
-                        totalVerts++;
-                    }
+                    _exporting = false;
+                    return;
                 }
 
-                if (totalVerts == 0)
+                var vertBuf = gpuSN.VertexBuffer;
+                var req = await AsyncGPUReadback.RequestAsync(vertBuf);
+                if (req.hasError)
+                {
+                    Debug.LogWarning("[RoomScan] PointCloudExporter: GPU readback error");
+                    _exporting = false;
+                    return;
+                }
+
+                var raw = req.GetData<byte>();
+                int vertCount = raw.Length / GpuVertexStride;
+                if (vertCount == 0)
                 {
                     Debug.Log("[RoomScan] PointCloudExporter: no vertices to export");
                     _exporting = false;
                     return;
                 }
 
-                byte[] vertexData = vertexStream.ToArray();
-                int vertCount = totalVerts;
+                // Copy to managed array for background thread
+                byte[] data = new byte[raw.Length];
+                NativeArray<byte>.Copy(raw, data, raw.Length);
                 string path = _plyPath;
 
-                await Task.Run(() =>
-                {
-                    using var fs = new FileStream(path, FileMode.Create);
-                    using var bw = new BinaryWriter(fs);
-
-                    string header =
-                        "ply\n" +
-                        "format binary_little_endian 1.0\n" +
-                        $"element vertex {vertCount}\n" +
-                        "property float x\n" +
-                        "property float y\n" +
-                        "property float z\n" +
-                        "property float nx\n" +
-                        "property float ny\n" +
-                        "property float nz\n" +
-                        "property uchar red\n" +
-                        "property uchar green\n" +
-                        "property uchar blue\n" +
-                        "end_header\n";
-
-                    byte[] headerBytes = System.Text.Encoding.ASCII.GetBytes(header);
-                    bw.Write(headerBytes);
-                    bw.Write(vertexData);
-                });
+                await Task.Run(() => WritePly(path, data, vertCount));
 
                 Debug.Log($"[RoomScan] PointCloudExporter: saved {vertCount} vertices to {path} ({new FileInfo(path).Length / 1024}KB)");
             }
@@ -149,6 +94,51 @@ namespace Genesis.RoomScan
             finally
             {
                 _exporting = false;
+            }
+        }
+
+        private static void WritePly(string path, byte[] vertexData, int vertCount)
+        {
+            using var fs = new FileStream(path, FileMode.Create);
+            using var bw = new BinaryWriter(fs);
+
+            string header =
+                "ply\n" +
+                "format binary_little_endian 1.0\n" +
+                $"element vertex {vertCount}\n" +
+                "property float x\n" +
+                "property float y\n" +
+                "property float z\n" +
+                "property float nx\n" +
+                "property float ny\n" +
+                "property float nz\n" +
+                "property uchar red\n" +
+                "property uchar green\n" +
+                "property uchar blue\n" +
+                "end_header\n";
+
+            bw.Write(System.Text.Encoding.ASCII.GetBytes(header));
+
+            // Parse GPUVertex structs: float3 pos (12B), float3 norm (12B), uint packedColor (4B), uint voxelFlatIdx (4B)
+            for (int i = 0; i < vertCount; i++)
+            {
+                int off = i * GpuVertexStride;
+
+                // pos xyz
+                bw.Write(BitConverter.ToSingle(vertexData, off));
+                bw.Write(BitConverter.ToSingle(vertexData, off + 4));
+                bw.Write(BitConverter.ToSingle(vertexData, off + 8));
+
+                // norm xyz
+                bw.Write(BitConverter.ToSingle(vertexData, off + 12));
+                bw.Write(BitConverter.ToSingle(vertexData, off + 16));
+                bw.Write(BitConverter.ToSingle(vertexData, off + 20));
+
+                // packedColor → RGB
+                uint packed = BitConverter.ToUInt32(vertexData, off + 24);
+                bw.Write((byte)(packed & 0xFF));
+                bw.Write((byte)((packed >> 8) & 0xFF));
+                bw.Write((byte)((packed >> 16) & 0xFF));
             }
         }
     }

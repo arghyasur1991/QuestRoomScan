@@ -2,25 +2,21 @@
 
 ## Overview
 
-Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Distance Field) volume, Surface Nets mesh extraction, and camera texture projection.
+Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Distance Field) volume and fully GPU-driven Surface Nets mesh extraction.
 
 ```
 DepthCapture (AR depth frames → normals → dilation)
        │
 VolumeIntegrator (TSDF integrate → warmup clear → prune)
        │
-       ├── [GPU path] GPUSurfaceNets (compute shader: classify → compact → smooth → snap → temporal → index)
-       │     └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
-       │
-       ├── [CPU path] ChunkManager → SurfaceNetsMesher
-       │     (AsyncGPUReadback → TSDF smooth → Surface Nets → vertex smooth → plane snap → temporal blend)
+MeshExtractor → GPUSurfaceNets (compute shader: classify → compact → smooth → snap → temporal → index)
+       │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
        │
        ├── PlaneDetector (periodic RANSAC on background thread → persistent plane list)
        ├── TriplanarCache (bake camera → 3 world-space textures, persistent)
        └── KeyframeStore (ring buffer of camera frames, live quality)
                 │
-ScanMeshVertexColor.shader (keyframes → triplanar → vertex color fallback)
-  └── _GPU_SURFACE_NETS variant (SV_VertexID + StructuredBuffer, no Mesh)
+ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → keyframes → triplanar → vertex color)
 ```
 
 ## 1. Volume Layout
@@ -138,76 +134,46 @@ Removes barely-observed voxels that were seeded but never confirmed.
 
 After `warmupIntegrations` (default 15) integration frames, the entire volume is cleared. This discards the initial sensor calibration noise that the Quest 3 depth sensor produces during its first ~0.5s of operation.
 
-## 6. Mesh Extraction
+## 6. GPU Mesh Extraction (Surface Nets)
 
-### Chunk System
-- World divided into chunks of `chunkWorldSize` (default 4m³)
-- `ChunkManager.UpdateDirtyChunks()` determines which chunks overlap the depth frustum
-- Chunks are enqueued for meshing on background worker threads (default 2)
-- Each chunk maps to a voxel sub-region via `WorldToVoxel`
+`MeshExtractor.Extract()` dispatches `GPUSurfaceNets` — the entire pipeline runs on the GPU with zero CPU readback.
 
-### Async GPU Readback
-1. Request TSDF volume slice (`R8G8_SNorm`)
-2. `CopySliceRG8Job` extracts R channel (TSDF) and G channel (weight) into separate `NativeArray<sbyte>` arrays
-3. Request color volume slice (`RGBA8_UNorm`)
-4. Copy color data into `NativeArray<Color32>`
+### Compute Pipeline (`SurfaceNetsExtract.compute`)
 
-### Confidence-Gated Surface Nets
-The mesher uses a **confidence gate**: voxels with weight below `minMeshWeight` are treated as empty, preventing phantom surfaces from low-confidence observations.
+1. **ClearCounters** — Reset vertex and index atomic counters
+2. **ClassifyAndEmit** (3D dispatch over volume) — For each voxel cell, check 12 edges for TSDF zero-crossings with confidence gating (`minMeshWeight`). Emit vertex via `InterlockedAdd` compaction into `_Vertices` buffer, store compact index in `_CoordVertMap`.
+3. **BuildVertexDispatchArgs** — Set indirect dispatch dimensions from vertex count. All subsequent per-vertex kernels use `DispatchIndirect`.
+4. **[optional] SmoothVertices** — HC-Laplacian on GPU (see Stage 2 below)
+5. **[optional] PlaneSnap** — Snap to detected planes (see Stage 3)
+6. **[optional] TemporalBlend** — Adaptive temporal damping via `RWTexture3D<float4>` (see Stage 4)
+7. **GenerateIndices** — Per vertex: check 3 axes for quad emission, write 6 indices per quad via atomic
+8. **BuildIndirectArgs** — Pack index count into `DrawProceduralIndirect` args
 
-**VertexJob** (per voxel cell):
-1. For each of 12 edges of the cell's 8 corners:
-   - Get TSDF values at both endpoints
-   - If weight at either endpoint is below `minMeshWeight`, treat as empty (value = 0)
-   - Check for zero crossing (`valA < 0 != valB < 0`)
-   - Track "bad crossings" (one side is genuinely empty, i.e., `sbyte.MinValue`)
-2. Reject if `numCrossings < 3` or all crossings are bad
-3. Average crossing positions → vertex position
-4. Gradient from finite differences → vertex normal
-5. Look up color from color volume (alpha > 10 threshold)
+### Rendering
+- `GPUMeshRenderer` calls `Graphics.RenderPrimitivesIndirect` — single draw call replaces per-chunk `MeshRenderer` draws
+- `ScanMeshVertexColor.shader` reads from `StructuredBuffer<GPUVertex>` via `SV_VertexID`
+- No `Mesh` objects, no `MeshFilter`, no chunk GameObjects
 
-**IndexJob** (per vertex):
-- For each axis (X, Y, Z), check if the voxel and its neighbor have opposite TSDF signs
-- Form quad from 4 neighboring vertices, split into 2 triangles
-- Winding order based on TSDF sign
+## 6b. GPU Mesh Regularization Pipeline
 
-## 6b. Mesh Regularization Pipeline
-
-Four post-processing stages run between mesh extraction and final output to produce smooth, stable geometry. Each stage is independently configurable and can be disabled by setting its iteration/threshold to zero.
+Three post-processing stages run on the GPU between vertex emit and index generation. Each is independently configurable and can be disabled by setting its iteration/threshold to zero.
 
 ```
-Readback → BilateralSmoothTsdf → VertexJob → SmoothVertices → PlaneSnap → TemporalBlend → IndexJob → Mesh
-                                                                    ↑
-                                                        PlaneDetector (periodic RANSAC)
+ClassifyAndEmit → SmoothVertices → PlaneSnap → TemporalBlend → GenerateIndices
+                                       ↑
+                            PlaneDetector (periodic RANSAC on background thread)
 ```
 
-### Stage 1: TSDF Bilateral Smoothing (`BilateralSmoothTsdfJob`, Burst IJobFor)
+### Stage 2: Normal-Aware Vertex Smoothing (`SmoothVertices` kernel)
 
-Runs before Surface Nets extraction on the CPU-side readback data. Smooths the signed distance field while preserving zero-crossings at edges.
+After ClassifyAndEmit produces raw Surface Nets positions and normals, this kernel smooths vertex positions using a bilateral HC-Laplacian.
 
-- **Kernel**: 3×3×3 bilateral filter over the per-chunk TSDF `NativeArray<sbyte>`
-- **Bilateral weighting**: `w = spatialW × rangeW × confidence`
-  - `spatialW`: 1.0 (face-adjacent, manhattan ≤ 1), 0.7 (edge, manhattan = 2), 0.5 (corner, manhattan = 3)
-  - `rangeW`: `exp(-diff² / (2σ²))` where `diff` is the TSDF value difference and `σ = tsdfSmoothSigma`
-  - `confidence`: neighbor's weight channel value (high-weight neighbors dominate)
-- **Ping-pong**: Two temp `NativeArray<sbyte>` buffers alternate as source/destination per iteration
-- **Border**: 1-voxel border is passed through unsmoothed (safe because Surface Nets skips boundary cells)
-- **Seam-free**: Chunk overlap (5 voxels) exceeds the 1-voxel kernel radius, so adjacent chunks produce identical values in the overlap zone
-- **Default**: 0 iterations (disabled); σ = 0.3 when enabled
-
-### Stage 2: Normal-Aware Vertex Smoothing (`SmoothVerticesJob`, Burst IJobFor)
-
-After VertexJob produces raw Surface Nets positions and normals, this stage smooths vertex positions using a bilateral HC-Laplacian.
-
-- **Adjacency**: 6-connected voxel grid neighbors via `CoordVertMap` lookup (O(1) per vertex, no triangle adjacency needed)
+- **Adjacency**: 6-connected voxel grid neighbors via `_CoordVertMap` lookup (O(1) per vertex)
 - **Bilateral Laplacian**: `L(pᵢ) = Σ(wⱼ · pⱼ) / Σ(wⱼ)` where `wⱼ = max(0, dot(nᵢ, nⱼ))`
-  - On flat surfaces: all neighbor normals agree → full Laplacian smoothing
-  - At edges (wall-floor junctions): normals differ → smoothing suppressed
 - **HC correction** (Vollmer et al.): Prevents volume shrinkage
   1. `q = lerp(pos, L(pos), λ)` — Laplacian step
   2. `result = q − β(q − original)` — pull back toward original position
-  - `original` is the pre-smoothing position from VertexJob (fixed for all iterations)
-- **Ping-pong**: Two `NativeArray<float3>` position buffers alternate per iteration
+- **Ping-pong**: Two `GraphicsBuffer` position buffers (`_SmoothPosA`, `_SmoothPosB`) alternate per iteration
 - **Default**: 1 iteration, λ = 0.33, β = 0.5
 
 ### Stage 3: Plane Detection & Vertex Snapping
@@ -216,7 +182,7 @@ After VertexJob produces raw Surface Nets positions and normals, this stage smoo
 
 Sequential RANSAC with axis-aligned bias detects dominant room planes from subsampled mesh vertices:
 
-1. **Vertex subsampling**: Collect positions/normals from all chunks with strided sampling, capped at `maxSampleVertices` (2048). This bounds RANSAC cost regardless of scene complexity.
+1. **Vertex subsampling**: Positions/normals are subsampled (strided) from GPU vertex buffer via periodic `AsyncGPUReadback`, capped at `maxSampleVertices` (2048). This bounds RANSAC cost regardless of scene complexity.
 2. For up to `maxPlanes` (6) iterations:
    - **RANSAC**: Sample 3 random non-inlier vertices, fit plane via cross product (80 iterations)
    - **Inlier test**: point-to-plane distance < 2cm AND normal alignment > 0.95
@@ -227,25 +193,24 @@ Sequential RANSAC with axis-aligned bias detects dominant room planes from subsa
 3. **Persistence across frames**: Detected planes merge with persistent planes if normal alignment > 0.95 and distance < 5cm. Merged planes blend parameters weighted by inlier count. Unmatched persistent planes decay by `confidenceDecay` per cycle and are removed at confidence 0.
 4. **Detection interval**: Runs every 3 mesh cycles (down from 5) since detection is now lightweight.
 
-#### PlaneSnapJob (Burst IJobFor)
+#### PlaneSnap (`PlaneSnap` compute kernel)
 
-For each vertex, finds the best-matching detected plane:
+For each vertex (dispatched indirectly), finds the best-matching detected plane:
 - Normal alignment: `|dot(vertexNormal, planeNormal)| > 0.9`
 - Proximity: `|dot(pos, normal) − d| < planeSnapThreshold`
 - Projects vertex onto plane: `pos -= signedDist × normal × confidence`
 - Snap strength scales with plane confidence (0.3 initial → 1.0 after many detections)
+- Plane data uploaded to GPU as a `StructuredBuffer<PlaneData>` each cycle
 
-### Stage 4: Adaptive Temporal Vertex Damping (`AdaptiveTemporalBlendJob`, Burst IJobFor)
+### Stage 4: Adaptive Temporal Vertex Damping (`TemporalBlend` kernel)
 
-Per-mesher `NativeArray<float4>` stores previous position (xyz) and stability age (w) for every voxel in the chunk, indexed by flat voxel coordinate. On subsequent mesh extractions:
+`RWTexture3D<float4> _TemporalState` stores previous position (xyz) and stability age (w) per voxel, indexed by 3D coordinate. On subsequent extractions:
 
 - **New vertex** (age = −1): Placed instantly at extracted position (α = 1.0, no damping)
 - **Deadzone**: If position changed less than `temporalDeadzone` (1mm), old position is kept exactly and age increments
 - **Large displacement** (> `convergenceThreshold` = 5mm): α = `alphaMax` (0.85), age resets to 0 — fast convergence
 - **Small displacement** (< convergenceThreshold): Age increments, α = `alphaMin + (alphaMax − alphaMin) × exp(−age × decayRate)`
-  - Freshly converged (age ~0): α ≈ 0.7 (responsive)
-  - Stable for ~20 frames: α ≈ 0.1 (strongly resists regression)
-- **Parallelism**: Runs as `IJobFor` with one slot per voxel — no contention between threads since each vertex writes its own voxel slot
+- **Storage**: Uses `RWTexture3D<float4>` instead of structured buffer to stay under Quest 3's 128MB `GraphicsBuffer` limit
 - **Default**: αMax = 0.85, αMin = 0.1, decayRate = 0.15, convergenceThreshold = 5mm, deadzone = 1mm
 
 ## 7. Camera Projection & Persistent Texturing
@@ -297,19 +262,9 @@ cropMin = sensorRes * (1 - scaleFactor) / 2
 uv = (sensorPt - cropMin) / (sensorRes * scaleFactor)
 ```
 
-## 8. Mesh Freezing
+## 8. Stability
 
-Chunks that have converged are automatically frozen to reduce GPU readback and CPU work:
-- After each mesh extraction, compare new vertex count to previous
-- **Distance gate**: freezing only progresses when the chunk has been observed from
-  within `freezeDistanceThreshold` (default 3m) at least `minCloseObservations` (default 3) times
-- Stable count only increments when delta < 5% AND the distance gate is satisfied
-- After `stableCyclesRequired` (default 5) consecutive stable extractions, mark chunk as `Frozen`
-- Frozen chunks are skipped in `UpdateDirtyChunks` — no readback, no remesh
-- Per-chunk tracking: `MinObserveDistance`, `CloseObservations` updated each frame in frustum
-- `UnfreezeAll()` resets all frozen state including observation counters
-
-Triplanar texels also auto-freeze via alpha-decaying blend rate (see Layer 2 above).
+Temporal blending on the GPU provides implicit convergence-based stability (see Stage 4). Long-stable vertices resist further displacement via exponentially decaying alpha. Triplanar texels also auto-freeze via alpha-decaying blend rate (see Layer 2 above).
 
 ## 9. Persistence
 
@@ -335,7 +290,7 @@ Triplanar textures saved separately as 3 raw RGBA8 files.
 1. Read binary, validate magic/version/voxel dimensions
 2. Create `Texture3D`, `SetPixelData`, `Graphics.CopyTexture` to upload TSDF and color to GPU
 3. `TriplanarCache.Load()` restores triplanar textures
-4. `ChunkManager.RemeshAll()` unfreezes all chunks and enqueues full re-extraction
+4. `MeshExtractor.Reinitialize()` reinitializes GPU buffers and triggers full re-extraction
 5. Resume scanning (new observations refine the loaded mesh)
 
 ## 10. Exclusion Zones
@@ -382,20 +337,11 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | `MIN_DOT` | 0.3 | Min view-normal dot product |
 | `COLOR_SURFACE_BAND` | 0.5 | TSDF band for color integration |
 
-### Meshing
+### GPU Meshing
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `minMeshWeight` | 0.08 | Min voxel weight for Surface Nets to consider |
-| `chunkWorldSize` | 4m³ | Spatial chunk dimensions |
-| `overlap` | 0.25m | Extra voxels per chunk edge |
-| `numMeshWorkers` | 2 | Background mesher threads |
-| `updateDistance` | 6m | Max distance for chunk enqueuing |
-
-### Mesh Regularization
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `tsdfSmoothIterations` | 0 | Bilateral filter passes on TSDF before extraction (0 = off) |
-| `tsdfSmoothSigma` | 0.3 | Bilateral range sigma (lower = sharper edges) |
+| `gpuVertexBudgetPercent` | 0.05 | Max vertex fraction of total voxels |
 | `meshSmoothIterations` | 1 | Post-extraction vertex smoothing passes (0 = off) |
 | `meshSmoothLambda` | 0.33 | Laplacian blend strength per iteration |
 | `meshSmoothBeta` | 0.5 | HC back-projection strength (prevents shrinkage) |
@@ -404,19 +350,11 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | `maxSampleVertices` | 2048 | Cap on vertices fed to RANSAC (strided subsampling) |
 | `ransacIterations` | 80 | RANSAC hypothesis iterations per plane candidate |
 | `maxPlanes` | 6 | Maximum planes to detect (typical room = floor + ceiling + 4 walls) |
-| `timeBudgetMs` | 2.0 | Max milliseconds for plane detection before aborting |
 | `temporalAlphaMax` | 0.85 | Blend factor for new/moving vertices (fast convergence) |
 | `temporalAlphaMin` | 0.1 | Blend factor for long-stable vertices (resists regression) |
 | `temporalDecayRate` | 0.15 | How quickly alpha decays from max to min as vertex stabilizes |
 | `convergenceThreshold` | 0.005m | Displacement threshold to consider a vertex still converging |
 | `temporalDeadzone` | 0.001m | Position changes below this are suppressed entirely |
-
-### Freezing
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `freezeDistanceThreshold` | 3m | Max eye-to-chunk distance for close-range observation |
-| `minCloseObservations` | 3 | Required close observations before freeze can begin |
-| `stableCyclesRequired` | 5 | Consecutive stable extractions to trigger freeze |
 
 ### Camera
 | Parameter | Default | Description |
@@ -426,10 +364,10 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | `pruneIntervalSeconds` | 3.0s | Time between prune passes |
 
 ### Scan Rates
-| Mode | Integration | Mesh Extraction | Texture |
-|------|-------------|-----------------|---------|
-| Passive | 3 Hz | 1 Hz | 5 Hz |
-| Guided | 8 Hz | 3 Hz | 15 Hz |
+| Mode | Integration | Mesh Extraction |
+|------|-------------|-----------------|
+| Passive | 3 Hz | 1 Hz |
+| Guided | 10 Hz | 15 Hz |
 
 ### Texture Persistence
 | Parameter | Default | Description |
@@ -466,9 +404,10 @@ Runs alongside scanning with no user interaction. Saves posed camera frames to `
 - **Typical output**: 100-300 keyframes, 10-30MB total
 
 ### PointCloudExporter (Quest side, periodic)
-Exports TSDF mesh vertices as binary PLY to `GSExport/points3d.ply`:
-- Iterates all populated chunks, transforms vertices to world space
-- Writes position (float3), normal (float3), color (uchar3) per vertex in Unity coordinates (left-handed Y-up)
+Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
+- Async GPU readback of the `GPUSurfaceNets` vertex buffer
+- Parses `GPUVertex` structs: position (float3), normal (float3), packedColor (uint) → RGB
+- Writes position, normal, color per vertex in Unity coordinates (left-handed Y-up)
 - Runs every 30s automatically
 - Provides dense initialization for GS training (10-100x more points than SfM)
 

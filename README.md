@@ -5,10 +5,10 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 ## Features
 
 - **GPU TSDF Integration** — Depth frames fused into a signed distance field via compute shaders
-- **Surface Nets Meshing** — Async chunk-based mesh extraction on background threads (Burst Jobs)
+- **GPU Surface Nets Meshing** — Fully GPU-driven mesh extraction via compute shaders with zero CPU readback, rendered via a single `Graphics.RenderPrimitivesIndirect` draw call
 - **Three-Layer Texturing** — Keyframe ring buffer (pixel-level) → triplanar world-space cache (persistent) → vertex colors (fallback)
 - **Mesh Persistence** — Save/load full scan state (TSDF + color volumes + triplanar textures) to disk
-- **Mesh Freezing** — Converged chunks auto-freeze to save GPU readback and CPU cycles
+- **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction
 - **Gaussian Splat Export** — Automatic keyframe capture + dense point cloud export for PC-side GS training
 
@@ -26,9 +26,9 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 | `com.unity.xr.meta-openxr` | 2.1+ | Bridges Meta depth to AR Foundation |
 | `com.unity.xr.openxr` | 1.15+ | OpenXR runtime |
 | `com.meta.xr.mrutilitykit` | 85+ | Passthrough camera RGB access |
-| `com.unity.burst` | 1.8+ | Burst-compiled mesh extraction jobs |
-| `com.unity.collections` | 2.4+ | NativeArray/NativeList for jobs |
-| `com.unity.mathematics` | 1.3+ | Math types for Burst |
+| `com.unity.burst` | 1.8+ | Required by Collections/Mathematics |
+| `com.unity.collections` | 2.4+ | NativeArray for plane detection |
+| `com.unity.mathematics` | 1.3+ | Math types used throughout |
 
 ### Android Permissions
 
@@ -70,11 +70,15 @@ Or clone locally and reference as a local package:
 DepthCapture (AR depth frames → normals → dilation)
        │
 VolumeIntegrator (TSDF integrate → warmup clear → prune)
-       ├── ChunkManager → SurfaceNetsMesher (mesh + vertex colors)
+       │
+MeshExtractor → GPUSurfaceNets (compute: classify → smooth → snap → temporal → index)
+       │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
+       │
+       ├── PlaneDetector (periodic RANSAC on background thread → persistent plane list)
        ├── TriplanarCache (bake camera → 3 world-space textures)
        └── KeyframeStore (ring buffer of camera frames)
                 │
-ScanMeshVertexColor.shader (keyframes → triplanar → vertex color fallback)
+ScanMeshVertexColor.shader (SV_VertexID → keyframes → triplanar → vertex color fallback)
 ```
 
 See [ALGORITHM.md](ALGORITHM.md) for the full technical reference.
@@ -86,7 +90,7 @@ QuestRoomScan can automatically capture keyframes and a dense point cloud during
 ### On-Device (automatic)
 
 - **KeyframeCollector**: Saves motion-gated JPEG frames + camera poses to `GSExport/`
-- **PointCloudExporter**: Periodically exports the TSDF mesh as a binary PLY point cloud
+- **PointCloudExporter**: Periodically exports GPU mesh vertices as a binary PLY point cloud via async readback
 
 ### PC Pipeline
 
@@ -158,9 +162,10 @@ QuestRoomScan builds on that foundation with significant extensions:
 
 | | lasertag | QuestRoomScan |
 |-|----------|---------------|
+| **Mesh extraction** | CPU marching cubes from GPU volume | Fully GPU-driven Surface Nets via compute shaders — zero CPU readback, single indirect draw call |
 | **Texturing** | Geometry only — no camera RGB texturing | Full camera-based texturing at three resolution tiers: keyframe projection (pixel-level), triplanar world-space cache (~8mm/texel), and vertex colors (~5cm) — all sourced from passthrough camera RGB |
 | **Persistence** | None — mesh lost on restart | Save/load of TSDF + color volumes + triplanar textures to disk (experimental, not well tested) |
-| **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, distance-gated chunk freezing |
+| **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, GPU temporal stabilization, RANSAC plane detection & snapping |
 | **Gaussian Splat export** | — | On-device keyframe + point cloud capture, PC pipeline for COLMAP conversion and GS training |
 | **Packaging** | Embedded in a game | Standalone Unity package with one-click editor setup wizard |
 
