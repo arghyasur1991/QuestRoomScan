@@ -83,7 +83,7 @@ namespace Genesis.RoomScan
 
         [Header("Warmup")]
         [Tooltip("Clear the volume after this many integrations to discard sensor startup noise. 0 = disabled.")]
-        [SerializeField] private int warmupIntegrations = 15;
+        [SerializeField] private int warmupIntegrations = 3;
 
         [Header("Pruning")]
         [SerializeField] private float pruneIntervalSeconds = 3f;
