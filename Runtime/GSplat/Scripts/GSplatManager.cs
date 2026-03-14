@@ -129,25 +129,14 @@ namespace Genesis.RoomScan.GSplat
             }
 
             // Blit the camera frame directly to a training-resolution RenderTexture.
-            // The rasterize compute shader writes scene-top to RWTexture2D row 0, but
-            // Graphics.Blit from the Vulkan camera texture writes scene-top to the LAST
-            // row (camera textures use top-left origin, Blit maps UV y=1 → framebuffer top).
-            // Flip Y during the Blit so the GT matches the compute shader's convention.
+            // No Y-flip: the camera texture orientation already matches the compute
+            // shader's RWTexture2D convention on Quest/Vulkan.
             var gtRT = new RenderTexture(trainingResWidth, trainingResHeight, 0,
                 RenderTextureFormat.ARGB32) { filterMode = FilterMode.Bilinear };
             gtRT.Create();
-            Graphics.Blit(frame, gtRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
+            Graphics.Blit(frame, gtRT);
 
             Matrix4x4 view = Matrix4x4.TRS(pos, rot, Vector3.one).inverse;
-
-            // Flip Y-axis of view matrix: Unity uses Y-up but camera intrinsics
-            // follow OpenCV convention (Y-down, origin at top-left). Without this,
-            // the rendered image is vertically flipped relative to the keyframe,
-            // causing the loss to compare mismatched pixels and produce garbage gradients.
-            view[1, 0] = -view[1, 0];
-            view[1, 1] = -view[1, 1];
-            view[1, 2] = -view[1, 2];
-            view[1, 3] = -view[1, 3];
 
             // Intrinsics from PassthroughCameraProvider are at sensor resolution.
             // The capture texture may be a centered crop of the sensor. Adjust the
