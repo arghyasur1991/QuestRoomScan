@@ -140,6 +140,7 @@ namespace Genesis.RoomScan.GSplat
             var gfxType = SystemInfo.graphicsDeviceType;
             _flipGTY = (gfxType == GraphicsDeviceType.Vulkan ||
                         gfxType == GraphicsDeviceType.OpenGLES3) ? 1 : 0;
+            Debug.Log($"[GSplatTrainer] graphicsDeviceType={gfxType}, _flipGTY={_flipGTY}");
 
             const GraphicsBuffer.Target s = GraphicsBuffer.Target.Structured;
             _vxy    = new GraphicsBuffer(s, maxPoints * 2, 4);

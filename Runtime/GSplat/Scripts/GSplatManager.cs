@@ -453,11 +453,14 @@ namespace Genesis.RoomScan.GSplat
                       $"rendTopR={rendTopAvg:F1} rendBotR={rendBotAvg:F1} " +
                       $"kfTopR={kfTopAvg:F1} kfBotR={kfBotAvg:F1}");
 
-            // Save rendered + GT images to disk on the first iteration for visual verification
+            // Save rendered + GT images to disk on the first iteration for visual verification.
+            // Flip the rendered image vertically so both diagnostics have the same orientation
+            // (ReadPixels from an RWTexture2D-backed RT vs a Blit'd Texture2D can differ on Vulkan).
             if (iter <= 1)
             {
                 string dir = System.IO.Path.Combine(Application.persistentDataPath, "GSExport", "train_diag");
                 System.IO.Directory.CreateDirectory(dir);
+                FlipTextureY(readTex);
                 var rendJpg = readTex.EncodeToJPG(95);
                 System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"rendered_s{sectorId}_i{iter}.jpg"), rendJpg);
                 var kfBlit = RenderTexture.GetTemporary(kf.Texture.width, kf.Texture.height, 0);
@@ -475,6 +478,23 @@ namespace Genesis.RoomScan.GSplat
             }
 
             Destroy(readTex);
+        }
+
+        static void FlipTextureY(Texture2D tex)
+        {
+            var pixels = tex.GetPixels32();
+            int w = tex.width, h = tex.height;
+            for (int y = 0; y < h / 2; y++)
+            {
+                int topRow = y * w;
+                int botRow = (h - 1 - y) * w;
+                for (int x = 0; x < w; x++)
+                {
+                    (pixels[topRow + x], pixels[botRow + x]) = (pixels[botRow + x], pixels[topRow + x]);
+                }
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply(false);
         }
 
         void LogGaussianDiagnostics(int sectorId, GSplatBuffers buffers, string tag)
