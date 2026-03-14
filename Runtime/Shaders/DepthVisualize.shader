@@ -2,7 +2,7 @@ Shader "Genesis/DepthVisualize"
 {
     Properties
     {
-        _MainTex ("Depth Texture", 2D) = "black" {}
+        _MainTex ("Unused (RawImage compat)", 2D) = "black" {}
         _NearColor ("Near Color", Color) = (1, 0, 0, 1)
         _FarColor ("Far Color", Color) = (0, 0, 1, 1)
         _NearDist ("Near Distance", Float) = 0.3
@@ -22,7 +22,12 @@ Shader "Genesis/DepthVisualize"
 
             #include "UnityCG.cginc"
 
-            sampler2D _MainTex;
+            // Depth is a Texture2DArray (stereo); read from the global
+            // set by DepthCapture.SetGlobalShaderProperties().
+            Texture2DArray<float> gsDepthTex;
+            SamplerState gsPointClampSampler;
+            uniform float4x4 gsDepthProj[2];
+
             float4 _NearColor;
             float4 _FarColor;
             float _NearDist;
@@ -50,9 +55,15 @@ Shader "Genesis/DepthVisualize"
 
             half4 frag(v2f i) : SV_Target
             {
-                float depth = tex2D(_MainTex, i.uv).r;
-                if (depth <= 0.001) return half4(0, 0, 0, 0.8);
-                float t = saturate((depth - _NearDist) / (_FarDist - _NearDist));
+                float depthNDC = gsDepthTex.SampleLevel(gsPointClampSampler, float3(i.uv, 0), 0);
+                if (depthNDC <= 0.001) return half4(0, 0, 0, 0.8);
+
+                float z = depthNDC * 2.0 - 1.0;
+                float A = gsDepthProj[0][2][2];
+                float B = gsDepthProj[0][2][3];
+                float linearDepth = abs(B / (z + A));
+
+                float t = saturate((linearDepth - _NearDist) / (_FarDist - _NearDist));
                 return half4(lerp(_NearColor.rgb, _FarColor.rgb, t), 1);
             }
             ENDHLSL
