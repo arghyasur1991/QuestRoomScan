@@ -129,12 +129,14 @@ namespace Genesis.RoomScan.GSplat
             }
 
             // Blit the camera frame directly to a training-resolution RenderTexture.
-            // Keeping it as an RT avoids the CPU round-trip (ReadPixels/Apply) and ensures
-            // the loss shader compares two RTs with identical Y conventions — no flip needed.
+            // The rasterize compute shader writes scene-top to RWTexture2D row 0, but
+            // Graphics.Blit from the Vulkan camera texture writes scene-top to the LAST
+            // row (camera textures use top-left origin, Blit maps UV y=1 → framebuffer top).
+            // Flip Y during the Blit so the GT matches the compute shader's convention.
             var gtRT = new RenderTexture(trainingResWidth, trainingResHeight, 0,
                 RenderTextureFormat.ARGB32) { filterMode = FilterMode.Bilinear };
             gtRT.Create();
-            Graphics.Blit(frame, gtRT);
+            Graphics.Blit(frame, gtRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
 
             Matrix4x4 view = Matrix4x4.TRS(pos, rot, Vector3.one).inverse;
 
