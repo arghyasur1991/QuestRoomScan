@@ -1,0 +1,103 @@
+// Compute prepass: projects Gaussians to 2D, decomposes covariance into
+// oriented axis vectors, evaluates SH color, packs into SplatViewData.
+// One thread per Gaussian. Runs once per frame per visible sector.
+#pragma kernel CSCalcViewData
+
+#include "GSplatHelpers.hlsl"
+
+struct SplatViewData
+{
+    float3 worldPos;
+    float viewDepth;
+    float2 axis1;
+    float2 axis2;
+    uint2 color;   // packed fp16: x = (r<<16)|g, y = (b<<16)|a
+};
+
+uint _NumPoints;
+uint _WriteOffset;      // offset into output buffer (for concatenating sectors)
+float _SplatSize;       // globScale multiplier
+uint _SHDegree;
+float4x4 _ViewMatrix;  // positive-Z-forward convention
+float2 _Focal;          // (fx, fy) in pixels
+float2 _ScreenSize;
+float3 _CamPos;
+
+StructuredBuffer<float> _Means;
+StructuredBuffer<float> _Scales;
+StructuredBuffer<float> _Quats;
+StructuredBuffer<float> _FeaturesDC;
+StructuredBuffer<float> _FeaturesRest;
+StructuredBuffer<float> _Opacities;
+
+RWStructuredBuffer<SplatViewData> _ViewData;
+
+void DecomposeCovariance(float3 cov2d, out float2 v1, out float2 v2)
+{
+    float diag1 = cov2d.x, diag2 = cov2d.z, offDiag = cov2d.y;
+    float mid = 0.5 * (diag1 + diag2);
+    float radius = length(float2((diag1 - diag2) * 0.5, offDiag));
+    float lambda1 = mid + radius;
+    float lambda2 = max(mid - radius, 0.1);
+
+    float2 rawVec = float2(offDiag, lambda1 - diag1);
+    float len = length(rawVec);
+    float2 diagVec = len > 1e-6 ? rawVec / len : float2(1, 0);
+    diagVec.y = -diagVec.y;
+
+    float maxSize = 4096.0;
+    v1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
+    v2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
+}
+
+[numthreads(256, 1, 1)]
+void CSCalcViewData(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _NumPoints) return;
+
+    SplatViewData view = (SplatViewData)0;
+
+    float3 pos = float3(_Means[idx*3], _Means[idx*3+1], _Means[idx*3+2]);
+    float3 pView = Transform4x3(_ViewMatrix, pos);
+
+    if (pView.z <= 0.01)
+    {
+        view.viewDepth = -1;
+        _ViewData[_WriteOffset + idx] = view;
+        return;
+    }
+
+    view.worldPos = pos;
+    view.viewDepth = pView.z;
+
+    // 3D covariance
+    float3 expScale = exp(float3(_Scales[idx*3], _Scales[idx*3+1], _Scales[idx*3+2]));
+    float4 quat = float4(_Quats[idx*4], _Quats[idx*4+1], _Quats[idx*4+2], _Quats[idx*4+3]);
+
+    float cov3d[6];
+    ScaleRotToCov3D(expScale, _SplatSize, quat, cov3d);
+
+    float fx = _Focal.x, fy = _Focal.y;
+    float tanFovX = 0.5 * _ScreenSize.x / fx;
+    float tanFovY = 0.5 * _ScreenSize.y / fy;
+
+    float3 cov2d = ProjectCov3DEWA(cov3d, _ViewMatrix, fx, fy, tanFovX, tanFovY, pView);
+
+    DecomposeCovariance(cov2d, view.axis1, view.axis2);
+
+    // SH color evaluation
+    float3 viewdir = normalize(pos - _CamPos);
+    uint numBases = NumSHBases(_SHDegree);
+    uint restSize = (numBases - 1) * 3;
+    float3 col;
+    SHCoeffsToColor(_SHDegree, viewdir, _FeaturesDC, 3 * idx, _FeaturesRest, restSize * idx, col);
+    col = saturate(col + 0.5);
+
+    float alpha = 1.0 / (1.0 + exp(-_Opacities[idx]));
+
+    view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
+    view.color.y = (f32tof16(col.b) << 16) | f32tof16(alpha);
+
+    _ViewData[_WriteOffset + idx] = view;
+}
