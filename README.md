@@ -132,9 +132,10 @@ The trained PLY can be imported into Unity with any Gaussian Splat renderer.
 |-----------|--------|
 | TSDF volume (160x128x160, RG8) | ~6.5 MB |
 | Color volume (160x128x160, RGBA8) | ~13 MB |
+| GPU Surface Nets (coord map, vertices, indices, smoothing, temporal 3D texture) | ~83 MB |
 | Triplanar textures (3x 1024x1024, RGBA8) | ~12 MB |
 | Keyframe ring buffer (8x 1280x960, RGBA8) | ~40 MB |
-| **Total GPU** | **~72 MB** |
+| **Total GPU** | **~155 MB** |
 
 ## Comparison with Hyperscape
 

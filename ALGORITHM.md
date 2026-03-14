@@ -366,8 +366,8 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Scan Rates
 | Mode | Integration | Mesh Extraction |
 |------|-------------|-----------------|
-| Passive | 3 Hz | 1 Hz |
-| Guided | 10 Hz | 15 Hz |
+| Passive | 30 Hz | 30 Hz |
+| Guided | 30 Hz | 30 Hz |
 
 ### Texture Persistence
 | Parameter | Default | Description |
@@ -383,9 +383,14 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 |-----------|--------|
 | TSDF volume (160x128x160 RG8) | ~6.5 MB |
 | Color volume (160x128x160 RGBA8) | ~13 MB |
+| GPU Surface Nets — coord vertex map (int per voxel) | ~12.5 MB |
+| GPU Surface Nets — vertex buffer (163K × 32B) | ~5 MB |
+| GPU Surface Nets — index buffer (2.9M × 4B) | ~11 MB |
+| GPU Surface Nets — smooth ping-pong (2 × 163K × 12B) | ~4 MB |
+| GPU Surface Nets — temporal state (160³ × 16B, RWTexture3D RGBA32F) | ~50 MB |
 | Triplanar textures (3x 1024x1024 RGBA8) | ~12 MB |
 | Keyframe array (8x 1280x960 RGBA8) | ~40 MB |
-| **Total** | **~72 MB** |
+| **Total GPU** | **~155 MB** |
 | **Persistence on disk** | **~31 MB** |
 
 ## 12. Gaussian Splat Export Pipeline
