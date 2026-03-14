@@ -6,12 +6,13 @@ namespace Genesis.RoomScan.GSplat
 {
     /// <summary>
     /// Renders trained Gaussian splat sectors directly from GPU training buffers.
-    /// Zero-copy: no file I/O or CPU readback. Uses RenderPrimitives with billboard quads.
+    /// Zero-copy: no file I/O or CPU readback. Projects 3D covariance to 2D conic
+    /// per-splat in the vertex shader for proper elliptical Gaussian rendering.
     /// </summary>
     public class GSSectorRenderer : MonoBehaviour
     {
         [SerializeField] Material splatMaterial;
-        [SerializeField, Range(1f, 8f)] float splatSizeMultiplier = 3f;
+        [SerializeField, Range(0.1f, 4f)] float splatSizeMultiplier = 1f;
 
         SectorScheduler _scheduler;
         MaterialPropertyBlock _props;
@@ -23,6 +24,7 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_FeaturesDC = Shader.PropertyToID("_FeaturesDC");
         static readonly int ID_Opacities = Shader.PropertyToID("_Opacities");
         static readonly int ID_Scales = Shader.PropertyToID("_Scales");
+        static readonly int ID_Quats = Shader.PropertyToID("_Quats");
         static readonly int ID_SplatCount = Shader.PropertyToID("_SplatCount");
         static readonly int ID_SplatSize = Shader.PropertyToID("_SplatSize");
 
@@ -64,6 +66,7 @@ namespace Genesis.RoomScan.GSplat
                 _props.SetBuffer(ID_FeaturesDC, buffers.FeaturesDC);
                 _props.SetBuffer(ID_Opacities, buffers.Opacities);
                 _props.SetBuffer(ID_Scales, buffers.Scales);
+                _props.SetBuffer(ID_Quats, buffers.Quats);
                 _props.SetInt(ID_SplatCount, buffers.CurrentCount);
                 _props.SetFloat(ID_SplatSize, splatSizeMultiplier);
 
