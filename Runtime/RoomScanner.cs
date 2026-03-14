@@ -47,12 +47,12 @@ namespace Genesis.RoomScan
         [SerializeField] private bool autoStartOnLoad = true;
 
         [Header("Passive Mode Rates")]
-        [SerializeField] private float passiveIntegrationHz = 3f;
-        [SerializeField] private float passiveMeshExtractionHz = 1f;
+        [SerializeField] private float passiveIntegrationHz = 30f;
+        [SerializeField] private float passiveMeshExtractionHz = 30f;
 
         [Header("Guided Mode Rates")]
-        [SerializeField] private float guidedIntegrationHz = 10f;
-        [SerializeField] private float guidedMeshExtractionHz = 15f;
+        [SerializeField] private float guidedIntegrationHz = 30f;
+        [SerializeField] private float guidedMeshExtractionHz = 30f;
 
         [Header("Mesh Quality")]
         [SerializeField] private int minIntegrationsBeforeMesh = 5;
