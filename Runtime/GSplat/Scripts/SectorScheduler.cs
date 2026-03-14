@@ -8,6 +8,7 @@ namespace Genesis.RoomScan.GSplat
     public enum SectorState
     {
         Empty,
+        NoGeometry,
         MeshOnly,
         Training,
         SplatReady
@@ -83,6 +84,7 @@ namespace Genesis.RoomScan.GSplat
 
         /// <summary>
         /// Mark a sector as having mesh data (called after mesh extraction).
+        /// Skips sectors marked NoGeometry (seeding found zero vertices in their AABB).
         /// </summary>
         public void MarkMeshReady(int sectorId)
         {
@@ -91,12 +93,12 @@ namespace Genesis.RoomScan.GSplat
         }
 
         /// <summary>
-        /// Revert a sector to Empty (e.g. seeding found no vertices in its AABB).
-        /// Prevents PickNextSector from ever selecting it again.
+        /// Mark a sector as permanently empty (seeding found no vertices in its AABB).
+        /// MarkMeshReady will not resurrect sectors in this state.
         /// </summary>
-        public void MarkEmpty(int sectorId)
+        public void MarkNoGeometry(int sectorId)
         {
-            _sectors[sectorId].State = SectorState.Empty;
+            _sectors[sectorId].State = SectorState.NoGeometry;
         }
 
         /// <summary>

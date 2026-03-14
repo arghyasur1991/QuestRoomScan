@@ -206,7 +206,7 @@ namespace Genesis.RoomScan.GSplat
                     SeedFromMesh(sectorId, buffers);
                     if (buffers.CurrentCount == 0)
                     {
-                        _scheduler.MarkEmpty(sectorId);
+                        _scheduler.MarkNoGeometry(sectorId);
                         continue;
                     }
                 }
@@ -244,6 +244,7 @@ namespace Genesis.RoomScan.GSplat
 
         readonly int[] _countReadback = new int[1];
         readonly int[] _meshCountReadback = new int[2];
+        bool _loggedVertexRange;
 
         void SeedFromMesh(int sectorId, GSplatBuffers buffers)
         {
@@ -259,6 +260,30 @@ namespace Genesis.RoomScan.GSplat
             countersBuf.GetData(_meshCountReadback);
             int numVertices = _meshCountReadback[0];
             if (numVertices <= 0) return;
+
+            if (!_loggedVertexRange)
+            {
+                _loggedVertexRange = true;
+                int sampleCount = Mathf.Min(numVertices, 2048);
+                var sampleData = new byte[sampleCount * 32];
+                vertBuf.GetData(sampleData, 0, 0, sampleCount);
+                Vector3 pMin = Vector3.one * float.MaxValue;
+                Vector3 pMax = Vector3.one * float.MinValue;
+                for (int i = 0; i < sampleCount; i++)
+                {
+                    float px = System.BitConverter.ToSingle(sampleData, i * 32 + 0);
+                    float py = System.BitConverter.ToSingle(sampleData, i * 32 + 4);
+                    float pz = System.BitConverter.ToSingle(sampleData, i * 32 + 8);
+                    if (px < pMin.x) pMin.x = px;
+                    if (py < pMin.y) pMin.y = py;
+                    if (pz < pMin.z) pMin.z = pz;
+                    if (px > pMax.x) pMax.x = px;
+                    if (py > pMax.y) pMax.y = py;
+                    if (pz > pMax.z) pMax.z = pz;
+                }
+                Debug.Log($"[GSplatManager] Vertex range diagnostic: {numVertices} verts, " +
+                          $"sample={sampleCount}, min={pMin}, max={pMax}");
+            }
 
             var bounds = _scheduler.GetSectorBounds(sectorId);
             Vector3 sMin = bounds.center - bounds.extents;
