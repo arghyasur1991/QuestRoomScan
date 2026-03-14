@@ -60,7 +60,7 @@ namespace Genesis.RoomScan
             }
 
             _mruk.SceneSettings ??= new MRUK.MRUKSettings();
-            _mruk.SceneSettings.DataSource = MRUK.SceneDataSource.DeviceOnly;
+            _mruk.SceneSettings.DataSource = MRUK.SceneDataSource.Device;
             _mruk.SceneSettings.LoadSceneOnStartup = false;
 
             _mruk.RegisterSceneLoadedCallback(OnSceneLoaded);
