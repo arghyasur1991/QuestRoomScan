@@ -219,11 +219,68 @@ namespace Genesis.RoomScan.GSplat
             UpdateMeshMask();
         }
 
+        static readonly int ID_NumVertices = Shader.PropertyToID("_NumVertices");
+        static readonly int ID_MaxGaussians = Shader.PropertyToID("_MaxGaussians");
+        static readonly int ID_InitScale = Shader.PropertyToID("_InitScale");
+        static readonly int ID_SectorMin = Shader.PropertyToID("_SectorMin");
+        static readonly int ID_SectorMax = Shader.PropertyToID("_SectorMax");
+        static readonly int ID_MeshVertices = Shader.PropertyToID("_MeshVertices");
+        static readonly int ID_OutMeans = Shader.PropertyToID("_OutMeans");
+        static readonly int ID_OutScales = Shader.PropertyToID("_OutScales");
+        static readonly int ID_OutQuats = Shader.PropertyToID("_OutQuats");
+        static readonly int ID_OutOpacities = Shader.PropertyToID("_OutOpacities");
+        static readonly int ID_OutFeaturesDC = Shader.PropertyToID("_OutFeaturesDC");
+        static readonly int ID_OutFeaturesRest = Shader.PropertyToID("_OutFeaturesRest");
+        static readonly int ID_OutCount = Shader.PropertyToID("_OutCount");
+
+        readonly int[] _countReadback = new int[1];
+
         void SeedFromMesh(int sectorId, GSplatBuffers buffers)
         {
-            // TODO: dispatch InitGaussians compute shader to extract mesh vertices
-            // within the sector AABB and create initial Gaussians.
-            Debug.Log($"[GSplatManager] Seeding sector {sectorId} from mesh vertices");
+            if (initGaussiansCompute == null) return;
+
+            var me = MeshExtractor.Instance;
+            if (me?.GpuSurfaceNets == null) return;
+
+            var vertBuf = me.GpuSurfaceNets.VertexBuffer;
+            if (vertBuf == null) return;
+
+            int numVertices = vertBuf.count;
+            if (numVertices == 0) return;
+
+            var bounds = _scheduler.GetSectorBounds(sectorId);
+            Vector3 sMin = bounds.center - bounds.extents;
+            Vector3 sMax = bounds.center + bounds.extents;
+
+            float vi_voxelSize = VolumeIntegrator.Instance?.VoxelSize ?? 0.05f;
+            float initScale = Mathf.Log(vi_voxelSize);
+
+            buffers.CountBuffer.SetData(new int[] { 0 });
+
+            int kernel = initGaussiansCompute.FindKernel("InitFromMeshVertices");
+            initGaussiansCompute.SetInt(ID_NumVertices, numVertices);
+            initGaussiansCompute.SetInt(ID_MaxGaussians, buffers.MaxGaussians);
+            initGaussiansCompute.SetFloat(ID_InitScale, initScale);
+            initGaussiansCompute.SetVector(ID_SectorMin, new Vector4(sMin.x, sMin.y, sMin.z, 0));
+            initGaussiansCompute.SetVector(ID_SectorMax, new Vector4(sMax.x, sMax.y, sMax.z, 0));
+
+            initGaussiansCompute.SetBuffer(kernel, ID_MeshVertices, vertBuf);
+            initGaussiansCompute.SetBuffer(kernel, ID_OutMeans, buffers.Means);
+            initGaussiansCompute.SetBuffer(kernel, ID_OutScales, buffers.Scales);
+            initGaussiansCompute.SetBuffer(kernel, ID_OutQuats, buffers.Quats);
+            initGaussiansCompute.SetBuffer(kernel, ID_OutOpacities, buffers.Opacities);
+            initGaussiansCompute.SetBuffer(kernel, ID_OutFeaturesDC, buffers.FeaturesDC);
+            initGaussiansCompute.SetBuffer(kernel, ID_OutFeaturesRest, buffers.FeaturesRest);
+            initGaussiansCompute.SetBuffer(kernel, ID_OutCount, buffers.CountBuffer);
+
+            int threadGroups = (numVertices + 255) / 256;
+            initGaussiansCompute.Dispatch(kernel, threadGroups, 1, 1);
+
+            buffers.CountBuffer.GetData(_countReadback);
+            buffers.CurrentCount = Mathf.Min(_countReadback[0], buffers.MaxGaussians);
+
+            Debug.Log($"[GSplatManager] Seeded sector {sectorId}: {buffers.CurrentCount} Gaussians " +
+                      $"from {numVertices} mesh verts (AABB {sMin} → {sMax})");
         }
 
         KeyframeData? PickBestKeyframe(int sectorId)
