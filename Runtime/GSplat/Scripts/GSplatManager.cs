@@ -136,6 +136,15 @@ namespace Genesis.RoomScan.GSplat
 
             Matrix4x4 view = Matrix4x4.TRS(pos, rot, Vector3.one).inverse;
 
+            // Flip Y-axis of view matrix: Unity uses Y-up but camera intrinsics
+            // follow OpenCV convention (Y-down, origin at top-left). Without this,
+            // the rendered image is vertically flipped relative to the keyframe,
+            // causing the loss to compare mismatched pixels and produce garbage gradients.
+            view[1, 0] = -view[1, 0];
+            view[1, 1] = -view[1, 1];
+            view[1, 2] = -view[1, 2];
+            view[1, 3] = -view[1, 3];
+
             // Scale intrinsics from camera resolution to training resolution
             float scaleX = (float)trainingResWidth / currentRes.x;
             float scaleY = (float)trainingResHeight / currentRes.y;
@@ -364,8 +373,15 @@ namespace Genesis.RoomScan.GSplat
             int total = rendPixels.Length;
             float rAvg = rSum / total, gAvg = gSum / total, bAvg = bSum / total;
 
-            // Keyframe average
-            var kfPixels = kf.Texture.GetPixels32();
+            // Keyframe average (texture is non-readable, blit to temp RT first)
+            var kfRT = RenderTexture.GetTemporary(kf.Texture.width, kf.Texture.height, 0);
+            Graphics.Blit(kf.Texture, kfRT);
+            RenderTexture.active = kfRT;
+            var kfRead = new Texture2D(kfRT.width, kfRT.height, TextureFormat.RGBA32, false);
+            kfRead.ReadPixels(new Rect(0, 0, kfRT.width, kfRT.height), 0, 0, false);
+            kfRead.Apply(false);
+            RenderTexture.active = prevRT;
+            var kfPixels = kfRead.GetPixels32();
             float krSum = 0, kgSum = 0, kbSum = 0;
             foreach (var px in kfPixels)
             {
@@ -373,6 +389,8 @@ namespace Genesis.RoomScan.GSplat
             }
             int kTotal = kfPixels.Length;
             float krAvg = krSum / kTotal, kgAvg = kgSum / kTotal, kbAvg = kbSum / kTotal;
+            Destroy(kfRead);
+            RenderTexture.ReleaseTemporary(kfRT);
 
             // Gradient magnitude sample
             int n = Mathf.Min(buffers.CurrentCount, 4);
@@ -382,10 +400,34 @@ namespace Genesis.RoomScan.GSplat
             for (int i = 0; i < n * 3; i++) gradMag += gMeans[i] * gMeans[i];
             gradMag = Mathf.Sqrt(gradMag / (n * 3));
 
+            // Top-half vs bottom-half brightness (detects Y-flip: if rendered top is dark
+            // but keyframe top is bright, the images are vertically misaligned)
+            float rendTopR = 0, rendBotR = 0, kfTopR = 0, kfBotR = 0;
+            int halfH = h / 2;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    float r = rendPixels[y * w + x].r;
+                    if (y < halfH) rendTopR += r; else rendBotR += r;
+                }
+            int kHalfH = kf.Texture.height / 2;
+            int kw = kf.Texture.width, kh = kf.Texture.height;
+            for (int y = 0; y < kh; y++)
+                for (int x = 0; x < kw; x++)
+                {
+                    float r = kfPixels[y * kw + x].r;
+                    if (y < kHalfH) kfTopR += r; else kfBotR += r;
+                }
+            int halfPixR = w * halfH, halfPixK = kw * kHalfH;
+            float rendTopAvg = rendTopR / halfPixR, rendBotAvg = rendBotR / Mathf.Max(1, total - halfPixR);
+            float kfTopAvg = kfTopR / halfPixK, kfBotAvg = kfBotR / Mathf.Max(1, kTotal - halfPixK);
+
             Debug.Log($"[GSplat-TrainDiag] sector={sectorId} iter={iter}: " +
                       $"rendered=({rAvg:F1},{gAvg:F1},{bAvg:F1}) nonBlack={nonBlack}/{total} " +
                       $"keyframe=({krAvg:F1},{kgAvg:F1},{kbAvg:F1}) size={kf.Texture.width}x{kf.Texture.height} " +
-                      $"gradMeanRMS={gradMag:E2}");
+                      $"gradMeanRMS={gradMag:E2} " +
+                      $"rendTopR={rendTopAvg:F1} rendBotR={rendBotAvg:F1} " +
+                      $"kfTopR={kfTopAvg:F1} kfBotR={kfBotAvg:F1}");
 
             Destroy(readTex);
         }
