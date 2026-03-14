@@ -295,20 +295,16 @@ void SHCoeffsToColorRW(uint degreesToUse, float3 viewdir,
 
 // Backward VJPs used by Phase 2 (forward-declared here, defined in backward shaders)
 
-// Inverse of cov2d → conic VJP
+// Inverse of cov2d → conic VJP: v_cov2d = -conic * v_conic * conic (matrix product)
 void Cov2DToConicVJP(float3 conic, float3 vConic, out float vCov2d[3])
 {
-    float det = conic.x * conic.z - conic.y * conic.y;
-    float detSq = det * det;
-    vCov2d[0] = (-conic.z * conic.z * vConic.x +
-                  conic.y * conic.z * vConic.y +
-                  (det - conic.x * conic.z) * vConic.z) / detSq;
-    vCov2d[1] = ( 2.f * conic.y * conic.z * vConic.x -
-                  (conic.x * conic.z + det) * vConic.y +
-                  2.f * conic.x * conic.y * vConic.z) / detSq;
-    vCov2d[2] = ((det - conic.x * conic.z) * vConic.x +
-                  conic.x * conic.y * vConic.y -
-                  conic.x * conic.x * vConic.z) / detSq;
+    float a = conic.x, b = conic.y, c = conic.z;
+    float ga = vConic.x, gb = vConic.y, gc = vConic.z;
+
+    // -(X * G * X) upper triangle with summed off-diagonal
+    vCov2d[0] = -(a*a*ga + 2.f*a*b*gb + b*b*gc);
+    vCov2d[1] = -2.f*(a*b*ga + (b*b + a*c)*gb + b*c*gc);
+    vCov2d[2] = -(b*b*ga + 2.f*b*c*gb + c*c*gc);
 }
 
 // Project pixel VJP

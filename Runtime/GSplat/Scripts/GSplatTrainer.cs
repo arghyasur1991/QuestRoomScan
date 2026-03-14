@@ -196,7 +196,6 @@ namespace Genesis.RoomScan.GSplat
             _rasterBwdCS.SetBuffer(_kRastBwd, "_VConic", _vConic);
             _rasterBwdCS.SetBuffer(_kRastBwd, "_VRGB", gaussians.GradColors);
             _rasterBwdCS.SetBuffer(_kRastBwd, "_VOpacity", gaussians.GradOpacities);
-            _rasterBwdCS.SetBuffer(_kRastBwd, "_VDepth", _vDepth);
 
             int rGroupsX = CeilDiv(_imgW, 8);
             int rGroupsY = CeilDiv(_imgH, 8);

@@ -1,6 +1,7 @@
-// Backward rasterization — ported from msplat nd_rasterize_backward_kernel.
+// Backward rasterization — ported from msplat rasterize_backward_kernel.
 // Per-tile back-to-front traversal computing gradients for each Gaussian.
 // All threads in a group hit barriers uniformly (no varying flow control around syncs).
+// Gradient accumulation uses CAS-based atomic float add (matches msplat atomic_fetch_add).
 #pragma kernel RasterizeBackward
 
 #include "GSplatHelpers.hlsl"
@@ -23,11 +24,24 @@ StructuredBuffer<int>   _FinalIndex;        // [H*W]
 
 RWTexture2D<float4>       _VOutput;         // dL/d(rendered), (W, H)
 
-RWStructuredBuffer<float> _VXY;             // [N*2]
-RWStructuredBuffer<float> _VConic;          // [N*3]
-RWStructuredBuffer<float> _VRGB;            // [N*3]
-RWStructuredBuffer<float> _VOpacity;        // [N]
-RWStructuredBuffer<float> _VDepth;          // [N]
+RWStructuredBuffer<uint> _VXY;              // [N*2] — uint for atomic CAS
+RWStructuredBuffer<uint> _VConic;           // [N*3]
+RWStructuredBuffer<uint> _VRGB;             // [N*3]
+RWStructuredBuffer<uint> _VOpacity;         // [N]
+
+void AtomicAddFloat(RWStructuredBuffer<uint> buf, uint idx, float val)
+{
+    uint expected = buf[idx];
+    [loop]
+    for (uint iter = 0; iter < 64; iter++)
+    {
+        uint desired = asuint(asfloat(expected) + val);
+        uint orig;
+        InterlockedCompareExchange(buf[idx], expected, desired, orig);
+        if (orig == expected) return;
+        expected = orig;
+    }
+}
 
 groupshared int    gs_idBatch[RAST_BLOCK_SIZE];
 groupshared float3 gs_xyOpacBatch[RAST_BLOCK_SIZE];
@@ -139,17 +153,15 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
                     bConic.y * delta.x + bConic.z * delta.y);
                 float vOpacLocal = -vSigma * (1.f - opac);
 
-                // Accumulate gradients. Multiple tiles CAN write to the same Gaussian;
-                // production version would use uint atomics with float reinterpret.
-                _VRGB[bId*3+0] += vRGBLocal.x;
-                _VRGB[bId*3+1] += vRGBLocal.y;
-                _VRGB[bId*3+2] += vRGBLocal.z;
-                _VConic[bId*3+0] += vConicLocal.x;
-                _VConic[bId*3+1] += vConicLocal.y;
-                _VConic[bId*3+2] += vConicLocal.z;
-                _VXY[bId*2+0] += vXYLocal.x;
-                _VXY[bId*2+1] += vXYLocal.y;
-                _VOpacity[bId] += vOpacLocal;
+                AtomicAddFloat(_VRGB, (uint)(bId*3+0), vRGBLocal.x);
+                AtomicAddFloat(_VRGB, (uint)(bId*3+1), vRGBLocal.y);
+                AtomicAddFloat(_VRGB, (uint)(bId*3+2), vRGBLocal.z);
+                AtomicAddFloat(_VConic, (uint)(bId*3+0), vConicLocal.x);
+                AtomicAddFloat(_VConic, (uint)(bId*3+1), vConicLocal.y);
+                AtomicAddFloat(_VConic, (uint)(bId*3+2), vConicLocal.z);
+                AtomicAddFloat(_VXY, (uint)(bId*2+0), vXYLocal.x);
+                AtomicAddFloat(_VXY, (uint)(bId*2+1), vXYLocal.y);
+                AtomicAddFloat(_VOpacity, (uint)bId, vOpacLocal);
             }
         }
     }

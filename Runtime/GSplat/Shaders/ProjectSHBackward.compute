@@ -56,7 +56,7 @@ void AdamUpdate(inout float param, inout float ea, inout float eas,
     eas = v;
 }
 
-// EWA projection backward (simplified from msplat)
+// EWA projection backward — matches msplat project_cov3d_ewa_vjp
 void ProjectCov3DEWABackward(
     float cov3d[6], float4x4 viewmat, float fx, float fy,
     float tanFovX, float tanFovY, float3 vCov2d,
@@ -83,38 +83,45 @@ void ProjectCov3DEWABackward(
     float v00 = cov3d[0], v01 = cov3d[1], v02 = cov3d[2];
     float v11 = cov3d[3], v12 = cov3d[4], v22 = cov3d[5];
 
-    // dL/dT = dL/dcov2d * dcov2d/dT; cov2d = T*V*T^T
+    float a = vCov2d.x, b = vCov2d.y, c = vCov2d.z;
+
+    // dL/dT = 2 * v_cov2d_matrix * T * V
+    float3 combined0 = a * t0 + b * t1;
+    float3 combined1 = b * t0 + c * t1;
     float3 vT0 = 2.f * float3(
-        vCov2d.x * (t0.x*v00 + t0.y*v01 + t0.z*v02) + vCov2d.y * (t1.x*v00 + t1.y*v01 + t1.z*v02),
-        vCov2d.x * (t0.x*v01 + t0.y*v11 + t0.z*v12) + vCov2d.y * (t1.x*v01 + t1.y*v11 + t1.z*v12),
-        vCov2d.x * (t0.x*v02 + t0.y*v12 + t0.z*v22) + vCov2d.y * (t1.x*v02 + t1.y*v12 + t1.z*v22)
+        combined0.x*v00 + combined0.y*v01 + combined0.z*v02,
+        combined0.x*v01 + combined0.y*v11 + combined0.z*v12,
+        combined0.x*v02 + combined0.y*v12 + combined0.z*v22
     );
     float3 vT1 = 2.f * float3(
-        vCov2d.y * (t0.x*v00 + t0.y*v01 + t0.z*v02) + vCov2d.z * (t1.x*v00 + t1.y*v01 + t1.z*v02),
-        vCov2d.y * (t0.x*v01 + t0.y*v11 + t0.z*v12) + vCov2d.z * (t1.x*v01 + t1.y*v11 + t1.z*v12),
-        vCov2d.y * (t0.x*v02 + t0.y*v12 + t0.z*v22) + vCov2d.z * (t1.x*v02 + t1.y*v12 + t1.z*v22)
+        combined1.x*v00 + combined1.y*v01 + combined1.z*v02,
+        combined1.x*v01 + combined1.y*v11 + combined1.z*v12,
+        combined1.x*v02 + combined1.y*v12 + combined1.z*v22
     );
 
-    // dL/dV (cov3d)
-    vCov3d[0] = dot(t0, t0) * vCov2d.x + 2.f * dot(t0, t1) * vCov2d.y + dot(t1, t1) * vCov2d.z;
-    vCov3d[1] = (t0.x*t0.y + t0.y*t0.x) * vCov2d.x;
-    vCov3d[2] = (t0.x*t0.z + t0.z*t0.x) * vCov2d.x;
-    vCov3d[3] = (t0.y*t0.y) * vCov2d.x + (t1.y*t1.y) * vCov2d.z;
-    vCov3d[4] = 0; // simplified
-    vCov3d[5] = (t0.z*t0.z) * vCov2d.x + (t1.z*t1.z) * vCov2d.z;
+    // dL/dV: v_V[i][j] = a*t0[i]*t0[j] + b*(t0[i]*t1[j]+t1[i]*t0[j]) + c*t1[i]*t1[j]
+    // Stored as upper triangle; off-diagonal elements are sum of both symmetric entries
+    vCov3d[0] = a*t0.x*t0.x + 2.f*b*t0.x*t1.x + c*t1.x*t1.x;
+    vCov3d[1] = 2.f*(a*t0.x*t0.y + b*(t0.x*t1.y + t1.x*t0.y) + c*t1.x*t1.y);
+    vCov3d[2] = 2.f*(a*t0.x*t0.z + b*(t0.x*t1.z + t1.x*t0.z) + c*t1.x*t1.z);
+    vCov3d[3] = a*t0.y*t0.y + 2.f*b*t0.y*t1.y + c*t1.y*t1.y;
+    vCov3d[4] = 2.f*(a*t0.y*t0.z + b*(t0.y*t1.z + t1.y*t0.z) + c*t1.y*t1.z);
+    vCov3d[5] = a*t0.z*t0.z + 2.f*b*t0.z*t1.z + c*t1.z*t1.z;
 
-    // dL/dp_view contribution from J derivatives
-    float vPVx = (-fx * rz2) * dot(vT0, mr2) + (-fy * rz2) * dot(vT1, mr2);
+    // Jacobian backward: chain through J derivatives to v_pView (3 separate components)
+    float vPVx = (-fx * rz2) * dot(vT0, mr2);
+    float vPVy = (-fy * rz2) * dot(vT1, mr2);
     float vPVz = (fx * pView.x * 2.f * rz2 * rz) * dot(vT0, mr2) +
                  (fy * pView.y * 2.f * rz2 * rz) * dot(vT1, mr2) +
                  (-fx * rz2) * dot(vT0, mr0) + (-fy * rz2) * dot(vT1, mr1);
 
-    vMean.x += viewmat[0][0] * vPVx + viewmat[2][0] * vPVz;
-    vMean.y += viewmat[0][1] * vPVx + viewmat[2][1] * vPVz;
-    vMean.z += viewmat[0][2] * vPVx + viewmat[2][2] * vPVz;
+    // World-space gradient via full rotation transpose (all 3 rows of viewmat)
+    vMean.x += viewmat[0][0] * vPVx + viewmat[1][0] * vPVy + viewmat[2][0] * vPVz;
+    vMean.y += viewmat[0][1] * vPVx + viewmat[1][1] * vPVy + viewmat[2][1] * vPVz;
+    vMean.z += viewmat[0][2] * vPVx + viewmat[1][2] * vPVy + viewmat[2][2] * vPVz;
 }
 
-// Scale+rotation → cov3d backward
+// Scale+rotation → cov3d backward — matches msplat scale_rot_to_cov3d_vjp
 void ScaleRotToCov3DVJP(float3 expScale, float globScale, float4 quat,
                          float vCov3d[6], out float3 vScale, out float4 vQuat)
 {
@@ -126,14 +133,14 @@ void ScaleRotToCov3DVJP(float3 expScale, float globScale, float4 quat,
     );
     float3x3 M = mul(R, S);
 
-    // Symmetric matrix from vCov3d upper triangle
-    float3x3 vT;
-    vT[0] = float3(vCov3d[0], vCov3d[1], vCov3d[2]);
-    vT[1] = float3(vCov3d[1], vCov3d[3], vCov3d[4]);
-    vT[2] = float3(vCov3d[2], vCov3d[4], vCov3d[5]);
+    // Reconstruct symmetric v_V with 0.5 on off-diagonal
+    // (stored values are summed: vCov3d[1] = v_V[0][1] + v_V[1][0])
+    float3x3 vV;
+    vV[0] = float3(vCov3d[0],        0.5f*vCov3d[1], 0.5f*vCov3d[2]);
+    vV[1] = float3(0.5f*vCov3d[1],   vCov3d[3],      0.5f*vCov3d[4]);
+    vV[2] = float3(0.5f*vCov3d[2],   0.5f*vCov3d[4], vCov3d[5]);
 
-    // dL/dM = (vT + vT^T) * M = 2 * vT * M (since vT is symmetric)
-    float3x3 vM = 2.f * mul(vT, M);
+    float3x3 vM = 2.f * mul(vV, M);
 
     // dL/dS = R^T * vM
     float3x3 vS = mul(transpose(R), vM);
