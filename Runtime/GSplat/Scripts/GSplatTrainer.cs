@@ -61,6 +61,13 @@ namespace Genesis.RoomScan.GSplat
         GraphicsBuffer _intermediates;
         RenderTexture _vRendered;
 
+        // Intermediate gradient buffers from rasterize backward.
+        // MUST be separate from GradMeans/GradScales/GradQuats to avoid aliasing
+        // with the projection backward pass which reads these and writes to the final grads.
+        GraphicsBuffer _vxy;     // [maxPoints * 2] dL/d(screen_xy)
+        GraphicsBuffer _vConic;  // [maxPoints * 3] dL/d(conic)
+        GraphicsBuffer _vDepth;  // [maxPoints]     dL/d(depth)
+
         readonly Config _config;
         int _step;
         int _imgW, _imgH;
@@ -81,6 +88,8 @@ namespace Genesis.RoomScan.GSplat
 
         public int Step => _step;
         public RenderTexture RenderedImage => _forward.OutputImage;
+
+        public void ResetStep() { _step = 0; }
 
         public GSplatTrainer(ComputeShader projectSH, ComputeShader tileSort,
                              ComputeShader rasterize, ComputeShader lossCS,
@@ -120,6 +129,11 @@ namespace Genesis.RoomScan.GSplat
                 filterMode = FilterMode.Point
             };
             _vRendered.Create();
+
+            const GraphicsBuffer.Target s = GraphicsBuffer.Target.Structured;
+            _vxy    = new GraphicsBuffer(s, maxPoints * 2, 4);
+            _vConic = new GraphicsBuffer(s, maxPoints * 3, 4);
+            _vDepth = new GraphicsBuffer(s, maxPoints, 4);
         }
 
         /// <summary>
@@ -159,10 +173,14 @@ namespace Genesis.RoomScan.GSplat
             _lossCS.SetTexture(_kLossBwd, "_VRendered", _vRendered);
             _lossCS.Dispatch(_kLossBwd, CeilDiv(_imgW, 8), CeilDiv(_imgH, 8), 1);
 
-            // 4. Zero gradient accumulators
+            // 4. Zero gradient accumulators + intermediate buffers
             gaussians.ZeroGrads();
+            ZeroBuf(_vxy);
+            ZeroBuf(_vConic);
+            ZeroBuf(_vDepth);
 
-            // 5. Rasterize backward
+            // 5. Rasterize backward → writes to SEPARATE intermediate buffers
+            // (_vxy, _vConic, _vDepth) to avoid aliasing with projection backward
             _rasterBwdCS.SetInts("_TileBounds", (int)((uint)(_imgW + 15) / 16), (int)((uint)(_imgH + 15) / 16), 1);
             _rasterBwdCS.SetInts(ID_ImgSize, _imgW, _imgH);
             _rasterBwdCS.SetVector("_Background", Vector4.zero);
@@ -174,17 +192,17 @@ namespace Genesis.RoomScan.GSplat
             _rasterBwdCS.SetBuffer(_kRastBwd, "_FinalTs", _forward.FinalTs);
             _rasterBwdCS.SetBuffer(_kRastBwd, "_FinalIndex", _forward.FinalIndex);
             _rasterBwdCS.SetTexture(_kRastBwd, "_VOutput", _vRendered);
-            _rasterBwdCS.SetBuffer(_kRastBwd, "_VXY", gaussians.GradMeans);
-            _rasterBwdCS.SetBuffer(_kRastBwd, "_VConic", gaussians.GradScales);
+            _rasterBwdCS.SetBuffer(_kRastBwd, "_VXY", _vxy);
+            _rasterBwdCS.SetBuffer(_kRastBwd, "_VConic", _vConic);
             _rasterBwdCS.SetBuffer(_kRastBwd, "_VRGB", gaussians.GradColors);
             _rasterBwdCS.SetBuffer(_kRastBwd, "_VOpacity", gaussians.GradOpacities);
-            _rasterBwdCS.SetBuffer(_kRastBwd, "_VDepth", gaussians.GradQuats);
+            _rasterBwdCS.SetBuffer(_kRastBwd, "_VDepth", _vDepth);
 
             int rGroupsX = CeilDiv(_imgW, 8);
             int rGroupsY = CeilDiv(_imgH, 8);
             _rasterBwdCS.Dispatch(_kRastBwd, rGroupsX, rGroupsY, 1);
 
-            // 6. Projection + SH backward (with fused SH Adam)
+            // 6. Projection backward — reads intermediate buffers, writes to final grad buffers
             _projBwdCS.SetInt(ID_NumPoints, N);
             _projBwdCS.SetFloat("_GlobScale", _config.GlobScale);
             _projBwdCS.SetInt("_Degree", _config.SHDegree);
@@ -194,18 +212,18 @@ namespace Genesis.RoomScan.GSplat
             _projBwdCS.SetVector("_CamPos", camPos);
             _projBwdCS.SetMatrix("_ViewMat", viewMat);
             _projBwdCS.SetMatrix("_ProjMat", projMat);
-            // Kernel 1: ProjectBackward (3 RW: VMean3D, VScale, VQuat)
+            // Kernel 1: ProjectBackward — reads from separate intermediates, writes to grad buffers
             _projBwdCS.SetBuffer(_kProjBwd, "_Means3D", gaussians.Means);
             _projBwdCS.SetBuffer(_kProjBwd, "_Scales", gaussians.Scales);
             _projBwdCS.SetBuffer(_kProjBwd, "_Quats", gaussians.Quats);
             _projBwdCS.SetBuffer(_kProjBwd, "_Radii", _forward.Radii);
             _projBwdCS.SetBuffer(_kProjBwd, "_Conics", _forward.Conics);
-            _projBwdCS.SetBuffer(_kProjBwd, "_VXY", gaussians.GradMeans);
-            _projBwdCS.SetBuffer(_kProjBwd, "_VDepth", gaussians.GradQuats);
-            _projBwdCS.SetBuffer(_kProjBwd, "_VConic", gaussians.GradScales);
-            _projBwdCS.SetBuffer(_kProjBwd, "_VMean3D", gaussians.GradMeans);
-            _projBwdCS.SetBuffer(_kProjBwd, "_VScale", gaussians.GradScales);
-            _projBwdCS.SetBuffer(_kProjBwd, "_VQuat", gaussians.GradQuats);
+            _projBwdCS.SetBuffer(_kProjBwd, "_VXY", _vxy);             // READ from intermediate
+            _projBwdCS.SetBuffer(_kProjBwd, "_VDepth", _vDepth);        // READ from intermediate
+            _projBwdCS.SetBuffer(_kProjBwd, "_VConic", _vConic);        // READ from intermediate
+            _projBwdCS.SetBuffer(_kProjBwd, "_VMean3D", gaussians.GradMeans);  // WRITE to final grad
+            _projBwdCS.SetBuffer(_kProjBwd, "_VScale", gaussians.GradScales);  // WRITE to final grad
+            _projBwdCS.SetBuffer(_kProjBwd, "_VQuat", gaussians.GradQuats);    // WRITE to final grad
             _projBwdCS.Dispatch(_kProjBwd, CeilDiv(N, 256), 1, 1);
 
             // Kernel 2: SHBackwardAdam (6 RW: FeaturesDC/Rest + Adam state)
@@ -280,9 +298,19 @@ namespace Genesis.RoomScan.GSplat
             _forward?.Dispose();
             _lossBuffer?.Release();
             _intermediates?.Release();
+            _vxy?.Release();
+            _vConic?.Release();
+            _vDepth?.Release();
             if (_vRendered) UnityEngine.Object.Destroy(_vRendered);
         }
 
         static int CeilDiv(int a, int b) => (a + b - 1) / b;
+
+        static void ZeroBuf(GraphicsBuffer buf)
+        {
+            if (buf == null) return;
+            var z = new byte[buf.count * buf.stride];
+            buf.SetData(z);
+        }
     }
 }

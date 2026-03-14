@@ -45,17 +45,13 @@ namespace Genesis.RoomScan.GSplat
         bool debugSkipTraining;
         [SerializeField, Tooltip("Disable mesh masking (show both mesh and splats)")]
         bool debugDisableMeshMask = true;
-        [SerializeField, Tooltip("Hide passthrough to see splats against black background")]
-        bool debugDisablePassthrough;
 
         SectorScheduler _scheduler;
         GSplatTrainer _trainer;
         bool _initialized;
         Camera _mainCam;
         Plane[] _frustumPlanes = new Plane[6];
-        MonoBehaviour _passthroughLayer;
-        bool _lastPassthroughState;
-
+        int _lastTrainedSectorId = -1;
         readonly List<KeyframeData> _keyframes = new();
         const int MaxKeyframes = 16;
 
@@ -160,42 +156,12 @@ namespace Genesis.RoomScan.GSplat
 
         void Update()
         {
-            ApplyPassthroughToggle();
-
             TryInitialize();
             if (!_initialized || _mainCam == null) return;
 
             var camTr = _mainCam.transform;
             GeometryUtility.CalculateFrustumPlanes(_mainCam, _frustumPlanes);
             TrainFrame(camTr.position, camTr.forward, _frustumPlanes);
-        }
-
-        void ApplyPassthroughToggle()
-        {
-            if (debugDisablePassthrough == _lastPassthroughState && _passthroughLayer != null)
-                return;
-
-            if (_passthroughLayer == null)
-            {
-                System.Type ptType = null;
-                foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    ptType = asm.GetType("OVRPassthroughLayer");
-                    if (ptType != null) break;
-                }
-                if (ptType != null)
-                {
-                    var all = FindObjectsByType(ptType, FindObjectsSortMode.None);
-                    if (all.Length > 0)
-                        _passthroughLayer = all[0] as MonoBehaviour;
-                }
-                if (_passthroughLayer == null) return;
-                Debug.Log($"[GSplatManager] Found OVRPassthroughLayer on '{_passthroughLayer.gameObject.name}'");
-            }
-
-            _passthroughLayer.enabled = !debugDisablePassthrough;
-            _lastPassthroughState = debugDisablePassthrough;
-            Debug.Log($"[GSplatManager] Passthrough layer enabled={!debugDisablePassthrough}");
         }
 
         static Texture2D ToTexture2D(Texture src)
@@ -265,6 +231,13 @@ namespace Genesis.RoomScan.GSplat
 
             var buffers = _scheduler.GetOrCreateBuffers(sectorId);
             if (buffers.CurrentCount == 0) return;
+
+            // Reset Adam state when switching to a new sector
+            if (sectorId != _lastTrainedSectorId)
+            {
+                _trainer.ResetStep();
+                _lastTrainedSectorId = sectorId;
+            }
 
             var kf = PickBestKeyframe(sectorId);
             if (!kf.HasValue) return;
