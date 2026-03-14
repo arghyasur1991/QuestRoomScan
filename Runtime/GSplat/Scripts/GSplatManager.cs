@@ -170,10 +170,12 @@ namespace Genesis.RoomScan.GSplat
             TrainFrame(camTr.position, camTr.forward, _frustumPlanes);
         }
 
+        System.Reflection.FieldInfo _hiddenField;
+
         void ApplyPassthroughToggle()
         {
-            if (debugDisablePassthrough == _lastPassthroughState) return;
-            _lastPassthroughState = debugDisablePassthrough;
+            if (debugDisablePassthrough == _lastPassthroughState && _passthroughLayer != null)
+                return;
 
             if (_passthroughLayer == null)
             {
@@ -184,18 +186,23 @@ namespace Genesis.RoomScan.GSplat
                     if (ptType != null) break;
                 }
                 if (ptType != null)
-                    _passthroughLayer = FindAnyObjectByType(ptType) as MonoBehaviour;
+                {
+                    var all = FindObjectsByType(ptType, FindObjectsSortMode.None);
+                    if (all.Length > 0)
+                        _passthroughLayer = all[0] as MonoBehaviour;
+                }
+                if (_passthroughLayer == null) return;
+
+                _hiddenField = _passthroughLayer.GetType().GetField("hidden",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                Debug.Log($"[GSplatManager] Found OVRPassthroughLayer on '{_passthroughLayer.gameObject.name}', hiddenField={_hiddenField != null}");
             }
 
-            if (_passthroughLayer != null)
+            if (_hiddenField != null)
             {
-                var hiddenField = _passthroughLayer.GetType().GetField("hidden",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                if (hiddenField != null)
-                {
-                    hiddenField.SetValue(_passthroughLayer, debugDisablePassthrough);
-                    Debug.Log($"[GSplatManager] Passthrough hidden={debugDisablePassthrough}");
-                }
+                _hiddenField.SetValue(_passthroughLayer, debugDisablePassthrough);
+                _lastPassthroughState = debugDisablePassthrough;
+                Debug.Log($"[GSplatManager] Passthrough hidden={debugDisablePassthrough}");
             }
         }
 
@@ -253,7 +260,12 @@ namespace Genesis.RoomScan.GSplat
                 }
             }
 
-            if (debugSkipTraining) return;
+            if (debugSkipTraining)
+            {
+                if (!debugDisableMeshMask)
+                    UpdateMeshMask();
+                return;
+            }
 
             // Phase 2: Train the best Training-state sector
             int sectorId = _scheduler.PickNextTrainingSector(headPos, gazeDir, frustumPlanes);
