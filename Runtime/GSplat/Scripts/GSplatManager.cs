@@ -113,7 +113,8 @@ namespace Genesis.RoomScan.GSplat
         /// Converts to a keyframe for the training ring buffer.
         /// </summary>
         public void OnCameraFrame(Texture frame, Vector3 pos, Quaternion rot,
-                                   Vector2 focalLen, Vector2 principalPt, Vector2 currentRes)
+                                   Vector2 focalLen, Vector2 principalPt,
+                                   Vector2 sensorRes, Vector2 currentRes)
         {
             if (!_initialized || frame == null) return;
 
@@ -145,13 +146,21 @@ namespace Genesis.RoomScan.GSplat
             view[1, 2] = -view[1, 2];
             view[1, 3] = -view[1, 3];
 
-            // Scale intrinsics from camera resolution to training resolution
+            // Intrinsics from PassthroughCameraProvider are at sensor resolution.
+            // The capture texture may be a centered crop of the sensor. Adjust the
+            // principal point for the crop first, then scale to training resolution.
+            // This matches the Python pipeline's unity_to_colmap_pose conversion.
+            float cropX = (sensorRes.x - currentRes.x) * 0.5f;
+            float cropY = (sensorRes.y - currentRes.y) * 0.5f;
+            float cxCapture = principalPt.x - cropX;
+            float cyCapture = principalPt.y - cropY;
+
             float scaleX = (float)trainingResWidth / currentRes.x;
             float scaleY = (float)trainingResHeight / currentRes.y;
             float fx = focalLen.x * scaleX;
             float fy = focalLen.y * scaleY;
-            float cx = principalPt.x * scaleX;
-            float cy = principalPt.y * scaleY;
+            float cx = cxCapture * scaleX;
+            float cy = cyCapture * scaleY;
 
             // Projection matrix: positive-Z-forward (matching our view matrix),
             // NO principal point offset (Ndc2Pix handles pp via cx/cy in _Intrinsics).
@@ -181,9 +190,11 @@ namespace Genesis.RoomScan.GSplat
             if (_keyframes.Count <= 1)
             {
                 Debug.Log($"[GSplatManager] Keyframe #{_keyframes.Count}: " +
-                          $"camRes={currentRes}, trainRes={trainingResWidth}x{trainingResHeight}, " +
+                          $"sensorRes={sensorRes}, camRes={currentRes}, " +
+                          $"trainRes={trainingResWidth}x{trainingResHeight}, " +
                           $"texSize={resized.width}x{resized.height}, " +
                           $"rawFocal=({focalLen.x:F1},{focalLen.y:F1}), " +
+                          $"crop=({cropX:F1},{cropY:F1}), " +
                           $"scaledFocal=({fx:F1},{fy:F1}), " +
                           $"scaledPP=({cx:F1},{cy:F1})");
             }
@@ -441,6 +452,27 @@ namespace Genesis.RoomScan.GSplat
                       $"gradMeanRMS={gradMag:E2} gradNonZero={gradNonZero}/{gradCount} " +
                       $"rendTopR={rendTopAvg:F1} rendBotR={rendBotAvg:F1} " +
                       $"kfTopR={kfTopAvg:F1} kfBotR={kfBotAvg:F1}");
+
+            // Save rendered + GT images to disk on the first iteration for visual verification
+            if (iter <= 1)
+            {
+                string dir = System.IO.Path.Combine(Application.persistentDataPath, "GSExport", "train_diag");
+                System.IO.Directory.CreateDirectory(dir);
+                var rendJpg = readTex.EncodeToJPG(95);
+                System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"rendered_s{sectorId}_i{iter}.jpg"), rendJpg);
+                var kfBlit = RenderTexture.GetTemporary(kf.Texture.width, kf.Texture.height, 0);
+                Graphics.Blit(kf.Texture, kfBlit);
+                RenderTexture.active = kfBlit;
+                var kfSnap = new Texture2D(kfBlit.width, kfBlit.height, TextureFormat.RGBA32, false);
+                kfSnap.ReadPixels(new Rect(0, 0, kfBlit.width, kfBlit.height), 0, 0, false);
+                kfSnap.Apply(false);
+                RenderTexture.active = prevRT;
+                var kfJpg = kfSnap.EncodeToJPG(95);
+                System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"groundtruth_s{sectorId}_i{iter}.jpg"), kfJpg);
+                Destroy(kfSnap);
+                RenderTexture.ReleaseTemporary(kfBlit);
+                Debug.Log($"[GSplat-TrainDiag] Saved diagnostic images to {dir}");
+            }
 
             Destroy(readTex);
         }

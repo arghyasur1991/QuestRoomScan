@@ -384,7 +384,7 @@ namespace Genesis.RoomScan
                     if (gsplatManager != null && gsplatManager.enabled)
                     {
                         gsplatManager.OnCameraFrame(frame, pose.position, pose.rotation,
-                            focal, principal, current);
+                            focal, principal, sensor, current);
                     }
 
                     _colorFrameLog++;

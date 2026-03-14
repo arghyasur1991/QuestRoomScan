@@ -129,7 +129,7 @@ namespace Genesis.RoomScan.GSplat
             _finalTs = new GraphicsBuffer(s, numPixels, 4);
             _finalIndex = new GraphicsBuffer(s, numPixels, 4);
 
-            _outImg = new RenderTexture(imgW, imgH, 0, GraphicsFormat.R8G8B8A8_UNorm)
+            _outImg = new RenderTexture(imgW, imgH, 0, GraphicsFormat.R16G16B16A16_SFloat)
             {
                 enableRandomWrite = true,
                 filterMode = FilterMode.Point

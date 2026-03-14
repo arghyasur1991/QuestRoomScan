@@ -1,6 +1,7 @@
 using System;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
+using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan.GSplat
 {
@@ -71,9 +72,11 @@ namespace Genesis.RoomScan.GSplat
         readonly Config _config;
         int _step;
         int _imgW, _imgH;
+        readonly int _flipGTY;
 
         static readonly int ID_ImgSize = Shader.PropertyToID("_ImgSize");
         static readonly int ID_SSIMWeight = Shader.PropertyToID("_SSIMWeight");
+        static readonly int ID_FlipGTY = Shader.PropertyToID("_FlipGTY");
         static readonly int ID_InvN = Shader.PropertyToID("_InvN");
         static readonly int ID_NumPoints = Shader.PropertyToID("_NumPoints");
         static readonly int ID_NumPoints2 = Shader.PropertyToID("_NumPoints2");
@@ -130,6 +133,14 @@ namespace Genesis.RoomScan.GSplat
             };
             _vRendered.Create();
 
+            // On Vulkan (Quest), Texture2D and RenderTexture have different Y-origins
+            // for integer-addressed reads in compute shaders. The rasterizer writes to
+            // an RWTexture2D (top-left origin) but the GT keyframe is a Texture2D
+            // (bottom-left origin). We flip the GT Y in the loss shader to compensate.
+            var gfxType = SystemInfo.graphicsDeviceType;
+            _flipGTY = (gfxType == GraphicsDeviceType.Vulkan ||
+                        gfxType == GraphicsDeviceType.OpenGLES3) ? 1 : 0;
+
             const GraphicsBuffer.Target s = GraphicsBuffer.Target.Structured;
             _vxy    = new GraphicsBuffer(s, maxPoints * 2, 4);
             _vConic = new GraphicsBuffer(s, maxPoints * 3, 4);
@@ -158,6 +169,7 @@ namespace Genesis.RoomScan.GSplat
             // 2. Loss forward
             _lossCS.SetInts(ID_ImgSize, _imgW, _imgH);
             _lossCS.SetFloat(ID_SSIMWeight, _config.SSIMWeight);
+            _lossCS.SetInt(ID_FlipGTY, _flipGTY);
             _lossCS.SetTexture(_kLossFwd, "_Rendered", _forward.OutputImage);
             _lossCS.SetTexture(_kLossFwd, "_GroundTruth", keyframe);
             _lossCS.SetBuffer(_kLossFwd, "_Intermediates", _intermediates);
@@ -173,11 +185,11 @@ namespace Genesis.RoomScan.GSplat
             _lossCS.SetTexture(_kLossBwd, "_VRendered", _vRendered);
             _lossCS.Dispatch(_kLossBwd, CeilDiv(_imgW, 8), CeilDiv(_imgH, 8), 1);
 
-            // 4. Zero gradient accumulators + intermediate buffers
-            gaussians.ZeroGrads();
-            ZeroBuf(_vxy);
-            ZeroBuf(_vConic);
-            ZeroBuf(_vDepth);
+            // 4. Zero gradient accumulators + intermediate buffers (GPU dispatch, no CPU alloc)
+            ZeroGradsGPU(gaussians);
+            ZeroBufGPU(_vxy);
+            ZeroBufGPU(_vConic);
+            ZeroBufGPU(_vDepth);
 
             // 5. Rasterize backward → writes to SEPARATE intermediate buffers
             // (_vxy, _vConic, _vDepth) to avoid aliasing with projection backward
@@ -305,11 +317,22 @@ namespace Genesis.RoomScan.GSplat
 
         static int CeilDiv(int a, int b) => (a + b - 1) / b;
 
-        static void ZeroBuf(GraphicsBuffer buf)
+        void ZeroBufGPU(GraphicsBuffer buf)
         {
             if (buf == null) return;
-            var z = new byte[buf.count * buf.stride];
-            buf.SetData(z);
+            int count = buf.count * buf.stride / 4;
+            _adamCS.SetInt(ID_ZeroCount, count);
+            _adamCS.SetBuffer(_kZero, "_ZeroBuf", buf);
+            _adamCS.Dispatch(_kZero, CeilDiv(count, 256), 1, 1);
+        }
+
+        void ZeroGradsGPU(GSplatBuffers g)
+        {
+            ZeroBufGPU(g.GradMeans);
+            ZeroBufGPU(g.GradScales);
+            ZeroBufGPU(g.GradQuats);
+            ZeroBufGPU(g.GradOpacities);
+            ZeroBufGPU(g.GradColors);
         }
     }
 }

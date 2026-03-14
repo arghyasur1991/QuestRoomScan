@@ -1,10 +1,12 @@
 // Backward rasterization — ported from msplat rasterize_backward_kernel.
 // Per-tile back-to-front traversal computing gradients for each Gaussian.
 // All threads in a group hit barriers uniformly (no varying flow control around syncs).
-// NOTE: Gradient accumulation uses non-atomic += due to Quest/Vulkan limitations:
-// - InterlockedCompareExchange (CAS): silently fails on Adreno/Vulkan
-// - Fixed-point InterlockedAdd: per-pixel gradients (~1e-7) quantize to zero
-// Race conditions lose some contributions but surviving gradients are correct.
+//
+// Gradients are accumulated via shared-memory reduction per-Gaussian: each thread
+// stores its per-pixel contribution in shared memory, then thread 0 sums all 64
+// contributions and writes once to global. This reduces race conditions from ~64
+// concurrent writes per tile to a single write, dramatically improving gradient quality
+// on Quest/Adreno which lacks float atomics.
 #pragma kernel RasterizeBackward
 
 #include "GSplatHelpers.hlsl"
@@ -32,15 +34,27 @@ RWStructuredBuffer<float> _VConic;          // [N*3]
 RWStructuredBuffer<float> _VRGB;            // [N*3]
 RWStructuredBuffer<float> _VOpacity;        // [N]
 
+// Batch loading shared memory
 groupshared int    gs_idBatch[RAST_BLOCK_SIZE];
 groupshared float3 gs_xyOpacBatch[RAST_BLOCK_SIZE];
 groupshared float3 gs_conicBatch[RAST_BLOCK_SIZE];
 groupshared float3 gs_rgbBatch[RAST_BLOCK_SIZE];
 
+// Per-thread gradient accumulation for shared-memory reduction.
+// 9 floats per thread: vRGB(3) + vConic(3) + vXY(2) + vOpac(1)
+groupshared float gs_vRGB_r[RAST_BLOCK_SIZE];
+groupshared float gs_vRGB_g[RAST_BLOCK_SIZE];
+groupshared float gs_vRGB_b[RAST_BLOCK_SIZE];
+groupshared float gs_vCon_a[RAST_BLOCK_SIZE];
+groupshared float gs_vCon_b[RAST_BLOCK_SIZE];
+groupshared float gs_vCon_c[RAST_BLOCK_SIZE];
+groupshared float gs_vXY_x[RAST_BLOCK_SIZE];
+groupshared float gs_vXY_y[RAST_BLOCK_SIZE];
+groupshared float gs_vOpac[RAST_BLOCK_SIZE];
+
 [numthreads(RAST_BLOCK_X, RAST_BLOCK_Y, 1)]
 void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIdx : SV_GroupIndex)
 {
-    // Tile ID from groupId only — uniform across the entire threadgroup.
     uint tileX = (groupId.x * RAST_BLOCK_X) / GS_BLOCK_X;
     uint tileY = (groupId.y * RAST_BLOCK_Y) / GS_BLOCK_Y;
     uint tileId = tileY * _TileBounds.x + tileX;
@@ -48,7 +62,6 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     int rangeStart = _TileBins[tileId * 2 + 0];
     int rangeEnd   = _TileBins[tileId * 2 + 1];
 
-    // Per-thread pixel coordinates
     uint pi = groupId.y * RAST_BLOCK_Y + groupThreadId.y;
     uint pj = groupId.x * RAST_BLOCK_X + groupThreadId.x;
     float px = (float)pj;
@@ -93,21 +106,24 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
 
         GroupMemoryBarrierWithGroupSync();
 
-        if (inside)
+        int batchStart = rangeStart + (int)(RAST_BLOCK_SIZE * (b - 1u));
+        int batchSize = min(RAST_BLOCK_SIZE, rangeEnd - batchStart);
+
+        for (int t = 0; t < batchSize; ++t)
         {
-            int batchStart = rangeStart + (int)(RAST_BLOCK_SIZE * (b - 1u));
-            int batchSize = min(RAST_BLOCK_SIZE, rangeEnd - batchStart);
+            int globalIdx = batchEnd - t;
+            bool valid = inside && globalIdx <= binFinal && globalIdx >= rangeStart;
 
-            for (int t = 0; t < batchSize; ++t)
+            float3 vRGBLocal = float3(0, 0, 0);
+            float3 vConicLocal = float3(0, 0, 0);
+            float2 vXYLocal = float2(0, 0);
+            float vOpacLocal = 0;
+
+            if (valid)
             {
-                int globalIdx = batchEnd - t;
-                if (globalIdx > binFinal) continue;
-                if (globalIdx < rangeStart) break;
-
                 float3 bConic = gs_conicBatch[t];
                 float3 bXYOpac = gs_xyOpacBatch[t];
                 float3 bRGB = gs_rgbBatch[t];
-                int bId = gs_idBatch[t];
 
                 float opac = bXYOpac.z;
                 float2 delta = float2(bXYOpac.x - px, bXYOpac.y - py);
@@ -115,43 +131,88 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
                                        bConic.z * delta.y * delta.y) +
                               bConic.y * delta.x * delta.y;
 
-                if (sigma < 0.f || sigma >= 5.55f) continue;
+                bool contributes = (sigma >= 0.f && sigma < 5.55f);
+                if (contributes)
+                {
+                    float vis = exp(-sigma);
+                    float alpha = min(0.999f, opac * vis);
+                    contributes = (alpha >= 1.f / 255.f && alpha < 0.999f);
 
-                float vis = exp(-sigma);
-                float alpha = min(0.999f, opac * vis);
-                if (alpha < 1.f / 255.f) continue;
-                if (alpha >= 0.999f) continue;
+                    if (contributes)
+                    {
+                        float ra = 1.f / (1.f - alpha);
+                        T *= ra;
+                        float fac = alpha * T;
 
-                float ra = 1.f / (1.f - alpha);
-                T *= ra;
-                float fac = alpha * T;
+                        float3 rgb = max(bRGB + 0.5f, 0.0f);
 
-                float3 rgb = max(bRGB + 0.5f, 0.0f);
+                        float vAlpha = dot(rgb * T - buffer * ra - ra * TfinalBg, vOut);
+                        vRGBLocal = fac * vOut;
 
-                float vAlpha = dot(rgb * T - buffer * ra - ra * TfinalBg, vOut);
-                float3 vRGBLocal = fac * vOut;
+                        buffer = rgb * fac + buffer;
 
-                buffer = rgb * fac + buffer;
-
-                float vSigma = -alpha * vAlpha;
-                float3 vConicLocal = (0.5f * vSigma) * float3(delta.x * delta.x,
-                                                                delta.x * delta.y,
-                                                                delta.y * delta.y);
-                float2 vXYLocal = vSigma * float2(
-                    bConic.x * delta.x + bConic.y * delta.y,
-                    bConic.y * delta.x + bConic.z * delta.y);
-                float vOpacLocal = -vSigma * (1.f - opac);
-
-                _VRGB[bId*3+0]  += vRGBLocal.x;
-                _VRGB[bId*3+1]  += vRGBLocal.y;
-                _VRGB[bId*3+2]  += vRGBLocal.z;
-                _VConic[bId*3+0] += vConicLocal.x;
-                _VConic[bId*3+1] += vConicLocal.y;
-                _VConic[bId*3+2] += vConicLocal.z;
-                _VXY[bId*2+0]   += vXYLocal.x;
-                _VXY[bId*2+1]   += vXYLocal.y;
-                _VOpacity[bId]   += vOpacLocal;
+                        float vSigma = -alpha * vAlpha;
+                        vConicLocal = (0.5f * vSigma) * float3(delta.x * delta.x,
+                                                                 delta.x * delta.y,
+                                                                 delta.y * delta.y);
+                        vXYLocal = vSigma * float2(
+                            bConic.x * delta.x + bConic.y * delta.y,
+                            bConic.y * delta.x + bConic.z * delta.y);
+                        vOpacLocal = -vSigma * (1.f - opac);
+                    }
+                }
             }
+
+            // Store per-pixel gradient in shared memory for reduction
+            gs_vRGB_r[groupIdx] = vRGBLocal.x;
+            gs_vRGB_g[groupIdx] = vRGBLocal.y;
+            gs_vRGB_b[groupIdx] = vRGBLocal.z;
+            gs_vCon_a[groupIdx] = vConicLocal.x;
+            gs_vCon_b[groupIdx] = vConicLocal.y;
+            gs_vCon_c[groupIdx] = vConicLocal.z;
+            gs_vXY_x[groupIdx]  = vXYLocal.x;
+            gs_vXY_y[groupIdx]  = vXYLocal.y;
+            gs_vOpac[groupIdx]  = vOpacLocal;
+
+            GroupMemoryBarrierWithGroupSync();
+
+            // Parallel tree reduction across 64 threads
+            [unroll]
+            for (uint stride = RAST_BLOCK_SIZE / 2; stride > 0; stride >>= 1)
+            {
+                if (groupIdx < stride)
+                {
+                    gs_vRGB_r[groupIdx] += gs_vRGB_r[groupIdx + stride];
+                    gs_vRGB_g[groupIdx] += gs_vRGB_g[groupIdx + stride];
+                    gs_vRGB_b[groupIdx] += gs_vRGB_b[groupIdx + stride];
+                    gs_vCon_a[groupIdx] += gs_vCon_a[groupIdx + stride];
+                    gs_vCon_b[groupIdx] += gs_vCon_b[groupIdx + stride];
+                    gs_vCon_c[groupIdx] += gs_vCon_c[groupIdx + stride];
+                    gs_vXY_x[groupIdx]  += gs_vXY_x[groupIdx + stride];
+                    gs_vXY_y[groupIdx]  += gs_vXY_y[groupIdx + stride];
+                    gs_vOpac[groupIdx]  += gs_vOpac[groupIdx + stride];
+                }
+                GroupMemoryBarrierWithGroupSync();
+            }
+
+            // Thread 0 writes the tile-reduced gradient to global memory.
+            // Remaining contention is only across tiles (typically 1-4 per Gaussian),
+            // not across pixels (was 64 per tile).
+            if (groupIdx == 0u)
+            {
+                int bId = gs_idBatch[t];
+                _VRGB[bId*3+0]   += gs_vRGB_r[0];
+                _VRGB[bId*3+1]   += gs_vRGB_g[0];
+                _VRGB[bId*3+2]   += gs_vRGB_b[0];
+                _VConic[bId*3+0] += gs_vCon_a[0];
+                _VConic[bId*3+1] += gs_vCon_b[0];
+                _VConic[bId*3+2] += gs_vCon_c[0];
+                _VXY[bId*2+0]   += gs_vXY_x[0];
+                _VXY[bId*2+1]   += gs_vXY_y[0];
+                _VOpacity[bId]   += gs_vOpac[0];
+            }
+
+            GroupMemoryBarrierWithGroupSync();
         }
     }
 }
