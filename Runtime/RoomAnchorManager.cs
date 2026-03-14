@@ -100,16 +100,18 @@ namespace Genesis.RoomScan
 
             if (OriginInRoomSpace == Vector3.zero)
             {
-                var bounds = _room.GetRoomBounds();
-                OriginInRoomSpace = bounds.center;
-                Debug.Log($"[RoomAnchor] Volume origin set to room center: {OriginInRoomSpace}");
+                OriginInRoomSpace = _room.transform.InverseTransformPoint(Vector3.zero);
+                Debug.Log($"[RoomAnchor] Volume origin set to world-origin in room space: {OriginInRoomSpace}");
             }
 
             RefreshVolumeTransform();
             TrySuppressBoundary();
 
             IsRoomLoaded = true;
-            Debug.Log($"[RoomAnchor] Room loaded, origin={OriginInRoomSpace}");
+            var roomPos = _room.transform.position;
+            var roomRot = _room.transform.rotation.eulerAngles;
+            Debug.Log($"[RoomAnchor] Room loaded — origin={OriginInRoomSpace}, " +
+                      $"roomWorldPos={roomPos}, roomWorldRot={roomRot}");
             RoomReady?.Invoke();
 #endif
         }
