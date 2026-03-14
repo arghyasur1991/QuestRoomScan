@@ -7,6 +7,7 @@ Shader "Genesis/ScanMeshVertexColor"
         [Toggle(_SHOW_NORMALS)] _ShowNormals ("Show Normals", Float) = 0
         [Toggle(_TRIPLANAR_ONLY)] _TriplanarOnly ("Triplanar Only (persistence eval)", Float) = 0
         [Toggle(_VERTEX_ONLY)] _VertexOnly ("Vertex Colors Only", Float) = 0
+        [Toggle(_LIT)] _Lit ("Lit (use Unity lighting)", Float) = 0
     }
     SubShader
     {
@@ -14,8 +15,8 @@ Shader "Genesis/ScanMeshVertexColor"
 
         Pass
         {
-            Name "VertexColorUnlit"
-            Tags { "LightMode"="SRPDefaultUnlit" }
+            Name "VertexColorForward"
+            Tags { "LightMode"="UniversalForwardOnly" }
             ZWrite On
             ZTest LEqual
 
@@ -26,8 +27,14 @@ Shader "Genesis/ScanMeshVertexColor"
             #pragma shader_feature_local _SHOW_NORMALS
             #pragma shader_feature_local _TRIPLANAR_ONLY
             #pragma shader_feature_local _VERTEX_ONLY
+            #pragma multi_compile_local _ _LIT
+            #pragma multi_compile _ _ADDITIONAL_LIGHTS
 
+            #ifdef _LIT
+            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #else
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #endif
 
             CBUFFER_START(UnityPerMaterial)
                 float _Smoothness;
@@ -35,6 +42,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 float _ShowNormals;
                 float _TriplanarOnly;
                 float _VertexOnly;
+                float _Lit;
             CBUFFER_END
 
             struct GPUVertex
@@ -56,20 +64,17 @@ Shader "Genesis/ScanMeshVertexColor"
                     ((packed >> 24)& 0xFF) / 255.0h);
             }
 
-            // Keyframe data (uniform array, max 16 keyframes × 7 float4s = 112)
             TEXTURE2D_ARRAY(_RSKeyframeTex);
             SAMPLER(sampler_RSKeyframeTex);
             float4 _RSKeyframeData[112];
             int _RSKeyframeCount;
             float _RSCamExposure;
 
-            // Triplanar persistent textures
             TEXTURE2D(_RSTriXZ);  SAMPLER(sampler_RSTriXZ);
             TEXTURE2D(_RSTriXY);  SAMPLER(sampler_RSTriXY);
             TEXTURE2D(_RSTriYZ);  SAMPLER(sampler_RSTriYZ);
             float _RSTriAvailable;
 
-            // Volume params (set by VolumeIntegrator as globals)
             float4 gsVoxCount;
             float gsVoxSize;
 
@@ -177,53 +182,76 @@ Shader "Genesis/ScanMeshVertexColor"
                 return half4(normal * 0.5 + 0.5, 1);
                 #endif
 
-                #ifdef _VERTEX_ONLY
-                return half4(IN.color.rgb, 1);
-                #endif
+                half3 baseColor = IN.color.rgb;
 
-                // Priority 1: Best keyframe match (skipped in triplanar-only eval mode)
-                #ifndef _TRIPLANAR_ONLY
-                if (_RSKeyframeCount > 0)
+                #ifndef _VERTEX_ONLY
                 {
-                    float bestScore = -1;
-                    float2 bestUV = float2(0, 0);
-                    int bestIdx = -1;
+                    bool resolved = false;
 
-                    [loop] for (int i = 0; i < _RSKeyframeCount; i++)
+                    #ifndef _TRIPLANAR_ONLY
+                    if (_RSKeyframeCount > 0)
                     {
-                        float2 uv = ProjectToKeyframeUV(IN.positionWS, i);
-                        if (uv.x < 0.02 || uv.x > 0.98 || uv.y < 0.02 || uv.y > 0.98)
-                            continue;
+                        float bestScore = -1;
+                        float2 bestUV = float2(0, 0);
+                        int bestIdx = -1;
 
-                        float3 camPos = _RSKeyframeData[i * 7 + 0].xyz;
-                        float3 viewDir = normalize(IN.positionWS - camPos);
-                        float score = -dot(viewDir, normal);
-                        if (score > bestScore)
+                        [loop] for (int i = 0; i < _RSKeyframeCount; i++)
                         {
-                            bestScore = score;
-                            bestUV = uv;
-                            bestIdx = i;
+                            float2 uv = ProjectToKeyframeUV(IN.positionWS, i);
+                            if (uv.x < 0.02 || uv.x > 0.98 || uv.y < 0.02 || uv.y > 0.98)
+                                continue;
+
+                            float3 camPos = _RSKeyframeData[i * 7 + 0].xyz;
+                            float3 viewDir = normalize(IN.positionWS - camPos);
+                            float score = -dot(viewDir, normal);
+                            if (score > bestScore)
+                            {
+                                bestScore = score;
+                                bestUV = uv;
+                                bestIdx = i;
+                            }
+                        }
+
+                        if (bestIdx >= 0)
+                        {
+                            half3 c = SAMPLE_TEXTURE2D_ARRAY(
+                                _RSKeyframeTex, sampler_RSKeyframeTex, bestUV, bestIdx).rgb;
+                            baseColor = saturate(c * _RSCamExposure);
+                            resolved = true;
                         }
                     }
+                    #endif
 
-                    if (bestIdx >= 0)
+                    if (!resolved && _RSTriAvailable > 0.5)
                     {
-                        half3 c = SAMPLE_TEXTURE2D_ARRAY(
-                            _RSKeyframeTex, sampler_RSKeyframeTex, bestUV, bestIdx).rgb;
-                        return half4(saturate(c * _RSCamExposure), 1);
+                        half3 tri = SampleTriplanar(IN.positionWS, normal);
+                        if (tri.r >= 0)
+                            baseColor = tri;
                     }
                 }
                 #endif
 
-                // Priority 2: Triplanar persistent texture
-                if (_RSTriAvailable > 0.5)
+                #ifdef _LIT
                 {
-                    half3 tri = SampleTriplanar(IN.positionWS, normal);
-                    if (tri.r >= 0) return half4(tri, 1);
-                }
+                    half3 lighting = half3(0, 0, 0);
 
-                // Priority 3: Vertex colors
-                return half4(IN.color.rgb, 1);
+                    Light mainLight = GetMainLight();
+                    lighting += mainLight.color * saturate(dot(normal, mainLight.direction));
+
+                    uint addCount = GetAdditionalLightsCount();
+                    for (uint li = 0u; li < addCount; li++)
+                    {
+                        Light addLight = GetAdditionalLight(li, IN.positionWS);
+                        lighting += addLight.color * addLight.distanceAttenuation
+                                  * saturate(dot(normal, addLight.direction));
+                    }
+
+                    half3 ambient = SampleSH(normal);
+                    baseColor *= (lighting + ambient);
+                }
+                #endif
+
+                return half4(baseColor, 1);
             }
             ENDHLSL
         }

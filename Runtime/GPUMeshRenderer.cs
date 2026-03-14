@@ -25,6 +25,15 @@ namespace Genesis.RoomScan
             set => gpuMeshMaterial = value;
         }
 
+        public void SetLitMode(bool lit)
+        {
+            if (gpuMeshMaterial == null) return;
+            if (lit)
+                gpuMeshMaterial.EnableKeyword("_LIT");
+            else
+                gpuMeshMaterial.DisableKeyword("_LIT");
+        }
+
         public void Initialize(GPUSurfaceNets surfaceNets, Bounds volumeBounds)
         {
             _surfaceNets = surfaceNets;

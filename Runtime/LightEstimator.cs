@@ -85,6 +85,9 @@ namespace Genesis.RoomScan
         private ReadOnlyCollection<EstimatedLight> _lightsReadOnly;
         private readonly List<LightCluster> _clusters = new();
         private GameObject _lightContainer;
+        private readonly List<GameObject> _markers = new();
+        private Material _markerMat;
+        private bool _markersVisible;
 
         private int _meshCyclesSinceDetection;
         private volatile bool _readbackPending;
@@ -116,6 +119,10 @@ namespace Genesis.RoomScan
             _lightContainer = new GameObject("[EstimatedLights]");
             _lightContainer.transform.SetParent(transform);
 
+            _markerMat = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
+            _markerMat.SetFloat("_Surface", 0); // opaque
+            _markerMat.enableInstancing = true;
+
             Debug.Log("[LightEstimator] Initialized");
         }
 
@@ -125,6 +132,14 @@ namespace Genesis.RoomScan
             _candidateCountBuffer?.Dispose();
             _ambientAccumBuffer?.Dispose();
             if (_lightContainer != null) Destroy(_lightContainer);
+            if (_markerMat != null) Destroy(_markerMat);
+        }
+
+        public void SetMarkersVisible(bool visible)
+        {
+            _markersVisible = visible;
+            foreach (var m in _markers)
+                if (m != null) m.SetActive(visible);
         }
 
         /// <summary>
@@ -377,6 +392,14 @@ namespace Genesis.RoomScan
                 LightRemoved?.Invoke(removed);
             }
 
+            // Remove excess markers
+            while (_markers.Count > _clusters.Count)
+            {
+                var m = _markers[_markers.Count - 1];
+                if (m != null) Destroy(m);
+                _markers.RemoveAt(_markers.Count - 1);
+            }
+
             for (int i = 0; i < _clusters.Count; i++)
             {
                 var cl = _clusters[i];
@@ -415,7 +438,6 @@ namespace Genesis.RoomScan
                     el.UnityLight.range = lightRange;
                     el.UnityLight.enabled = cl.Intensity > 0.01f;
 
-                    // Ceiling lights (normal pointing down) → spot aimed down
                     if (cl.Normal.y < -0.5f)
                     {
                         el.UnityLight.type = LightType.Spot;
@@ -427,9 +449,45 @@ namespace Genesis.RoomScan
                         el.UnityLight.type = LightType.Point;
                     }
                 }
+
+                // Marker sphere
+                UpdateMarker(i, cl);
             }
 
             LightsUpdated?.Invoke();
+        }
+
+        private void UpdateMarker(int idx, LightCluster cl)
+        {
+            GameObject marker;
+            if (idx < _markers.Count)
+            {
+                marker = _markers[idx];
+            }
+            else
+            {
+                marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                marker.name = $"LightMarker_{idx}";
+                marker.transform.SetParent(_lightContainer.transform);
+                Destroy(marker.GetComponent<Collider>());
+                marker.GetComponent<Renderer>().sharedMaterial = _markerMat;
+                _markers.Add(marker);
+            }
+
+            float scale = cl.Frozen ? 0.08f : 0.05f;
+            marker.transform.position = cl.Position;
+            marker.transform.localScale = Vector3.one * scale;
+
+            var rend = marker.GetComponent<Renderer>();
+            if (rend != null)
+            {
+                var mpb = new MaterialPropertyBlock();
+                Color emissive = cl.Color * Mathf.Max(cl.Intensity, 0.5f);
+                mpb.SetColor("_BaseColor", emissive);
+                rend.SetPropertyBlock(mpb);
+            }
+
+            marker.SetActive(_markersVisible && cl.Intensity > 0.01f);
         }
 
         private static int CeilDiv(int a, int b) => (a + b - 1) / b;

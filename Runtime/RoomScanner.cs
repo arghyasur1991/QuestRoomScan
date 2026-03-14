@@ -12,6 +12,7 @@ namespace Genesis.RoomScan
     public enum ScanVisualization
     {
         VertexColored,
+        Lit,
         Wireframe,
         OcclusionOnly,
         Hidden
@@ -209,6 +210,9 @@ namespace Genesis.RoomScan
                 _lastAutoSaveTime = t;
                 _ = persistence.SaveAsync();
             }
+
+            if (Input.GetKeyDown(KeyCode.L))
+                CycleVisualization();
         }
 
         public void StartScanning()
@@ -253,6 +257,18 @@ namespace Genesis.RoomScan
         {
             visualization = vis;
             ApplyVisualization();
+        }
+
+        /// <summary>
+        /// Cycle through visualization modes. Call from controller input or UI.
+        /// Order: VertexColored → Lit → Wireframe → OcclusionOnly → Hidden → repeat.
+        /// </summary>
+        public void CycleVisualization()
+        {
+            int count = System.Enum.GetValues(typeof(ScanVisualization)).Length;
+            int next = ((int)visualization + 1) % count;
+            SetVisualization((ScanVisualization)next);
+            Debug.Log($"[RoomScan] Visualization: {visualization}");
         }
 
         public void ClearScan()
@@ -408,6 +424,12 @@ namespace Genesis.RoomScan
             if (gpuRenderer == null) return;
 
             gpuRenderer.enabled = visualization != ScanVisualization.Hidden;
+
+            bool lit = visualization == ScanVisualization.Lit;
+            gpuRenderer.SetLitMode(lit);
+
+            if (lightEstimator != null)
+                lightEstimator.SetMarkersVisible(lit);
         }
     }
 }
