@@ -31,9 +31,9 @@ namespace Genesis.RoomScan.GSplat
         [Header("Training")]
         [SerializeField] int maxGaussiansPerSector = 10000;
         [SerializeField] int targetItersPerSector = 1500;
-        [SerializeField] int itersPerFrame = 3;
-        [SerializeField] int trainingResWidth = 640;
-        [SerializeField] int trainingResHeight = 480;
+        [SerializeField] int itersPerFrame = 1;
+        [SerializeField] int trainingResWidth = 320;
+        [SerializeField] int trainingResHeight = 240;
         [SerializeField, Range(0f, 1f)] float ssimWeight = 0.2f;
 
         [Header("Startup")]
@@ -130,31 +130,54 @@ namespace Genesis.RoomScan.GSplat
             Texture2D snap = ToTexture2D(frame);
             if (snap == null) return;
 
+            // Resize to training resolution so the loss compares matching pixel grids
+            Texture2D resized = ResizeToTrainingRes(snap);
+            Destroy(snap);
+
             Matrix4x4 view = Matrix4x4.TRS(pos, rot, Vector3.one).inverse;
 
-            float fx = focalLen.x, fy = focalLen.y;
-            float cx = principalPt.x, cy = principalPt.y;
-            float w = currentRes.x, h = currentRes.y;
+            // Scale intrinsics from camera resolution to training resolution
+            float scaleX = (float)trainingResWidth / currentRes.x;
+            float scaleY = (float)trainingResHeight / currentRes.y;
+            float fx = focalLen.x * scaleX;
+            float fy = focalLen.y * scaleY;
+            float cx = principalPt.x * scaleX;
+            float cy = principalPt.y * scaleY;
 
+            // Projection matrix: positive-Z-forward (matching our view matrix),
+            // NO principal point offset (Ndc2Pix handles pp via cx/cy in _Intrinsics).
+            // This matches the 3DGS convention where projmatrix = proj * view.
+            float tw = (float)trainingResWidth, th = (float)trainingResHeight;
             float n = 0.1f, f = 100f;
-            var proj = new Matrix4x4();
-            proj[0, 0] = 2f * fx / w;
-            proj[1, 1] = 2f * fy / h;
-            proj[0, 2] = 1f - 2f * cx / w;
-            proj[1, 2] = 2f * cy / h - 1f;
-            proj[2, 2] = -(f + n) / (f - n);
+            var proj = Matrix4x4.zero;
+            proj[0, 0] = 2f * fx / tw;
+            proj[1, 1] = 2f * fy / th;
+            proj[2, 2] = (f + n) / (f - n);
             proj[2, 3] = -2f * f * n / (f - n);
-            proj[3, 2] = -1f;
+            proj[3, 2] = 1f;
+
+            // Combined world-to-clip matrix (3DGS convention: projmatrix includes view)
+            Matrix4x4 fullProj = proj * view;
 
             AddKeyframe(new KeyframeData
             {
-                Texture = snap,
+                Texture = resized,
                 ViewMatrix = view,
-                ProjMatrix = proj,
+                ProjMatrix = fullProj,
                 Fx = fx, Fy = fy,
                 Cx = cx, Cy = cy,
                 CamPos = pos
             });
+
+            if (_keyframes.Count <= 1)
+            {
+                Debug.Log($"[GSplatManager] Keyframe #{_keyframes.Count}: " +
+                          $"camRes={currentRes}, trainRes={trainingResWidth}x{trainingResHeight}, " +
+                          $"texSize={resized.width}x{resized.height}, " +
+                          $"rawFocal=({focalLen.x:F1},{focalLen.y:F1}), " +
+                          $"scaledFocal=({fx:F1},{fy:F1}), " +
+                          $"scaledPP=({cx:F1},{cy:F1})");
+            }
 
             _lastKeyframeCamPos = pos;
             _lastKeyframeCamRot = rot;
@@ -200,6 +223,25 @@ namespace Genesis.RoomScan.GSplat
                 return tex;
             }
             return null;
+        }
+
+        Texture2D ResizeToTrainingRes(Texture2D src)
+        {
+            if (src.width == trainingResWidth && src.height == trainingResHeight)
+                return src;
+
+            var rt = RenderTexture.GetTemporary(trainingResWidth, trainingResHeight, 0,
+                RenderTextureFormat.ARGB32);
+            Graphics.Blit(src, rt);
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            var resized = new Texture2D(trainingResWidth, trainingResHeight,
+                TextureFormat.RGBA32, false);
+            resized.ReadPixels(new Rect(0, 0, trainingResWidth, trainingResHeight), 0, 0, false);
+            resized.Apply(false, true);
+            RenderTexture.active = prev;
+            RenderTexture.ReleaseTemporary(rt);
+            return resized;
         }
 
         void AddKeyframe(KeyframeData kf)
