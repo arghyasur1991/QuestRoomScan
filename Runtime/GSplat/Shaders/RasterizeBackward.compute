@@ -1,5 +1,6 @@
 // Backward rasterization — ported from msplat nd_rasterize_backward_kernel.
 // Per-tile back-to-front traversal computing gradients for each Gaussian.
+// All threads in a group hit barriers uniformly (no varying flow control around syncs).
 #pragma kernel RasterizeBackward
 
 #include "GSplatHelpers.hlsl"
@@ -22,8 +23,6 @@ StructuredBuffer<int>   _FinalIndex;        // [H*W]
 
 RWTexture2D<float4>       _VOutput;         // dL/d(rendered), (W, H)
 
-// Atomic float gradients (Vulkan/Metal RWStructuredBuffer with InterlockedAdd on floats)
-// On platforms without native float atomics we accumulate in int and convert.
 RWStructuredBuffer<float> _VXY;             // [N*2]
 RWStructuredBuffer<float> _VConic;          // [N*3]
 RWStructuredBuffer<float> _VRGB;            // [N*3]
@@ -38,14 +37,16 @@ groupshared float3 gs_rgbBatch[RAST_BLOCK_SIZE];
 [numthreads(RAST_BLOCK_X, RAST_BLOCK_Y, 1)]
 void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIdx : SV_GroupIndex)
 {
-    int i = (int)(groupId.y * RAST_BLOCK_Y + groupThreadId.y);
-    int j = (int)(groupId.x * RAST_BLOCK_X + groupThreadId.x);
+    uint pi = groupId.y * RAST_BLOCK_Y + groupThreadId.y;
+    uint pj = groupId.x * RAST_BLOCK_X + groupThreadId.x;
 
-    int tileId = (i / GS_BLOCK_Y) * (int)_TileBounds.x + (j / GS_BLOCK_X);
-    float px = (float)j;
-    float py = (float)i;
-    int pixId = min(i * (int)_ImgSize.x + j, (int)(_ImgSize.x * _ImgSize.y - 1));
-    bool inside = (i < (int)_ImgSize.y && j < (int)_ImgSize.x);
+    uint tileX = pj / GS_BLOCK_X;
+    uint tileY = pi / GS_BLOCK_Y;
+    uint tileId = tileY * _TileBounds.x + tileX;
+    float px = (float)pj;
+    float py = (float)pi;
+    bool inside = (pi < _ImgSize.y && pj < _ImgSize.x);
+    uint pixId = min(pi * _ImgSize.x + pj, _ImgSize.x * _ImgSize.y - 1u);
 
     int rangeStart = _TileBins[tileId * 2 + 0];
     int rangeEnd   = _TileBins[tileId * 2 + 1];
@@ -53,7 +54,7 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
     float T = inside ? _FinalTs[pixId] : 1.f;
     int binFinal = inside ? _FinalIndex[pixId] : -1;
 
-    float4 vOutRGBA = inside ? _VOutput[uint2(j, i)] : float4(0,0,0,0);
+    float4 vOutRGBA = inside ? _VOutput[uint2(pj, pi)] : float4(0,0,0,0);
     float3 vOut = vOutRGBA.rgb;
 
     float Tfinal = T;
@@ -64,7 +65,6 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
 
     int numBatches = (rangeEnd - rangeStart + RAST_BLOCK_SIZE - 1) / RAST_BLOCK_SIZE;
 
-    // Back-to-front traversal
     for (int b = numBatches - 1; b >= 0; --b)
     {
         GroupMemoryBarrierWithGroupSync();
@@ -84,70 +84,70 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
                                             _PackedRGB[loadIdx*3+1],
                                             _PackedRGB[loadIdx*3+2]);
         }
+
         GroupMemoryBarrierWithGroupSync();
 
-        if (!inside) continue;
-
-        int batchStart = rangeStart + RAST_BLOCK_SIZE * b;
-        int batchSize = min(RAST_BLOCK_SIZE, rangeEnd - batchStart);
-
-        for (int t = 0; t < batchSize; ++t)
+        if (inside)
         {
-            int globalIdx = batchEnd - t;
-            if (globalIdx > binFinal) continue;
-            if (globalIdx < rangeStart) break;
+            int batchStart = rangeStart + RAST_BLOCK_SIZE * b;
+            int batchSize = min(RAST_BLOCK_SIZE, rangeEnd - batchStart);
 
-            float3 bConic = gs_conicBatch[t];
-            float3 bXYOpac = gs_xyOpacBatch[t];
-            float3 bRGB = gs_rgbBatch[t];
-            int bId = gs_idBatch[t];
+            for (int t = 0; t < batchSize; ++t)
+            {
+                int globalIdx = batchEnd - t;
+                if (globalIdx > binFinal) continue;
+                if (globalIdx < rangeStart) break;
 
-            float opac = bXYOpac.z;
-            float2 delta = float2(bXYOpac.x - px, bXYOpac.y - py);
-            float sigma = 0.5f * (bConic.x * delta.x * delta.x +
-                                   bConic.z * delta.y * delta.y) +
-                          bConic.y * delta.x * delta.y;
+                float3 bConic = gs_conicBatch[t];
+                float3 bXYOpac = gs_xyOpacBatch[t];
+                float3 bRGB = gs_rgbBatch[t];
+                int bId = gs_idBatch[t];
 
-            if (sigma < 0.f || sigma >= 5.55f) continue;
+                float opac = bXYOpac.z;
+                float2 delta = float2(bXYOpac.x - px, bXYOpac.y - py);
+                float sigma = 0.5f * (bConic.x * delta.x * delta.x +
+                                       bConic.z * delta.y * delta.y) +
+                              bConic.y * delta.x * delta.y;
 
-            float vis = exp(-sigma);
-            float alpha = min(0.999f, opac * vis);
-            if (alpha < 1.f / 255.f) continue;
-            if (alpha >= 0.999f) continue;
+                if (sigma < 0.f || sigma >= 5.55f) continue;
 
-            float ra = 1.f / (1.f - alpha);
-            T *= ra;
-            float fac = alpha * T;
+                float vis = exp(-sigma);
+                float alpha = min(0.999f, opac * vis);
+                if (alpha < 1.f / 255.f) continue;
+                if (alpha >= 0.999f) continue;
 
-            float3 rgb = max(bRGB + 0.5f, 0.0f);
+                float ra = 1.f / (1.f - alpha);
+                T *= ra;
+                float fac = alpha * T;
 
-            float vAlpha = dot(rgb * T - buffer * ra - ra * TfinalBg, vOut);
-            float3 vRGBLocal = fac * vOut;
+                float3 rgb = max(bRGB + 0.5f, 0.0f);
 
-            buffer = rgb * fac + buffer;
+                float vAlpha = dot(rgb * T - buffer * ra - ra * TfinalBg, vOut);
+                float3 vRGBLocal = fac * vOut;
 
-            float vSigma = -alpha * vAlpha;
-            float3 vConicLocal = (0.5f * vSigma) * float3(delta.x * delta.x,
-                                                            delta.x * delta.y,
-                                                            delta.y * delta.y);
-            float2 vXYLocal = vSigma * float2(
-                bConic.x * delta.x + bConic.y * delta.y,
-                bConic.y * delta.x + bConic.z * delta.y);
-            float vOpacLocal = -vSigma * (1.f - opac);
+                buffer = rgb * fac + buffer;
 
-            // Accumulate gradients (no native float atomics in HLSL — use simple writes, one tile at a time)
-            // This is safe because each tile writes to non-overlapping pixel sets,
-            // but multiple tiles CAN write to the same Gaussian. We accept the race for now;
-            // production version would use uint atomics with float reinterpret.
-            _VRGB[bId*3+0] += vRGBLocal.x;
-            _VRGB[bId*3+1] += vRGBLocal.y;
-            _VRGB[bId*3+2] += vRGBLocal.z;
-            _VConic[bId*3+0] += vConicLocal.x;
-            _VConic[bId*3+1] += vConicLocal.y;
-            _VConic[bId*3+2] += vConicLocal.z;
-            _VXY[bId*2+0] += vXYLocal.x;
-            _VXY[bId*2+1] += vXYLocal.y;
-            _VOpacity[bId] += vOpacLocal;
+                float vSigma = -alpha * vAlpha;
+                float3 vConicLocal = (0.5f * vSigma) * float3(delta.x * delta.x,
+                                                                delta.x * delta.y,
+                                                                delta.y * delta.y);
+                float2 vXYLocal = vSigma * float2(
+                    bConic.x * delta.x + bConic.y * delta.y,
+                    bConic.y * delta.x + bConic.z * delta.y);
+                float vOpacLocal = -vSigma * (1.f - opac);
+
+                // Accumulate gradients. Multiple tiles CAN write to the same Gaussian;
+                // production version would use uint atomics with float reinterpret.
+                _VRGB[bId*3+0] += vRGBLocal.x;
+                _VRGB[bId*3+1] += vRGBLocal.y;
+                _VRGB[bId*3+2] += vRGBLocal.z;
+                _VConic[bId*3+0] += vConicLocal.x;
+                _VConic[bId*3+1] += vConicLocal.y;
+                _VConic[bId*3+2] += vConicLocal.z;
+                _VXY[bId*2+0] += vXYLocal.x;
+                _VXY[bId*2+1] += vXYLocal.y;
+                _VOpacity[bId] += vOpacLocal;
+            }
         }
     }
 }

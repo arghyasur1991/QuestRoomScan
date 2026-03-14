@@ -9,7 +9,7 @@
 #define GS_BLOCK_SIZE (GS_BLOCK_X * GS_BLOCK_Y)
 #define GS_CHANNELS 3
 
-#define GS_MAX_TILE_ELEMS 1024
+#define GS_MAX_TILE_ELEMS 1024u
 #define GS_SORT_TG_SIZE 512
 
 static const float SH_C0 = 0.28209479177387814f;

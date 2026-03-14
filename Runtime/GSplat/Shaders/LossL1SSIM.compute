@@ -103,12 +103,17 @@ void LossBackward(uint3 id : SV_DispatchThreadID)
     int dxMin = max(-SSIM_HALF_WIN, (int)px - (int)(W - 1));
     int dxMax = min(SSIM_HALF_WIN, (int)px);
 
-    float3 vRend = float3(0, 0, 0);
+    float4 rendPx = _Rendered[uint2(px, py)];
+    float4 gtPx = _GroundTruth[uint2(px, py)];
+    float rendArr[3] = { rendPx.r, rendPx.g, rendPx.b };
+    float gtArr[3] = { gtPx.r, gtPx.g, gtPx.b };
+    float vRendArr[3] = { 0, 0, 0 };
 
+    [unroll]
     for (uint c = 0; c < 3; c++)
     {
-        float rendVal = _Rendered[uint2(px, py)][c];
-        float gtVal = _GroundTruth[uint2(px, py)][c];
+        float rendVal = rendArr[c];
+        float gtVal = gtArr[c];
 
         float vL1 = (gtVal > rendVal) ? -1.0f : ((gtVal < rendVal) ? 1.0f : 0.0f);
         float vSSIM = 0.0f;
@@ -121,7 +126,7 @@ void LossBackward(uint3 id : SV_DispatchThreadID)
                 int cx2 = (int)px - dx;
                 float w = GAUSS_1D[dy + SSIM_HALF_WIN] * GAUSS_1D[dx + SSIM_HALF_WIN];
 
-                uint iIdx = (cy * W + cx2) * 15 + c * 5;
+                uint iIdx = ((uint)cy * W + (uint)cx2) * 15u + c * 5u;
                 float muX = _Intermediates[iIdx + 0];
                 float muY = _Intermediates[iIdx + 1];
                 float sigmaXSq = _Intermediates[iIdx + 2];
@@ -144,8 +149,8 @@ void LossBackward(uint3 id : SV_DispatchThreadID)
             }
         }
 
-        vRend[c] = _InvN * (-_SSIMWeight * vSSIM + (1.0f - _SSIMWeight) * vL1);
+        vRendArr[c] = _InvN * (-_SSIMWeight * vSSIM + (1.0f - _SSIMWeight) * vL1);
     }
 
-    _VRendered[uint2(px, py)] = float4(vRend, 0);
+    _VRendered[uint2(px, py)] = float4(vRendArr[0], vRendArr[1], vRendArr[2], 0);
 }

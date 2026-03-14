@@ -104,8 +104,8 @@ void DensifyAppendSplit(uint3 id : SV_DispatchThreadID)
         _ScalesBuf[child*3+1] = _ScalesBuf[id.x*3+1] - _LogSizeFac;
         _ScalesBuf[child*3+2] = _ScalesBuf[id.x*3+2] - _LogSizeFac;
 
-        for (int j = 0; j < 4; j++) _QuatsBuf[child*4+j] = _QuatsBuf[id.x*4+j];
-        for (int j = 0; j < 3; j++) _FeaturesDCBuf[child*3+j] = _FeaturesDCBuf[id.x*3+j];
+        { for (int q = 0; q < 4; q++) _QuatsBuf[child*4+q] = _QuatsBuf[id.x*4+q]; }
+        { for (int f = 0; f < 3; f++) _FeaturesDCBuf[child*3+f] = _FeaturesDCBuf[id.x*3+f]; }
         _OpacitiesBuf[child] = _OpacitiesBuf[id.x];
     }
 
@@ -127,10 +127,10 @@ void DensifyAppendDup(uint3 id : SV_DispatchThreadID)
     int ord = _DupPrefix[id.x] - 1;
     int dst = _N + 2 * (int)_NSplits + ord;
 
-    for (int j = 0; j < 3; j++) _MeansBuf[dst*3+j] = _MeansBuf[id.x*3+j];
-    for (int j = 0; j < 3; j++) _ScalesBuf[dst*3+j] = _ScalesBuf[id.x*3+j];
-    for (int j = 0; j < 4; j++) _QuatsBuf[dst*4+j] = _QuatsBuf[id.x*4+j];
-    for (int j = 0; j < 3; j++) _FeaturesDCBuf[dst*3+j] = _FeaturesDCBuf[id.x*3+j];
+    { for (int m = 0; m < 3; m++) _MeansBuf[dst*3+m] = _MeansBuf[id.x*3+m]; }
+    { for (int s = 0; s < 3; s++) _ScalesBuf[dst*3+s] = _ScalesBuf[id.x*3+s]; }
+    { for (int q = 0; q < 4; q++) _QuatsBuf[dst*4+q] = _QuatsBuf[id.x*4+q]; }
+    { for (int f = 0; f < 3; f++) _FeaturesDCBuf[dst*3+f] = _FeaturesDCBuf[id.x*3+f]; }
     _OpacitiesBuf[dst] = _OpacitiesBuf[id.x];
 }
 
