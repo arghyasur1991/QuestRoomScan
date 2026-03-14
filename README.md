@@ -10,6 +10,8 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Mesh Persistence** — Save/load full scan state (TSDF + color volumes + triplanar textures) to disk
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction
+- **Room Anchoring** — MRUK-based spatial anchoring keeps mesh locked to the physical room across tracking recenters and boundary exits
+- **Boundaryless Mode** — Suppresses Quest Guardian boundary for uninterrupted passthrough scanning
 - **Gaussian Splat Export** — Automatic keyframe capture + dense point cloud export for PC-side GS training
 
 ## Requirements
@@ -67,6 +69,10 @@ Or clone locally and reference as a local package:
 ### Architecture
 
 ```
+RoomAnchorManager (MRUK scene load → volumeToWorld matrix → boundaryless mode)
+       │
+RoomScanner (waits for RoomReady, then starts pipeline)
+       │
 DepthCapture (AR depth frames → normals → dilation)
        │
 VolumeIntegrator (TSDF integrate → warmup clear → prune)
@@ -165,7 +171,8 @@ QuestRoomScan builds on that foundation with significant extensions:
 |-|----------|---------------|
 | **Mesh extraction** | CPU marching cubes from GPU volume | Fully GPU-driven Surface Nets via compute shaders — zero CPU readback, single indirect draw call |
 | **Texturing** | Geometry only — no camera RGB texturing | Full camera-based texturing at three resolution tiers: keyframe projection (pixel-level), triplanar world-space cache (~8mm/texel), and vertex colors (~5cm) — all sourced from passthrough camera RGB |
-| **Persistence** | None — mesh lost on restart | Save/load of TSDF + color volumes + triplanar textures to disk (experimental, not well tested) |
+| **Persistence** | None — mesh lost on restart | Save/load of TSDF + color volumes + triplanar textures to disk with MRUK room anchoring |
+| **Spatial anchoring** | — | MRUK room anchor keeps mesh locked to physical room across recenters |
 | **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, GPU temporal stabilization, RANSAC plane detection & snapping |
 | **Gaussian Splat export** | — | On-device keyframe + point cloud capture, PC pipeline for COLMAP conversion and GS training |
 | **Packaging** | Embedded in a game | Standalone Unity package with one-click editor setup wizard |

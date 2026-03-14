@@ -5,6 +5,10 @@
 Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Distance Field) volume and fully GPU-driven Surface Nets mesh extraction.
 
 ```
+RoomAnchorManager (MRUK scene load → volumeToWorld/worldToVolume matrices → boundaryless mode)
+       │
+RoomScanner (waits for RoomReady event, then starts pipeline)
+       │
 DepthCapture (AR depth frames → normals → dilation)
        │
 VolumeIntegrator (TSDF integrate → warmup clear → prune)
@@ -39,9 +43,13 @@ ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → keyframes → tri
 - **Memory:** ~13 MB
 
 ### Coordinate System
-- Voxel `(0,0,0)` maps to world `(-VoxelCount/2 * voxelSize)`.
-- `WorldToVoxel(pos)`: `floor(pos / voxelSize + VoxelCount / 2)`, clamped.
-- `VoxelToWorld(idx)`: `(idx + 0.5 - VoxelCount / 2) * voxelSize`.
+
+The volume exists in its own local coordinate space, mapped to world space via `volumeToWorld` and `worldToVolume` matrices derived from the MRUK room anchor.
+
+- **Volume-local**: Voxel `(0,0,0)` maps to local `(-VoxelCount/2 * voxelSize)`. Center of grid is local origin.
+- **VoxelToWorld**: `volumeToWorld * ((idx + 0.5 - VoxelCount / 2) * voxelSize)`
+- **WorldToVoxel**: `floor(worldToVolume * worldPos / voxelSize + VoxelCount / 2)`, clamped.
+- **Room anchoring**: `volumeToWorld = roomAnchor.localToWorldMatrix * Translate(originInRoomSpace)`. The room anchor's world transform changes on tracking recenter but `originInRoomSpace` stays constant, keeping the volume locked to the physical room.
 
 ## 2. Integration Pipeline
 
@@ -274,6 +282,7 @@ Temporal blending on the GPU provides implicit convergence-based stability (see 
 ```
 Header: magic (RMSH) | version | timestamp
 Params: voxelCount (int3) | voxelSize (float) | integrationCount (int) | triplanarRes (int)
+Anchor: volumeOriginInRoomSpace (float3) — room-anchor-local offset for spatial re-alignment
 TSDF:   length (int) | raw bytes (RG8_SNorm, ~6.2MB)
 Color:  length (int) | raw bytes (RGBA8_UNorm, ~12.5MB)
 ```
@@ -393,7 +402,43 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | **Total GPU** | **~155 MB** |
 | **Persistence on disk** | **~31 MB** |
 
-## 12. Gaussian Splat Export Pipeline
+## 12. Room Anchoring & Boundaryless Mode
+
+### Problem
+The Quest tracking frame can recenter (headset sleep/wake, boundary exit, app restart), shifting and rotating the world origin. Without anchoring, the TSDF volume — centered at world origin — becomes misaligned with the physical room.
+
+### Solution: MRUK Room Anchor
+`RoomAnchorManager` subscribes to MRUK's `SceneLoadedEvent` and uses the room anchor transform as a physically-stable reference frame.
+
+**Volume placement:**
+```
+volumeToWorld = roomAnchor.localToWorldMatrix * Translate(originInRoomSpace)
+worldToVolume = inverse(volumeToWorld)
+```
+
+- `originInRoomSpace` is computed once at scan start from `room.GetRoomBounds().center` and stays constant
+- `roomAnchor.localToWorldMatrix` changes when tracking recenters, but the room anchor stays locked to the physical room
+- Both matrices are set as global shader properties and recomputed every frame in `LateUpdate`
+
+### Shader Integration
+All voxel-to-world and world-to-voxel conversions use the matrices:
+- `VolumeHelpers.hlsl`: `gsVolumeToWorld` / `gsWorldToVolume` — used by integration and triplanar shaders
+- `SurfaceNetsExtract.compute`: `_VolumeToWorld` — transforms extracted vertices to world space
+- `ScanMeshVertexColor.shader`: `gsWorldToVolume` — maps world positions back to volume UVW for texture sampling
+
+### Startup Sequence
+1. `RoomAnchorManager.Start()` creates MRUK and triggers scene load from device
+2. MRUK calls `OnSceneLoaded()` — room anchor is available, volume origin computed
+3. `RoomReady` event fires
+4. `RoomScanner.OnRoomReady()` loads any saved scan, then starts scanning
+
+### Boundaryless Mode
+On scene load, `RoomAnchorManager` requests boundary suppression via OpenXR `BoundaryVisibilityFeature.TryRequestBoundaryVisibility(VisibilitySuppressed)`. Requires `boundaryVisibilitySupport = Supported` in `OculusProjectConfig.asset`.
+
+### Persistence
+The `originInRoomSpace` Vector3 is saved alongside the TSDF/color volume data. On load, it's restored to `RoomAnchorManager` before volume upload, so the volume re-anchors to the same physical position via the current room anchor transform.
+
+## 13. Gaussian Splat Export Pipeline
 
 Automatic export of camera keyframes and dense point cloud for PC-side Gaussian Splat training.
 

@@ -15,22 +15,23 @@ Texture2D<float4> gsDilatedDepth;
 int gsNumExclusions;
 float3 gsExclusionHeads[64];
 
+float4x4 gsVolumeToWorld;
+float4x4 gsWorldToVolume;
+
 #define GS_EMPTY_VOXEL -1.0
 
 float3 gsVoxelToWorld(uint3 indices)
 {
-    float3 pos = (float3)indices;
-    pos += 0.5;
-    pos -= (float3)gsVoxCount / 2.0;
-    pos *= gsVoxSize;
-    return pos;
+    float3 local = ((float3)indices + 0.5 - (float3)gsVoxCount / 2.0) * gsVoxSize;
+    return mul(gsVolumeToWorld, float4(local, 1)).xyz;
 }
 
-float3 gsWorldToVoxelFloat(float3 pos)
+float3 gsWorldToVoxelFloat(float3 worldPos)
 {
-    pos /= gsVoxSize;
-    pos += (float3)gsVoxCount / 2.0;
-    return pos;
+    float3 local = mul(gsWorldToVolume, float4(worldPos, 1)).xyz;
+    local /= gsVoxSize;
+    local += (float3)gsVoxCount / 2.0;
+    return local;
 }
 
 uint3 gsWorldToVoxel(float3 pos)

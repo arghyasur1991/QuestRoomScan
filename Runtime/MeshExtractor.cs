@@ -120,6 +120,7 @@ namespace Genesis.RoomScan
 
             _extractCount++;
             _gpuSurfaceNets.MinMeshWeight = _volume.MinMeshWeight;
+            _gpuSurfaceNets.VolumeToWorld = _volume.VolumeToWorld;
 
             PlaneData[] planes = null;
             int numPlanes = 0;
@@ -134,6 +135,9 @@ namespace Genesis.RoomScan
             _gpuSurfaceNets.Extract(
                 _volume.Volume, _volume.ColorVolume,
                 _volume.VoxelSize, planes, numPlanes);
+
+            if (_gpuRenderer != null)
+                _gpuRenderer.UpdateBounds(_gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
 
             if (_extractCount <= 3 || _extractCount % 50 == 0)
                 Debug.Log($"[RoomScan] GPU extraction #{_extractCount}");

@@ -53,6 +53,7 @@ namespace Genesis.RoomScan
         public float TemporalDecayRate { get; set; } = 0.15f;
         public float ConvergenceThreshold { get; set; } = 0.005f;
         public float TemporalDeadzone { get; set; } = 0.001f;
+        public Matrix4x4 VolumeToWorld { get; set; } = Matrix4x4.identity;
 
         public GraphicsBuffer VertexBuffer => _vertices;
         public GraphicsBuffer IndexBuffer => _indices;
@@ -76,6 +77,7 @@ namespace Genesis.RoomScan
         private static readonly int ID_TemporalDecayRate = Shader.PropertyToID("_TemporalDecayRate");
         private static readonly int ID_ConvergeThreshold = Shader.PropertyToID("_ConvergeThreshold");
         private static readonly int ID_TemporalDeadzone = Shader.PropertyToID("_TemporalDeadzone");
+        private static readonly int ID_VolumeToWorld = Shader.PropertyToID("_VolumeToWorld");
 
         private static readonly int ID_CoordVertMap = Shader.PropertyToID("_CoordVertMap");
         private static readonly int ID_Vertices = Shader.PropertyToID("_Vertices");
@@ -249,8 +251,9 @@ namespace Genesis.RoomScan
 
         public Bounds GetVolumeBounds(float voxelSize)
         {
-            float3 halfExtent = (float3)_voxCount * voxelSize * 0.5f;
-            return new Bounds(Vector3.zero, (Vector3)(halfExtent * 2));
+            Vector3 halfExtent = (Vector3)((float3)_voxCount * voxelSize * 0.5f);
+            Vector3 center = VolumeToWorld.GetPosition();
+            return new Bounds(center, halfExtent * 2);
         }
 
         private void SetGlobalParams(float voxelSize)
@@ -268,6 +271,7 @@ namespace Genesis.RoomScan
             _compute.SetFloat(ID_TemporalDecayRate, TemporalDecayRate);
             _compute.SetFloat(ID_ConvergeThreshold, ConvergenceThreshold);
             _compute.SetFloat(ID_TemporalDeadzone, TemporalDeadzone);
+            _compute.SetMatrix(ID_VolumeToWorld, VolumeToWorld);
         }
 
         private void BindAllBuffers()

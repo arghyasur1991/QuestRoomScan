@@ -39,6 +39,8 @@ float  _MinWeight;
 uint   _TotalVoxels;
 uint   _MaxVertices;
 
+float4x4 _VolumeToWorld;
+
 float  _SmoothLambda;
 float  _SmoothBeta;
 
@@ -112,7 +114,8 @@ int3 Unflatten(int idx)
 
 float3 VoxelCoordToWorld(float3 c)
 {
-    return (c + 0.5 - (float3)_VoxCount / 2.0) * _VoxSize;
+    float3 local = (c + 0.5 - (float3)_VoxCount / 2.0) * _VoxSize;
+    return mul(_VolumeToWorld, float4(local, 1)).xyz;
 }
 
 uint PackColor(float4 c)

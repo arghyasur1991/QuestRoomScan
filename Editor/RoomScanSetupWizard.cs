@@ -33,6 +33,7 @@ namespace Genesis.RoomScan.Editor
         KeyframeCollector _keyframeCollector;
         PointCloudExporter _pointCloudExporter;
         PlaneDetector _planeDetector;
+        RoomAnchorManager _roomAnchorManager;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
 
@@ -100,6 +101,7 @@ namespace Genesis.RoomScan.Editor
             _keyframeCollector = FindAny<KeyframeCollector>();
             _pointCloudExporter = FindAny<PointCloudExporter>();
             _planeDetector = FindAny<PlaneDetector>();
+            _roomAnchorManager = FindAny<RoomAnchorManager>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -245,6 +247,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
             StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
             StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
+            StatusRow("RoomAnchorManager (MRUK anchoring)", _roomAnchorManager != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _meshExtractor == null ||
@@ -252,7 +255,8 @@ namespace Genesis.RoomScan.Editor
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null || _keyframeStore == null ||
                               _persistence == null || _keyframeCollector == null ||
-                              _pointCloudExporter == null || _planeDetector == null;
+                              _pointCloudExporter == null || _planeDetector == null ||
+                              _roomAnchorManager == null;
 
             if (anyMissing)
             {
@@ -329,6 +333,8 @@ namespace Genesis.RoomScan.Editor
                 var planeDetector = Undo.AddComponent<PlaneDetector>(root);
                 planeDetector.enabled = false;
             }
+            if (root.GetComponent<RoomAnchorManager>() == null)
+                Undo.AddComponent<RoomAnchorManager>(root);
 
             MarkDirty();
             Refresh();
@@ -513,6 +519,7 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "keyframeCollector", _keyframeCollector);
                 SetRef(so, "pointCloudExporter", _pointCloudExporter);
                 SetRef(so, "planeDetector", _planeDetector);
+                SetRef(so, "roomAnchorManager", _roomAnchorManager);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }
