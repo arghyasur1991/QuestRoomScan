@@ -45,12 +45,16 @@ namespace Genesis.RoomScan.GSplat
         bool debugSkipTraining;
         [SerializeField, Tooltip("Disable mesh masking (show both mesh and splats)")]
         bool debugDisableMeshMask = true;
+        [SerializeField, Tooltip("Hide passthrough to see splats against black background")]
+        bool debugDisablePassthrough;
 
         SectorScheduler _scheduler;
         GSplatTrainer _trainer;
         bool _initialized;
         Camera _mainCam;
         Plane[] _frustumPlanes = new Plane[6];
+        MonoBehaviour _passthroughLayer;
+        bool _lastPassthroughState;
 
         readonly List<KeyframeData> _keyframes = new();
         const int MaxKeyframes = 16;
@@ -156,12 +160,43 @@ namespace Genesis.RoomScan.GSplat
 
         void Update()
         {
+            ApplyPassthroughToggle();
+
             TryInitialize();
             if (!_initialized || _mainCam == null) return;
 
             var camTr = _mainCam.transform;
             GeometryUtility.CalculateFrustumPlanes(_mainCam, _frustumPlanes);
             TrainFrame(camTr.position, camTr.forward, _frustumPlanes);
+        }
+
+        void ApplyPassthroughToggle()
+        {
+            if (debugDisablePassthrough == _lastPassthroughState) return;
+            _lastPassthroughState = debugDisablePassthrough;
+
+            if (_passthroughLayer == null)
+            {
+                System.Type ptType = null;
+                foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    ptType = asm.GetType("OVRPassthroughLayer");
+                    if (ptType != null) break;
+                }
+                if (ptType != null)
+                    _passthroughLayer = FindAnyObjectByType(ptType) as MonoBehaviour;
+            }
+
+            if (_passthroughLayer != null)
+            {
+                var hiddenField = _passthroughLayer.GetType().GetField("hidden",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                if (hiddenField != null)
+                {
+                    hiddenField.SetValue(_passthroughLayer, debugDisablePassthrough);
+                    Debug.Log($"[GSplatManager] Passthrough hidden={debugDisablePassthrough}");
+                }
+            }
         }
 
         static Texture2D ToTexture2D(Texture src)
