@@ -255,7 +255,7 @@ namespace Genesis.RoomScan.GSplat
                      GraphicsBuffer m, GraphicsBuffer v, int n, float lr, float bc2)
         {
             float stepSize = lr / (1f - Mathf.Pow(_config.AdamBeta1, _step));
-            _adamCS.SetInt(ID_N, (uint)n);
+            _adamCS.SetInt(ID_N, n);
             _adamCS.SetFloat(ID_StepSize, stepSize);
             _adamCS.SetFloat(ID_Beta1, _config.AdamBeta1);
             _adamCS.SetFloat(ID_Beta2, _config.AdamBeta2);
