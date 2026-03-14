@@ -189,43 +189,36 @@ namespace Genesis.RoomScan.GSplat
         {
             if (_keyframes.Count < 2) return;
 
-            const int maxSeedAttemptsPerFrame = 4;
-            int seedAttempts = 0;
-
-            while (seedAttempts < maxSeedAttemptsPerFrame)
+            // Phase 1: Opportunistically seed 1 MeshOnly sector per frame
+            int seedId = _scheduler.PickNextMeshOnlySector(headPos, gazeDir, frustumPlanes);
+            if (seedId >= 0)
             {
-                int sectorId = _scheduler.PickNextSector(headPos, gazeDir, frustumPlanes, Time.time);
-                if (sectorId < 0) return;
-
-                ref var sector = ref _scheduler.Sectors[sectorId];
-                var buffers = _scheduler.GetOrCreateBuffers(sectorId);
-
-                if (buffers.CurrentCount == 0 && sector.State == SectorState.MeshOnly)
-                {
-                    seedAttempts++;
-                    SeedFromMesh(sectorId, buffers);
-                    if (buffers.CurrentCount == 0)
-                    {
-                        _scheduler.MarkNoGeometry(sectorId);
-                        continue;
-                    }
-                }
-
-                var kf = PickBestKeyframe(sectorId);
-                if (!kf.HasValue) return;
-
-                for (int i = 0; i < itersPerFrame; i++)
-                {
-                    _trainer.TrainStep(buffers, kf.Value.Texture,
-                                       kf.Value.ViewMatrix, kf.Value.ProjMatrix,
-                                       kf.Value.Fx, kf.Value.Fy, kf.Value.Cx, kf.Value.Cy,
-                                       kf.Value.CamPos);
-                }
-
-                _scheduler.AdvanceTraining(sectorId, itersPerFrame, 0f, buffers.CurrentCount);
-                UpdateMeshMask();
-                return;
+                var seedBuf = _scheduler.GetOrCreateBuffers(seedId);
+                SeedFromMesh(seedId, seedBuf);
+                if (seedBuf.CurrentCount == 0)
+                    _scheduler.MarkNoGeometry(seedId);
             }
+
+            // Phase 2: Train the best Training-state sector
+            int sectorId = _scheduler.PickNextTrainingSector(headPos, gazeDir, frustumPlanes);
+            if (sectorId < 0) return;
+
+            var buffers = _scheduler.GetOrCreateBuffers(sectorId);
+            if (buffers.CurrentCount == 0) return;
+
+            var kf = PickBestKeyframe(sectorId);
+            if (!kf.HasValue) return;
+
+            for (int i = 0; i < itersPerFrame; i++)
+            {
+                _trainer.TrainStep(buffers, kf.Value.Texture,
+                                   kf.Value.ViewMatrix, kf.Value.ProjMatrix,
+                                   kf.Value.Fx, kf.Value.Fy, kf.Value.Cx, kf.Value.Cy,
+                                   kf.Value.CamPos);
+            }
+
+            _scheduler.AdvanceTraining(sectorId, itersPerFrame, 0f, buffers.CurrentCount);
+            UpdateMeshMask();
         }
 
         static readonly int ID_NumVertices = Shader.PropertyToID("_NumVertices");

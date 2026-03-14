@@ -118,11 +118,10 @@ namespace Genesis.RoomScan.GSplat
         }
 
         /// <summary>
-        /// Update priorities and pick the next sector to train.
-        /// Call once per frame before running training iterations.
+        /// Pick highest-priority sector matching the given state filter.
         /// </summary>
-        public int PickNextSector(Vector3 headPos, Vector3 gazeDir,
-                                  Plane[] frustumPlanes, float timeSinceStart)
+        int PickByScoredPriority(Vector3 headPos, Vector3 gazeDir,
+                                  Plane[] frustumPlanes, SectorState requiredState)
         {
             float bestPriority = float.MinValue;
             int bestId = -1;
@@ -130,25 +129,20 @@ namespace Genesis.RoomScan.GSplat
             for (int i = 0; i < TotalSectors; i++)
             {
                 ref var s = ref _sectors[i];
-                if (s.State != SectorState.MeshOnly && s.State != SectorState.Training)
-                    continue;
+                if (s.State != requiredState) continue;
 
                 float priority = 0;
 
-                // Frustum intersection bonus
                 if (frustumPlanes != null && GeometryUtility.TestPlanesAABB(frustumPlanes, s.WorldAABB))
                     priority += 10f;
 
-                // Proximity
                 float dist = Vector3.Distance(headPos, s.WorldAABB.center);
                 priority += 5f / (1f + dist);
 
-                // Gaze alignment
                 Vector3 toSector = (s.WorldAABB.center - headPos).normalized;
                 float gazeDot = Vector3.Dot(gazeDir, toSector);
                 priority += 3f * Mathf.Max(0, gazeDot);
 
-                // Fairness: less trained = higher priority
                 float trainFrac = (float)s.TrainingIteration / _targetItersPerSector;
                 priority += 2f * (1f - Mathf.Clamp01(trainFrac));
 
@@ -159,9 +153,38 @@ namespace Genesis.RoomScan.GSplat
                     bestId = i;
                 }
             }
-
-            _currentSectorId = bestId;
             return bestId;
+        }
+
+        /// <summary>
+        /// Pick the best MeshOnly sector for seeding. Returns -1 if none.
+        /// </summary>
+        public int PickNextMeshOnlySector(Vector3 headPos, Vector3 gazeDir, Plane[] frustumPlanes)
+        {
+            return PickByScoredPriority(headPos, gazeDir, frustumPlanes, SectorState.MeshOnly);
+        }
+
+        /// <summary>
+        /// Pick the best Training sector for continued training. Returns -1 if none.
+        /// </summary>
+        public int PickNextTrainingSector(Vector3 headPos, Vector3 gazeDir, Plane[] frustumPlanes)
+        {
+            int id = PickByScoredPriority(headPos, gazeDir, frustumPlanes, SectorState.Training);
+            _currentSectorId = id;
+            return id;
+        }
+
+        /// <summary>
+        /// Pick best sector from either MeshOnly or Training states (legacy).
+        /// </summary>
+        public int PickNextSector(Vector3 headPos, Vector3 gazeDir,
+                                  Plane[] frustumPlanes, float timeSinceStart)
+        {
+            int id = PickNextTrainingSector(headPos, gazeDir, frustumPlanes);
+            if (id < 0)
+                id = PickNextMeshOnlySector(headPos, gazeDir, frustumPlanes);
+            _currentSectorId = id;
+            return id;
         }
 
         /// <summary>
