@@ -170,8 +170,6 @@ namespace Genesis.RoomScan.GSplat
             TrainFrame(camTr.position, camTr.forward, _frustumPlanes);
         }
 
-        System.Reflection.FieldInfo _hiddenField;
-
         void ApplyPassthroughToggle()
         {
             if (debugDisablePassthrough == _lastPassthroughState && _passthroughLayer != null)
@@ -192,18 +190,12 @@ namespace Genesis.RoomScan.GSplat
                         _passthroughLayer = all[0] as MonoBehaviour;
                 }
                 if (_passthroughLayer == null) return;
-
-                _hiddenField = _passthroughLayer.GetType().GetField("hidden",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-                Debug.Log($"[GSplatManager] Found OVRPassthroughLayer on '{_passthroughLayer.gameObject.name}', hiddenField={_hiddenField != null}");
+                Debug.Log($"[GSplatManager] Found OVRPassthroughLayer on '{_passthroughLayer.gameObject.name}'");
             }
 
-            if (_hiddenField != null)
-            {
-                _hiddenField.SetValue(_passthroughLayer, debugDisablePassthrough);
-                _lastPassthroughState = debugDisablePassthrough;
-                Debug.Log($"[GSplatManager] Passthrough hidden={debugDisablePassthrough}");
-            }
+            _passthroughLayer.enabled = !debugDisablePassthrough;
+            _lastPassthroughState = debugDisablePassthrough;
+            Debug.Log($"[GSplatManager] Passthrough layer enabled={!debugDisablePassthrough}");
         }
 
         static Texture2D ToTexture2D(Texture src)
