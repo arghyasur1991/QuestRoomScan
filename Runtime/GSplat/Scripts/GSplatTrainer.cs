@@ -1,7 +1,6 @@
 using System;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
-using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan.GSplat
 {
@@ -72,11 +71,9 @@ namespace Genesis.RoomScan.GSplat
         readonly Config _config;
         int _step;
         int _imgW, _imgH;
-        readonly int _flipGTY;
 
         static readonly int ID_ImgSize = Shader.PropertyToID("_ImgSize");
         static readonly int ID_SSIMWeight = Shader.PropertyToID("_SSIMWeight");
-        static readonly int ID_FlipGTY = Shader.PropertyToID("_FlipGTY");
         static readonly int ID_InvN = Shader.PropertyToID("_InvN");
         static readonly int ID_NumPoints = Shader.PropertyToID("_NumPoints");
         static readonly int ID_NumPoints2 = Shader.PropertyToID("_NumPoints2");
@@ -133,14 +130,7 @@ namespace Genesis.RoomScan.GSplat
             };
             _vRendered.Create();
 
-            // On Vulkan (Quest), Texture2D and RenderTexture have different Y-origins
-            // for integer-addressed reads in compute shaders. The rasterizer writes to
-            // an RWTexture2D (top-left origin) but the GT keyframe is a Texture2D
-            // (bottom-left origin). We flip the GT Y in the loss shader to compensate.
-            var gfxType = SystemInfo.graphicsDeviceType;
-            _flipGTY = (gfxType == GraphicsDeviceType.Vulkan ||
-                        gfxType == GraphicsDeviceType.OpenGLES3) ? 1 : 0;
-            Debug.Log($"[GSplatTrainer] graphicsDeviceType={gfxType}, _flipGTY={_flipGTY}");
+            Debug.Log($"[GSplatTrainer] graphicsDeviceType={SystemInfo.graphicsDeviceType}");
 
             const GraphicsBuffer.Target s = GraphicsBuffer.Target.Structured;
             _vxy    = new GraphicsBuffer(s, maxPoints * 2, 4);
@@ -151,7 +141,7 @@ namespace Genesis.RoomScan.GSplat
         /// <summary>
         /// Run one complete training iteration against a keyframe.
         /// </summary>
-        public void TrainStep(GSplatBuffers gaussians, Texture2D keyframe,
+        public void TrainStep(GSplatBuffers gaussians, Texture keyframe,
                               Matrix4x4 viewMat, Matrix4x4 projMat,
                               float fx, float fy, float cx, float cy,
                               Vector3 camPos)
@@ -170,7 +160,6 @@ namespace Genesis.RoomScan.GSplat
             // 2. Loss forward
             _lossCS.SetInts(ID_ImgSize, _imgW, _imgH);
             _lossCS.SetFloat(ID_SSIMWeight, _config.SSIMWeight);
-            _lossCS.SetInt(ID_FlipGTY, _flipGTY);
             _lossCS.SetTexture(_kLossFwd, "_Rendered", _forward.OutputImage);
             _lossCS.SetTexture(_kLossFwd, "_GroundTruth", keyframe);
             _lossCS.SetBuffer(_kLossFwd, "_Intermediates", _intermediates);

@@ -7,16 +7,9 @@
 uint2 _ImgSize;       // (W, H)
 float _SSIMWeight;
 float _InvN;          // 1.0 / (H * W * 3)
-uint _FlipGTY;        // 1 = flip GT Y coord (Vulkan: Texture2D origin != RenderTexture origin)
 
-Texture2D<float4> _Rendered;    // from rasterize forward
-Texture2D<float4> _GroundTruth; // keyframe
-
-float4 SampleGT(uint x, uint y)
-{
-    uint gy = (_FlipGTY != 0u) ? (_ImgSize.y - 1u - y) : y;
-    return _GroundTruth[uint2(x, gy)];
-}
+Texture2D<float4> _Rendered;    // from rasterize forward (RenderTexture)
+Texture2D<float4> _GroundTruth; // keyframe (RenderTexture — same Y convention as _Rendered)
 
 // Forward intermediates for SSIM backward pass
 RWStructuredBuffer<float> _Intermediates;  // [H*W*15]
@@ -58,7 +51,7 @@ void LossForward(uint3 id : SV_DispatchThreadID)
             {
                 int nx = (int)px + dx;
                 float w = GAUSS_1D[dy + SSIM_HALF_WIN] * GAUSS_1D[dx + SSIM_HALF_WIN];
-                float xVal = SampleGT((uint)nx, (uint)ny)[c];
+                float xVal = _GroundTruth[uint2(nx, ny)][c];
                 float yVal = _Rendered[uint2(nx, ny)][c];
                 muX += w * xVal;
                 muY += w * yVal;
@@ -86,7 +79,7 @@ void LossForward(uint3 id : SV_DispatchThreadID)
 
         ssimSum += (A * B) / (Cd * D);
 
-        float gtVal = SampleGT(px, py)[c];
+        float gtVal = _GroundTruth[uint2(px, py)][c];
         float rendVal = _Rendered[uint2(px, py)][c];
         l1Sum += abs(gtVal - rendVal);
     }
@@ -111,7 +104,7 @@ void LossBackward(uint3 id : SV_DispatchThreadID)
     int dxMax = min(SSIM_HALF_WIN, (int)px);
 
     float4 rendPx = _Rendered[uint2(px, py)];
-    float4 gtPx = SampleGT(px, py);
+    float4 gtPx = _GroundTruth[uint2(px, py)];
     float rendArr[3] = { rendPx.r, rendPx.g, rendPx.b };
     float gtArr[3] = { gtPx.r, gtPx.g, gtPx.b };
     float vRendArr[3] = { 0, 0, 0 };

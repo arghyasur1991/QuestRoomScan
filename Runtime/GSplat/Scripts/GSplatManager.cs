@@ -68,7 +68,7 @@ namespace Genesis.RoomScan.GSplat
 
         public struct KeyframeData
         {
-            public Texture2D Texture;
+            public RenderTexture Texture;
             public Matrix4x4 ViewMatrix;
             public Matrix4x4 ProjMatrix;
             public float Fx, Fy, Cx, Cy;
@@ -128,12 +128,13 @@ namespace Genesis.RoomScan.GSplat
                     return;
             }
 
-            Texture2D snap = ToTexture2D(frame);
-            if (snap == null) return;
-
-            // Resize to training resolution so the loss compares matching pixel grids
-            Texture2D resized = ResizeToTrainingRes(snap);
-            Destroy(snap);
+            // Blit the camera frame directly to a training-resolution RenderTexture.
+            // Keeping it as an RT avoids the CPU round-trip (ReadPixels/Apply) and ensures
+            // the loss shader compares two RTs with identical Y conventions — no flip needed.
+            var gtRT = new RenderTexture(trainingResWidth, trainingResHeight, 0,
+                RenderTextureFormat.ARGB32) { filterMode = FilterMode.Bilinear };
+            gtRT.Create();
+            Graphics.Blit(frame, gtRT);
 
             Matrix4x4 view = Matrix4x4.TRS(pos, rot, Vector3.one).inverse;
 
@@ -179,7 +180,7 @@ namespace Genesis.RoomScan.GSplat
 
             AddKeyframe(new KeyframeData
             {
-                Texture = resized,
+                Texture = gtRT,
                 ViewMatrix = view,
                 ProjMatrix = fullProj,
                 Fx = fx, Fy = fy,
@@ -192,7 +193,7 @@ namespace Genesis.RoomScan.GSplat
                 Debug.Log($"[GSplatManager] Keyframe #{_keyframes.Count}: " +
                           $"sensorRes={sensorRes}, camRes={currentRes}, " +
                           $"trainRes={trainingResWidth}x{trainingResHeight}, " +
-                          $"texSize={resized.width}x{resized.height}, " +
+                          $"texSize={gtRT.width}x{gtRT.height}, " +
                           $"rawFocal=({focalLen.x:F1},{focalLen.y:F1}), " +
                           $"crop=({cropX:F1},{cropY:F1}), " +
                           $"scaledFocal=({fx:F1},{fy:F1}), " +
@@ -229,47 +230,14 @@ namespace Genesis.RoomScan.GSplat
             TrainFrame(camTr.position, camTr.forward, _frustumPlanes);
         }
 
-        static Texture2D ToTexture2D(Texture src)
-        {
-            if (src is Texture2D t2d) return t2d;
-            if (src is RenderTexture rt)
-            {
-                var prev = RenderTexture.active;
-                RenderTexture.active = rt;
-                var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
-                tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0, false);
-                tex.Apply(false, true);
-                RenderTexture.active = prev;
-                return tex;
-            }
-            return null;
-        }
 
-        Texture2D ResizeToTrainingRes(Texture2D src)
-        {
-            if (src.width == trainingResWidth && src.height == trainingResHeight)
-                return src;
-
-            var rt = RenderTexture.GetTemporary(trainingResWidth, trainingResHeight, 0,
-                RenderTextureFormat.ARGB32);
-            Graphics.Blit(src, rt);
-            var prev = RenderTexture.active;
-            RenderTexture.active = rt;
-            var resized = new Texture2D(trainingResWidth, trainingResHeight,
-                TextureFormat.RGBA32, false);
-            resized.ReadPixels(new Rect(0, 0, trainingResWidth, trainingResHeight), 0, 0, false);
-            resized.Apply(false, true);
-            RenderTexture.active = prev;
-            RenderTexture.ReleaseTemporary(rt);
-            return resized;
-        }
 
         void AddKeyframe(KeyframeData kf)
         {
             if (_keyframes.Count >= MaxKeyframes)
             {
-                if (_keyframes[0].Texture != null)
-                    Destroy(_keyframes[0].Texture);
+                var old = _keyframes[0].Texture;
+                if (old != null) { old.Release(); Destroy(old); }
                 _keyframes.RemoveAt(0);
             }
             _keyframes.Add(kf);
@@ -360,21 +328,29 @@ namespace Genesis.RoomScan.GSplat
                 UpdateMeshMask();
         }
 
+        /// <summary>
+        /// ReadPixels from a RenderTexture into a temporary Texture2D for CPU-side analysis.
+        /// Both rendered and GT are RenderTextures now, so same Y convention — no flip needed.
+        /// </summary>
+        static Texture2D ReadbackRT(RenderTexture rt)
+        {
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
+            tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0, false);
+            tex.Apply(false);
+            RenderTexture.active = prev;
+            return tex;
+        }
+
         void LogTrainingDiag(int sectorId, int iter, KeyframeData kf, GSplatBuffers buffers)
         {
-            // Read back rendered image average pixel (GPU → CPU readback, only for diagnostics)
             var rendered = _trainer.RenderedImage;
             if (rendered == null) return;
 
-            int w = rendered.width, h = rendered.height;
-            var prevRT = RenderTexture.active;
-            RenderTexture.active = rendered;
-            var readTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
-            readTex.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
-            readTex.Apply(false);
-            RenderTexture.active = prevRT;
-
+            var readTex = ReadbackRT(rendered);
             var rendPixels = readTex.GetPixels32();
+            int w = readTex.width, h = readTex.height;
             float rSum = 0, gSum = 0, bSum = 0;
             int nonBlack = 0;
             foreach (var px in rendPixels)
@@ -385,24 +361,15 @@ namespace Genesis.RoomScan.GSplat
             int total = rendPixels.Length;
             float rAvg = rSum / total, gAvg = gSum / total, bAvg = bSum / total;
 
-            // Keyframe average (texture is non-readable, blit to temp RT first)
-            var kfRT = RenderTexture.GetTemporary(kf.Texture.width, kf.Texture.height, 0);
-            Graphics.Blit(kf.Texture, kfRT);
-            RenderTexture.active = kfRT;
-            var kfRead = new Texture2D(kfRT.width, kfRT.height, TextureFormat.RGBA32, false);
-            kfRead.ReadPixels(new Rect(0, 0, kfRT.width, kfRT.height), 0, 0, false);
-            kfRead.Apply(false);
-            RenderTexture.active = prevRT;
+            var kfRead = ReadbackRT(kf.Texture);
             var kfPixels = kfRead.GetPixels32();
+            int kTotal = kfPixels.Length;
             float krSum = 0, kgSum = 0, kbSum = 0;
             foreach (var px in kfPixels)
             {
                 krSum += px.r; kgSum += px.g; kbSum += px.b;
             }
-            int kTotal = kfPixels.Length;
             float krAvg = krSum / kTotal, kgAvg = kgSum / kTotal, kbAvg = kbSum / kTotal;
-            Destroy(kfRead);
-            RenderTexture.ReleaseTemporary(kfRT);
 
             // Gradient magnitude: sample from beginning, middle, and end of the buffer
             int N = buffers.CurrentCount;
@@ -424,8 +391,7 @@ namespace Genesis.RoomScan.GSplat
             }
             float gradMag = gradCount > 0 ? Mathf.Sqrt(gradSumSq / gradCount) : 0f;
 
-            // Top-half vs bottom-half brightness (detects Y-flip: if rendered top is dark
-            // but keyframe top is bright, the images are vertically misaligned)
+            // Top-half vs bottom-half brightness comparison
             float rendTopR = 0, rendBotR = 0, kfTopR = 0, kfBotR = 0;
             int halfH = h / 2;
             for (int y = 0; y < h; y++)
@@ -434,8 +400,8 @@ namespace Genesis.RoomScan.GSplat
                     float r = rendPixels[y * w + x].r;
                     if (y < halfH) rendTopR += r; else rendBotR += r;
                 }
-            int kHalfH = kf.Texture.height / 2;
             int kw = kf.Texture.width, kh = kf.Texture.height;
+            int kHalfH = kh / 2;
             for (int y = 0; y < kh; y++)
                 for (int x = 0; x < kw; x++)
                 {
@@ -453,48 +419,21 @@ namespace Genesis.RoomScan.GSplat
                       $"rendTopR={rendTopAvg:F1} rendBotR={rendBotAvg:F1} " +
                       $"kfTopR={kfTopAvg:F1} kfBotR={kfBotAvg:F1}");
 
-            // Save rendered + GT images to disk on the first iteration for visual verification.
-            // Flip the rendered image vertically so both diagnostics have the same orientation
-            // (ReadPixels from an RWTexture2D-backed RT vs a Blit'd Texture2D can differ on Vulkan).
+            // Save both images to disk on the first iteration for visual verification.
+            // Both are RTs → same Y convention → ReadPixels gives matching orientation.
             if (iter <= 1)
             {
                 string dir = System.IO.Path.Combine(Application.persistentDataPath, "GSExport", "train_diag");
                 System.IO.Directory.CreateDirectory(dir);
-                FlipTextureY(readTex);
                 var rendJpg = readTex.EncodeToJPG(95);
                 System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"rendered_s{sectorId}_i{iter}.jpg"), rendJpg);
-                var kfBlit = RenderTexture.GetTemporary(kf.Texture.width, kf.Texture.height, 0);
-                Graphics.Blit(kf.Texture, kfBlit);
-                RenderTexture.active = kfBlit;
-                var kfSnap = new Texture2D(kfBlit.width, kfBlit.height, TextureFormat.RGBA32, false);
-                kfSnap.ReadPixels(new Rect(0, 0, kfBlit.width, kfBlit.height), 0, 0, false);
-                kfSnap.Apply(false);
-                RenderTexture.active = prevRT;
-                var kfJpg = kfSnap.EncodeToJPG(95);
+                var kfJpg = kfRead.EncodeToJPG(95);
                 System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, $"groundtruth_s{sectorId}_i{iter}.jpg"), kfJpg);
-                Destroy(kfSnap);
-                RenderTexture.ReleaseTemporary(kfBlit);
                 Debug.Log($"[GSplat-TrainDiag] Saved diagnostic images to {dir}");
             }
 
             Destroy(readTex);
-        }
-
-        static void FlipTextureY(Texture2D tex)
-        {
-            var pixels = tex.GetPixels32();
-            int w = tex.width, h = tex.height;
-            for (int y = 0; y < h / 2; y++)
-            {
-                int topRow = y * w;
-                int botRow = (h - 1 - y) * w;
-                for (int x = 0; x < w; x++)
-                {
-                    (pixels[topRow + x], pixels[botRow + x]) = (pixels[botRow + x], pixels[topRow + x]);
-                }
-            }
-            tex.SetPixels32(pixels);
-            tex.Apply(false);
+            Destroy(kfRead);
         }
 
         void LogGaussianDiagnostics(int sectorId, GSplatBuffers buffers, string tag)
@@ -686,7 +625,7 @@ namespace Genesis.RoomScan.GSplat
         {
             foreach (var kf in _keyframes)
             {
-                if (kf.Texture != null) Destroy(kf.Texture);
+                if (kf.Texture != null) { kf.Texture.Release(); Destroy(kf.Texture); }
             }
             _keyframes.Clear();
 
