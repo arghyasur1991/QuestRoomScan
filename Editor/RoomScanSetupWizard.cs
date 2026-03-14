@@ -1,6 +1,7 @@
 using System.IO;
 using System.Linq;
 using System.Xml.Linq;
+using Genesis.RoomScan.GSplat;
 using Meta.XR;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -35,8 +36,11 @@ namespace Genesis.RoomScan.Editor
         KeyframeCollector _keyframeCollector;
         PointCloudExporter _pointCloudExporter;
         PlaneDetector _planeDetector;
+        GSplatManager _gsplatManager;
+        GSSectorRenderer _gsSectorRenderer;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
+        bool _gsplatComputeWired;
         bool _boundarylessManifest;
 
         // Style
@@ -47,6 +51,7 @@ namespace Genesis.RoomScan.Editor
         static readonly Color COL_SECT = new(0.18f, 0.18f, 0.22f);
 
         const string PKG = "Packages/com.genesis.roomscan/Runtime/Shaders/";
+        const string GSPLAT_PKG = "Packages/com.genesis.roomscan/Runtime/GSplat/Shaders/";
 
         [MenuItem("RoomScan/Setup Scene")]
         static void Open()
@@ -103,6 +108,8 @@ namespace Genesis.RoomScan.Editor
             _keyframeCollector = FindAny<KeyframeCollector>();
             _pointCloudExporter = FindAny<PointCloudExporter>();
             _planeDetector = FindAny<PlaneDetector>();
+            _gsplatManager = FindAny<GSplatManager>();
+            _gsSectorRenderer = FindAny<GSSectorRenderer>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -114,6 +121,10 @@ namespace Genesis.RoomScan.Editor
                 "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
+            _gsplatComputeWired = _gsplatManager != null && AreFieldsAssigned(_gsplatManager,
+                "projectSHCompute", "tileSortCompute", "rasterizeCompute",
+                "lossCompute", "rasterBwdCompute", "projBwdCompute", "adamCompute",
+                "initGaussiansCompute");
 
             _boundarylessManifest = ManifestHasBoundaryless();
         }
@@ -334,6 +345,8 @@ namespace Genesis.RoomScan.Editor
             StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
             StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
             StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
+            StatusRow("GSplatManager (on-device training)", _gsplatManager != null);
+            StatusRow("GSSectorRenderer (splat rendering)", _gsSectorRenderer != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _meshExtractor == null ||
@@ -341,7 +354,8 @@ namespace Genesis.RoomScan.Editor
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null || _keyframeStore == null ||
                               _persistence == null || _keyframeCollector == null ||
-                              _pointCloudExporter == null || _planeDetector == null;
+                              _pointCloudExporter == null || _planeDetector == null ||
+                              _gsplatManager == null || _gsSectorRenderer == null;
 
             if (anyMissing)
             {
@@ -418,6 +432,16 @@ namespace Genesis.RoomScan.Editor
                 var planeDetector = Undo.AddComponent<PlaneDetector>(root);
                 planeDetector.enabled = false;
             }
+            if (root.GetComponent<GSSectorRenderer>() == null)
+            {
+                var renderer = Undo.AddComponent<GSSectorRenderer>(root);
+                renderer.enabled = false;
+            }
+            if (root.GetComponent<GSplatManager>() == null)
+            {
+                var gsplat = Undo.AddComponent<GSplatManager>(root);
+                gsplat.enabled = false;
+            }
 
             MarkDirty();
             Refresh();
@@ -434,10 +458,11 @@ namespace Genesis.RoomScan.Editor
             StatusRow("MeshExtractor scan material", _meshMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
+            StatusRow("GSplatManager compute shaders (8)", _gsplatComputeWired);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
                             !_meshMatWired || !_triplanarWired ||
-                            !_computeShaderWired;
+                            !_computeShaderWired || !_gsplatComputeWired;
             if (needsFix)
             {
                 GUILayout.Space(2);
@@ -506,6 +531,54 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_meshExtractor);
             }
 
+            // GSplatManager — 8 compute shaders + mesh material + sector renderer
+            if (_gsplatManager != null)
+            {
+                var so = new SerializedObject(_gsplatManager);
+                AssignCompute(so, "projectSHCompute", GSPLAT_PKG + "ProjectSH.compute");
+                AssignCompute(so, "tileSortCompute", GSPLAT_PKG + "TileSort.compute");
+                AssignCompute(so, "rasterizeCompute", GSPLAT_PKG + "Rasterize.compute");
+                AssignCompute(so, "lossCompute", GSPLAT_PKG + "LossL1SSIM.compute");
+                AssignCompute(so, "rasterBwdCompute", GSPLAT_PKG + "RasterizeBackward.compute");
+                AssignCompute(so, "projBwdCompute", GSPLAT_PKG + "ProjectSHBackward.compute");
+                AssignCompute(so, "adamCompute", GSPLAT_PKG + "AdamOptimizer.compute");
+                AssignCompute(so, "initGaussiansCompute", GSPLAT_PKG + "InitGaussians.compute");
+
+                // Wire mesh material from MeshExtractor
+                var matProp = so.FindProperty("meshMaterial");
+                if (matProp != null && matProp.objectReferenceValue == null && _meshExtractor != null)
+                {
+                    var meSO = new SerializedObject(_meshExtractor);
+                    var scanMat = meSO.FindProperty("scanMeshMaterial");
+                    if (scanMat?.objectReferenceValue != null)
+                        matProp.objectReferenceValue = scanMat.objectReferenceValue;
+                }
+
+                // Wire sector renderer reference
+                Refresh();
+                var rendProp = so.FindProperty("splatRenderer");
+                if (rendProp != null && rendProp.objectReferenceValue == null && _gsSectorRenderer != null)
+                    rendProp.objectReferenceValue = _gsSectorRenderer;
+
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_gsplatManager);
+            }
+
+            // GSSectorRenderer — splat material
+            if (_gsSectorRenderer != null)
+            {
+                var so = new SerializedObject(_gsSectorRenderer);
+                var matProp = so.FindProperty("splatMaterial");
+                if (matProp != null && matProp.objectReferenceValue == null)
+                {
+                    Material mat = GetOrCreateSplatMaterial();
+                    if (mat != null)
+                        matProp.objectReferenceValue = mat;
+                }
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_gsSectorRenderer);
+            }
+
             MarkDirty();
             Refresh();
         }
@@ -550,6 +623,29 @@ namespace Genesis.RoomScan.Editor
                 AssetDatabase.CreateFolder("Assets", "RoomScan");
 
             var mat = new Material(shader) { name = "ScanMesh", enableInstancing = true };
+            AssetDatabase.CreateAsset(mat, matPath);
+            AssetDatabase.SaveAssets();
+            return mat;
+        }
+
+        static Material GetOrCreateSplatMaterial()
+        {
+            const string pkgMatPath = "Packages/com.genesis.roomscan/Runtime/GSplat/Materials/SplatRender.mat";
+            var pkgMat = AssetDatabase.LoadAssetAtPath<Material>(pkgMatPath);
+            if (pkgMat != null) return pkgMat;
+
+            Shader shader = Shader.Find("Genesis/SplatRender");
+            if (shader == null)
+            {
+                Debug.LogWarning("[RoomScan Setup] Shader 'Genesis/SplatRender' not found");
+                return null;
+            }
+
+            if (!AssetDatabase.IsValidFolder("Assets/RoomScan"))
+                AssetDatabase.CreateFolder("Assets", "RoomScan");
+
+            var mat = new Material(shader) { name = "SplatRender" };
+            const string matPath = "Assets/RoomScan/SplatRender.mat";
             AssetDatabase.CreateAsset(mat, matPath);
             AssetDatabase.SaveAssets();
             return mat;

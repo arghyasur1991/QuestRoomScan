@@ -9,6 +9,9 @@ namespace Genesis.RoomScan.GSplat
     /// Top-level manager for progressive Gaussian splat training.
     /// Integrates with the scan pipeline: seeds from mesh, trains per-sector,
     /// masks mesh where splats are ready, renders splats.
+    ///
+    /// Self-wires at runtime by subscribing to RoomScanner events — no
+    /// cross-assembly reference needed from RoomScanner to this assembly.
     /// </summary>
     public class GSplatManager : MonoBehaviour
     {
@@ -34,11 +37,17 @@ namespace Genesis.RoomScan.GSplat
         [SerializeField] int trainingResHeight = 480;
         [SerializeField, Range(0f, 1f)] float ssimWeight = 0.2f;
 
+        [Header("Startup")]
+        [SerializeField, Tooltip("Min integration count before GSplat training begins")]
+        int minIntegrationsBeforeTraining = 60;
+
         SectorScheduler _scheduler;
         GSplatTrainer _trainer;
         bool _initialized;
+        RoomScanner _scanner;
+        Camera _mainCam;
+        Plane[] _frustumPlanes = new Plane[6];
 
-        // Keyframe ring buffer (textures + poses from scan pipeline)
         readonly List<KeyframeData> _keyframes = new();
         const int MaxKeyframes = 16;
 
@@ -57,9 +66,32 @@ namespace Genesis.RoomScan.GSplat
         public SectorScheduler Scheduler => _scheduler;
         public bool IsTraining => _initialized && _scheduler?.CurrentSectorId >= 0;
 
-        public void Initialize(int3 voxelCount, float voxelSize)
+        void Start()
         {
-            _scheduler = new SectorScheduler(voxelCount, voxelSize,
+            _mainCam = Camera.main;
+            _scanner = RoomScanner.Instance;
+            if (_scanner == null)
+            {
+                _scanner = FindFirstObjectByType<RoomScanner>();
+                if (_scanner == null)
+                {
+                    Debug.LogWarning("[GSplatManager] RoomScanner not found — disabling");
+                    enabled = false;
+                    return;
+                }
+            }
+
+            _scanner.ColorFrameCaptured += OnColorFrame;
+            _scanner.MeshExtracted += OnMeshExtracted;
+        }
+
+        void TryInitialize()
+        {
+            if (_initialized) return;
+            var vi = VolumeIntegrator.Instance;
+            if (vi == null || vi.IntegrationCount < minIntegrationsBeforeTraining) return;
+
+            _scheduler = new SectorScheduler(vi.VoxelCount, vi.VoxelSize,
                                               maxGaussiansPerSector, targetItersPerSector);
 
             var config = GSplatTrainer.Config.Default;
@@ -75,36 +107,102 @@ namespace Genesis.RoomScan.GSplat
                 splatRenderer.Initialize(_scheduler);
 
             _initialized = true;
-            Debug.Log("[GSplatManager] Initialized with sector grid 4x4x4");
+            Debug.Log($"[GSplatManager] Initialized — voxels={vi.VoxelCount}, voxelSize={vi.VoxelSize}");
         }
 
-        /// <summary>
-        /// Called by scan pipeline when a keyframe is captured.
-        /// </summary>
+        void OnColorFrame(CameraFrameArgs args)
+        {
+            if (!_initialized) return;
+            if (args.Frame == null) return;
+
+            Texture2D snap = ToTexture2D(args.Frame);
+            if (snap == null) return;
+
+            Matrix4x4 view = Matrix4x4.TRS(args.Position, args.Rotation, Vector3.one).inverse;
+
+            float fx = args.FocalLength.x;
+            float fy = args.FocalLength.y;
+            float cx = args.PrincipalPoint.x;
+            float cy = args.PrincipalPoint.y;
+            float w = args.CurrentResolution.x;
+            float h = args.CurrentResolution.y;
+
+            float n = 0.1f, f = 100f;
+            var proj = new Matrix4x4();
+            proj[0, 0] = 2f * fx / w;
+            proj[1, 1] = 2f * fy / h;
+            proj[0, 2] = 1f - 2f * cx / w;
+            proj[1, 2] = 2f * cy / h - 1f;
+            proj[2, 2] = -(f + n) / (f - n);
+            proj[2, 3] = -2f * f * n / (f - n);
+            proj[3, 2] = -1f;
+
+            AddKeyframe(new KeyframeData
+            {
+                Texture = snap,
+                ViewMatrix = view,
+                ProjMatrix = proj,
+                Fx = fx, Fy = fy,
+                Cx = cx, Cy = cy,
+                CamPos = args.Position
+            });
+        }
+
+        static Texture2D ToTexture2D(Texture src)
+        {
+            if (src is Texture2D t2d) return t2d;
+            if (src is RenderTexture rt)
+            {
+                var prev = RenderTexture.active;
+                RenderTexture.active = rt;
+                var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
+                tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0, false);
+                tex.Apply(false, true);
+                RenderTexture.active = prev;
+                return tex;
+            }
+            return null;
+        }
+
+        void OnMeshExtracted()
+        {
+            if (!_initialized) return;
+            var me = MeshExtractor.Instance;
+            if (me?.GpuSurfaceNets == null) return;
+            var vi = VolumeIntegrator.Instance;
+            if (vi == null) return;
+            NotifyMeshUpdated(me.GpuSurfaceNets, vi.VoxelSize);
+        }
+
+        void Update()
+        {
+            TryInitialize();
+            if (!_initialized || _mainCam == null) return;
+
+            var camTr = _mainCam.transform;
+            GeometryUtility.CalculateFrustumPlanes(_mainCam, _frustumPlanes);
+            TrainFrame(camTr.position, camTr.forward, _frustumPlanes);
+        }
+
         public void AddKeyframe(KeyframeData kf)
         {
             if (_keyframes.Count >= MaxKeyframes)
+            {
+                if (_keyframes[0].Texture != null)
+                    Destroy(_keyframes[0].Texture);
                 _keyframes.RemoveAt(0);
+            }
             _keyframes.Add(kf);
         }
 
-        /// <summary>
-        /// Called by scan pipeline after mesh extraction to mark which sectors have geometry.
-        /// </summary>
         public void NotifyMeshUpdated(GPUSurfaceNets surfaceNets, float voxelSize)
         {
             if (!_initialized || surfaceNets == null) return;
-
-            // For now, mark all sectors as MeshOnly if volume has any data.
-            // A proper implementation would check which sectors have vertices.
             for (int i = 0; i < SectorScheduler.TotalSectors; i++)
                 _scheduler.MarkMeshReady(i);
         }
 
-        /// <summary>
-        /// Run N training iterations this frame. Called from the scan pipeline Update loop.
-        /// </summary>
-        public void TrainFrame(Vector3 headPos, Vector3 gazeDir, Plane[] frustumPlanes)
+        void TrainFrame(Vector3 headPos, Vector3 gazeDir, Plane[] frustumPlanes)
         {
             if (!_initialized || _keyframes.Count < 2) return;
 
@@ -114,18 +212,15 @@ namespace Genesis.RoomScan.GSplat
             ref var sector = ref _scheduler.Sectors[sectorId];
             var buffers = _scheduler.GetOrCreateBuffers(sectorId);
 
-            // Seed Gaussians from mesh if this is the first time
             if (buffers.CurrentCount == 0 && sector.State == SectorState.MeshOnly)
             {
                 SeedFromMesh(sectorId, buffers);
                 if (buffers.CurrentCount == 0) return;
             }
 
-            // Pick keyframes visible to this sector
             var kf = PickBestKeyframe(sectorId);
             if (!kf.HasValue) return;
 
-            // Run training iterations
             for (int i = 0; i < itersPerFrame; i++)
             {
                 _trainer.TrainStep(buffers, kf.Value.Texture,
@@ -135,19 +230,13 @@ namespace Genesis.RoomScan.GSplat
             }
 
             _scheduler.AdvanceTraining(sectorId, itersPerFrame, 0f, buffers.CurrentCount);
-
-            // Update mesh sector mask
             UpdateMeshMask();
         }
 
         void SeedFromMesh(int sectorId, GSplatBuffers buffers)
         {
-            var vi = VolumeIntegrator.Instance;
-            if (vi == null) return;
-
-            // TODO: Read vertex positions from GPUSurfaceNets and dispatch InitGaussians compute
-            // For now, this is a placeholder that would use the InitGaussians.compute shader
-            // to extract mesh vertices within the sector AABB and create initial Gaussians.
+            // TODO: dispatch InitGaussians compute shader to extract mesh vertices
+            // within the sector AABB and create initial Gaussians.
             Debug.Log($"[GSplatManager] Seeding sector {sectorId} from mesh vertices");
         }
 
@@ -162,8 +251,7 @@ namespace Genesis.RoomScan.GSplat
             for (int i = 0; i < _keyframes.Count; i++)
             {
                 var kf = _keyframes[i];
-                Vector3 toSector = bounds.center - kf.CamPos;
-                float dist = toSector.magnitude;
+                float dist = Vector3.Distance(bounds.center, kf.CamPos);
                 float score = 1f / (1f + dist);
                 if (score > bestScore)
                 {
@@ -198,6 +286,18 @@ namespace Genesis.RoomScan.GSplat
 
         void OnDestroy()
         {
+            if (_scanner != null)
+            {
+                _scanner.ColorFrameCaptured -= OnColorFrame;
+                _scanner.MeshExtracted -= OnMeshExtracted;
+            }
+
+            foreach (var kf in _keyframes)
+            {
+                if (kf.Texture != null) Destroy(kf.Texture);
+            }
+            _keyframes.Clear();
+
             _trainer?.Dispose();
             _scheduler?.Dispose();
         }

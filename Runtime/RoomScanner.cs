@@ -3,6 +3,17 @@ using UnityEngine;
 
 namespace Genesis.RoomScan
 {
+    public struct CameraFrameArgs
+    {
+        public Texture Frame;
+        public Vector3 Position;
+        public Quaternion Rotation;
+        public Vector2 FocalLength;
+        public Vector2 PrincipalPoint;
+        public Vector2 SensorResolution;
+        public Vector2 CurrentResolution;
+    }
+
     public enum ScanMode
     {
         Passive,
@@ -36,6 +47,7 @@ namespace Genesis.RoomScan
         [SerializeField] private KeyframeCollector keyframeCollector;
         [SerializeField] private PointCloudExporter pointCloudExporter;
         [SerializeField] private PlaneDetector planeDetector;
+        [SerializeField] private RoomAnchorManager roomAnchorManager;
 
         [Header("Camera")]
         [SerializeField] private PassthroughCameraProvider cameraProvider;
@@ -77,6 +89,8 @@ namespace Genesis.RoomScan
         public event Action<ScanMode> ModeChanged;
         public event Action ScanStarted;
         public event Action ScanStopped;
+        public event Action<CameraFrameArgs> ColorFrameCaptured;
+        public event Action MeshExtracted;
 
         private float _lastIntegrationTime;
         private float _lastMeshTime;
@@ -97,10 +111,29 @@ namespace Genesis.RoomScan
             SetSafeShaderDefaults();
         }
 
-        private async void Start()
+        private void Start()
         {
             ValidateComponents();
             SetupHeadExclusion();
+
+            if (roomAnchorManager != null)
+            {
+                if (roomAnchorManager.IsRoomLoaded)
+                    OnRoomReady();
+                else
+                    roomAnchorManager.RoomReady += OnRoomReady;
+                Debug.Log("[RoomScan] Waiting for MRUK room before scanning...");
+            }
+            else
+            {
+                OnRoomReady();
+            }
+        }
+
+        private async void OnRoomReady()
+        {
+            if (roomAnchorManager != null)
+                roomAnchorManager.RoomReady -= OnRoomReady;
 
             if (persistence != null && persistence.HasSavedScan())
             {
@@ -112,6 +145,7 @@ namespace Genesis.RoomScan
                 StartScanning();
 
             _started = true;
+            Debug.Log("[RoomScan] Room ready, scanning started");
         }
 
         private void OnEnable()
@@ -168,6 +202,10 @@ namespace Genesis.RoomScan
             if (t - _lastIntegrationTime >= IntegrationInterval)
             {
                 _lastIntegrationTime = t;
+
+                if (roomAnchorManager != null)
+                    roomAnchorManager.RefreshVolumeTransform();
+
                 ProvideColorFrame();
                 volumeIntegrator.Integrate();
                 _integrateCount++;
@@ -178,6 +216,7 @@ namespace Genesis.RoomScan
                 {
                     _lastMeshTime = t;
                     meshExtractor.Extract();
+                    MeshExtracted?.Invoke();
 
                     if (planeDetector != null)
                         planeDetector.OnMeshCycleComplete();
@@ -367,6 +406,17 @@ namespace Genesis.RoomScan
                             volumeIntegrator.CameraExposure,
                             volumeIntegrator.ExclusionZones);
                     }
+
+                    ColorFrameCaptured?.Invoke(new CameraFrameArgs
+                    {
+                        Frame = frame,
+                        Position = pose.position,
+                        Rotation = pose.rotation,
+                        FocalLength = focal,
+                        PrincipalPoint = principal,
+                        SensorResolution = sensor,
+                        CurrentResolution = current
+                    });
 
                     _colorFrameLog++;
                     if (_colorFrameLog <= 3 || _colorFrameLog % 50 == 0)

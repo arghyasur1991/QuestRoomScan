@@ -3,6 +3,7 @@
   "rootNamespace": "Genesis.RoomScan.Editor",
   "references": [
     "Genesis.RoomScan",
+    "Genesis.RoomScan.GSplat",
     "Unity.XR.ARFoundation",
     "Unity.XR.CoreUtils",
     "meta.xr.mrutilitykit"
