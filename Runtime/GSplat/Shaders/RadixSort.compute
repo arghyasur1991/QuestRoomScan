@@ -1,0 +1,20 @@
+// 8-bit LSD Device Radix Sort — GPU key-payload sort.
+// Based on GPUSorting by Thomas Smith (MIT), adapted from UGS.
+// Requires wave intrinsics (Vulkan subgroup ops on Quest).
+
+#pragma multi_compile __ KEY_UINT KEY_INT KEY_FLOAT
+#pragma multi_compile __ PAYLOAD_UINT PAYLOAD_INT PAYLOAD_FLOAT
+#pragma multi_compile __ SHOULD_ASCEND
+#pragma multi_compile __ SORT_PAIRS
+#pragma multi_compile __ VULKAN
+
+#pragma kernel InitDeviceRadixSort
+#pragma kernel Upsweep
+#pragma kernel Scan
+#pragma kernel Downsweep
+
+#pragma require wavebasic
+#pragma require waveballot
+#pragma use_dxc
+
+#include "DeviceRadixSort.hlsl"

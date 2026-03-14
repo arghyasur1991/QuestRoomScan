@@ -1,7 +1,9 @@
-// GPU bitonic sort for back-to-front Gaussian splat rendering.
-// Two kernels: CSInitSortKeys (build sortable key-index pairs from view data)
-// and CSBitonicStep (one comparison step per dispatch).
+// Sort key initialization kernels for Gaussian splat rendering.
+// CSInitSortKeys: writes separate uint key/payload for radix sort.
+// CSInitSortKeysBitonic: writes uint2 for bitonic sort fallback.
+// CSBitonicStep: one comparison step per dispatch (bitonic fallback).
 #pragma kernel CSInitSortKeys
+#pragma kernel CSInitSortKeysBitonic
 #pragma kernel CSBitonicStep
 
 struct SplatViewData
@@ -14,12 +16,11 @@ struct SplatViewData
 };
 
 StructuredBuffer<SplatViewData> _ViewData;
-RWStructuredBuffer<uint2> _SortBuffer; // .x = sortKey, .y = originalIndex
+RWStructuredBuffer<uint> _SortKeys;
+RWStructuredBuffer<uint> _SortPayload;
 
 uint _Count;
 uint _PaddedCount;
-uint _StepSize;     // j: XOR partner stride
-uint _GroupSize;    // k: determines ascending/descending direction
 
 uint FloatToSortableUint(float f)
 {
@@ -37,7 +38,31 @@ void CSInitSortKeys(uint3 id : SV_DispatchThreadID)
     if (i < _Count)
     {
         float depth = _ViewData[i].viewDepth;
-        // Back-to-front: negate so larger depth → smaller key → sorted first
+        // Negate so ascending sort yields back-to-front (farther = smaller key = first)
+        _SortKeys[i] = (depth > 0) ? FloatToSortableUint(-depth) : 0xFFFFFFFFu;
+        _SortPayload[i] = i;
+    }
+    else
+    {
+        _SortKeys[i] = 0xFFFFFFFFu;
+        _SortPayload[i] = i;
+    }
+}
+
+// Bitonic sort fallback — kept for GPUs without wave intrinsics
+RWStructuredBuffer<uint2> _SortBuffer; // .x = sortKey, .y = originalIndex
+uint _StepSize;
+uint _GroupSize;
+
+[numthreads(256, 1, 1)]
+void CSInitSortKeysBitonic(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _PaddedCount) return;
+
+    if (i < _Count)
+    {
+        float depth = _ViewData[i].viewDepth;
         uint key = (depth > 0)
             ? (0xFFFFFFFFu - FloatToSortableUint(depth))
             : 0xFFFFFFFFu;

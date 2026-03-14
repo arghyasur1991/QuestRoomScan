@@ -7,13 +7,14 @@ namespace Genesis.RoomScan.GSplat
     /// <summary>
     /// Renders Gaussian splats via compute prepass → GPU sort → lightweight render.
     /// Zero-copy from training buffers. All sectors concatenated into one draw call.
-    /// Bitonic sort provides back-to-front ordering for correct alpha compositing.
+    /// Uses radix sort (13 dispatches) with bitonic fallback for Quest compatibility.
     /// </summary>
     public class GSSectorRenderer : MonoBehaviour
     {
         [SerializeField] Material splatMaterial;
         [SerializeField] ComputeShader viewPrepassCompute;
         [SerializeField] ComputeShader sortCompute;
+        [SerializeField] ComputeShader radixSortCompute;
         [SerializeField, Range(0.1f, 4f)] float splatSizeMultiplier = 1f;
         [SerializeField] int shDegree = 2;
 
@@ -25,11 +26,22 @@ namespace Genesis.RoomScan.GSplat
 
         GraphicsBuffer _viewDataBuffer;
         int _viewDataCapacity;
-        GraphicsBuffer _sortBuffer;
-        int _sortBufferCapacity;
+
+        // Radix sort buffers (separate key/payload)
+        GraphicsBuffer _sortKeysBuffer;
+        GraphicsBuffer _sortPayloadBuffer;
+        int _sortCapacity;
+        GpuRadixSort _radixSort;
+        GpuRadixSort.Resources _radixResources;
+        bool _useRadixSort;
+
+        // Bitonic sort fallback
+        GraphicsBuffer _bitonicSortBuffer;
+        int _bitonicCapacity;
 
         int _prepassKernel = -1;
-        int _initSortKernel = -1;
+        int _initSortKernel = -1;       // radix: writes to _SortKeys/_SortPayload
+        int _initSortBitonicKernel = -1; // bitonic: writes to _SortBuffer (uint2)
         int _bitonicStepKernel = -1;
 
         static readonly int ID_NumPoints     = Shader.PropertyToID("_NumPoints");
@@ -49,11 +61,14 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_ViewData      = Shader.PropertyToID("_ViewData");
         static readonly int ID_SplatViewData = Shader.PropertyToID("_SplatViewData");
         static readonly int ID_SplatCount    = Shader.PropertyToID("_SplatCount");
-        static readonly int ID_SortBuffer    = Shader.PropertyToID("_SortBuffer");
+        static readonly int ID_OrderBuffer   = Shader.PropertyToID("_OrderBuffer");
+        static readonly int ID_SortKeys      = Shader.PropertyToID("_SortKeys");
+        static readonly int ID_SortPayload   = Shader.PropertyToID("_SortPayload");
         static readonly int ID_Count         = Shader.PropertyToID("_Count");
         static readonly int ID_PaddedCount   = Shader.PropertyToID("_PaddedCount");
         static readonly int ID_StepSize      = Shader.PropertyToID("_StepSize");
         static readonly int ID_GroupSize     = Shader.PropertyToID("_GroupSize");
+        static readonly int ID_SortBuffer    = Shader.PropertyToID("_SortBuffer");
 
         public Material SplatMaterial
         {
@@ -74,18 +89,37 @@ namespace Genesis.RoomScan.GSplat
             if (sortCompute != null)
             {
                 _initSortKernel = sortCompute.FindKernel("CSInitSortKeys");
+                _initSortBitonicKernel = sortCompute.FindKernel("CSInitSortKeysBitonic");
                 _bitonicStepKernel = sortCompute.FindKernel("CSBitonicStep");
             }
-            else
-                Debug.LogWarning("[GSSectorRenderer] No sortCompute shader assigned!");
+
+            // Try radix sort first
+            if (radixSortCompute != null)
+            {
+                _radixSort = new GpuRadixSort(radixSortCompute);
+                _useRadixSort = _radixSort.Valid;
+            }
+
+            if (!_useRadixSort)
+                Debug.LogWarning("[GSSectorRenderer] Radix sort unavailable, using bitonic fallback");
+
+            if (splatMaterial != null)
+            {
+                if (_useRadixSort)
+                    splatMaterial.EnableKeyword("_SORT_RADIX");
+                else
+                    splatMaterial.DisableKeyword("_SORT_RADIX");
+            }
 
             _ready = true;
             Debug.Log($"[GSSectorRenderer] Initialized, material={splatMaterial?.name ?? "NULL"}, " +
-                      $"prepass={viewPrepassCompute?.name ?? "NULL"}, sort={sortCompute?.name ?? "NULL"}");
+                      $"prepass={viewPrepassCompute?.name ?? "NULL"}, " +
+                      $"sort={(_useRadixSort ? "radix(13 dispatches)" : "bitonic(O(log²N))")}");
         }
 
         void EnsureBuffers(int totalCount)
         {
+            // View data buffer (shared)
             if (_viewDataBuffer == null || _viewDataCapacity < totalCount)
             {
                 _viewDataBuffer?.Release();
@@ -94,13 +128,32 @@ namespace Genesis.RoomScan.GSplat
                     GraphicsBuffer.Target.Structured, _viewDataCapacity, 40);
             }
 
-            int padded = Mathf.NextPowerOfTwo(totalCount);
-            if (_sortBuffer == null || _sortBufferCapacity < padded)
+            if (_useRadixSort)
             {
-                _sortBuffer?.Release();
-                _sortBufferCapacity = padded;
-                _sortBuffer = new GraphicsBuffer(
-                    GraphicsBuffer.Target.Structured, _sortBufferCapacity, 8);
+                if (_sortKeysBuffer == null || _sortCapacity < totalCount)
+                {
+                    _sortKeysBuffer?.Release();
+                    _sortPayloadBuffer?.Release();
+                    _radixResources.Dispose();
+
+                    _sortCapacity = Mathf.Max(totalCount, 1024);
+                    _sortKeysBuffer = new GraphicsBuffer(
+                        GraphicsBuffer.Target.Structured, _sortCapacity, 4) { name = "SplatSortKeys" };
+                    _sortPayloadBuffer = new GraphicsBuffer(
+                        GraphicsBuffer.Target.Structured, _sortCapacity, 4) { name = "SplatSortPayload" };
+                    _radixResources = GpuRadixSort.Resources.Create(_sortCapacity);
+                }
+            }
+            else
+            {
+                int padded = Mathf.NextPowerOfTwo(totalCount);
+                if (_bitonicSortBuffer == null || _bitonicCapacity < padded)
+                {
+                    _bitonicSortBuffer?.Release();
+                    _bitonicCapacity = padded;
+                    _bitonicSortBuffer = new GraphicsBuffer(
+                        GraphicsBuffer.Target.Structured, _bitonicCapacity, 8);
+                }
             }
         }
 
@@ -124,7 +177,8 @@ namespace Genesis.RoomScan.GSplat
             {
                 _loggedFirstDraw = true;
                 Debug.Log($"[GSSectorRenderer] First draw: {_readySectors.Count} sector(s), " +
-                          $"{totalCount} total gaussians, splatSize={splatSizeMultiplier}");
+                          $"{totalCount} total gaussians, splatSize={splatSizeMultiplier}, " +
+                          $"sort={(_useRadixSort ? "radix" : "bitonic")}");
             }
 
             EnsureBuffers(totalCount);
@@ -137,7 +191,7 @@ namespace Genesis.RoomScan.GSplat
             float fx = Mathf.Abs(cam.projectionMatrix[0, 0]) * screenW / 2f;
             float fy = Mathf.Abs(cam.projectionMatrix[1, 1]) * screenH / 2f;
 
-            // --- Phase 1: Compute prepass (per-sector dispatch into shared buffer) ---
+            // --- Phase 1: Compute prepass ---
             viewPrepassCompute.SetFloat(ID_SplatSize, splatSizeMultiplier);
             viewPrepassCompute.SetInt(ID_SHDegree, shDegree);
             viewPrepassCompute.SetMatrix(ID_ViewMatrix, viewPosZ);
@@ -174,13 +228,18 @@ namespace Genesis.RoomScan.GSplat
                 writeOffset += n;
             }
 
-            // --- Phase 2: GPU bitonic sort (back-to-front) ---
-            if (_initSortKernel >= 0 && _bitonicStepKernel >= 0)
-                DispatchSort(totalCount);
+            // --- Phase 2: Sort ---
+            if (_useRadixSort)
+                DispatchRadixSort(totalCount);
+            else if (_initSortBitonicKernel >= 0 && _bitonicStepKernel >= 0)
+                DispatchBitonicSort(totalCount);
 
             // --- Phase 3: Render ---
             _props.SetBuffer(ID_SplatViewData, _viewDataBuffer);
-            _props.SetBuffer(ID_SortBuffer, _sortBuffer);
+            if (_useRadixSort)
+                _props.SetBuffer(ID_OrderBuffer, _sortPayloadBuffer);
+            else
+                _props.SetBuffer(ID_SortBuffer, _bitonicSortBuffer);
             _props.SetInt(ID_SplatCount, totalCount);
 
             var rp = new RenderParams(splatMaterial)
@@ -195,20 +254,34 @@ namespace Genesis.RoomScan.GSplat
             Graphics.RenderPrimitives(rp, MeshTopology.Quads, totalCount * 4);
         }
 
-        void DispatchSort(int totalCount)
+        void DispatchRadixSort(int totalCount)
+        {
+            int threadGroups = (totalCount + 255) / 256;
+
+            // Init sort keys from view depths
+            sortCompute.SetInt(ID_Count, totalCount);
+            sortCompute.SetInt(ID_PaddedCount, totalCount);
+            sortCompute.SetBuffer(_initSortKernel, ID_ViewData, _viewDataBuffer);
+            sortCompute.SetBuffer(_initSortKernel, ID_SortKeys, _sortKeysBuffer);
+            sortCompute.SetBuffer(_initSortKernel, ID_SortPayload, _sortPayloadBuffer);
+            sortCompute.Dispatch(_initSortKernel, threadGroups, 1, 1);
+
+            // Radix sort: 13 dispatches total
+            _radixSort.Dispatch(totalCount, _sortKeysBuffer, _sortPayloadBuffer, _radixResources);
+        }
+
+        void DispatchBitonicSort(int totalCount)
         {
             int padded = Mathf.NextPowerOfTwo(totalCount);
             int threadGroups = (padded + 255) / 256;
 
-            // Init sort keys from view data depths
             sortCompute.SetInt(ID_Count, totalCount);
             sortCompute.SetInt(ID_PaddedCount, padded);
-            sortCompute.SetBuffer(_initSortKernel, ID_ViewData, _viewDataBuffer);
-            sortCompute.SetBuffer(_initSortKernel, ID_SortBuffer, _sortBuffer);
-            sortCompute.Dispatch(_initSortKernel, threadGroups, 1, 1);
+            sortCompute.SetBuffer(_initSortBitonicKernel, ID_ViewData, _viewDataBuffer);
+            sortCompute.SetBuffer(_initSortBitonicKernel, ID_SortBuffer, _bitonicSortBuffer);
+            sortCompute.Dispatch(_initSortBitonicKernel, threadGroups, 1, 1);
 
-            // Bitonic sort: O(log²N) passes
-            sortCompute.SetBuffer(_bitonicStepKernel, ID_SortBuffer, _sortBuffer);
+            sortCompute.SetBuffer(_bitonicStepKernel, ID_SortBuffer, _bitonicSortBuffer);
             for (int k = 2; k <= padded; k <<= 1)
             {
                 for (int j = k >> 1; j >= 1; j >>= 1)
@@ -223,12 +296,12 @@ namespace Genesis.RoomScan.GSplat
         void OnDisable()
         {
             _ready = false;
-            _viewDataBuffer?.Release();
-            _viewDataBuffer = null;
-            _viewDataCapacity = 0;
-            _sortBuffer?.Release();
-            _sortBuffer = null;
-            _sortBufferCapacity = 0;
+            _viewDataBuffer?.Release(); _viewDataBuffer = null; _viewDataCapacity = 0;
+            _sortKeysBuffer?.Release(); _sortKeysBuffer = null;
+            _sortPayloadBuffer?.Release(); _sortPayloadBuffer = null;
+            _radixResources.Dispose();
+            _sortCapacity = 0;
+            _bitonicSortBuffer?.Release(); _bitonicSortBuffer = null; _bitonicCapacity = 0;
         }
     }
 }

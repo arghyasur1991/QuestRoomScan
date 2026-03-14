@@ -16,6 +16,7 @@ Shader "Genesis/SplatRender"
             HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
+            #pragma multi_compile _ _SORT_RADIX
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
@@ -29,8 +30,13 @@ Shader "Genesis/SplatRender"
             };
 
             StructuredBuffer<SplatViewData> _SplatViewData;
-            StructuredBuffer<uint2> _SortBuffer;  // .x = sortKey, .y = original index
             uint _SplatCount;
+
+#ifdef _SORT_RADIX
+            StructuredBuffer<uint> _OrderBuffer;
+#else
+            StructuredBuffer<uint2> _SortBuffer;  // .y = original index
+#endif
 
             struct Varyings
             {
@@ -54,7 +60,11 @@ Shader "Genesis/SplatRender"
                     return o;
                 }
 
+#ifdef _SORT_RADIX
+                uint dataIdx = _OrderBuffer[splatIdx];
+#else
                 uint dataIdx = _SortBuffer[splatIdx].y;
+#endif
                 SplatViewData view = _SplatViewData[dataIdx];
 
                 if (view.viewDepth <= 0)
