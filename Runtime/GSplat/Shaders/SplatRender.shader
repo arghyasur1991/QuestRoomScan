@@ -109,7 +109,10 @@ Shader "Genesis/SplatRender"
                 OUT.opacity = (half)Sigmoid(_Opacities[splatIdx]);
 
                 // --- View-space transform ---
+                // Unity's UNITY_MATRIX_V negates Z (OpenGL convention: -Z forward).
+                // Negate Z to match training convention (positive Z = forward/depth).
                 float3 pView = mul(UNITY_MATRIX_V, float4(pos, 1)).xyz;
+                pView.z = -pView.z;
                 if (pView.z <= 0.01)
                 {
                     OUT.positionHCS = asfloat(0x7fc00000);
@@ -140,9 +143,10 @@ Shader "Genesis/SplatRender"
                 pView.x = pView.z * clamp(pView.x * rz, -limX, limX);
                 pView.y = pView.z * clamp(pView.y * rz, -limY, limY);
 
+                // Negate mr2 to match the Z-flip above
                 float3 mr0 = float3(UNITY_MATRIX_V[0][0], UNITY_MATRIX_V[0][1], UNITY_MATRIX_V[0][2]);
                 float3 mr1 = float3(UNITY_MATRIX_V[1][0], UNITY_MATRIX_V[1][1], UNITY_MATRIX_V[1][2]);
-                float3 mr2 = float3(UNITY_MATRIX_V[2][0], UNITY_MATRIX_V[2][1], UNITY_MATRIX_V[2][2]);
+                float3 mr2 = -float3(UNITY_MATRIX_V[2][0], UNITY_MATRIX_V[2][1], UNITY_MATRIX_V[2][2]);
                 float3 t0 = fx * rz * mr0 + (-fx * pView.x * rz2) * mr2;
                 float3 t1 = fy * rz * mr1 + (-fy * pView.y * rz2) * mr2;
 
