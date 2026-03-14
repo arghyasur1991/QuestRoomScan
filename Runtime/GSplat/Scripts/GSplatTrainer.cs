@@ -54,7 +54,7 @@ namespace Genesis.RoomScan.GSplat
 
         readonly int _kLossFwd, _kLossBwd;
         readonly int _kRastBwd;
-        readonly int _kProjBwd;
+        readonly int _kProjBwd, _kSHBwd;
         readonly int _kAdam, _kGradStats, _kZero;
 
         GraphicsBuffer _lossBuffer;
@@ -103,7 +103,8 @@ namespace Genesis.RoomScan.GSplat
             _kRastBwd = rasterBwdCS.FindKernel("RasterizeBackward");
 
             _projBwdCS = projBwdCS;
-            _kProjBwd = projBwdCS.FindKernel("ProjectSHBackward");
+            _kProjBwd = projBwdCS.FindKernel("ProjectBackward");
+            _kSHBwd = projBwdCS.FindKernel("SHBackwardAdam");
 
             _adamCS = adamCS;
             _kAdam = adamCS.FindKernel("AdamStep");
@@ -193,6 +194,7 @@ namespace Genesis.RoomScan.GSplat
             _projBwdCS.SetVector("_CamPos", camPos);
             _projBwdCS.SetMatrix("_ViewMat", viewMat);
             _projBwdCS.SetMatrix("_ProjMat", projMat);
+            // Kernel 1: ProjectBackward (3 RW: VMean3D, VScale, VQuat)
             _projBwdCS.SetBuffer(_kProjBwd, "_Means3D", gaussians.Means);
             _projBwdCS.SetBuffer(_kProjBwd, "_Scales", gaussians.Scales);
             _projBwdCS.SetBuffer(_kProjBwd, "_Quats", gaussians.Quats);
@@ -201,16 +203,21 @@ namespace Genesis.RoomScan.GSplat
             _projBwdCS.SetBuffer(_kProjBwd, "_VXY", gaussians.GradMeans);
             _projBwdCS.SetBuffer(_kProjBwd, "_VDepth", gaussians.GradQuats);
             _projBwdCS.SetBuffer(_kProjBwd, "_VConic", gaussians.GradScales);
-            _projBwdCS.SetBuffer(_kProjBwd, "_VColors", gaussians.GradColors);
             _projBwdCS.SetBuffer(_kProjBwd, "_VMean3D", gaussians.GradMeans);
             _projBwdCS.SetBuffer(_kProjBwd, "_VScale", gaussians.GradScales);
             _projBwdCS.SetBuffer(_kProjBwd, "_VQuat", gaussians.GradQuats);
-            _projBwdCS.SetBuffer(_kProjBwd, "_FeaturesDC", gaussians.FeaturesDC);
-            _projBwdCS.SetBuffer(_kProjBwd, "_FeaturesRest", gaussians.FeaturesRest);
-            _projBwdCS.SetBuffer(_kProjBwd, "_DCExpAvg", gaussians.AdamDCM);
-            _projBwdCS.SetBuffer(_kProjBwd, "_DCExpAvgSq", gaussians.AdamDCV);
-            _projBwdCS.SetBuffer(_kProjBwd, "_RestExpAvg", gaussians.AdamRestM);
-            _projBwdCS.SetBuffer(_kProjBwd, "_RestExpAvgSq", gaussians.AdamRestV);
+            _projBwdCS.Dispatch(_kProjBwd, CeilDiv(N, 256), 1, 1);
+
+            // Kernel 2: SHBackwardAdam (6 RW: FeaturesDC/Rest + Adam state)
+            _projBwdCS.SetBuffer(_kSHBwd, "_Means3D", gaussians.Means);
+            _projBwdCS.SetBuffer(_kSHBwd, "_Radii", _forward.Radii);
+            _projBwdCS.SetBuffer(_kSHBwd, "_VColors", gaussians.GradColors);
+            _projBwdCS.SetBuffer(_kSHBwd, "_FeaturesDC", gaussians.FeaturesDC);
+            _projBwdCS.SetBuffer(_kSHBwd, "_FeaturesRest", gaussians.FeaturesRest);
+            _projBwdCS.SetBuffer(_kSHBwd, "_DCExpAvg", gaussians.AdamDCM);
+            _projBwdCS.SetBuffer(_kSHBwd, "_DCExpAvgSq", gaussians.AdamDCV);
+            _projBwdCS.SetBuffer(_kSHBwd, "_RestExpAvg", gaussians.AdamRestM);
+            _projBwdCS.SetBuffer(_kSHBwd, "_RestExpAvgSq", gaussians.AdamRestV);
             float dcStep = _config.LRDC / (1f - Mathf.Pow(_config.AdamBeta1, _step));
             float restStep = _config.LRRest / (1f - Mathf.Pow(_config.AdamBeta1, _step));
             _projBwdCS.SetFloat("_DCStepSize", dcStep);
@@ -220,7 +227,7 @@ namespace Genesis.RoomScan.GSplat
             _projBwdCS.SetFloat("_AdamBeta1", _config.AdamBeta1);
             _projBwdCS.SetFloat("_AdamBeta2", _config.AdamBeta2);
             _projBwdCS.SetFloat("_AdamEps", _config.AdamEps);
-            _projBwdCS.Dispatch(_kProjBwd, CeilDiv(N, 256), 1, 1);
+            _projBwdCS.Dispatch(_kSHBwd, CeilDiv(N, 256), 1, 1);
 
             // 7. Adam for means, scales, quats, opacity
             RunAdam(gaussians.Means, gaussians.GradMeans,

@@ -1,6 +1,8 @@
-// Fused projection backward + SH backward — ported from msplat project_and_sh_backward_kernel.
-// One thread per Gaussian. Computes gradients for means, scales, quats, and SH coefficients.
-#pragma kernel ProjectSHBackward
+// Split into two kernels to stay within 8 UAV limit on mobile GPUs.
+// Kernel 1: ProjectBackward — projection/cov gradients → 3 RW buffers
+// Kernel 2: SHBackwardAdam — SH backward + fused Adam → 6 RW buffers
+#pragma kernel ProjectBackward
+#pragma kernel SHBackwardAdam
 
 #include "GSplatHelpers.hlsl"
 
@@ -28,7 +30,7 @@ RWStructuredBuffer<float> _VMean3D;     // output gradients
 RWStructuredBuffer<float> _VScale;
 RWStructuredBuffer<float> _VQuat;
 
-// SH parameters (read-write for fused Adam)
+// SH parameters (read-write for fused Adam) — only bound for SHBackwardAdam kernel
 RWStructuredBuffer<float> _FeaturesDC;
 RWStructuredBuffer<float> _FeaturesRest;
 RWStructuredBuffer<float> _DCExpAvg;
@@ -152,8 +154,9 @@ void ScaleRotToCov3DVJP(float3 expScale, float globScale, float4 quat,
     vQuat.w = 2.f * (w*(vR[0][1] - vR[1][0]) + x*(vR[0][2] + vR[2][0]) + y*(vR[1][2] + vR[2][1]) - 2.f*z*(vR[0][0] + vR[1][1]));
 }
 
+// ---- Kernel 1: Projection backward (3 RW: VMean3D, VScale, VQuat) ----
 [numthreads(256, 1, 1)]
-void ProjectSHBackward(uint3 id : SV_DispatchThreadID)
+void ProjectBackward(uint3 id : SV_DispatchThreadID)
 {
     uint idx = id.x;
     if (idx >= _NumPoints || _Radii[idx] <= 0) return;
@@ -161,21 +164,17 @@ void ProjectSHBackward(uint3 id : SV_DispatchThreadID)
     float3 pWorld = float3(_Means3D[idx*3], _Means3D[idx*3+1], _Means3D[idx*3+2]);
     float fx = _Intrinsics.x, fy = _Intrinsics.y;
 
-    // Projection backward: vMean from vXY
     float2 vXY = float2(_VXY[idx*2], _VXY[idx*2+1]);
     float3 vMean = ProjectPixVJP(_ProjMat, pWorld, _ImgSize, vXY);
 
-    // z gradient
     float vZ = _VDepth[idx];
     vMean += float3(_ViewMat[2][0], _ViewMat[2][1], _ViewMat[2][2]) * vZ;
 
-    // vCov2d from vConic
     float3 conicVal = float3(_Conics[idx*3], _Conics[idx*3+1], _Conics[idx*3+2]);
     float3 vConicVal = float3(_VConic[idx*3], _VConic[idx*3+1], _VConic[idx*3+2]);
     float vCov2d[3];
     Cov2DToConicVJP(conicVal, vConicVal, vCov2d);
 
-    // Recompute cov3d from scales+quats
     float3 expScale = exp(float3(_Scales[idx*3], _Scales[idx*3+1], _Scales[idx*3+2]));
     float4 quat = float4(_Quats[idx*4], _Quats[idx*4+1], _Quats[idx*4+2], _Quats[idx*4+3]);
     float cov3d[6];
@@ -189,12 +188,10 @@ void ProjectSHBackward(uint3 id : SV_DispatchThreadID)
                              float3(vCov2d[0], vCov2d[1], vCov2d[2]),
                              vMean, gradCov3d, pView);
 
-    // Scale+rotation backward
     float3 vScale;
     float4 vQuat;
     ScaleRotToCov3DVJP(expScale, _GlobScale, quat, gradCov3d, vScale, vQuat);
 
-    // Chain rule: dL/d(log_s) = dL/d(exp_s) * exp(log_s)
     vScale *= expScale;
 
     _VMean3D[idx*3+0] = vMean.x;
@@ -207,8 +204,16 @@ void ProjectSHBackward(uint3 id : SV_DispatchThreadID)
     _VQuat[idx*4+1] = vQuat.y;
     _VQuat[idx*4+2] = vQuat.z;
     _VQuat[idx*4+3] = vQuat.w;
+}
 
-    // ---- Fused SH backward + Adam ----
+// ---- Kernel 2: SH backward + fused Adam (6 RW: FeaturesDC, FeaturesRest, DC/Rest ExpAvg/ExpAvgSq) ----
+[numthreads(256, 1, 1)]
+void SHBackwardAdam(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _NumPoints || _Radii[idx] <= 0) return;
+
+    float3 pWorld = float3(_Means3D[idx*3], _Means3D[idx*3+1], _Means3D[idx*3+2]);
     float3 viewdir = normalize(pWorld - _CamPos);
     uint numBases = NumSHBases(_Degree);
     uint dcOff = 3 * idx;
@@ -216,7 +221,6 @@ void ProjectSHBackward(uint3 id : SV_DispatchThreadID)
 
     float3 vc = float3(_VColors[idx*3], _VColors[idx*3+1], _VColors[idx*3+2]);
 
-    // DC
     [unroll]
     for (int c = 0; c < 3; c++)
     {
