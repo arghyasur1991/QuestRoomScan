@@ -10,6 +10,7 @@ namespace Genesis.RoomScan
         [SerializeField] private Vector2 previewSize = new(320, 240);
 
         [Header("Depth Visualization")]
+        [SerializeField] private Shader depthVisualizeShader;
         [SerializeField] private Color nearColor = Color.red;
         [SerializeField] private Color farColor = Color.blue;
         [SerializeField] private float nearDist = 0.3f;
@@ -31,9 +32,11 @@ namespace Genesis.RoomScan
         {
             _headTransform = Camera.main != null ? Camera.main.transform : null;
 
-            var depthVizShader = Shader.Find("Genesis/DepthVisualize");
-            if (depthVizShader != null)
-                _depthMat = new Material(depthVizShader);
+            var shader = depthVisualizeShader != null
+                ? depthVisualizeShader
+                : Shader.Find("Genesis/DepthVisualize");
+            if (shader != null)
+                _depthMat = new Material(shader);
             else
                 Debug.LogWarning("[RoomScan] DepthDebugOverlay: Genesis/DepthVisualize shader not found");
 

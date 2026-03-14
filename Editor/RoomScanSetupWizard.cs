@@ -392,6 +392,15 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_triplanarCache);
             }
 
+            // DepthDebugOverlay
+            if (_depthDebug != null)
+            {
+                var so = new SerializedObject(_depthDebug);
+                AssignAsset<Shader>(so, "depthVisualizeShader", PKG + "DepthVisualize.shader");
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_depthDebug);
+            }
+
             // MeshExtractor — needs a Material + compute shader
             if (_meshExtractor != null)
             {
@@ -414,11 +423,16 @@ namespace Genesis.RoomScan.Editor
 
         static void AssignCompute(SerializedObject so, string fieldName, string assetPath)
         {
+            AssignAsset<ComputeShader>(so, fieldName, assetPath);
+        }
+
+        static void AssignAsset<T>(SerializedObject so, string fieldName, string assetPath) where T : Object
+        {
             var prop = so.FindProperty(fieldName);
             if (prop == null) return;
             if (prop.objectReferenceValue != null) return;
 
-            var asset = AssetDatabase.LoadAssetAtPath<ComputeShader>(assetPath);
+            var asset = AssetDatabase.LoadAssetAtPath<T>(assetPath);
             if (asset != null)
                 prop.objectReferenceValue = asset;
             else
