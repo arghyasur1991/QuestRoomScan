@@ -2,15 +2,16 @@ using UnityEngine;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.Rendering.RenderGraphModule;
+using UnityEngine.XR;
 
 namespace Genesis.RoomScan.GSplat
 {
     /// <summary>
     /// URP Renderer Feature that draws Gaussian splats with proper stereo RT slice
-    /// targeting. On Quest, Unity can't correctly set unity_stereoEyeIndex when
-    /// drawing procedurally, so we render each eye separately by binding the
-    /// correct texture-array slice before each DrawProcedural call — same
-    /// workaround that UnityGaussianSplatting uses.
+    /// targeting. Per-eye VP matrices are captured at render time (after XR late-
+    /// latching) so the vertex shader produces jitter-free clip-space positions.
+    /// On Quest, Unity can't correctly set unity_stereoEyeIndex when drawing
+    /// procedurally, so we render each eye separately — same workaround as UGS.
     /// </summary>
     public class GSplatRenderFeature : ScriptableRendererFeature
     {
@@ -24,6 +25,7 @@ namespace Genesis.RoomScan.GSplat
                 internal TextureHandle ColorTarget;
                 internal TextureHandle DepthTarget;
                 internal bool IsStereo;
+                internal Camera Camera;
             }
 
             public override void RecordRenderGraph(RenderGraph renderGraph,
@@ -35,11 +37,13 @@ namespace Genesis.RoomScan.GSplat
                 using var builder =
                     renderGraph.AddUnsafePass(ProfilerTag, out PassData passData);
 
+                var cameraData = frameData.Get<UniversalCameraData>();
                 var resourceData = frameData.Get<UniversalResourceData>();
 
                 passData.ColorTarget = resourceData.activeColorTexture;
                 passData.DepthTarget = resourceData.activeDepthTexture;
                 passData.IsStereo = inst.IsStereoMode;
+                passData.Camera = cameraData.camera;
 
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
                 builder.UseTexture(resourceData.activeDepthTexture, AccessFlags.Read);
@@ -55,22 +59,38 @@ namespace Genesis.RoomScan.GSplat
                             CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
                         using var _ = new ProfilingScope(cmd, s_Sampler);
 
+                        var cam = data.Camera;
+
                         if (data.IsStereo)
                         {
-                            // Left eye → texture array slice 0
+                            var vpL = GL.GetGPUProjectionMatrix(
+                                          cam.GetStereoProjectionMatrix(
+                                              Camera.StereoscopicEye.Left), true)
+                                      * cam.GetStereoViewMatrix(
+                                          Camera.StereoscopicEye.Left);
+
+                            var vpR = GL.GetGPUProjectionMatrix(
+                                          cam.GetStereoProjectionMatrix(
+                                              Camera.StereoscopicEye.Right), true)
+                                      * cam.GetStereoViewMatrix(
+                                          Camera.StereoscopicEye.Right);
+
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
                                 0, CubemapFace.Unknown, 0);
-                            renderer.DrawSplats(cmd, 0);
+                            renderer.DrawSplats(cmd, vpL);
 
-                            // Right eye → texture array slice 1
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
                                 0, CubemapFace.Unknown, 1);
-                            renderer.DrawSplats(cmd, 1);
+                            renderer.DrawSplats(cmd, vpR);
                         }
                         else
                         {
+                            var vp = GL.GetGPUProjectionMatrix(
+                                         cam.projectionMatrix, true)
+                                     * cam.worldToCameraMatrix;
+
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget);
-                            renderer.DrawSplats(cmd, -1);
+                            renderer.DrawSplats(cmd, vp);
                         }
                     });
             }

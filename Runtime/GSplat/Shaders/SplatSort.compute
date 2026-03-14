@@ -8,7 +8,8 @@
 
 struct SplatViewData
 {
-    float4 pos;     // clip-space position; .w = linear depth
+    float3 worldPos;
+    float depth;     // view-space depth
     float2 axis1;
     float2 axis2;
     uint2 color;
@@ -20,7 +21,6 @@ RWStructuredBuffer<uint> _SortPayload;
 
 uint _Count;
 uint _PaddedCount;
-uint _IsStereo;
 
 uint FloatToSortableUint(float f)
 {
@@ -37,9 +37,7 @@ void CSInitSortKeys(uint3 id : SV_DispatchThreadID)
 
     if (i < _Count)
     {
-        // In stereo, left-eye data is at idx*2; use left-eye depth for sort
-        uint viewIdx = _IsStereo ? (i * 2) : i;
-        float depth = _ViewData[viewIdx].pos.w;
+        float depth = _ViewData[i].depth;
         _SortKeys[i] = (depth > 0) ? FloatToSortableUint(-depth) : 0xFFFFFFFFu;
         _SortPayload[i] = i;
     }
@@ -63,8 +61,7 @@ void CSInitSortKeysBitonic(uint3 id : SV_DispatchThreadID)
 
     if (i < _Count)
     {
-        uint viewIdx = _IsStereo ? (i * 2) : i;
-        float depth = _ViewData[viewIdx].pos.w;
+        float depth = _ViewData[i].depth;
         uint key = (depth > 0)
             ? (0xFFFFFFFFu - FloatToSortableUint(depth))
             : 0xFFFFFFFFu;

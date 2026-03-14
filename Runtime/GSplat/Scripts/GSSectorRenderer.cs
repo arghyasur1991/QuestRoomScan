@@ -9,6 +9,9 @@ namespace Genesis.RoomScan.GSplat
     /// Renders Gaussian splats via compute prepass → GPU sort → URP render pass.
     /// Zero-copy from training buffers. All sectors concatenated into one draw call.
     /// Uses radix sort (13 dispatches) with bitonic fallback for Quest compatibility.
+    ///
+    /// The prepass outputs world-space positions so the vertex shader can apply
+    /// the late-latched per-eye VP matrix at render time, eliminating VR jitter.
     /// Drawing is deferred to <see cref="GSplatRenderFeature"/> which handles
     /// per-eye RT slice targeting required for Quest stereo.
     /// </summary>
@@ -54,8 +57,8 @@ namespace Genesis.RoomScan.GSplat
         int _bitonicCapacity;
 
         int _prepassKernel = -1;
-        int _initSortKernel = -1;       // radix: writes to _SortKeys/_SortPayload
-        int _initSortBitonicKernel = -1; // bitonic: writes to _SortBuffer (uint2)
+        int _initSortKernel = -1;
+        int _initSortBitonicKernel = -1;
         int _bitonicStepKernel = -1;
 
         static readonly int ID_NumPoints     = Shader.PropertyToID("_NumPoints");
@@ -84,9 +87,6 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_GroupSize     = Shader.PropertyToID("_GroupSize");
         static readonly int ID_SortBuffer    = Shader.PropertyToID("_SortBuffer");
         static readonly int ID_ViewProjMatrix = Shader.PropertyToID("_ViewProjMatrix");
-        static readonly int ID_ViewProjMatrixRight = Shader.PropertyToID("_ViewProjMatrixRight");
-        static readonly int ID_IsStereo   = Shader.PropertyToID("_IsStereo");
-        static readonly int ID_EyeIndex   = Shader.PropertyToID("_EyeIndex");
 
         public Material SplatMaterial
         {
@@ -140,14 +140,12 @@ namespace Genesis.RoomScan.GSplat
                       $"sort={(_useRadixSort ? "radix(13 dispatches)" : "bitonic(O(log²N))")}");
         }
 
-        void EnsureBuffers(int totalCount, bool stereo)
+        void EnsureBuffers(int totalCount)
         {
-            // View data buffer: 2x for stereo (left + right per Gaussian)
-            int viewDataNeeded = stereo ? totalCount * 2 : totalCount;
-            if (_viewDataBuffer == null || _viewDataCapacity < viewDataNeeded)
+            if (_viewDataBuffer == null || _viewDataCapacity < totalCount)
             {
                 _viewDataBuffer?.Release();
-                _viewDataCapacity = Mathf.Max(viewDataNeeded, 1024);
+                _viewDataCapacity = Mathf.Max(totalCount, 1024);
                 _viewDataBuffer = new GraphicsBuffer(
                     GraphicsBuffer.Target.Structured, _viewDataCapacity, 40);
             }
@@ -207,67 +205,27 @@ namespace Genesis.RoomScan.GSplat
                           $"sort={(_useRadixSort ? "radix" : "bitonic")}");
             }
 
-            // Detect stereo early (needed for buffer sizing)
-            bool isStereoEarly = XRSettings.enabled && cam.stereoEnabled;
-            EnsureBuffers(totalCount, isStereoEarly);
+            EnsureBuffers(totalCount);
 
             var camT = cam.transform;
             Matrix4x4 viewPosZ = Matrix4x4.TRS(camT.position, camT.rotation, Vector3.one).inverse;
 
-            // Detect stereo XR rendering
             bool isStereo = XRSettings.enabled && cam.stereoEnabled;
-
-            float screenW, screenH;
-            if (isStereo)
-            {
-                screenW = XRSettings.eyeTextureWidth;
-                screenH = XRSettings.eyeTextureHeight;
-            }
-            else
-            {
-                screenW = cam.pixelWidth;
-                screenH = cam.pixelHeight;
-            }
-
+            float screenW = isStereo ? XRSettings.eyeTextureWidth : cam.pixelWidth;
+            float screenH = isStereo ? XRSettings.eyeTextureHeight : cam.pixelHeight;
             float fx = Mathf.Abs(cam.projectionMatrix[0, 0]) * screenW / 2f;
             float fy = Mathf.Abs(cam.projectionMatrix[1, 1]) * screenH / 2f;
 
-            // VP matrices for clip-space output
-            Matrix4x4 vpLeft, vpRight;
-            if (isStereo)
-            {
-                var viewL = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Left);
-                var projL = cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left);
-                vpLeft = GL.GetGPUProjectionMatrix(projL, true) * viewL;
-
-                var viewR = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Right);
-                var projR = cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Right);
-                vpRight = GL.GetGPUProjectionMatrix(projR, true) * viewR;
-            }
-            else
-            {
-                Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
-                vpLeft = gpuProj * cam.worldToCameraMatrix;
-                vpRight = vpLeft;
-            }
-
-            // --- Phase 1: Compute prepass ---
+            // --- Phase 1: Compute prepass (world-space output, VP-independent) ---
             viewPrepassCompute.SetFloat(ID_SplatSize, splatSizeMultiplier);
             viewPrepassCompute.SetInt(ID_SHDegree, shDegree);
-            viewPrepassCompute.SetInt(ID_IsStereo, isStereo ? 1 : 0);
             viewPrepassCompute.SetMatrix(ID_ViewMatrix, viewPosZ);
-            viewPrepassCompute.SetMatrix(ID_ViewProjMatrix, vpLeft);
-            viewPrepassCompute.SetMatrix(ID_ViewProjMatrixRight, vpRight);
             viewPrepassCompute.SetVector(ID_Focal, new Vector4(fx, fy, 0, 0));
             viewPrepassCompute.SetVector(ID_ScreenSize, new Vector4(screenW, screenH, 0, 0));
             viewPrepassCompute.SetVector(ID_CamPos, (Vector4)camT.position);
             viewPrepassCompute.SetBuffer(_prepassKernel, ID_ViewData, _viewDataBuffer);
 
-            // _WriteOffset is in view data entries. In stereo, each Gaussian writes
-            // 2 entries (left + right), so the shader computes: _WriteOffset + idx*2 (stereo)
-            // or _WriteOffset + idx (mono). C# advances by n*2 or n accordingly.
             int writeOffset = 0;
-
             foreach (var (id, buffers) in _readySectors)
             {
                 int n = buffers.CurrentCount;
@@ -285,14 +243,14 @@ namespace Genesis.RoomScan.GSplat
                 int groups = (n + 255) / 256;
                 viewPrepassCompute.Dispatch(_prepassKernel, groups, 1, 1);
 
-                writeOffset += isStereo ? n * 2 : n;
+                writeOffset += n;
             }
 
-            // --- Phase 2: Sort (by splat index, same order for both eyes) ---
+            // --- Phase 2: Sort by view-space depth ---
             if (_useRadixSort)
-                DispatchRadixSort(totalCount, isStereo);
+                DispatchRadixSort(totalCount);
             else if (_initSortBitonicKernel >= 0 && _bitonicStepKernel >= 0)
-                DispatchBitonicSort(totalCount, isStereo);
+                DispatchBitonicSort(totalCount);
 
             // --- Phase 3: Bind buffers on material for the URP render pass ---
             splatMaterial.SetBuffer(ID_SplatViewData, _viewDataBuffer);
@@ -308,47 +266,43 @@ namespace Genesis.RoomScan.GSplat
 
         /// <summary>
         /// Called by <see cref="GSplatRenderFeature"/> from the URP render pass.
-        /// Issues a DrawProcedural for all prepared splats.
+        /// The per-eye VP matrix is captured at render time (after XR late-latching)
+        /// so splats are world-locked with zero jitter.
         /// </summary>
         /// <param name="cmd">URP command buffer.</param>
-        /// <param name="eyeIndex">0 = left, 1 = right, -1 = mono.</param>
-        public void DrawSplats(CommandBuffer cmd, int eyeIndex)
+        /// <param name="viewProjMatrix">Per-eye VP matrix captured at render time.</param>
+        public void DrawSplats(CommandBuffer cmd, Matrix4x4 viewProjMatrix)
         {
             if (_preparedTotalCount <= 0 || splatMaterial == null) return;
 
-            bool stereo = eyeIndex >= 0;
-            _props.SetInteger(ID_IsStereo, stereo ? 1 : 0);
-            _props.SetInteger(ID_EyeIndex, stereo ? eyeIndex : 0);
+            _props.SetMatrix(ID_ViewProjMatrix, viewProjMatrix);
 
             cmd.DrawProcedural(
                 Matrix4x4.identity, splatMaterial, 0,
                 MeshTopology.Quads, _preparedTotalCount * 4, 1, _props);
         }
 
-        void DispatchRadixSort(int totalCount, bool stereo = false)
+        void DispatchRadixSort(int totalCount)
         {
             int threadGroups = (totalCount + 255) / 256;
 
             sortCompute.SetInt(ID_Count, totalCount);
             sortCompute.SetInt(ID_PaddedCount, totalCount);
-            sortCompute.SetInt(ID_IsStereo, stereo ? 1 : 0);
             sortCompute.SetBuffer(_initSortKernel, ID_ViewData, _viewDataBuffer);
             sortCompute.SetBuffer(_initSortKernel, ID_SortKeys, _sortKeysBuffer);
             sortCompute.SetBuffer(_initSortKernel, ID_SortPayload, _sortPayloadBuffer);
             sortCompute.Dispatch(_initSortKernel, threadGroups, 1, 1);
 
-            // Radix sort: 13 dispatches total
             _radixSort.Dispatch(totalCount, _sortKeysBuffer, _sortPayloadBuffer, _radixResources);
         }
 
-        void DispatchBitonicSort(int totalCount, bool stereo = false)
+        void DispatchBitonicSort(int totalCount)
         {
             int padded = Mathf.NextPowerOfTwo(totalCount);
             int threadGroups = (padded + 255) / 256;
 
             sortCompute.SetInt(ID_Count, totalCount);
             sortCompute.SetInt(ID_PaddedCount, padded);
-            sortCompute.SetInt(ID_IsStereo, stereo ? 1 : 0);
             sortCompute.SetBuffer(_initSortBitonicKernel, ID_ViewData, _viewDataBuffer);
             sortCompute.SetBuffer(_initSortBitonicKernel, ID_SortBuffer, _bitonicSortBuffer);
             sortCompute.Dispatch(_initSortBitonicKernel, threadGroups, 1, 1);
