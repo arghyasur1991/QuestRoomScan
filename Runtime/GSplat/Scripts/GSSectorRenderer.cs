@@ -87,6 +87,9 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_GroupSize     = Shader.PropertyToID("_GroupSize");
         static readonly int ID_SortBuffer    = Shader.PropertyToID("_SortBuffer");
         static readonly int ID_SplatVP = Shader.PropertyToID("_SplatVP");
+        static readonly int ID_SplatView = Shader.PropertyToID("_SplatView");
+        static readonly int ID_SplatFocal = Shader.PropertyToID("_SplatFocal");
+        static readonly int ID_SplatScreen = Shader.PropertyToID("_SplatScreen");
 
         public Material SplatMaterial
         {
@@ -147,7 +150,7 @@ namespace Genesis.RoomScan.GSplat
                 _viewDataBuffer?.Release();
                 _viewDataCapacity = Mathf.Max(totalCount, 1024);
                 _viewDataBuffer = new GraphicsBuffer(
-                    GraphicsBuffer.Target.Structured, _viewDataCapacity, 40);
+                    GraphicsBuffer.Target.Structured, _viewDataCapacity, 48);
             }
 
             if (_useRadixSort)
@@ -266,16 +269,19 @@ namespace Genesis.RoomScan.GSplat
 
         /// <summary>
         /// Called by <see cref="GSplatRenderFeature"/> from the URP render pass.
-        /// The per-eye VP matrix is captured at render time (after XR late-latching)
-        /// so splats are world-locked with zero jitter.
+        /// Both VP and view matrices are captured at render time (after XR late-latching)
+        /// so both splat positions AND covariance axes are world-locked.
         /// </summary>
-        /// <param name="cmd">URP command buffer.</param>
-        /// <param name="viewProjMatrix">Per-eye VP matrix captured at render time.</param>
-        public void DrawSplats(CommandBuffer cmd, Matrix4x4 viewProjMatrix)
+        public void DrawSplats(CommandBuffer cmd, Matrix4x4 viewProjMatrix,
+                               Matrix4x4 viewMatrix, float fx, float fy,
+                               float screenW, float screenH)
         {
             if (_preparedTotalCount <= 0 || splatMaterial == null) return;
 
             _props.SetMatrix(ID_SplatVP, viewProjMatrix);
+            _props.SetMatrix(ID_SplatView, viewMatrix);
+            _props.SetVector(ID_SplatFocal, new Vector4(fx, fy, 0, 0));
+            _props.SetVector(ID_SplatScreen, new Vector4(screenW, screenH, 0, 0));
 
             cmd.DrawProcedural(
                 Matrix4x4.identity, splatMaterial, 0,

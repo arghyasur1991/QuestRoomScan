@@ -60,37 +60,53 @@ namespace Genesis.RoomScan.GSplat
                         using var _ = new ProfilingScope(cmd, s_Sampler);
 
                         var cam = data.Camera;
+                        bool isStereo = data.IsStereo;
+                        float screenW = isStereo
+                            ? XRSettings.eyeTextureWidth
+                            : cam.pixelWidth;
+                        float screenH = isStereo
+                            ? XRSettings.eyeTextureHeight
+                            : cam.pixelHeight;
 
-                        if (data.IsStereo)
+                        if (isStereo)
                         {
-                            var vpL = GL.GetGPUProjectionMatrix(
-                                          cam.GetStereoProjectionMatrix(
-                                              Camera.StereoscopicEye.Left), true)
-                                      * cam.GetStereoViewMatrix(
-                                          Camera.StereoscopicEye.Left);
+                            var viewL = cam.GetStereoViewMatrix(
+                                Camera.StereoscopicEye.Left);
+                            var projL = GL.GetGPUProjectionMatrix(
+                                cam.GetStereoProjectionMatrix(
+                                    Camera.StereoscopicEye.Left), true);
+                            float fxL = Mathf.Abs(projL[0, 0]) * screenW / 2f;
+                            float fyL = Mathf.Abs(projL[1, 1]) * screenH / 2f;
 
-                            var vpR = GL.GetGPUProjectionMatrix(
-                                          cam.GetStereoProjectionMatrix(
-                                              Camera.StereoscopicEye.Right), true)
-                                      * cam.GetStereoViewMatrix(
-                                          Camera.StereoscopicEye.Right);
+                            var viewR = cam.GetStereoViewMatrix(
+                                Camera.StereoscopicEye.Right);
+                            var projR = GL.GetGPUProjectionMatrix(
+                                cam.GetStereoProjectionMatrix(
+                                    Camera.StereoscopicEye.Right), true);
+                            float fxR = Mathf.Abs(projR[0, 0]) * screenW / 2f;
+                            float fyR = Mathf.Abs(projR[1, 1]) * screenH / 2f;
 
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
                                 0, CubemapFace.Unknown, 0);
-                            renderer.DrawSplats(cmd, vpL);
+                            renderer.DrawSplats(cmd, projL * viewL, viewL,
+                                fxL, fyL, screenW, screenH);
 
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
                                 0, CubemapFace.Unknown, 1);
-                            renderer.DrawSplats(cmd, vpR);
+                            renderer.DrawSplats(cmd, projR * viewR, viewR,
+                                fxR, fyR, screenW, screenH);
                         }
                         else
                         {
-                            var vp = GL.GetGPUProjectionMatrix(
-                                         cam.projectionMatrix, true)
-                                     * cam.worldToCameraMatrix;
+                            var view = cam.worldToCameraMatrix;
+                            var proj = GL.GetGPUProjectionMatrix(
+                                cam.projectionMatrix, true);
+                            float fx = Mathf.Abs(proj[0, 0]) * screenW / 2f;
+                            float fy = Mathf.Abs(proj[1, 1]) * screenH / 2f;
 
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget);
-                            renderer.DrawSplats(cmd, vp);
+                            renderer.DrawSplats(cmd, proj * view, view,
+                                fx, fy, screenW, screenH);
                         }
                     });
             }

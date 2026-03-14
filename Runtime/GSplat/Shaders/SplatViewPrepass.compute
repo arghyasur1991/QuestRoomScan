@@ -1,8 +1,8 @@
-// Compute prepass: projects Gaussians to 2D, decomposes covariance into
-// oriented axis vectors, evaluates SH color, packs into SplatViewData.
-// One thread per Gaussian. Runs once per frame per visible sector.
-// Stores WORLD-SPACE position so the vertex shader can apply the
-// late-latched per-eye VP matrix at render time, eliminating VR jitter.
+// Compute prepass: computes world-space 3D covariance, evaluates SH color,
+// packs into SplatViewData. One thread per Gaussian. Runs once per frame.
+// Stores WORLD-SPACE position and 3D covariance (both view-independent)
+// so the vertex shader can apply late-latched per-eye view/VP matrices at
+// render time for both center position AND covariance axis computation.
 #pragma kernel CSCalcViewData
 
 #include "GSplatHelpers.hlsl"
@@ -11,8 +11,8 @@ struct SplatViewData
 {
     float3 worldPos; // world-space center
     float depth;     // view-space depth (for sorting)
-    float2 axis1;
-    float2 axis2;
+    float3 cov3dA;   // upper triangle of 3D covariance: (c00, c01, c02)
+    float3 cov3dB;   // upper triangle continued: (c11, c12, c22)
     uint2 color;     // packed fp16: x = (r<<16)|g, y = (b<<16)|a
 };
 
@@ -34,23 +34,8 @@ StructuredBuffer<float> _Opacities;
 
 RWStructuredBuffer<SplatViewData> _ViewData;
 
-void DecomposeCovariance(float3 cov2d, out float2 v1, out float2 v2)
-{
-    float diag1 = cov2d.x, diag2 = cov2d.z, offDiag = cov2d.y;
-    float mid = 0.5 * (diag1 + diag2);
-    float radius = length(float2((diag1 - diag2) * 0.5, offDiag));
-    float lambda1 = mid + radius;
-    float lambda2 = max(mid - radius, 0.1);
-
-    float2 rawVec = float2(offDiag, lambda1 - diag1);
-    float len = length(rawVec);
-    float2 diagVec = len > 1e-6 ? rawVec / len : float2(1, 0);
-    diagVec.y = -diagVec.y;
-
-    float maxSize = 4096.0;
-    v1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
-    v2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
-}
+// DecomposeCovariance moved to SplatRender.shader vertex shader
+// so it uses the late-latched render-time view matrix.
 
 [numthreads(256, 1, 1)]
 void CSCalcViewData(uint3 id : SV_DispatchThreadID)
@@ -69,21 +54,12 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // 3D covariance → 2D decomposition
+    // 3D covariance (world-space, view-independent)
     float3 expScale = exp(float3(_Scales[idx*3], _Scales[idx*3+1], _Scales[idx*3+2]));
     float4 quat = float4(_Quats[idx*4], _Quats[idx*4+1], _Quats[idx*4+2], _Quats[idx*4+3]);
 
     float cov3d[6];
     ScaleRotToCov3D(expScale, _SplatSize, quat, cov3d);
-
-    float fx = _Focal.x, fy = _Focal.y;
-    float tanFovX = 0.5 * _ScreenSize.x / fx;
-    float tanFovY = 0.5 * _ScreenSize.y / fy;
-
-    float3 cov2d = ProjectCov3DEWA(cov3d, _ViewMatrix, fx, fy, tanFovX, tanFovY, pView);
-
-    float2 ax1, ax2;
-    DecomposeCovariance(cov2d, ax1, ax2);
 
     // SH color evaluation
     float3 viewdir = normalize(wpos - _CamPos);
@@ -101,8 +77,8 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
 
     view.worldPos = wpos;
     view.depth = pView.z;
-    view.axis1 = ax1;
-    view.axis2 = ax2;
+    view.cov3dA = float3(cov3d[0], cov3d[1], cov3d[2]);
+    view.cov3dB = float3(cov3d[3], cov3d[4], cov3d[5]);
     view.color = packedColor;
     _ViewData[_WriteOffset + idx] = view;
 }

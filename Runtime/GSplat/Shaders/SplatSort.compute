@@ -10,8 +10,8 @@ struct SplatViewData
 {
     float3 worldPos;
     float depth;     // view-space depth
-    float2 axis1;
-    float2 axis2;
+    float3 cov3dA;   // upper triangle: (c00, c01, c02)
+    float3 cov3dB;   // upper triangle: (c11, c12, c22)
     uint2 color;
 };
 
