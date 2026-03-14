@@ -10,7 +10,7 @@ Shader "Genesis/SplatRender"
             Tags { "LightMode"="SRPDefaultUnlit" }
             ZWrite Off
             ZTest LEqual
-            Blend SrcAlpha OneMinusSrcAlpha
+            Blend One OneMinusSrcAlpha
             Cull Off
 
             HLSLPROGRAM
@@ -29,13 +29,14 @@ Shader "Genesis/SplatRender"
             };
 
             StructuredBuffer<SplatViewData> _SplatViewData;
+            StructuredBuffer<uint2> _SortBuffer;  // .x = sortKey, .y = original index
             uint _SplatCount;
 
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
                 float2 quadUV : TEXCOORD0;
-                half4 col : COLOR0;
+                nointerpolation half4 col : COLOR0;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -44,8 +45,8 @@ Shader "Genesis/SplatRender"
                 Varyings o = (Varyings)0;
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
 
-                uint quadVert = vertID % 4;
-                uint splatIdx = vertID / 4;
+                uint quadVert = vertID & 3;
+                uint splatIdx = vertID >> 2;
 
                 if (splatIdx >= _SplatCount)
                 {
@@ -53,7 +54,8 @@ Shader "Genesis/SplatRender"
                     return o;
                 }
 
-                SplatViewData view = _SplatViewData[splatIdx];
+                uint dataIdx = _SortBuffer[splatIdx].y;
+                SplatViewData view = _SplatViewData[dataIdx];
 
                 if (view.viewDepth <= 0)
                 {
@@ -61,18 +63,15 @@ Shader "Genesis/SplatRender"
                     return o;
                 }
 
-                // Unpack fp16 color
                 o.col.r = f16tof32(view.color.x >> 16);
                 o.col.g = f16tof32(view.color.x);
                 o.col.b = f16tof32(view.color.y >> 16);
                 o.col.a = f16tof32(view.color.y);
 
-                // Quad [-2, 2] mapped to quad corners
                 float2 quadPos = float2(quadVert & 1, (quadVert >> 1) & 1) * 2.0 - 1.0;
                 quadPos *= 2.0;
                 o.quadUV = quadPos;
 
-                // Clip-space center from world position (Unity handles all platform conventions)
                 float4 centerClip = TransformWorldToHClip(view.worldPos);
                 if (centerClip.w <= 0)
                 {
@@ -80,7 +79,6 @@ Shader "Genesis/SplatRender"
                     return o;
                 }
 
-                // Offset quad corners using precomputed screen-space axes
                 float2 deltaScreen = (quadPos.x * view.axis1 + quadPos.y * view.axis2)
                                      * 2.0 / _ScreenParams.xy;
                 o.positionHCS = centerClip;
@@ -98,7 +96,7 @@ Shader "Genesis/SplatRender"
                 alpha = saturate(alpha * i.col.a);
                 if (alpha < 1.0h / 255.0h) discard;
 
-                return half4(i.col.rgb, alpha);
+                return half4(i.col.rgb * alpha, alpha);
             }
             ENDHLSL
         }

@@ -1,0 +1,72 @@
+// GPU bitonic sort for back-to-front Gaussian splat rendering.
+// Two kernels: CSInitSortKeys (build sortable key-index pairs from view data)
+// and CSBitonicStep (one comparison step per dispatch).
+#pragma kernel CSInitSortKeys
+#pragma kernel CSBitonicStep
+
+struct SplatViewData
+{
+    float3 worldPos;
+    float viewDepth;
+    float2 axis1;
+    float2 axis2;
+    uint2 color;
+};
+
+StructuredBuffer<SplatViewData> _ViewData;
+RWStructuredBuffer<uint2> _SortBuffer; // .x = sortKey, .y = originalIndex
+
+uint _Count;
+uint _PaddedCount;
+uint _StepSize;     // j: XOR partner stride
+uint _GroupSize;    // k: determines ascending/descending direction
+
+uint FloatToSortableUint(float f)
+{
+    uint u = asuint(f);
+    uint mask = -(int)(u >> 31) | 0x80000000u;
+    return u ^ mask;
+}
+
+[numthreads(256, 1, 1)]
+void CSInitSortKeys(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _PaddedCount) return;
+
+    if (i < _Count)
+    {
+        float depth = _ViewData[i].viewDepth;
+        // Back-to-front: negate so larger depth → smaller key → sorted first
+        uint key = (depth > 0)
+            ? (0xFFFFFFFFu - FloatToSortableUint(depth))
+            : 0xFFFFFFFFu;
+        _SortBuffer[i] = uint2(key, i);
+    }
+    else
+    {
+        _SortBuffer[i] = uint2(0xFFFFFFFFu, i);
+    }
+}
+
+[numthreads(256, 1, 1)]
+void CSBitonicStep(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= _PaddedCount) return;
+
+    uint partner = i ^ _StepSize;
+    if (partner <= i || partner >= _PaddedCount) return;
+
+    uint2 a = _SortBuffer[i];
+    uint2 b = _SortBuffer[partner];
+
+    bool ascending = ((i & _GroupSize) == 0);
+    bool needSwap = ascending ? (a.x > b.x) : (a.x < b.x);
+
+    if (needSwap)
+    {
+        _SortBuffer[i] = b;
+        _SortBuffer[partner] = a;
+    }
+}

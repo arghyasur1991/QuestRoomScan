@@ -126,7 +126,7 @@ namespace Genesis.RoomScan.Editor
                 "lossCompute", "rasterBwdCompute", "projBwdCompute", "adamCompute",
                 "initGaussiansCompute");
             _gsRendererComputeWired = _gsSectorRenderer != null && AreFieldsAssigned(_gsSectorRenderer,
-                "viewPrepassCompute", "splatMaterial");
+                "viewPrepassCompute", "sortCompute", "splatMaterial");
 
             _boundarylessManifest = ManifestHasBoundaryless();
         }
@@ -568,11 +568,12 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_gsplatManager);
             }
 
-            // GSSectorRenderer — view prepass compute + splat material
+            // GSSectorRenderer — view prepass + sort compute + splat material
             if (_gsSectorRenderer != null)
             {
                 var so = new SerializedObject(_gsSectorRenderer);
                 AssignCompute(so, "viewPrepassCompute", GSPLAT_PKG + "SplatViewPrepass.compute");
+                AssignCompute(so, "sortCompute", GSPLAT_PKG + "SplatSort.compute");
                 var matProp = so.FindProperty("splatMaterial");
                 if (matProp != null && matProp.objectReferenceValue == null)
                 {

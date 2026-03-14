@@ -352,7 +352,7 @@ namespace Genesis.RoomScan.GSplat
             Vector3 sMax = bounds.center + bounds.extents;
 
             float vi_voxelSize = VolumeIntegrator.Instance?.VoxelSize ?? 0.05f;
-            float initScale = Mathf.Log(vi_voxelSize);
+            float initScale = Mathf.Log(vi_voxelSize * 0.3f);
 
             buffers.CountBuffer.SetData(new int[] { 0 });
 
