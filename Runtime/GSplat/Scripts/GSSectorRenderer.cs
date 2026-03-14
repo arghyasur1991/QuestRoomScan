@@ -86,7 +86,7 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_StepSize      = Shader.PropertyToID("_StepSize");
         static readonly int ID_GroupSize     = Shader.PropertyToID("_GroupSize");
         static readonly int ID_SortBuffer    = Shader.PropertyToID("_SortBuffer");
-        static readonly int ID_ViewProjMatrix = Shader.PropertyToID("_ViewProjMatrix");
+        static readonly int ID_SplatVP = Shader.PropertyToID("_SplatVP");
 
         public Material SplatMaterial
         {
@@ -275,7 +275,7 @@ namespace Genesis.RoomScan.GSplat
         {
             if (_preparedTotalCount <= 0 || splatMaterial == null) return;
 
-            _props.SetMatrix(ID_ViewProjMatrix, viewProjMatrix);
+            _props.SetMatrix(ID_SplatVP, viewProjMatrix);
 
             cmd.DrawProcedural(
                 Matrix4x4.identity, splatMaterial, 0,

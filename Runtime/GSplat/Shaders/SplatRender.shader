@@ -30,7 +30,7 @@ Shader "Genesis/SplatRender"
             };
 
             StructuredBuffer<SplatViewData> _SplatViewData;
-            float4x4 _ViewProjMatrix;
+            float4x4 _SplatVP;
             uint _SplatCount;
 
 #ifdef _SORT_RADIX
@@ -68,7 +68,7 @@ Shader "Genesis/SplatRender"
 #endif
                 SplatViewData view = _SplatViewData[origIdx];
 
-                float4 centerClip = mul(_ViewProjMatrix, float4(view.worldPos, 1));
+                float4 centerClip = mul(_SplatVP, float4(view.worldPos, 1));
                 if (centerClip.w <= 0)
                 {
                     o.positionHCS = asfloat(0x7fc00000);
