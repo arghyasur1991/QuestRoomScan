@@ -116,8 +116,7 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_globalHist = Shader.PropertyToID("b_globalHist");
 
         /// <summary>
-        /// Sort key-payload pairs in ascending order.
-        /// keys and payloads buffers are sorted in-place (result ends up in them after 4 even passes).
+        /// Sort key-payload pairs in ascending order (immediate dispatch).
         /// </summary>
         public void Dispatch(int count, GraphicsBuffer keys, GraphicsBuffer payloads, Resources res)
         {
@@ -128,14 +127,12 @@ namespace Genesis.RoomScan.GSplat
             _cs.SetInt(ID_numKeys, count);
             _cs.SetInt(ID_threadBlocks, (int)threadBlocks);
 
-            // Static buffer bindings
             _cs.SetBuffer(_kernelUpsweep, ID_passHist, res.passHistBuffer);
             _cs.SetBuffer(_kernelUpsweep, ID_globalHist, res.globalHistBuffer);
             _cs.SetBuffer(_kernelScan, ID_passHist, res.passHistBuffer);
             _cs.SetBuffer(_kernelDownsweep, ID_passHist, res.passHistBuffer);
             _cs.SetBuffer(_kernelDownsweep, ID_globalHist, res.globalHistBuffer);
 
-            // Clear global histogram
             _cs.SetBuffer(_kernelInit, ID_globalHist, res.globalHistBuffer);
             _cs.Dispatch(_kernelInit, 1, 1, 1);
 
@@ -147,22 +144,57 @@ namespace Genesis.RoomScan.GSplat
             for (uint shift = 0; shift < 32; shift += RadixBits)
             {
                 _cs.SetInt(ID_radixShift, (int)shift);
-
-                // Upsweep
                 _cs.SetBuffer(_kernelUpsweep, ID_sort, srcKey);
                 _cs.Dispatch(_kernelUpsweep, (int)threadBlocks, 1, 1);
-
-                // Scan
                 _cs.Dispatch(_kernelScan, (int)Radix, 1, 1);
-
-                // Downsweep
                 _cs.SetBuffer(_kernelDownsweep, ID_sort, srcKey);
                 _cs.SetBuffer(_kernelDownsweep, ID_sortPayload, srcPayload);
                 _cs.SetBuffer(_kernelDownsweep, ID_alt, dstKey);
                 _cs.SetBuffer(_kernelDownsweep, ID_altPayload, dstPayload);
                 _cs.Dispatch(_kernelDownsweep, (int)threadBlocks, 1, 1);
+                (srcKey, dstKey) = (dstKey, srcKey);
+                (srcPayload, dstPayload) = (dstPayload, srcPayload);
+            }
+        }
 
-                // Swap src/dst
+        /// <summary>
+        /// Sort key-payload pairs in ascending order (command buffer dispatch).
+        /// Records all dispatches into the given command buffer for deferred execution.
+        /// </summary>
+        public void Dispatch(CommandBuffer cmd, int count, GraphicsBuffer keys, GraphicsBuffer payloads, Resources res)
+        {
+            if (!_valid || count <= 0) return;
+
+            uint threadBlocks = DivRoundUp((uint)count, PartitionSize);
+
+            cmd.SetComputeIntParam(_cs, ID_numKeys, count);
+            cmd.SetComputeIntParam(_cs, ID_threadBlocks, (int)threadBlocks);
+
+            cmd.SetComputeBufferParam(_cs, _kernelUpsweep, ID_passHist, res.passHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelUpsweep, ID_globalHist, res.globalHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelScan, ID_passHist, res.passHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, ID_passHist, res.passHistBuffer);
+            cmd.SetComputeBufferParam(_cs, _kernelDownsweep, ID_globalHist, res.globalHistBuffer);
+
+            cmd.SetComputeBufferParam(_cs, _kernelInit, ID_globalHist, res.globalHistBuffer);
+            cmd.DispatchCompute(_cs, _kernelInit, 1, 1, 1);
+
+            var srcKey = keys;
+            var srcPayload = payloads;
+            var dstKey = res.altBuffer;
+            var dstPayload = res.altPayloadBuffer;
+
+            for (uint shift = 0; shift < 32; shift += RadixBits)
+            {
+                cmd.SetComputeIntParam(_cs, ID_radixShift, (int)shift);
+                cmd.SetComputeBufferParam(_cs, _kernelUpsweep, ID_sort, srcKey);
+                cmd.DispatchCompute(_cs, _kernelUpsweep, (int)threadBlocks, 1, 1);
+                cmd.DispatchCompute(_cs, _kernelScan, (int)Radix, 1, 1);
+                cmd.SetComputeBufferParam(_cs, _kernelDownsweep, ID_sort, srcKey);
+                cmd.SetComputeBufferParam(_cs, _kernelDownsweep, ID_sortPayload, srcPayload);
+                cmd.SetComputeBufferParam(_cs, _kernelDownsweep, ID_alt, dstKey);
+                cmd.SetComputeBufferParam(_cs, _kernelDownsweep, ID_altPayload, dstPayload);
+                cmd.DispatchCompute(_cs, _kernelDownsweep, (int)threadBlocks, 1, 1);
                 (srcKey, dstKey) = (dstKey, srcKey);
                 (srcPayload, dstPayload) = (dstPayload, srcPayload);
             }

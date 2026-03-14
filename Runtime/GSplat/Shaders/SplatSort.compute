@@ -1,17 +1,15 @@
 // Sort key initialization kernels for Gaussian splat rendering.
-// CSInitSortKeys: writes separate uint key/payload for radix sort.
-// CSInitSortKeysBitonic: writes uint2 for bitonic sort fallback.
-// CSBitonicStep: one comparison step per dispatch (bitonic fallback).
+// Back-to-front sort (descending depth) for Blend One OneMinusSrcAlpha.
+// Reads clip-space pos.w (= -view-space Z) for depth.
 #pragma kernel CSInitSortKeys
 #pragma kernel CSInitSortKeysBitonic
 #pragma kernel CSBitonicStep
 
 struct SplatViewData
 {
-    float3 worldPos;
-    float depth;     // view-space depth
-    float3 cov3dA;   // upper triangle: (c00, c01, c02)
-    float3 cov3dB;   // upper triangle: (c11, c12, c22)
+    float4 pos;      // clip-space
+    float2 axis1;
+    float2 axis2;
     uint2 color;
 };
 
@@ -21,6 +19,7 @@ RWStructuredBuffer<uint> _SortPayload;
 
 uint _Count;
 uint _PaddedCount;
+uint _Stride; // 1 for mono, 2 for stereo (read left-eye entry for depth)
 
 uint FloatToSortableUint(float f)
 {
@@ -37,8 +36,9 @@ void CSInitSortKeys(uint3 id : SV_DispatchThreadID)
 
     if (i < _Count)
     {
-        float depth = _ViewData[i].depth;
-        _SortKeys[i] = (depth > 0) ? FloatToSortableUint(-depth) : 0xFFFFFFFFu;
+        float w = _ViewData[i * _Stride].pos.w;
+        // Back-to-front: negate so ascending radix sort puts far (large w) first
+        _SortKeys[i] = (w > 0) ? FloatToSortableUint(-w) : 0xFFFFFFFFu;
         _SortPayload[i] = i;
     }
     else
@@ -48,8 +48,8 @@ void CSInitSortKeys(uint3 id : SV_DispatchThreadID)
     }
 }
 
-// Bitonic sort fallback — kept for GPUs without wave intrinsics
-RWStructuredBuffer<uint2> _SortBuffer; // .x = sortKey, .y = originalIndex
+// Bitonic sort fallback
+RWStructuredBuffer<uint2> _SortBuffer;
 uint _StepSize;
 uint _GroupSize;
 
@@ -61,9 +61,10 @@ void CSInitSortKeysBitonic(uint3 id : SV_DispatchThreadID)
 
     if (i < _Count)
     {
-        float depth = _ViewData[i].depth;
-        uint key = (depth > 0)
-            ? (0xFFFFFFFFu - FloatToSortableUint(depth))
+        float w = _ViewData[i * _Stride].pos.w;
+        // Back-to-front: inverted key so ascending bitonic yields far-first order
+        uint key = (w > 0)
+            ? (0xFFFFFFFFu - FloatToSortableUint(w))
             : 0xFFFFFFFFu;
         _SortBuffer[i] = uint2(key, i);
     }

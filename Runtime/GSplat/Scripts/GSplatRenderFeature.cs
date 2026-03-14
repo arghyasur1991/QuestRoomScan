@@ -7,28 +7,13 @@ using UnityEngine.XR;
 namespace Genesis.RoomScan.GSplat
 {
     /// <summary>
-    /// URP Renderer Feature that draws Gaussian splats with proper stereo RT slice
-    /// targeting. Per-eye VP matrices are captured at render time (after XR late-
-    /// latching) so the vertex shader produces jitter-free clip-space positions.
-    /// On Quest, Unity can't correctly set unity_stereoEyeIndex when drawing
-    /// procedurally, so we render each eye separately — same workaround as UGS.
+    /// URP Renderer Feature: dispatches GSplat prepass + sort + draw all inside
+    /// the render pass command buffer (matching UGS architecture). Per-eye VP
+    /// matrices are captured at render time (after XR late-latching) and passed
+    /// to the prepass. Renders back-to-front directly to the scene buffer.
     /// </summary>
     public class GSplatRenderFeature : ScriptableRendererFeature
     {
-        /// <summary>
-        /// Unity's worldToCameraMatrix uses -Z forward (OpenGL convention).
-        /// The EWA projection math expects +Z forward (objects in front have z > 0).
-        /// Negate row 2 to convert.
-        /// </summary>
-        static Matrix4x4 ViewToPositiveZ(Matrix4x4 v)
-        {
-            v[2, 0] = -v[2, 0];
-            v[2, 1] = -v[2, 1];
-            v[2, 2] = -v[2, 2];
-            v[2, 3] = -v[2, 3];
-            return v;
-        }
-
         class GSplatPass : ScriptableRenderPass
         {
             const string ProfilerTag = "GSplat Render";
@@ -46,7 +31,7 @@ namespace Genesis.RoomScan.GSplat
                 ContextContainer frameData)
             {
                 var inst = GSSectorRenderer.ActiveInstance;
-                if (inst == null || !inst.HasPreparedSplats) return;
+                if (inst == null || !inst.HasSplatsReady) return;
 
                 using var builder =
                     renderGraph.AddUnsafePass(ProfilerTag, out PassData passData);
@@ -54,9 +39,11 @@ namespace Genesis.RoomScan.GSplat
                 var cameraData = frameData.Get<UniversalCameraData>();
                 var resourceData = frameData.Get<UniversalResourceData>();
 
+                bool isStereo = XRSettings.enabled && cameraData.camera.stereoEnabled;
+
                 passData.ColorTarget = resourceData.activeColorTexture;
                 passData.DepthTarget = resourceData.activeDepthTexture;
-                passData.IsStereo = inst.IsStereoMode;
+                passData.IsStereo = isStereo;
                 passData.Camera = cameraData.camera;
 
                 builder.UseTexture(resourceData.activeColorTexture, AccessFlags.ReadWrite);
@@ -67,63 +54,59 @@ namespace Genesis.RoomScan.GSplat
                     static (PassData data, UnsafeGraphContext context) =>
                     {
                         var renderer = GSSectorRenderer.ActiveInstance;
-                        if (renderer == null || !renderer.HasPreparedSplats) return;
+                        if (renderer == null || !renderer.HasSplatsReady) return;
 
                         var cmd =
                             CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
                         using var _ = new ProfilingScope(cmd, s_Sampler);
 
                         var cam = data.Camera;
-                        bool isStereo = data.IsStereo;
-                        float screenW = isStereo
-                            ? XRSettings.eyeTextureWidth
-                            : cam.pixelWidth;
-                        float screenH = isStereo
-                            ? XRSettings.eyeTextureHeight
-                            : cam.pixelHeight;
+                        bool stereo = data.IsStereo;
 
-                        if (isStereo)
+                        // Build per-eye VP matrices at render time (late-latched)
+                        Matrix4x4 vpL, vpR = Matrix4x4.identity;
+                        if (stereo)
                         {
                             var viewL = cam.GetStereoViewMatrix(
                                 Camera.StereoscopicEye.Left);
                             var projL = GL.GetGPUProjectionMatrix(
                                 cam.GetStereoProjectionMatrix(
                                     Camera.StereoscopicEye.Left), true);
-                            float fxL = Mathf.Abs(projL[0, 0]) * screenW / 2f;
-                            float fyL = Mathf.Abs(projL[1, 1]) * screenH / 2f;
+                            vpL = projL * viewL;
 
                             var viewR = cam.GetStereoViewMatrix(
                                 Camera.StereoscopicEye.Right);
                             var projR = GL.GetGPUProjectionMatrix(
                                 cam.GetStereoProjectionMatrix(
                                     Camera.StereoscopicEye.Right), true);
-                            float fxR = Mathf.Abs(projR[0, 0]) * screenW / 2f;
-                            float fyR = Mathf.Abs(projR[1, 1]) * screenH / 2f;
-
-                            cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
-                                0, CubemapFace.Unknown, 0);
-                            renderer.DrawSplats(cmd, projL * viewL,
-                                ViewToPositiveZ(viewL),
-                                fxL, fyL, screenW, screenH);
-
-                            cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
-                                0, CubemapFace.Unknown, 1);
-                            renderer.DrawSplats(cmd, projR * viewR,
-                                ViewToPositiveZ(viewR),
-                                fxR, fyR, screenW, screenH);
+                            vpR = projR * viewR;
                         }
                         else
                         {
                             var view = cam.worldToCameraMatrix;
                             var proj = GL.GetGPUProjectionMatrix(
                                 cam.projectionMatrix, true);
-                            float fx = Mathf.Abs(proj[0, 0]) * screenW / 2f;
-                            float fy = Mathf.Abs(proj[1, 1]) * screenH / 2f;
+                            vpL = proj * view;
+                        }
 
+                        // Prepass + Sort (all dispatches via command buffer)
+                        renderer.PrepareAndSort(cmd, cam, stereo, vpL, vpR);
+
+                        // Draw splats
+                        if (stereo)
+                        {
+                            cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
+                                0, CubemapFace.Unknown, 0);
+                            renderer.DrawSplats(cmd, 0, true);
+
+                            cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
+                                0, CubemapFace.Unknown, 1);
+                            renderer.DrawSplats(cmd, 1, true);
+                        }
+                        else
+                        {
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget);
-                            renderer.DrawSplats(cmd, proj * view,
-                                ViewToPositiveZ(view),
-                                fx, fy, screenW, screenH);
+                            renderer.DrawSplats(cmd, 0, false);
                         }
                     });
             }
@@ -143,7 +126,7 @@ namespace Genesis.RoomScan.GSplat
             ref RenderingData renderingData)
         {
             var inst = GSSectorRenderer.ActiveInstance;
-            if (inst == null || !inst.HasPreparedSplats) return;
+            if (inst == null || !inst.HasSplatsReady) return;
             renderer.EnqueuePass(m_Pass);
         }
 

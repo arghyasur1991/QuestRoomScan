@@ -10,6 +10,7 @@ Shader "Genesis/SplatRender"
             Tags { "LightMode"="SRPDefaultUnlit" }
             ZWrite Off
             ZTest LEqual
+            // Back-to-front premultiplied alpha
             Blend One OneMinusSrcAlpha
             Cull Off
 
@@ -22,19 +23,16 @@ Shader "Genesis/SplatRender"
 
             struct SplatViewData
             {
-                float3 worldPos;
-                float depth;
-                float3 cov3dA;  // upper triangle: (c00, c01, c02)
-                float3 cov3dB;  // upper triangle: (c11, c12, c22)
-                uint2 color;
+                float4 pos;      // clip-space center (per-eye)
+                float2 axis1;    // screen-space 2D covariance axis
+                float2 axis2;    // screen-space 2D covariance axis
+                uint2 color;     // packed fp16 RGBA
             };
 
             StructuredBuffer<SplatViewData> _SplatViewData;
-            float4x4 _SplatVP;
-            float4x4 _SplatView;  // render-time view matrix (for EWA projection)
-            float2 _SplatFocal;   // (fx, fy) focal lengths in pixels
-            float2 _SplatScreen;  // (width, height) in pixels
             uint _SplatCount;
+            uint _EyeIndex;
+            uint _IsStereo;
 
 #ifdef _SORT_RADIX
             StructuredBuffer<uint> _OrderBuffer;
@@ -50,32 +48,12 @@ Shader "Genesis/SplatRender"
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
-            void DecomposeCovariance(float3 cov2d, out float2 v1, out float2 v2)
-            {
-                float diag1 = cov2d.x, diag2 = cov2d.z, offDiag = cov2d.y;
-                float mid = 0.5 * (diag1 + diag2);
-                float radius = length(float2((diag1 - diag2) * 0.5, offDiag));
-                float lambda1 = mid + radius;
-                float lambda2 = max(mid - radius, 0.1);
-
-                float2 rawVec = float2(offDiag, lambda1 - diag1);
-                float len = length(rawVec);
-                float2 diagVec = len > 1e-6 ? rawVec / len : float2(1, 0);
-                diagVec.y = -diagVec.y;
-
-                float maxSize = 4096.0;
-                v1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
-                v2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
-            }
-
-            Varyings vert(uint vertID : SV_VertexID)
+            Varyings vert(uint vertID : SV_VertexID, uint instID : SV_InstanceID)
             {
                 Varyings o = (Varyings)0;
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
 
-                uint quadVert = vertID & 3;
-                uint splatIdx = vertID >> 2;
-
+                uint splatIdx = instID;
                 if (splatIdx >= _SplatCount)
                 {
                     o.positionHCS = asfloat(0x7fc00000);
@@ -87,73 +65,27 @@ Shader "Genesis/SplatRender"
 #else
                 uint origIdx = _SortBuffer[splatIdx].y;
 #endif
-                SplatViewData sv = _SplatViewData[origIdx];
+                uint viewIdx = _IsStereo ? origIdx * 2 + _EyeIndex : origIdx;
+                SplatViewData view = _SplatViewData[viewIdx];
 
-                float4 centerClip = mul(_SplatVP, float4(sv.worldPos, 1));
+                float4 centerClip = view.pos;
                 if (centerClip.w <= 0)
                 {
                     o.positionHCS = asfloat(0x7fc00000);
                     return o;
                 }
 
-                // EWA projection: 3D cov → 2D cov using the render-time view matrix (+Z fwd)
-                float3 pView = float3(
-                    _SplatView[0][0]*sv.worldPos.x + _SplatView[0][1]*sv.worldPos.y + _SplatView[0][2]*sv.worldPos.z + _SplatView[0][3],
-                    _SplatView[1][0]*sv.worldPos.x + _SplatView[1][1]*sv.worldPos.y + _SplatView[1][2]*sv.worldPos.z + _SplatView[1][3],
-                    _SplatView[2][0]*sv.worldPos.x + _SplatView[2][1]*sv.worldPos.y + _SplatView[2][2]*sv.worldPos.z + _SplatView[2][3]
-                );
+                o.col.r = f16tof32(view.color.x >> 16);
+                o.col.g = f16tof32(view.color.x);
+                o.col.b = f16tof32(view.color.y >> 16);
+                o.col.a = f16tof32(view.color.y);
 
-                float fx = _SplatFocal.x, fy = _SplatFocal.y;
-
-                // FOV limiter: clamp projected position to avoid numerical issues
-                // at extreme view angles (matches ProjectCov3DEWA in GSplatHelpers.hlsl)
-                float tanFovX = 0.5 * _SplatScreen.x / fx;
-                float tanFovY = 0.5 * _SplatScreen.y / fy;
-                float limX = 1.3 * tanFovX;
-                float limY = 1.3 * tanFovY;
-                pView.x = pView.z * clamp(pView.x / pView.z, -limX, limX);
-                pView.y = pView.z * clamp(pView.y / pView.z, -limY, limY);
-
-                float rz = 1.0 / pView.z;
-                float rz2 = rz * rz;
-
-                float j00 = fx * rz;
-                float j11 = fy * rz;
-                float j20 = -fx * pView.x * rz2;
-                float j21 = -fy * pView.y * rz2;
-
-                // T = J * W (W = top-left 3x3 of view matrix)
-                float3 mr0 = float3(_SplatView[0][0], _SplatView[0][1], _SplatView[0][2]);
-                float3 mr1 = float3(_SplatView[1][0], _SplatView[1][1], _SplatView[1][2]);
-                float3 mr2 = float3(_SplatView[2][0], _SplatView[2][1], _SplatView[2][2]);
-                float3 t0 = j00 * mr0 + j20 * mr2;
-                float3 t1 = j11 * mr1 + j21 * mr2;
-
-                // cov2D = T * Σ3D * T^T (symmetric, store upper triangle)
-                float v00 = sv.cov3dA.x, v01 = sv.cov3dA.y, v02 = sv.cov3dA.z;
-                float v11 = sv.cov3dB.x, v12 = sv.cov3dB.y, v22 = sv.cov3dB.z;
-                float3 tv0 = float3(t0.x*v00 + t0.y*v01 + t0.z*v02,
-                                    t0.x*v01 + t0.y*v11 + t0.z*v12,
-                                    t0.x*v02 + t0.y*v12 + t0.z*v22);
-                float3 tv1 = float3(t1.x*v00 + t1.y*v01 + t1.z*v02,
-                                    t1.x*v01 + t1.y*v11 + t1.z*v12,
-                                    t1.x*v02 + t1.y*v12 + t1.z*v22);
-                float3 cov2d = float3(dot(tv0, t0) + 0.3, dot(tv0, t1), dot(tv1, t1) + 0.3);
-
-                float2 axis1, axis2;
-                DecomposeCovariance(cov2d, axis1, axis2);
-
-                o.col.r = f16tof32(sv.color.x >> 16);
-                o.col.g = f16tof32(sv.color.x);
-                o.col.b = f16tof32(sv.color.y >> 16);
-                o.col.a = f16tof32(sv.color.y);
-
-                float2 quadPos = float2(quadVert & 1, (quadVert >> 1) & 1) * 2.0 - 1.0;
+                float2 quadPos = float2(vertID & 1, (vertID >> 1) & 1) * 2.0 - 1.0;
                 quadPos *= 2.0;
                 o.quadUV = quadPos;
 
-                float2 deltaScreen = (quadPos.x * axis1 + quadPos.y * axis2)
-                                     * 2.0 / _SplatScreen;
+                float2 deltaScreen = (quadPos.x * view.axis1 + quadPos.y * view.axis2)
+                                     * 2.0 / _ScreenParams.xy;
                 o.positionHCS = centerClip;
                 o.positionHCS.xy += deltaScreen * centerClip.w;
 

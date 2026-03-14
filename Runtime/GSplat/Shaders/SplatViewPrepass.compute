@@ -1,18 +1,17 @@
-// Compute prepass: computes world-space 3D covariance, evaluates SH color,
-// packs into SplatViewData. One thread per Gaussian. Runs once per frame.
-// Stores WORLD-SPACE position and 3D covariance (both view-independent)
-// so the vertex shader can apply late-latched per-eye view/VP matrices at
-// render time for both center position AND covariance axis computation.
+// Compute prepass: projects Gaussians to 2D, computes covariance axes,
+// evaluates SH color, packs into SplatViewData. One thread per Gaussian.
+// Runs inside the render pass command buffer (like UGS) so matrices are
+// from the late-latched camera pose. Uses mono MV/P for covariance, per-eye
+// VP for clip positions. For stereo, writes 2 entries per splat.
 #pragma kernel CSCalcViewData
 
 #include "GSplatHelpers.hlsl"
 
 struct SplatViewData
 {
-    float3 worldPos; // world-space center
-    float depth;     // view-space depth (for sorting)
-    float3 cov3dA;   // upper triangle of 3D covariance: (c00, c01, c02)
-    float3 cov3dB;   // upper triangle continued: (c11, c12, c22)
+    float4 pos;      // clip-space center (per-eye)
+    float2 axis1;    // screen-space 2D covariance axis
+    float2 axis2;    // screen-space 2D covariance axis
     uint2 color;     // packed fp16: x = (r<<16)|g, y = (b<<16)|a
 };
 
@@ -20,9 +19,12 @@ uint _NumPoints;
 uint _WriteOffset;
 float _SplatSize;
 uint _SHDegree;
-float4x4 _ViewMatrix;   // positive-Z-forward view (for cov2d + depth)
-float2 _Focal;
-float2 _ScreenSize;
+uint _IsStereo;
+float4x4 _ViewMatrix;      // mono worldToCameraMatrix (Unity -Z forward)
+float4x4 _ProjMatrix;      // mono projection (for focal length)
+float4x4 _VPMatrixLeft;    // per-eye VP (left or mono)
+float4x4 _VPMatrixRight;   // per-eye VP (right, stereo only)
+float4 _VecScreenParams;   // (width, height, 0, 0)
 float3 _CamPos;
 
 StructuredBuffer<float> _Means;
@@ -34,8 +36,58 @@ StructuredBuffer<float> _Opacities;
 
 RWStructuredBuffer<SplatViewData> _ViewData;
 
-// DecomposeCovariance moved to SplatRender.shader vertex shader
-// so it uses the late-latched render-time view matrix.
+void DecomposeCovariance(float3 cov2d, out float2 v1, out float2 v2)
+{
+    float diag1 = cov2d.x, diag2 = cov2d.z, offDiag = cov2d.y;
+    float mid = 0.5 * (diag1 + diag2);
+    float radius = length(float2((diag1 - diag2) * 0.5, offDiag));
+    float lambda1 = mid + radius;
+    float lambda2 = max(mid - radius, 0.1);
+
+    float2 rawVec = float2(offDiag, lambda1 - diag1);
+    float len = length(rawVec);
+    float2 diagVec = len > 1e-6 ? rawVec / len : float2(1, 0);
+    diagVec.y = -diagVec.y;
+
+    float maxSize = 4096.0;
+    v1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
+    v2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
+}
+
+// EWA projection matching UGS CalcCovariance2D: single focal, mono view
+float3 CalcCovariance2DUGS(float3 worldPos, float cov3d[6],
+                           float4x4 viewMatrix, float4x4 projMatrix, float4 screenParams)
+{
+    float3 viewPos = mul(viewMatrix, float4(worldPos, 1)).xyz;
+
+    float aspect = projMatrix._m00 / projMatrix._m11;
+    float tanFovX = rcp(projMatrix._m00);
+    float tanFovY = rcp(projMatrix._m11 * aspect);
+    float limX = 1.3 * tanFovX;
+    float limY = 1.3 * tanFovY;
+    viewPos.x = clamp(viewPos.x / viewPos.z, -limX, limX) * viewPos.z;
+    viewPos.y = clamp(viewPos.y / viewPos.z, -limY, limY) * viewPos.z;
+
+    float focal = screenParams.x * projMatrix._m00 / 2;
+
+    float3x3 J = float3x3(
+        focal / viewPos.z, 0, -(focal * viewPos.x) / (viewPos.z * viewPos.z),
+        0, focal / viewPos.z, -(focal * viewPos.y) / (viewPos.z * viewPos.z),
+        0, 0, 0
+    );
+    float3x3 W = (float3x3)viewMatrix;
+    float3x3 T = mul(J, W);
+    float3x3 V = float3x3(
+        cov3d[0], cov3d[1], cov3d[2],
+        cov3d[1], cov3d[3], cov3d[4],
+        cov3d[2], cov3d[4], cov3d[5]
+    );
+    float3x3 cov = mul(T, mul(V, transpose(T)));
+
+    cov._m00 += 0.3;
+    cov._m11 += 0.3;
+    return float3(cov._m00, cov._m01, cov._m11);
+}
 
 [numthreads(256, 1, 1)]
 void CSCalcViewData(uint3 id : SV_DispatchThreadID)
@@ -43,25 +95,36 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
     uint idx = id.x;
     if (idx >= _NumPoints) return;
 
-    SplatViewData view = (SplatViewData)0;
+    uint stride = _IsStereo ? 2 : 1;
+    uint baseIdx = _WriteOffset + idx * stride;
+
+    SplatViewData viewL = (SplatViewData)0;
+    SplatViewData viewR = (SplatViewData)0;
 
     float3 wpos = float3(_Means[idx*3], _Means[idx*3+1], _Means[idx*3+2]);
 
-    float3 pView = Transform4x3(_ViewMatrix, wpos);
-    if (pView.z <= 0.01)
+    // Clip-space center (left/mono)
+    float4 clipL = mul(_VPMatrixLeft, float4(wpos, 1));
+    bool behindCam = clipL.w <= 0;
+    if (behindCam)
     {
-        _ViewData[_WriteOffset + idx] = view;
+        _ViewData[baseIdx] = viewL;
+        if (_IsStereo) _ViewData[baseIdx + 1] = viewR;
         return;
     }
 
-    // 3D covariance (world-space, view-independent)
+    // 3D covariance
     float3 expScale = exp(float3(_Scales[idx*3], _Scales[idx*3+1], _Scales[idx*3+2]));
     float4 quat = float4(_Quats[idx*4], _Quats[idx*4+1], _Quats[idx*4+2], _Quats[idx*4+3]);
-
     float cov3d[6];
     ScaleRotToCov3D(expScale, _SplatSize, quat, cov3d);
 
-    // SH color evaluation
+    // 2D covariance from MONO view (shared between eyes, matches UGS)
+    float3 cov2d = CalcCovariance2DUGS(wpos, cov3d, _ViewMatrix, _ProjMatrix, _VecScreenParams);
+    float2 ax1, ax2;
+    DecomposeCovariance(cov2d, ax1, ax2);
+
+    // SH color
     float3 viewdir = normalize(wpos - _CamPos);
     uint numBases = NumSHBases(_SHDegree);
     uint restSize = (numBases - 1) * 3;
@@ -75,10 +138,19 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
     packedColor.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
     packedColor.y = (f32tof16(col.b) << 16) | f32tof16(alpha);
 
-    view.worldPos = wpos;
-    view.depth = pView.z;
-    view.cov3dA = float3(cov3d[0], cov3d[1], cov3d[2]);
-    view.cov3dB = float3(cov3d[3], cov3d[4], cov3d[5]);
-    view.color = packedColor;
-    _ViewData[_WriteOffset + idx] = view;
+    viewL.pos = clipL;
+    viewL.axis1 = ax1;
+    viewL.axis2 = ax2;
+    viewL.color = packedColor;
+    _ViewData[baseIdx] = viewL;
+
+    if (_IsStereo)
+    {
+        float4 clipR = mul(_VPMatrixRight, float4(wpos, 1));
+        viewR.pos = clipR;
+        viewR.axis1 = ax1;
+        viewR.axis2 = ax2;
+        viewR.color = packedColor;
+        _ViewData[baseIdx + 1] = viewR;
+    }
 }

@@ -6,14 +6,12 @@ using UnityEngine.XR;
 namespace Genesis.RoomScan.GSplat
 {
     /// <summary>
-    /// Renders Gaussian splats via compute prepass → GPU sort → URP render pass.
-    /// Zero-copy from training buffers. All sectors concatenated into one draw call.
-    /// Uses radix sort (13 dispatches) with bitonic fallback for Quest compatibility.
-    ///
-    /// The prepass outputs world-space positions so the vertex shader can apply
-    /// the late-latched per-eye VP matrix at render time, eliminating VR jitter.
-    /// Drawing is deferred to <see cref="GSplatRenderFeature"/> which handles
-    /// per-eye RT slice targeting required for Quest stereo.
+    /// Renders Gaussian splats via compute prepass -> GPU sort -> draw.
+    /// All compute work (prepass + sort) executes inside the URP render pass
+    /// command buffer (like UGS) so camera matrices are from the late-latched
+    /// pose. Covariance uses mono MV/P; clip positions are per-eye.
+    /// For stereo, writes 2 SplatViewData entries per splat (L+R).
+    /// Front-to-back sort + Blend OneMinusDstAlpha One.
     /// </summary>
     public class GSSectorRenderer : MonoBehaviour
     {
@@ -33,18 +31,12 @@ namespace Genesis.RoomScan.GSplat
         bool _loggedFirstDraw;
 
         int _preparedTotalCount;
-        bool _preparedIsStereo;
 
-        /// <summary>True when LateUpdate has prepared splat data for the current frame.</summary>
-        public bool HasPreparedSplats => _preparedTotalCount > 0;
-
-        /// <summary>Whether the current frame's prepared data is for stereo rendering.</summary>
-        public bool IsStereoMode => _preparedIsStereo;
+        public bool HasSplatsReady => _preparedTotalCount > 0;
 
         GraphicsBuffer _viewDataBuffer;
         int _viewDataCapacity;
 
-        // Radix sort buffers (separate key/payload)
         GraphicsBuffer _sortKeysBuffer;
         GraphicsBuffer _sortPayloadBuffer;
         int _sortCapacity;
@@ -52,7 +44,6 @@ namespace Genesis.RoomScan.GSplat
         GpuRadixSort.Resources _radixResources;
         bool _useRadixSort;
 
-        // Bitonic sort fallback
         GraphicsBuffer _bitonicSortBuffer;
         int _bitonicCapacity;
 
@@ -61,35 +52,36 @@ namespace Genesis.RoomScan.GSplat
         int _initSortBitonicKernel = -1;
         int _bitonicStepKernel = -1;
 
-        static readonly int ID_NumPoints     = Shader.PropertyToID("_NumPoints");
-        static readonly int ID_WriteOffset   = Shader.PropertyToID("_WriteOffset");
-        static readonly int ID_SplatSize     = Shader.PropertyToID("_SplatSize");
-        static readonly int ID_SHDegree      = Shader.PropertyToID("_SHDegree");
-        static readonly int ID_ViewMatrix    = Shader.PropertyToID("_ViewMatrix");
-        static readonly int ID_Focal         = Shader.PropertyToID("_Focal");
-        static readonly int ID_ScreenSize    = Shader.PropertyToID("_ScreenSize");
-        static readonly int ID_CamPos        = Shader.PropertyToID("_CamPos");
-        static readonly int ID_Means         = Shader.PropertyToID("_Means");
-        static readonly int ID_Scales        = Shader.PropertyToID("_Scales");
-        static readonly int ID_Quats         = Shader.PropertyToID("_Quats");
-        static readonly int ID_FeaturesDC    = Shader.PropertyToID("_FeaturesDC");
-        static readonly int ID_FeaturesRest  = Shader.PropertyToID("_FeaturesRest");
-        static readonly int ID_Opacities     = Shader.PropertyToID("_Opacities");
-        static readonly int ID_ViewData      = Shader.PropertyToID("_ViewData");
-        static readonly int ID_SplatViewData = Shader.PropertyToID("_SplatViewData");
-        static readonly int ID_SplatCount    = Shader.PropertyToID("_SplatCount");
-        static readonly int ID_OrderBuffer   = Shader.PropertyToID("_OrderBuffer");
-        static readonly int ID_SortKeys      = Shader.PropertyToID("_SortKeys");
-        static readonly int ID_SortPayload   = Shader.PropertyToID("_SortPayload");
-        static readonly int ID_Count         = Shader.PropertyToID("_Count");
-        static readonly int ID_PaddedCount   = Shader.PropertyToID("_PaddedCount");
-        static readonly int ID_StepSize      = Shader.PropertyToID("_StepSize");
-        static readonly int ID_GroupSize     = Shader.PropertyToID("_GroupSize");
-        static readonly int ID_SortBuffer    = Shader.PropertyToID("_SortBuffer");
-        static readonly int ID_SplatVP = Shader.PropertyToID("_SplatVP");
-        static readonly int ID_SplatView = Shader.PropertyToID("_SplatView");
-        static readonly int ID_SplatFocal = Shader.PropertyToID("_SplatFocal");
-        static readonly int ID_SplatScreen = Shader.PropertyToID("_SplatScreen");
+        static readonly int ID_NumPoints       = Shader.PropertyToID("_NumPoints");
+        static readonly int ID_WriteOffset     = Shader.PropertyToID("_WriteOffset");
+        static readonly int ID_SplatSize       = Shader.PropertyToID("_SplatSize");
+        static readonly int ID_SHDegree        = Shader.PropertyToID("_SHDegree");
+        static readonly int ID_IsStereo        = Shader.PropertyToID("_IsStereo");
+        static readonly int ID_ViewMatrix      = Shader.PropertyToID("_ViewMatrix");
+        static readonly int ID_ProjMatrix      = Shader.PropertyToID("_ProjMatrix");
+        static readonly int ID_VPMatrixLeft    = Shader.PropertyToID("_VPMatrixLeft");
+        static readonly int ID_VPMatrixRight   = Shader.PropertyToID("_VPMatrixRight");
+        static readonly int ID_VecScreenParams = Shader.PropertyToID("_VecScreenParams");
+        static readonly int ID_CamPos          = Shader.PropertyToID("_CamPos");
+        static readonly int ID_Means           = Shader.PropertyToID("_Means");
+        static readonly int ID_Scales          = Shader.PropertyToID("_Scales");
+        static readonly int ID_Quats           = Shader.PropertyToID("_Quats");
+        static readonly int ID_FeaturesDC      = Shader.PropertyToID("_FeaturesDC");
+        static readonly int ID_FeaturesRest    = Shader.PropertyToID("_FeaturesRest");
+        static readonly int ID_Opacities       = Shader.PropertyToID("_Opacities");
+        static readonly int ID_ViewData        = Shader.PropertyToID("_ViewData");
+        static readonly int ID_SplatViewData   = Shader.PropertyToID("_SplatViewData");
+        static readonly int ID_SplatCount      = Shader.PropertyToID("_SplatCount");
+        static readonly int ID_EyeIndex        = Shader.PropertyToID("_EyeIndex");
+        static readonly int ID_OrderBuffer     = Shader.PropertyToID("_OrderBuffer");
+        static readonly int ID_SortKeys        = Shader.PropertyToID("_SortKeys");
+        static readonly int ID_SortPayload     = Shader.PropertyToID("_SortPayload");
+        static readonly int ID_Count           = Shader.PropertyToID("_Count");
+        static readonly int ID_PaddedCount     = Shader.PropertyToID("_PaddedCount");
+        static readonly int ID_Stride          = Shader.PropertyToID("_Stride");
+        static readonly int ID_StepSize        = Shader.PropertyToID("_StepSize");
+        static readonly int ID_GroupSize       = Shader.PropertyToID("_GroupSize");
+        static readonly int ID_SortBuffer      = Shader.PropertyToID("_SortBuffer");
 
         public Material SplatMaterial
         {
@@ -97,10 +89,7 @@ namespace Genesis.RoomScan.GSplat
             set => splatMaterial = value;
         }
 
-        void OnEnable()
-        {
-            ActiveInstance = this;
-        }
+        void OnEnable() => ActiveInstance = this;
 
         public void Initialize(SectorScheduler scheduler)
         {
@@ -119,13 +108,11 @@ namespace Genesis.RoomScan.GSplat
                 _bitonicStepKernel = sortCompute.FindKernel("CSBitonicStep");
             }
 
-            // Try radix sort first
             if (radixSortCompute != null)
             {
                 _radixSort = new GpuRadixSort(radixSortCompute);
                 _useRadixSort = _radixSort.Valid;
             }
-
             if (!_useRadixSort)
                 Debug.LogWarning("[GSSectorRenderer] Radix sort unavailable, using bitonic fallback");
 
@@ -138,19 +125,18 @@ namespace Genesis.RoomScan.GSplat
             }
 
             _ready = true;
-            Debug.Log($"[GSSectorRenderer] Initialized, material={splatMaterial?.name ?? "NULL"}, " +
-                      $"prepass={viewPrepassCompute?.name ?? "NULL"}, " +
-                      $"sort={(_useRadixSort ? "radix(13 dispatches)" : "bitonic(O(log²N))")}");
+            Debug.Log($"[GSSectorRenderer] Initialized, sort={(_useRadixSort ? "radix" : "bitonic")}");
         }
 
-        void EnsureBuffers(int totalCount)
+        void EnsureBuffers(int totalCount, bool stereo)
         {
-            if (_viewDataBuffer == null || _viewDataCapacity < totalCount)
+            int viewEntries = stereo ? totalCount * 2 : totalCount;
+            if (_viewDataBuffer == null || _viewDataCapacity < viewEntries)
             {
                 _viewDataBuffer?.Release();
-                _viewDataCapacity = Mathf.Max(totalCount, 1024);
+                _viewDataCapacity = Mathf.Max(viewEntries, 1024);
                 _viewDataBuffer = new GraphicsBuffer(
-                    GraphicsBuffer.Target.Structured, _viewDataCapacity, 48);
+                    GraphicsBuffer.Target.Structured, _viewDataCapacity, 40);
             }
 
             if (_useRadixSort)
@@ -160,7 +146,6 @@ namespace Genesis.RoomScan.GSplat
                     _sortKeysBuffer?.Release();
                     _sortPayloadBuffer?.Release();
                     _radixResources.Dispose();
-
                     _sortCapacity = Mathf.Max(totalCount, 1024);
                     _sortKeysBuffer = new GraphicsBuffer(
                         GraphicsBuffer.Target.Structured, _sortCapacity, 4) { name = "SplatSortKeys" };
@@ -182,10 +167,13 @@ namespace Genesis.RoomScan.GSplat
             }
         }
 
+        /// <summary>
+        /// Called each frame from LateUpdate to count ready splats.
+        /// Buffer allocation is done here; actual compute is deferred to PrepareAndSort.
+        /// </summary>
         void LateUpdate()
         {
             _preparedTotalCount = 0;
-
             if (!_ready || _scheduler == null || splatMaterial == null || _prepassKernel < 0)
                 return;
 
@@ -200,127 +188,140 @@ namespace Genesis.RoomScan.GSplat
                 totalCount += buf.CurrentCount;
             if (totalCount <= 0) return;
 
+            bool isStereo = XRSettings.enabled && cam.stereoEnabled;
+            EnsureBuffers(totalCount, isStereo);
+
+            _preparedTotalCount = totalCount;
+        }
+
+        /// <summary>
+        /// Records prepass + sort dispatches into the command buffer.
+        /// Called from <see cref="GSplatRenderFeature"/> at render time so
+        /// all camera matrices are from the late-latched pose.
+        /// </summary>
+        public void PrepareAndSort(CommandBuffer cmd, Camera cam, bool isStereo,
+                                   Matrix4x4 vpLeft, Matrix4x4 vpRight)
+        {
+            if (_preparedTotalCount <= 0 || _prepassKernel < 0) return;
+
+            int totalCount = _preparedTotalCount;
+            int stride = isStereo ? 2 : 1;
+
             if (!_loggedFirstDraw)
             {
                 _loggedFirstDraw = true;
                 Debug.Log($"[GSSectorRenderer] First draw: {_readySectors.Count} sector(s), " +
-                          $"{totalCount} total gaussians, splatSize={splatSizeMultiplier}, " +
-                          $"sort={(_useRadixSort ? "radix" : "bitonic")}");
+                          $"{totalCount} gaussians, stereo={isStereo}");
             }
 
-            EnsureBuffers(totalCount);
+            // Mono view matrix (Unity convention: -Z forward)
+            Matrix4x4 monoView = cam.worldToCameraMatrix;
+            Matrix4x4 monoProj = cam.projectionMatrix;
 
-            var camT = cam.transform;
-            Matrix4x4 viewPosZ = Matrix4x4.TRS(camT.position, camT.rotation, Vector3.one).inverse;
-
-            bool isStereo = XRSettings.enabled && cam.stereoEnabled;
             float screenW = isStereo ? XRSettings.eyeTextureWidth : cam.pixelWidth;
             float screenH = isStereo ? XRSettings.eyeTextureHeight : cam.pixelHeight;
-            float fx = Mathf.Abs(cam.projectionMatrix[0, 0]) * screenW / 2f;
-            float fy = Mathf.Abs(cam.projectionMatrix[1, 1]) * screenH / 2f;
 
-            // --- Phase 1: Compute prepass (world-space output, VP-independent) ---
-            viewPrepassCompute.SetFloat(ID_SplatSize, splatSizeMultiplier);
-            viewPrepassCompute.SetInt(ID_SHDegree, shDegree);
-            viewPrepassCompute.SetMatrix(ID_ViewMatrix, viewPosZ);
-            viewPrepassCompute.SetVector(ID_Focal, new Vector4(fx, fy, 0, 0));
-            viewPrepassCompute.SetVector(ID_ScreenSize, new Vector4(screenW, screenH, 0, 0));
-            viewPrepassCompute.SetVector(ID_CamPos, (Vector4)camT.position);
-            viewPrepassCompute.SetBuffer(_prepassKernel, ID_ViewData, _viewDataBuffer);
+            // --- Phase 1: Prepass (command buffer dispatch) ---
+            cmd.SetComputeFloatParam(viewPrepassCompute, ID_SplatSize, splatSizeMultiplier);
+            cmd.SetComputeIntParam(viewPrepassCompute, ID_SHDegree, shDegree);
+            cmd.SetComputeIntParam(viewPrepassCompute, ID_IsStereo, isStereo ? 1 : 0);
+            cmd.SetComputeMatrixParam(viewPrepassCompute, ID_ViewMatrix, monoView);
+            cmd.SetComputeMatrixParam(viewPrepassCompute, ID_ProjMatrix, monoProj);
+            cmd.SetComputeMatrixParam(viewPrepassCompute, ID_VPMatrixLeft, vpLeft);
+            cmd.SetComputeMatrixParam(viewPrepassCompute, ID_VPMatrixRight, isStereo ? vpRight : vpLeft);
+            cmd.SetComputeVectorParam(viewPrepassCompute, ID_VecScreenParams,
+                new Vector4(screenW, screenH, 0, 0));
+            cmd.SetComputeVectorParam(viewPrepassCompute, ID_CamPos,
+                (Vector4)cam.transform.position);
+            cmd.SetComputeBufferParam(viewPrepassCompute, _prepassKernel,
+                ID_ViewData, _viewDataBuffer);
 
             int writeOffset = 0;
-            foreach (var (id, buffers) in _readySectors)
+            foreach (var (_, buffers) in _readySectors)
             {
                 int n = buffers.CurrentCount;
                 if (n <= 0) continue;
 
-                viewPrepassCompute.SetInt(ID_NumPoints, n);
-                viewPrepassCompute.SetInt(ID_WriteOffset, writeOffset);
-                viewPrepassCompute.SetBuffer(_prepassKernel, ID_Means, buffers.Means);
-                viewPrepassCompute.SetBuffer(_prepassKernel, ID_Scales, buffers.Scales);
-                viewPrepassCompute.SetBuffer(_prepassKernel, ID_Quats, buffers.Quats);
-                viewPrepassCompute.SetBuffer(_prepassKernel, ID_FeaturesDC, buffers.FeaturesDC);
-                viewPrepassCompute.SetBuffer(_prepassKernel, ID_FeaturesRest, buffers.FeaturesRest);
-                viewPrepassCompute.SetBuffer(_prepassKernel, ID_Opacities, buffers.Opacities);
+                cmd.SetComputeIntParam(viewPrepassCompute, ID_NumPoints, n);
+                cmd.SetComputeIntParam(viewPrepassCompute, ID_WriteOffset, writeOffset);
+                cmd.SetComputeBufferParam(viewPrepassCompute, _prepassKernel, ID_Means, buffers.Means);
+                cmd.SetComputeBufferParam(viewPrepassCompute, _prepassKernel, ID_Scales, buffers.Scales);
+                cmd.SetComputeBufferParam(viewPrepassCompute, _prepassKernel, ID_Quats, buffers.Quats);
+                cmd.SetComputeBufferParam(viewPrepassCompute, _prepassKernel, ID_FeaturesDC, buffers.FeaturesDC);
+                cmd.SetComputeBufferParam(viewPrepassCompute, _prepassKernel, ID_FeaturesRest, buffers.FeaturesRest);
+                cmd.SetComputeBufferParam(viewPrepassCompute, _prepassKernel, ID_Opacities, buffers.Opacities);
 
                 int groups = (n + 255) / 256;
-                viewPrepassCompute.Dispatch(_prepassKernel, groups, 1, 1);
+                cmd.DispatchCompute(viewPrepassCompute, _prepassKernel, groups, 1, 1);
 
-                writeOffset += n;
+                writeOffset += n * stride;
             }
 
-            // --- Phase 2: Sort by view-space depth ---
+            // --- Phase 2: Sort ---
             if (_useRadixSort)
-                DispatchRadixSort(totalCount);
+                DispatchRadixSort(cmd, totalCount, stride);
             else if (_initSortBitonicKernel >= 0 && _bitonicStepKernel >= 0)
-                DispatchBitonicSort(totalCount);
+                DispatchBitonicSort(cmd, totalCount, stride);
 
-            // --- Phase 3: Bind buffers on material for the URP render pass ---
+            // --- Phase 3: Bind on material ---
             splatMaterial.SetBuffer(ID_SplatViewData, _viewDataBuffer);
             if (_useRadixSort)
                 splatMaterial.SetBuffer(ID_OrderBuffer, _sortPayloadBuffer);
             else
                 splatMaterial.SetBuffer(ID_SortBuffer, _bitonicSortBuffer);
             splatMaterial.SetInt(ID_SplatCount, totalCount);
-
-            _preparedTotalCount = totalCount;
-            _preparedIsStereo = isStereo;
         }
 
         /// <summary>
-        /// Called by <see cref="GSplatRenderFeature"/> from the URP render pass.
-        /// Both VP and view matrices are captured at render time (after XR late-latching)
-        /// so both splat positions AND covariance axes are world-locked.
+        /// Draws the splats for one eye. Called per-eye from the render pass.
         /// </summary>
-        public void DrawSplats(CommandBuffer cmd, Matrix4x4 viewProjMatrix,
-                               Matrix4x4 viewMatrix, float fx, float fy,
-                               float screenW, float screenH)
+        public void DrawSplats(CommandBuffer cmd, int eyeIndex, bool isStereo)
         {
             if (_preparedTotalCount <= 0 || splatMaterial == null) return;
 
-            _props.SetMatrix(ID_SplatVP, viewProjMatrix);
-            _props.SetMatrix(ID_SplatView, viewMatrix);
-            _props.SetVector(ID_SplatFocal, new Vector4(fx, fy, 0, 0));
-            _props.SetVector(ID_SplatScreen, new Vector4(screenW, screenH, 0, 0));
+            _props.SetInteger(ID_EyeIndex, eyeIndex);
+            _props.SetInteger(ID_IsStereo, isStereo ? 1 : 0);
 
             cmd.DrawProcedural(
                 Matrix4x4.identity, splatMaterial, 0,
-                MeshTopology.Quads, _preparedTotalCount * 4, 1, _props);
+                MeshTopology.Triangles, 6, _preparedTotalCount, _props);
         }
 
-        void DispatchRadixSort(int totalCount)
+        void DispatchRadixSort(CommandBuffer cmd, int totalCount, int stride)
         {
             int threadGroups = (totalCount + 255) / 256;
 
-            sortCompute.SetInt(ID_Count, totalCount);
-            sortCompute.SetInt(ID_PaddedCount, totalCount);
-            sortCompute.SetBuffer(_initSortKernel, ID_ViewData, _viewDataBuffer);
-            sortCompute.SetBuffer(_initSortKernel, ID_SortKeys, _sortKeysBuffer);
-            sortCompute.SetBuffer(_initSortKernel, ID_SortPayload, _sortPayloadBuffer);
-            sortCompute.Dispatch(_initSortKernel, threadGroups, 1, 1);
+            cmd.SetComputeIntParam(sortCompute, ID_Count, totalCount);
+            cmd.SetComputeIntParam(sortCompute, ID_PaddedCount, totalCount);
+            cmd.SetComputeIntParam(sortCompute, ID_Stride, stride);
+            cmd.SetComputeBufferParam(sortCompute, _initSortKernel, ID_ViewData, _viewDataBuffer);
+            cmd.SetComputeBufferParam(sortCompute, _initSortKernel, ID_SortKeys, _sortKeysBuffer);
+            cmd.SetComputeBufferParam(sortCompute, _initSortKernel, ID_SortPayload, _sortPayloadBuffer);
+            cmd.DispatchCompute(sortCompute, _initSortKernel, threadGroups, 1, 1);
 
-            _radixSort.Dispatch(totalCount, _sortKeysBuffer, _sortPayloadBuffer, _radixResources);
+            _radixSort.Dispatch(cmd, totalCount, _sortKeysBuffer, _sortPayloadBuffer, _radixResources);
         }
 
-        void DispatchBitonicSort(int totalCount)
+        void DispatchBitonicSort(CommandBuffer cmd, int totalCount, int stride)
         {
             int padded = Mathf.NextPowerOfTwo(totalCount);
             int threadGroups = (padded + 255) / 256;
 
-            sortCompute.SetInt(ID_Count, totalCount);
-            sortCompute.SetInt(ID_PaddedCount, padded);
-            sortCompute.SetBuffer(_initSortBitonicKernel, ID_ViewData, _viewDataBuffer);
-            sortCompute.SetBuffer(_initSortBitonicKernel, ID_SortBuffer, _bitonicSortBuffer);
-            sortCompute.Dispatch(_initSortBitonicKernel, threadGroups, 1, 1);
+            cmd.SetComputeIntParam(sortCompute, ID_Count, totalCount);
+            cmd.SetComputeIntParam(sortCompute, ID_PaddedCount, padded);
+            cmd.SetComputeIntParam(sortCompute, ID_Stride, stride);
+            cmd.SetComputeBufferParam(sortCompute, _initSortBitonicKernel, ID_ViewData, _viewDataBuffer);
+            cmd.SetComputeBufferParam(sortCompute, _initSortBitonicKernel, ID_SortBuffer, _bitonicSortBuffer);
+            cmd.DispatchCompute(sortCompute, _initSortBitonicKernel, threadGroups, 1, 1);
 
-            sortCompute.SetBuffer(_bitonicStepKernel, ID_SortBuffer, _bitonicSortBuffer);
+            cmd.SetComputeBufferParam(sortCompute, _bitonicStepKernel, ID_SortBuffer, _bitonicSortBuffer);
             for (int k = 2; k <= padded; k <<= 1)
             {
                 for (int j = k >> 1; j >= 1; j >>= 1)
                 {
-                    sortCompute.SetInt(ID_StepSize, j);
-                    sortCompute.SetInt(ID_GroupSize, k);
-                    sortCompute.Dispatch(_bitonicStepKernel, threadGroups, 1, 1);
+                    cmd.SetComputeIntParam(sortCompute, ID_StepSize, j);
+                    cmd.SetComputeIntParam(sortCompute, ID_GroupSize, k);
+                    cmd.DispatchCompute(sortCompute, _bitonicStepKernel, threadGroups, 1, 1);
                 }
             }
         }
