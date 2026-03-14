@@ -18,29 +18,25 @@ Shader "Genesis/SplatRender"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
-            struct GaussianData
-            {
-                float3 pos;
-                float3 conic;   // inverse 2D covariance
-                float3 color;   // RGB (SH evaluated, clamped)
-                float  opacity; // sigmoid
-                float  radius;  // screen-space radius
-            };
-
-            StructuredBuffer<GaussianData> _SplatData;
-            StructuredBuffer<uint>         _SplatIndices; // sorted by depth
+            StructuredBuffer<float> _Means;       // [N*3] world xyz
+            StructuredBuffer<float> _FeaturesDC;  // [N*3] SH DC coefficients
+            StructuredBuffer<float> _Opacities;   // [N]   raw opacity (pre-sigmoid)
+            StructuredBuffer<float> _Scales;      // [N*3] log-space scales
             uint _SplatCount;
+            float _SplatSize;
+
+            static const float SH_C0 = 0.28209479177387814;
 
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
                 float2 quadUV : TEXCOORD0;
                 float3 color : TEXCOORD1;
-                float3 conic : TEXCOORD2;
-                float  opacity : TEXCOORD3;
-                float2 center : TEXCOORD4;
+                float  opacity : TEXCOORD2;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
+
+            float Sigmoid(float x) { return 1.0 / (1.0 + exp(-x)); }
 
             Varyings vert(uint vertID : SV_VertexID)
             {
@@ -55,25 +51,42 @@ Shader "Genesis/SplatRender"
                     return OUT;
                 }
 
-                uint idx = _SplatIndices[splatIdx];
-                GaussianData g = _SplatData[idx];
+                float3 pos = float3(
+                    _Means[splatIdx * 3],
+                    _Means[splatIdx * 3 + 1],
+                    _Means[splatIdx * 3 + 2]);
 
-                // Quad corners in clip space around the projected center
-                float4 clipPos = TransformWorldToHClip(g.pos);
-                float2 screenCenter = clipPos.xy / clipPos.w;
+                float3 dc = float3(
+                    _FeaturesDC[splatIdx * 3],
+                    _FeaturesDC[splatIdx * 3 + 1],
+                    _FeaturesDC[splatIdx * 3 + 2]);
+                float3 col = saturate(SH_C0 * dc + 0.5);
 
-                float2 r = g.radius * 2.0 / _ScreenParams.xy;
+                float rawOpacity = _Opacities[splatIdx];
+                float alpha = Sigmoid(rawOpacity);
+
+                float3 logScale = float3(
+                    _Scales[splatIdx * 3],
+                    _Scales[splatIdx * 3 + 1],
+                    _Scales[splatIdx * 3 + 2]);
+                float avgScale = (exp(logScale.x) + exp(logScale.y) + exp(logScale.z)) / 3.0;
+                float splatWorld = max(avgScale * _SplatSize, 0.005);
+
+                float4 clipPos = TransformWorldToHClip(pos);
 
                 float2 offsets[4] = {
                     float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1)
                 };
-                float2 off = offsets[quadVert] * r;
-                OUT.positionHCS = float4((screenCenter + off) * clipPos.w, clipPos.z, clipPos.w);
-                OUT.quadUV = offsets[quadVert] * g.radius;
-                OUT.center = float2(0, 0);
-                OUT.color = g.color;
-                OUT.conic = g.conic;
-                OUT.opacity = g.opacity;
+
+                float3 camRight = UNITY_MATRIX_V[0].xyz;
+                float3 camUp = UNITY_MATRIX_V[1].xyz;
+                float3 worldOffset = (offsets[quadVert].x * camRight + offsets[quadVert].y * camUp) * splatWorld;
+                float4 cornerClip = TransformWorldToHClip(pos + worldOffset);
+
+                OUT.positionHCS = cornerClip;
+                OUT.quadUV = offsets[quadVert];
+                OUT.color = col;
+                OUT.opacity = alpha;
 
                 return OUT;
             }
@@ -82,14 +95,11 @@ Shader "Genesis/SplatRender"
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(IN);
 
-                float2 delta = IN.quadUV - IN.center;
-                float sigma = 0.5 * (IN.conic.x * delta.x * delta.x +
-                                      IN.conic.z * delta.y * delta.y) +
-                              IN.conic.y * delta.x * delta.y;
+                float d2 = dot(IN.quadUV, IN.quadUV);
+                if (d2 > 1.0) discard;
 
-                if (sigma < 0 || sigma >= 5.55) discard;
-
-                float alpha = min(0.999, IN.opacity * exp(-sigma));
+                float falloff = exp(-4.0 * d2);
+                float alpha = IN.opacity * falloff;
                 if (alpha < 1.0 / 255.0) discard;
 
                 return half4(IN.color, alpha);

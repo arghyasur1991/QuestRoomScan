@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -7,20 +6,24 @@ namespace Genesis.RoomScan.GSplat
 {
     /// <summary>
     /// Renders trained Gaussian splat sectors directly from GPU training buffers.
-    /// Zero-copy: no file I/O or CPU readback. Uses RenderPrimitivesIndirect.
+    /// Zero-copy: no file I/O or CPU readback. Uses RenderPrimitives with billboard quads.
     /// </summary>
     public class GSSectorRenderer : MonoBehaviour
     {
         [SerializeField] Material splatMaterial;
+        [SerializeField, Range(1f, 8f)] float splatSizeMultiplier = 3f;
 
         SectorScheduler _scheduler;
         MaterialPropertyBlock _props;
         readonly List<(int id, GSplatBuffers buffers)> _readySectors = new();
         bool _ready;
 
-        static readonly int ID_SplatData = Shader.PropertyToID("_SplatData");
-        static readonly int ID_SplatIndices = Shader.PropertyToID("_SplatIndices");
+        static readonly int ID_Means = Shader.PropertyToID("_Means");
+        static readonly int ID_FeaturesDC = Shader.PropertyToID("_FeaturesDC");
+        static readonly int ID_Opacities = Shader.PropertyToID("_Opacities");
+        static readonly int ID_Scales = Shader.PropertyToID("_Scales");
         static readonly int ID_SplatCount = Shader.PropertyToID("_SplatCount");
+        static readonly int ID_SplatSize = Shader.PropertyToID("_SplatSize");
 
         public Material SplatMaterial
         {
@@ -33,6 +36,7 @@ namespace Genesis.RoomScan.GSplat
             _scheduler = scheduler;
             _props = new MaterialPropertyBlock();
             _ready = true;
+            Debug.Log($"[GSSectorRenderer] Initialized, material={splatMaterial?.name ?? "NULL"}");
         }
 
         void LateUpdate()
@@ -46,12 +50,12 @@ namespace Genesis.RoomScan.GSplat
             {
                 if (buffers.CurrentCount <= 0) continue;
 
-                // For now, render each sector's Gaussians as a billboard quad pass.
-                // The training buffers ARE the render buffers — zero copy.
-                // A proper implementation would sort by depth per frame,
-                // but for the initial version we skip sorting (sectors are small).
-                _props.SetBuffer(ID_SplatData, buffers.Means);
+                _props.SetBuffer(ID_Means, buffers.Means);
+                _props.SetBuffer(ID_FeaturesDC, buffers.FeaturesDC);
+                _props.SetBuffer(ID_Opacities, buffers.Opacities);
+                _props.SetBuffer(ID_Scales, buffers.Scales);
                 _props.SetInt(ID_SplatCount, buffers.CurrentCount);
+                _props.SetFloat(ID_SplatSize, splatSizeMultiplier);
 
                 var bounds = _scheduler.GetSectorBounds(id);
                 var rp = new RenderParams(splatMaterial)
@@ -63,7 +67,6 @@ namespace Genesis.RoomScan.GSplat
                     layer = gameObject.layer
                 };
 
-                // 4 vertices per splat (quad), 6 indices per quad
                 int vertexCount = buffers.CurrentCount * 4;
                 Graphics.RenderPrimitives(rp, MeshTopology.Quads, vertexCount);
             }
