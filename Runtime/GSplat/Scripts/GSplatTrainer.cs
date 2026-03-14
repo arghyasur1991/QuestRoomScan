@@ -53,7 +53,7 @@ namespace Genesis.RoomScan.GSplat
         readonly ComputeShader _adamCS;
 
         readonly int _kLossFwd, _kLossBwd;
-        readonly int _kRastBwd;
+        readonly int _kRastBwd, _kDequantize;
         readonly int _kProjBwd, _kSHBwd;
         readonly int _kAdam, _kGradStats, _kZero;
 
@@ -110,6 +110,7 @@ namespace Genesis.RoomScan.GSplat
 
             _rasterBwdCS = rasterBwdCS;
             _kRastBwd = rasterBwdCS.FindKernel("RasterizeBackward");
+            _kDequantize = rasterBwdCS.FindKernel("DequantizeGrads");
 
             _projBwdCS = projBwdCS;
             _kProjBwd = projBwdCS.FindKernel("ProjectBackward");
@@ -200,6 +201,12 @@ namespace Genesis.RoomScan.GSplat
             int rGroupsX = CeilDiv(_imgW, 8);
             int rGroupsY = CeilDiv(_imgH, 8);
             _rasterBwdCS.Dispatch(_kRastBwd, rGroupsX, rGroupsY, 1);
+
+            // 5b. Dequantize fixed-point int gradients back to float (in-place)
+            DequantizeBuffer(_vxy, N * 2);
+            DequantizeBuffer(_vConic, N * 3);
+            DequantizeBuffer(gaussians.GradColors, N * 3);
+            DequantizeBuffer(gaussians.GradOpacities, N);
 
             // 6. Projection backward — reads intermediate buffers, writes to final grad buffers
             _projBwdCS.SetInt(ID_NumPoints, N);
@@ -301,6 +308,13 @@ namespace Genesis.RoomScan.GSplat
             _vConic?.Release();
             _vDepth?.Release();
             if (_vRendered) UnityEngine.Object.Destroy(_vRendered);
+        }
+
+        void DequantizeBuffer(GraphicsBuffer buf, int count)
+        {
+            _rasterBwdCS.SetInt("_DqCount", count);
+            _rasterBwdCS.SetBuffer(_kDequantize, "_DqBuffer", buf);
+            _rasterBwdCS.Dispatch(_kDequantize, CeilDiv(count, 256), 1, 1);
         }
 
         static int CeilDiv(int a, int b) => (a + b - 1) / b;

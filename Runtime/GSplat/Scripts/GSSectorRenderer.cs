@@ -235,12 +235,14 @@ namespace Genesis.RoomScan.GSplat
                 DispatchBitonicSort(totalCount);
 
             // --- Phase 3: Render ---
-            _props.SetBuffer(ID_SplatViewData, _viewDataBuffer);
+            // Bind buffers directly on Material (MaterialPropertyBlock.SetBuffer
+            // silently fails on Vulkan for StructuredBuffer bindings).
+            splatMaterial.SetBuffer(ID_SplatViewData, _viewDataBuffer);
             if (_useRadixSort)
-                _props.SetBuffer(ID_OrderBuffer, _sortPayloadBuffer);
+                splatMaterial.SetBuffer(ID_OrderBuffer, _sortPayloadBuffer);
             else
-                _props.SetBuffer(ID_SortBuffer, _bitonicSortBuffer);
-            _props.SetInt(ID_SplatCount, totalCount);
+                splatMaterial.SetBuffer(ID_SortBuffer, _bitonicSortBuffer);
+            splatMaterial.SetInt(ID_SplatCount, totalCount);
 
             var rp = new RenderParams(splatMaterial)
             {
