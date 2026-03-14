@@ -105,7 +105,7 @@ namespace Genesis.RoomScan
                 Debug.Log($"[RoomAnchor] Volume origin set to room center: {OriginInRoomSpace}");
             }
 
-            UpdateVolumeTransform();
+            RefreshVolumeTransform();
             TrySuppressBoundary();
 
             IsRoomLoaded = true;
