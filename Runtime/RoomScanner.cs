@@ -37,7 +37,6 @@ namespace Genesis.RoomScan
         [SerializeField] private KeyframeCollector keyframeCollector;
         [SerializeField] private PointCloudExporter pointCloudExporter;
         [SerializeField] private PlaneDetector planeDetector;
-        [SerializeField] private RoomAnchorManager roomAnchorManager;
         [SerializeField] private GSplatManager gsplatManager;
 
         [Header("Camera")]
@@ -105,25 +104,11 @@ namespace Genesis.RoomScan
             ValidateComponents();
             SetupHeadExclusion();
 
-            if (roomAnchorManager != null)
-            {
-                if (roomAnchorManager.IsRoomLoaded)
-                    OnRoomReady();
-                else
-                    roomAnchorManager.RoomReady += OnRoomReady;
-                Debug.Log("[RoomScan] Waiting for MRUK room before scanning...");
-            }
-            else
-            {
-                OnRoomReady();
-            }
+            OnRoomReady();
         }
 
         private async void OnRoomReady()
         {
-            if (roomAnchorManager != null)
-                roomAnchorManager.RoomReady -= OnRoomReady;
-
             if (persistence != null && persistence.HasSavedScan())
             {
                 Debug.Log("[RoomScan] Found saved scan, loading...");
@@ -191,9 +176,6 @@ namespace Genesis.RoomScan
             if (t - _lastIntegrationTime >= IntegrationInterval)
             {
                 _lastIntegrationTime = t;
-
-                if (roomAnchorManager != null)
-                    roomAnchorManager.RefreshVolumeTransform();
 
                 ProvideColorFrame();
                 volumeIntegrator.Integrate();
