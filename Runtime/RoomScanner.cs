@@ -189,6 +189,10 @@ namespace Genesis.RoomScan
             if (t - _lastIntegrationTime >= IntegrationInterval)
             {
                 _lastIntegrationTime = t;
+
+                if (roomAnchorManager != null)
+                    roomAnchorManager.RefreshVolumeTransform();
+
                 ProvideColorFrame();
                 volumeIntegrator.Integrate();
                 _integrateCount++;

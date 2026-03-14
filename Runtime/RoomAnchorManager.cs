@@ -114,14 +114,6 @@ namespace Genesis.RoomScan
 #endif
         }
 
-        private void LateUpdate()
-        {
-#if HAS_MRUK
-            if (_room != null && _volumeIntegrator != null)
-                UpdateVolumeTransform();
-#endif
-        }
-
         /// <summary>
         /// Restore a previously persisted volume origin.
         /// Call before scanning starts (i.e. before RoomReady fires or in its handler).
@@ -132,18 +124,26 @@ namespace Genesis.RoomScan
             Debug.Log($"[RoomAnchor] Restored volume origin from persistence: {origin}");
         }
 
-#if HAS_MRUK
-        private void UpdateVolumeTransform()
+        /// <summary>
+        /// Recompute volumeToWorld / worldToVolume from the current room anchor pose.
+        /// Called by RoomScanner BEFORE each integration to avoid a 1-frame stale
+        /// matrix on tracking recenters (LateUpdate would run after integration).
+        /// </summary>
+        public void RefreshVolumeTransform()
         {
-            if (_room == null || _volumeIntegrator == null) return;
+#if HAS_MRUK
+            if (_room == null) return;
+            if (_volumeIntegrator == null)
+                _volumeIntegrator = VolumeIntegrator.Instance;
+            if (_volumeIntegrator == null) return;
 
             Matrix4x4 volumeToWorld = _room.transform.localToWorldMatrix *
                                       Matrix4x4.Translate(OriginInRoomSpace);
             Matrix4x4 worldToVolume = volumeToWorld.inverse;
 
             _volumeIntegrator.SetVolumeTransform(volumeToWorld, worldToVolume);
-        }
 #endif
+        }
 
         private void TrySuppressBoundary()
         {
