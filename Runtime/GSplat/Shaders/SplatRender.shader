@@ -11,6 +11,7 @@ Shader "Genesis/SplatRender"
             ZWrite Off
             ZTest LEqual
             Blend SrcAlpha OneMinusSrcAlpha
+            Cull Off
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -31,10 +32,9 @@ Shader "Genesis/SplatRender"
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
-                nointerpolation float2 centerPixel : TEXCOORD0;
-                nointerpolation float3 conic : TEXCOORD1;
-                nointerpolation float3 color : TEXCOORD2;
-                nointerpolation float opacity : TEXCOORD3;
+                float2 quadUV : TEXCOORD0;
+                nointerpolation half3 color : TEXCOORD1;
+                nointerpolation half opacity : TEXCOORD2;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -51,6 +51,26 @@ Shader "Genesis/SplatRender"
                 );
             }
 
+            // Decompose 2D covariance into oriented axis vectors (matches UGS approach).
+            // Returns two screen-space axis vectors encoding the elliptical Gaussian shape.
+            void DecomposeCovariance(float3 cov2d, out float2 v1, out float2 v2)
+            {
+                float diag1 = cov2d.x, diag2 = cov2d.z, offDiag = cov2d.y;
+                float mid = 0.5 * (diag1 + diag2);
+                float radius = length(float2((diag1 - diag2) * 0.5, offDiag));
+                float lambda1 = mid + radius;
+                float lambda2 = max(mid - radius, 0.1);
+
+                float2 rawVec = float2(offDiag, lambda1 - diag1);
+                float len = length(rawVec);
+                float2 diagVec = len > 1e-6 ? rawVec / len : float2(1, 0);
+                diagVec.y = -diagVec.y;
+
+                float maxSize = 4096.0;
+                v1 = min(sqrt(2.0 * lambda1), maxSize) * diagVec;
+                v2 = min(sqrt(2.0 * lambda2), maxSize) * float2(diagVec.y, -diagVec.x);
+            }
+
             Varyings vert(uint vertID : SV_VertexID)
             {
                 Varyings OUT = (Varyings)0;
@@ -60,7 +80,7 @@ Shader "Genesis/SplatRender"
                 uint splatIdx = vertID / 4;
                 if (splatIdx >= _SplatCount)
                 {
-                    OUT.positionHCS = float4(0, 0, -1, 0);
+                    OUT.positionHCS = asfloat(0x7fc00000);
                     return OUT;
                 }
 
@@ -85,25 +105,25 @@ Shader "Genesis/SplatRender"
                     _FeaturesDC[splatIdx * 3 + 1],
                     _FeaturesDC[splatIdx * 3 + 2]);
 
-                OUT.color = saturate(SH_C0 * dc + 0.5);
-                OUT.opacity = Sigmoid(_Opacities[splatIdx]);
+                OUT.color = (half3)saturate(SH_C0 * dc + 0.5);
+                OUT.opacity = (half)Sigmoid(_Opacities[splatIdx]);
 
                 // --- View-space transform ---
                 float3 pView = mul(UNITY_MATRIX_V, float4(pos, 1)).xyz;
                 if (pView.z <= 0.01)
                 {
-                    OUT.positionHCS = float4(0, 0, -1, 0);
+                    OUT.positionHCS = asfloat(0x7fc00000);
                     return OUT;
                 }
 
                 // --- 3D covariance: R * S * S^T * R^T ---
                 float3x3 R = QuatToRotmat(quat);
                 float gs = _SplatSize;
-                float3x3 S = float3x3(
+                float3x3 Sc = float3x3(
                     gs * scale.x, 0, 0,
                     0, gs * scale.y, 0,
                     0, 0, gs * scale.z);
-                float3x3 M = mul(R, S);
+                float3x3 M = mul(R, Sc);
                 float3x3 covWorld = mul(M, transpose(M));
 
                 // --- EWA projection: 3D cov → 2D cov in pixel space ---
@@ -120,14 +140,12 @@ Shader "Genesis/SplatRender"
                 pView.x = pView.z * clamp(pView.x * rz, -limX, limX);
                 pView.y = pView.z * clamp(pView.y * rz, -limY, limY);
 
-                // T = J * W (2x3 = Jacobian of projection * view rotation)
                 float3 mr0 = float3(UNITY_MATRIX_V[0][0], UNITY_MATRIX_V[0][1], UNITY_MATRIX_V[0][2]);
                 float3 mr1 = float3(UNITY_MATRIX_V[1][0], UNITY_MATRIX_V[1][1], UNITY_MATRIX_V[1][2]);
                 float3 mr2 = float3(UNITY_MATRIX_V[2][0], UNITY_MATRIX_V[2][1], UNITY_MATRIX_V[2][2]);
                 float3 t0 = fx * rz * mr0 + (-fx * pView.x * rz2) * mr2;
                 float3 t1 = fy * rz * mr1 + (-fy * pView.y * rz2) * mr2;
 
-                // cov2d = T * covWorld * T^T  (+0.3 regularization on diagonal)
                 float3 cv0 = mul(covWorld, t0);
                 float3 cv1 = mul(covWorld, t1);
                 float3 cov2d = float3(
@@ -135,31 +153,25 @@ Shader "Genesis/SplatRender"
                     dot(t0, cv1),
                     dot(t1, cv1) + 0.3);
 
-                // --- Conic (inverse 2D covariance) and pixel radius ---
-                float det = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
-                if (det <= 0)
+                // --- Decompose 2D covariance into oriented axis vectors ---
+                float2 axis1, axis2;
+                DecomposeCovariance(cov2d, axis1, axis2);
+
+                // --- Position quad using eigenvector axes ---
+                float4 centerClip = TransformWorldToHClip(pos);
+                if (centerClip.w <= 0)
                 {
-                    OUT.positionHCS = float4(0, 0, -1, 0);
+                    OUT.positionHCS = asfloat(0x7fc00000);
                     return OUT;
                 }
-                float invDet = 1.0 / det;
-                OUT.conic = float3(cov2d.z * invDet, -cov2d.y * invDet, cov2d.x * invDet);
 
-                float b = 0.5 * (cov2d.x + cov2d.z);
-                float disc = sqrt(max(0.1, b * b - det));
-                float radius = ceil(3.0 * sqrt(b + disc));
+                float2 quadPos = float2(quadVert & 1, (quadVert >> 1) & 1) * 2.0 - 1.0;
+                quadPos *= 2.0;
 
-                // --- Quad positioning in clip space ---
-                float4 centerClip = TransformWorldToHClip(pos);
-                OUT.centerPixel = (centerClip.xy / centerClip.w + 1.0) * 0.5 * screenSize;
-
-                float2 offsets[4] = {
-                    float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1)
-                };
-                float2 ndcOffset = offsets[quadVert] * radius * 2.0 / screenSize;
-                OUT.positionHCS = float4(
-                    centerClip.xy + ndcOffset * centerClip.w,
-                    centerClip.z, centerClip.w);
+                float2 deltaScreen = (quadPos.x * axis1 + quadPos.y * axis2) * 2.0 / screenSize;
+                OUT.positionHCS = centerClip;
+                OUT.positionHCS.xy += deltaScreen * centerClip.w;
+                OUT.quadUV = quadPos;
 
                 return OUT;
             }
@@ -168,14 +180,10 @@ Shader "Genesis/SplatRender"
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(IN);
 
-                float2 delta = IN.positionHCS.xy - IN.centerPixel;
-                float power = -0.5 * (IN.conic.x * delta.x * delta.x
-                                     + 2.0 * IN.conic.y * delta.x * delta.y
-                                     + IN.conic.z * delta.y * delta.y);
-                if (power > 0.0) discard;
-
-                float alpha = min(0.99, IN.opacity * exp(power));
-                if (alpha < 1.0 / 255.0) discard;
+                float power = -dot(IN.quadUV, IN.quadUV);
+                half alpha = (half)exp(power);
+                alpha = saturate(alpha * IN.opacity);
+                if (alpha < 1.0h / 255.0h) discard;
 
                 return half4(IN.color, alpha);
             }
