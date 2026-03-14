@@ -74,6 +74,14 @@ Shader "Genesis/ScanMeshVertexColor"
             float4 gsVoxCount;
             float gsVoxSize;
 
+            float3 WorldToVoxelUVW(float3 pos)
+            {
+                pos /= gsVoxSize;
+                pos += gsVoxCount.xyz / 2.0;
+                pos /= gsVoxCount.xyz;
+                return saturate(pos);
+            }
+
             #ifdef _GSPLAT_SECTOR_MASK
             uint _SectorSplatMask0;  // bits 0-31
             uint _SectorSplatMask1;  // bits 32-63
@@ -94,14 +102,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 return (mask & (1u << bit)) != 0;
             }
             #endif
-
-            float3 WorldToVoxelUVW(float3 pos)
-            {
-                pos /= gsVoxSize;
-                pos += gsVoxCount.xyz / 2.0;
-                pos /= gsVoxCount.xyz;
-                return saturate(pos);
-            }
 
             float2 ProjectToKeyframeUV(float3 worldPos, int idx)
             {

@@ -37,19 +37,21 @@ groupshared float3 gs_rgbBatch[RAST_BLOCK_SIZE];
 [numthreads(RAST_BLOCK_X, RAST_BLOCK_Y, 1)]
 void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIdx : SV_GroupIndex)
 {
+    // Tile ID from groupId only — uniform across the entire threadgroup.
+    uint tileX = (groupId.x * RAST_BLOCK_X) / GS_BLOCK_X;
+    uint tileY = (groupId.y * RAST_BLOCK_Y) / GS_BLOCK_Y;
+    uint tileId = tileY * _TileBounds.x + tileX;
+
+    int rangeStart = _TileBins[tileId * 2 + 0];
+    int rangeEnd   = _TileBins[tileId * 2 + 1];
+
+    // Per-thread pixel coordinates
     uint pi = groupId.y * RAST_BLOCK_Y + groupThreadId.y;
     uint pj = groupId.x * RAST_BLOCK_X + groupThreadId.x;
-
-    uint tileX = pj / GS_BLOCK_X;
-    uint tileY = pi / GS_BLOCK_Y;
-    uint tileId = tileY * _TileBounds.x + tileX;
     float px = (float)pj;
     float py = (float)pi;
     bool inside = (pi < _ImgSize.y && pj < _ImgSize.x);
     uint pixId = min(pi * _ImgSize.x + pj, _ImgSize.x * _ImgSize.y - 1u);
-
-    int rangeStart = _TileBins[tileId * 2 + 0];
-    int rangeEnd   = _TileBins[tileId * 2 + 1];
 
     float T = inside ? _FinalTs[pixId] : 1.f;
     int binFinal = inside ? _FinalIndex[pixId] : -1;
@@ -63,13 +65,14 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
 
     float3 buffer = float3(0, 0, 0);
 
-    int numBatches = (rangeEnd - rangeStart + RAST_BLOCK_SIZE - 1) / RAST_BLOCK_SIZE;
+    uint rangeLen = (uint)max(rangeEnd - rangeStart, 0);
+    uint numBatches = (rangeLen + RAST_BLOCK_SIZE - 1u) / RAST_BLOCK_SIZE;
 
-    for (int b = numBatches - 1; b >= 0; --b)
+    for (uint b = numBatches; b > 0u; --b)
     {
         GroupMemoryBarrierWithGroupSync();
 
-        int batchEnd = rangeEnd - 1 - RAST_BLOCK_SIZE * (numBatches - 1 - b);
+        int batchEnd = rangeEnd - 1 - (int)(RAST_BLOCK_SIZE * (numBatches - b));
         int loadIdx = batchEnd - (int)groupIdx;
         if (loadIdx >= rangeStart)
         {
@@ -89,7 +92,7 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
 
         if (inside)
         {
-            int batchStart = rangeStart + RAST_BLOCK_SIZE * b;
+            int batchStart = rangeStart + (int)(RAST_BLOCK_SIZE * (b - 1u));
             int batchSize = min(RAST_BLOCK_SIZE, rangeEnd - batchStart);
 
             for (int t = 0; t < batchSize; ++t)

@@ -29,31 +29,35 @@ groupshared float3 gs_rgb[RAST_BLOCK_SIZE];
 [numthreads(RAST_BLOCK_X, RAST_BLOCK_Y, 1)]
 void RasterizeForward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIdx : SV_GroupIndex)
 {
+    // Tile ID from groupId only — uniform across the entire threadgroup.
+    // Each 8x8 raster block is a sub-block of one 16x16 tile.
+    uint tileX = (groupId.x * RAST_BLOCK_X) / GS_BLOCK_X;
+    uint tileY = (groupId.y * RAST_BLOCK_Y) / GS_BLOCK_Y;
+    uint tileId = tileY * _TileBounds.x + tileX;
+
+    int rangeStart = _TileBins[tileId * 2 + 0];
+    int rangeEnd   = _TileBins[tileId * 2 + 1];
+    uint rangeLen = (uint)max(rangeEnd - rangeStart, 0);
+    uint numBatches = (rangeLen + RAST_BLOCK_SIZE - 1u) / RAST_BLOCK_SIZE;
+
+    // Per-thread pixel coordinates
     uint pi = groupId.y * RAST_BLOCK_Y + groupThreadId.y;
     uint pj = groupId.x * RAST_BLOCK_X + groupThreadId.x;
-
-    uint tileX = pj / GS_BLOCK_X;
-    uint tileY = pi / GS_BLOCK_Y;
-    uint tileId = tileY * _TileBounds.x + tileX;
     float px = (float)pj;
     float py = (float)pi;
     bool inside = (pi < _ImgSize.y && pj < _ImgSize.x);
     uint pixId = pi * _ImgSize.x + pj;
-
-    int rangeStart = _TileBins[tileId * 2 + 0];
-    int rangeEnd   = _TileBins[tileId * 2 + 1];
-    int numBatches = (rangeEnd - rangeStart + RAST_BLOCK_SIZE - 1) / RAST_BLOCK_SIZE;
 
     float T = 1.f;
     float3 pixOut = float3(0, 0, 0);
     int lastContributor = rangeStart - 1;
     bool done = false;
 
-    for (int b = 0; b < numBatches; ++b)
+    for (uint b = 0u; b < numBatches; ++b)
     {
         GroupMemoryBarrierWithGroupSync();
 
-        int batchStart = rangeStart + RAST_BLOCK_SIZE * b;
+        int batchStart = rangeStart + (int)(RAST_BLOCK_SIZE * b);
         int loadIdx = batchStart + (int)groupIdx;
         if (loadIdx < rangeEnd)
         {

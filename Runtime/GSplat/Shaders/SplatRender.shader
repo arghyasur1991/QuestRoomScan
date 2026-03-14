@@ -62,7 +62,7 @@ Shader "Genesis/SplatRender"
                 float4 clipPos = TransformWorldToHClip(g.pos);
                 float2 screenCenter = clipPos.xy / clipPos.w;
 
-                float r = g.radius * 2.0 / _ScreenParams.xy; // normalized screen radius
+                float2 r = g.radius * 2.0 / _ScreenParams.xy;
 
                 float2 offsets[4] = {
                     float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1)
