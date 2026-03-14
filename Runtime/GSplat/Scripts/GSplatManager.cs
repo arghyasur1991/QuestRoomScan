@@ -220,6 +220,14 @@ namespace Genesis.RoomScan.GSplat
             }
 
             _scheduler.AdvanceTraining(sectorId, itersPerFrame, 0f, buffers.CurrentCount);
+
+            ref var trained = ref _scheduler.Sectors[sectorId];
+            if (trained.TrainingIteration % 30 == 0 || trained.State == SectorState.SplatReady)
+            {
+                Debug.Log($"[GSplatManager] Training sector {sectorId}: iter={trained.TrainingIteration}/{targetItersPerSector}, " +
+                          $"gaussians={buffers.CurrentCount}, state={trained.State}");
+            }
+
             UpdateMeshMask();
         }
 
