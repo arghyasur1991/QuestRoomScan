@@ -1,17 +1,17 @@
 // Backward rasterization — ported from msplat rasterize_backward_kernel.
 // Per-tile back-to-front traversal computing gradients for each Gaussian.
 // All threads in a group hit barriers uniformly (no varying flow control around syncs).
-// Gradient accumulation uses fixed-point InterlockedAdd (works reliably on Quest/Vulkan).
+// NOTE: Gradient accumulation uses non-atomic += due to Quest/Vulkan limitations:
+// - InterlockedCompareExchange (CAS): silently fails on Adreno/Vulkan
+// - Fixed-point InterlockedAdd: per-pixel gradients (~1e-7) quantize to zero
+// Race conditions lose some contributions but surviving gradients are correct.
 #pragma kernel RasterizeBackward
-#pragma kernel DequantizeGrads
 
 #include "GSplatHelpers.hlsl"
 
 #define RAST_BLOCK_X 8
 #define RAST_BLOCK_Y 8
 #define RAST_BLOCK_SIZE (RAST_BLOCK_X * RAST_BLOCK_Y)
-
-#define GRAD_SCALE 4096.0f
 
 uint3 _TileBounds;
 uint2 _ImgSize;
@@ -27,10 +27,10 @@ StructuredBuffer<int>   _FinalIndex;        // [H*W]
 
 RWTexture2D<float4>       _VOutput;         // dL/d(rendered), (W, H)
 
-RWStructuredBuffer<uint> _VXY;              // [N*2] — uint for InterlockedAdd (fixed-point int)
-RWStructuredBuffer<uint> _VConic;           // [N*3]
-RWStructuredBuffer<uint> _VRGB;             // [N*3]
-RWStructuredBuffer<uint> _VOpacity;         // [N]
+RWStructuredBuffer<float> _VXY;             // [N*2]
+RWStructuredBuffer<float> _VConic;          // [N*3]
+RWStructuredBuffer<float> _VRGB;            // [N*3]
+RWStructuredBuffer<float> _VOpacity;        // [N]
 
 groupshared int    gs_idBatch[RAST_BLOCK_SIZE];
 groupshared float3 gs_xyOpacBatch[RAST_BLOCK_SIZE];
@@ -142,29 +142,16 @@ void RasterizeBackward(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_Grou
                     bConic.y * delta.x + bConic.z * delta.y);
                 float vOpacLocal = -vSigma * (1.f - opac);
 
-                InterlockedAdd(_VRGB[(uint)(bId*3+0)],  (uint)(int)(vRGBLocal.x  * GRAD_SCALE));
-                InterlockedAdd(_VRGB[(uint)(bId*3+1)],  (uint)(int)(vRGBLocal.y  * GRAD_SCALE));
-                InterlockedAdd(_VRGB[(uint)(bId*3+2)],  (uint)(int)(vRGBLocal.z  * GRAD_SCALE));
-                InterlockedAdd(_VConic[(uint)(bId*3+0)], (uint)(int)(vConicLocal.x * GRAD_SCALE));
-                InterlockedAdd(_VConic[(uint)(bId*3+1)], (uint)(int)(vConicLocal.y * GRAD_SCALE));
-                InterlockedAdd(_VConic[(uint)(bId*3+2)], (uint)(int)(vConicLocal.z * GRAD_SCALE));
-                InterlockedAdd(_VXY[(uint)(bId*2+0)],   (uint)(int)(vXYLocal.x   * GRAD_SCALE));
-                InterlockedAdd(_VXY[(uint)(bId*2+1)],   (uint)(int)(vXYLocal.y   * GRAD_SCALE));
-                InterlockedAdd(_VOpacity[(uint)bId],     (uint)(int)(vOpacLocal   * GRAD_SCALE));
+                _VRGB[bId*3+0]  += vRGBLocal.x;
+                _VRGB[bId*3+1]  += vRGBLocal.y;
+                _VRGB[bId*3+2]  += vRGBLocal.z;
+                _VConic[bId*3+0] += vConicLocal.x;
+                _VConic[bId*3+1] += vConicLocal.y;
+                _VConic[bId*3+2] += vConicLocal.z;
+                _VXY[bId*2+0]   += vXYLocal.x;
+                _VXY[bId*2+1]   += vXYLocal.y;
+                _VOpacity[bId]   += vOpacLocal;
             }
         }
     }
-}
-
-// Convert fixed-point int gradient buffers back to float (in-place).
-// Dispatched per-buffer after RasterizeBackward, before downstream readers.
-uint _DqCount;
-RWStructuredBuffer<uint> _DqBuffer;
-
-[numthreads(256, 1, 1)]
-void DequantizeGrads(uint3 id : SV_DispatchThreadID)
-{
-    if (id.x >= _DqCount) return;
-    float val = (float)asint(_DqBuffer[id.x]) * (1.0f / GRAD_SCALE);
-    _DqBuffer[id.x] = asuint(val);
 }
