@@ -96,7 +96,7 @@ Shader "Genesis/SplatRender"
                     return o;
                 }
 
-                // EWA projection: 3D cov → 2D cov using the render-time view matrix
+                // EWA projection: 3D cov → 2D cov using the render-time view matrix (+Z fwd)
                 float3 pView = float3(
                     _SplatView[0][0]*sv.worldPos.x + _SplatView[0][1]*sv.worldPos.y + _SplatView[0][2]*sv.worldPos.z + _SplatView[0][3],
                     _SplatView[1][0]*sv.worldPos.x + _SplatView[1][1]*sv.worldPos.y + _SplatView[1][2]*sv.worldPos.z + _SplatView[1][3],
@@ -104,10 +104,19 @@ Shader "Genesis/SplatRender"
                 );
 
                 float fx = _SplatFocal.x, fy = _SplatFocal.y;
+
+                // FOV limiter: clamp projected position to avoid numerical issues
+                // at extreme view angles (matches ProjectCov3DEWA in GSplatHelpers.hlsl)
+                float tanFovX = 0.5 * _SplatScreen.x / fx;
+                float tanFovY = 0.5 * _SplatScreen.y / fy;
+                float limX = 1.3 * tanFovX;
+                float limY = 1.3 * tanFovY;
+                pView.x = pView.z * clamp(pView.x / pView.z, -limX, limX);
+                pView.y = pView.z * clamp(pView.y / pView.z, -limY, limY);
+
                 float rz = 1.0 / pView.z;
                 float rz2 = rz * rz;
 
-                // Jacobian of perspective projection
                 float j00 = fx * rz;
                 float j11 = fy * rz;
                 float j20 = -fx * pView.x * rz2;

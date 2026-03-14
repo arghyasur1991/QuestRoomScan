@@ -15,6 +15,20 @@ namespace Genesis.RoomScan.GSplat
     /// </summary>
     public class GSplatRenderFeature : ScriptableRendererFeature
     {
+        /// <summary>
+        /// Unity's worldToCameraMatrix uses -Z forward (OpenGL convention).
+        /// The EWA projection math expects +Z forward (objects in front have z > 0).
+        /// Negate row 2 to convert.
+        /// </summary>
+        static Matrix4x4 ViewToPositiveZ(Matrix4x4 v)
+        {
+            v[2, 0] = -v[2, 0];
+            v[2, 1] = -v[2, 1];
+            v[2, 2] = -v[2, 2];
+            v[2, 3] = -v[2, 3];
+            return v;
+        }
+
         class GSplatPass : ScriptableRenderPass
         {
             const string ProfilerTag = "GSplat Render";
@@ -88,12 +102,14 @@ namespace Genesis.RoomScan.GSplat
 
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
                                 0, CubemapFace.Unknown, 0);
-                            renderer.DrawSplats(cmd, projL * viewL, viewL,
+                            renderer.DrawSplats(cmd, projL * viewL,
+                                ViewToPositiveZ(viewL),
                                 fxL, fyL, screenW, screenH);
 
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget,
                                 0, CubemapFace.Unknown, 1);
-                            renderer.DrawSplats(cmd, projR * viewR, viewR,
+                            renderer.DrawSplats(cmd, projR * viewR,
+                                ViewToPositiveZ(viewR),
                                 fxR, fyR, screenW, screenH);
                         }
                         else
@@ -105,7 +121,8 @@ namespace Genesis.RoomScan.GSplat
                             float fy = Mathf.Abs(proj[1, 1]) * screenH / 2f;
 
                             cmd.SetRenderTarget(data.ColorTarget, data.DepthTarget);
-                            renderer.DrawSplats(cmd, proj * view, view,
+                            renderer.DrawSplats(cmd, proj * view,
+                                ViewToPositiveZ(view),
                                 fx, fy, screenW, screenH);
                         }
                     });
