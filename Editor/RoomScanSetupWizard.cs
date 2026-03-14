@@ -1,4 +1,6 @@
+using System.IO;
 using System.Linq;
+using System.Xml.Linq;
 using Meta.XR;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -36,6 +38,7 @@ namespace Genesis.RoomScan.Editor
         RoomAnchorManager _roomAnchorManager;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
+        bool _boundarylessManifest;
 
         // Style
         static readonly Color COL_OK   = new(0.25f, 0.82f, 0.35f);
@@ -113,6 +116,8 @@ namespace Genesis.RoomScan.Editor
                 "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
+
+            _boundarylessManifest = ManifestHasBoundaryless();
         }
 
         // =================================================================
@@ -126,6 +131,7 @@ namespace Genesis.RoomScan.Editor
             GUILayout.Space(4);
 
             DrawPrerequisites();
+            DrawProjectSettings();
             DrawComponents();
             DrawShaderWiring();
 
@@ -225,6 +231,90 @@ namespace Genesis.RoomScan.Editor
 
             MarkDirty();
             Refresh();
+        }
+
+        // -- Project Settings ---------------------------------------------
+
+        const string MANIFEST_PATH = "Assets/Plugins/Android/AndroidManifest.xml";
+        const string BOUNDARYLESS_FEATURE = "com.oculus.feature.BOUNDARYLESS_APP";
+
+        void DrawProjectSettings()
+        {
+            BeginSection("PROJECT SETTINGS");
+
+            StatusRow("AndroidManifest boundaryless entry", _boundarylessManifest);
+
+            if (!_boundarylessManifest)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Add Boundaryless Manifest", GUILayout.Width(200)))
+                {
+                    FixBoundarylessManifest();
+                    Refresh();
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
+            EndSection();
+        }
+
+        static bool ManifestHasBoundaryless()
+        {
+            string fullPath = Path.Combine(Application.dataPath, "..", MANIFEST_PATH);
+            if (!File.Exists(fullPath)) return false;
+
+            try
+            {
+                var doc = XDocument.Load(fullPath);
+                XNamespace android = "http://schemas.android.com/apk/res/android";
+                return doc.Root?.Elements("uses-feature")
+                    .Any(e => e.Attribute(android + "name")?.Value == BOUNDARYLESS_FEATURE) ?? false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        static void FixBoundarylessManifest()
+        {
+            string fullPath = Path.Combine(Application.dataPath, "..", MANIFEST_PATH);
+            string dir = Path.GetDirectoryName(fullPath);
+
+            if (!File.Exists(fullPath))
+            {
+                EditorUtility.DisplayDialog("Room Scan Setup",
+                    "AndroidManifest.xml not found at:\n" + MANIFEST_PATH + "\n\n" +
+                    "Build the project once or create a custom manifest first.",
+                    "OK");
+                return;
+            }
+
+            try
+            {
+                var doc = XDocument.Load(fullPath);
+                XNamespace android = "http://schemas.android.com/apk/res/android";
+
+                bool exists = doc.Root?.Elements("uses-feature")
+                    .Any(e => e.Attribute(android + "name")?.Value == BOUNDARYLESS_FEATURE) ?? false;
+                if (exists) return;
+
+                var element = new XElement("uses-feature",
+                    new XAttribute(android + "name", BOUNDARYLESS_FEATURE),
+                    new XAttribute(android + "required", "true"));
+
+                doc.Root?.Add(element);
+                doc.Save(fullPath);
+
+                AssetDatabase.Refresh();
+                Debug.Log($"[RoomScan Setup] Added {BOUNDARYLESS_FEATURE} to AndroidManifest.xml");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[RoomScan Setup] Failed to update manifest: {ex.Message}");
+            }
         }
 
         // -- Components ---------------------------------------------------
@@ -501,6 +591,7 @@ namespace Genesis.RoomScan.Editor
 
             if (_arSession == null) FixARSession();
             if (_arOcclusion == null) FixAROcclusion();
+            if (!_boundarylessManifest) FixBoundarylessManifest();
             FixComponents();
             FixShaderWiring();
 
