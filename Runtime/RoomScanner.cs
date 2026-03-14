@@ -211,6 +211,10 @@ namespace Genesis.RoomScan
                 _ = persistence.SaveAsync();
             }
 
+#if HAS_META_XR_SDK
+            if (OVRInput.GetDown(OVRInput.Button.One, OVRInput.Controller.LTouch))
+                CycleVisualization();
+#endif
             if (Input.GetKeyDown(KeyCode.L))
                 CycleVisualization();
         }
