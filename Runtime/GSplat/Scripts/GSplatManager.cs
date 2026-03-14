@@ -317,10 +317,19 @@ namespace Genesis.RoomScan.GSplat
             _scheduler.AdvanceTraining(sectorId, itersPerFrame, 0f, buffers.CurrentCount);
 
             ref var trained = ref _scheduler.Sectors[sectorId];
-            if (trained.TrainingIteration % 30 == 0 || trained.State == SectorState.SplatReady)
+            bool shouldLog = trained.TrainingIteration % 30 == 0 ||
+                             trained.State == SectorState.SplatReady;
+
+            if (shouldLog)
             {
                 Debug.Log($"[GSplatManager] Training sector {sectorId}: iter={trained.TrainingIteration}/{targetItersPerSector}, " +
                           $"gaussians={buffers.CurrentCount}, state={trained.State}");
+            }
+
+            // Diagnostic: log rendered image + keyframe stats on first few iterations per sector
+            if (trained.TrainingIteration <= 3 || trained.TrainingIteration == 30)
+            {
+                LogTrainingDiag(sectorId, trained.TrainingIteration, kf.Value, buffers);
             }
 
             if (trained.State == SectorState.SplatReady)
@@ -328,6 +337,57 @@ namespace Genesis.RoomScan.GSplat
 
             if (!debugDisableMeshMask)
                 UpdateMeshMask();
+        }
+
+        void LogTrainingDiag(int sectorId, int iter, KeyframeData kf, GSplatBuffers buffers)
+        {
+            // Read back rendered image average pixel (GPU → CPU readback, only for diagnostics)
+            var rendered = _trainer.RenderedImage;
+            if (rendered == null) return;
+
+            int w = rendered.width, h = rendered.height;
+            var prevRT = RenderTexture.active;
+            RenderTexture.active = rendered;
+            var readTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            readTex.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
+            readTex.Apply(false);
+            RenderTexture.active = prevRT;
+
+            var rendPixels = readTex.GetPixels32();
+            float rSum = 0, gSum = 0, bSum = 0;
+            int nonBlack = 0;
+            foreach (var px in rendPixels)
+            {
+                rSum += px.r; gSum += px.g; bSum += px.b;
+                if (px.r > 5 || px.g > 5 || px.b > 5) nonBlack++;
+            }
+            int total = rendPixels.Length;
+            float rAvg = rSum / total, gAvg = gSum / total, bAvg = bSum / total;
+
+            // Keyframe average
+            var kfPixels = kf.Texture.GetPixels32();
+            float krSum = 0, kgSum = 0, kbSum = 0;
+            foreach (var px in kfPixels)
+            {
+                krSum += px.r; kgSum += px.g; kbSum += px.b;
+            }
+            int kTotal = kfPixels.Length;
+            float krAvg = krSum / kTotal, kgAvg = kgSum / kTotal, kbAvg = kbSum / kTotal;
+
+            // Gradient magnitude sample
+            int n = Mathf.Min(buffers.CurrentCount, 4);
+            var gMeans = new float[n * 3];
+            buffers.GradMeans.GetData(gMeans, 0, 0, n * 3);
+            float gradMag = 0;
+            for (int i = 0; i < n * 3; i++) gradMag += gMeans[i] * gMeans[i];
+            gradMag = Mathf.Sqrt(gradMag / (n * 3));
+
+            Debug.Log($"[GSplat-TrainDiag] sector={sectorId} iter={iter}: " +
+                      $"rendered=({rAvg:F1},{gAvg:F1},{bAvg:F1}) nonBlack={nonBlack}/{total} " +
+                      $"keyframe=({krAvg:F1},{kgAvg:F1},{kbAvg:F1}) size={kf.Texture.width}x{kf.Texture.height} " +
+                      $"gradMeanRMS={gradMag:E2}");
+
+            Destroy(readTex);
         }
 
         void LogGaussianDiagnostics(int sectorId, GSplatBuffers buffers, string tag)
