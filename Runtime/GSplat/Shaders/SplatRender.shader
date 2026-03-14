@@ -9,9 +9,7 @@ Shader "Genesis/SplatRender"
             Name "SplatQuad"
             Tags { "LightMode"="SRPDefaultUnlit" }
             ZWrite Off
-            ZTest LEqual
-            // Back-to-front premultiplied alpha
-            Blend One OneMinusSrcAlpha
+            Blend OneMinusDstAlpha One
             Cull Off
 
             HLSLPROGRAM

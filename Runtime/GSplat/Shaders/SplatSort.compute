@@ -1,6 +1,6 @@
 // Sort key initialization kernels for Gaussian splat rendering.
-// Back-to-front sort (descending depth) for Blend One OneMinusSrcAlpha.
-// Reads clip-space pos.w (= -view-space Z) for depth.
+// Front-to-back sort (ascending depth) for Blend OneMinusDstAlpha One.
+// Reads clip-space pos.w (= -view-space Z) for depth; smaller w = nearer.
 #pragma kernel CSInitSortKeys
 #pragma kernel CSInitSortKeysBitonic
 #pragma kernel CSBitonicStep
@@ -37,8 +37,8 @@ void CSInitSortKeys(uint3 id : SV_DispatchThreadID)
     if (i < _Count)
     {
         float w = _ViewData[i * _Stride].pos.w;
-        // Back-to-front: negate so ascending radix sort puts far (large w) first
-        _SortKeys[i] = (w > 0) ? FloatToSortableUint(-w) : 0xFFFFFFFFu;
+        // Front-to-back: ascending radix sort puts near (small w) first
+        _SortKeys[i] = (w > 0) ? FloatToSortableUint(w) : 0xFFFFFFFFu;
         _SortPayload[i] = i;
     }
     else
@@ -62,9 +62,9 @@ void CSInitSortKeysBitonic(uint3 id : SV_DispatchThreadID)
     if (i < _Count)
     {
         float w = _ViewData[i * _Stride].pos.w;
-        // Back-to-front: inverted key so ascending bitonic yields far-first order
+        // Front-to-back: ascending bitonic yields near-first order
         uint key = (w > 0)
-            ? (0xFFFFFFFFu - FloatToSortableUint(w))
+            ? FloatToSortableUint(w)
             : 0xFFFFFFFFu;
         _SortBuffer[i] = uint2(key, i);
     }
