@@ -197,6 +197,8 @@ namespace Genesis.RoomScan.GSplat
                 SeedFromMesh(seedId, seedBuf);
                 if (seedBuf.CurrentCount == 0)
                     _scheduler.MarkNoGeometry(seedId);
+                else
+                    _scheduler.AdvanceTraining(seedId, 0, float.MaxValue, seedBuf.CurrentCount);
             }
 
             // Phase 2: Train the best Training-state sector
