@@ -7,7 +7,7 @@ Shader "Genesis/SplatComposite"
             ZWrite Off
             ZTest Always
             Cull Off
-            Blend SrcAlpha OneMinusSrcAlpha
+            Blend One OneMinusSrcAlpha
 
 CGPROGRAM
 #pragma vertex vert
@@ -51,8 +51,11 @@ half4 frag (v2f i) : SV_Target
         col = _GaussianSplatRT.Load(int3(i.vertex.xy, 0));
     #endif
 
-    col.rgb = GammaToLinearSpace(col.rgb);
-    col.a = saturate(col.a * 1.5);
+    // Our prepass produces linear-space colors (SH evaluation in compute).
+    // UGS uses GammaToLinearSpace here because its colors come from .Load()
+    // on sRGB textures (gamma values). We skip that conversion.
+    // Blend One OneMinusSrcAlpha is correct for premultiplied linear data:
+    //   final = col.rgb + (1 - col.a) * scene
     return col;
 }
 ENDCG
