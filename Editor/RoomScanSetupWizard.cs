@@ -438,15 +438,9 @@ namespace Genesis.RoomScan.Editor
                 planeDetector.enabled = false;
             }
             if (root.GetComponent<GSSectorRenderer>() == null)
-            {
-                var renderer = Undo.AddComponent<GSSectorRenderer>(root);
-                renderer.enabled = false;
-            }
+                Undo.AddComponent<GSSectorRenderer>(root);
             if (root.GetComponent<GSplatManager>() == null)
-            {
-                var gsplat = Undo.AddComponent<GSplatManager>(root);
-                gsplat.enabled = false;
-            }
+                Undo.AddComponent<GSplatManager>(root);
 
             MarkDirty();
             Refresh();
