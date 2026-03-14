@@ -162,6 +162,8 @@ namespace Genesis.RoomScan.GSplat
             }
         }
 
+        [SerializeField] Shader compositeShader;
+
         GSplatPass m_Pass;
         Material m_CompositeMaterial;
 
@@ -169,7 +171,7 @@ namespace Genesis.RoomScan.GSplat
         {
             if (m_CompositeMaterial == null)
             {
-                var shader = Shader.Find("Genesis/SplatComposite");
+                var shader = compositeShader != null ? compositeShader : Shader.Find("Genesis/SplatComposite");
                 if (shader != null)
                     m_CompositeMaterial = CoreUtils.CreateEngineMaterial(shader);
                 else

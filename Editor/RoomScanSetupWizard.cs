@@ -586,6 +586,8 @@ namespace Genesis.RoomScan.Editor
 
             if (!_gsplatRenderFeatureAdded)
                 AddGSplatRenderFeature();
+            else
+                EnsureRenderFeatureCompositeShader();
 
             MarkDirty();
             Refresh();
@@ -686,6 +688,27 @@ namespace Genesis.RoomScan.Editor
             return false;
         }
 
+        static void EnsureRenderFeatureCompositeShader()
+        {
+            var rd = FindActiveRendererData();
+            if (rd == null) return;
+            foreach (var f in rd.rendererFeatures)
+            {
+                if (f is not GSplatRenderFeature) continue;
+                var fso = new SerializedObject(f);
+                var shaderProp = fso.FindProperty("compositeShader");
+                if (shaderProp == null || shaderProp.objectReferenceValue != null) continue;
+                var compShader = Shader.Find("Genesis/SplatComposite");
+                if (compShader == null) continue;
+                shaderProp.objectReferenceValue = compShader;
+                fso.ApplyModifiedProperties();
+                EditorUtility.SetDirty(f);
+                EditorUtility.SetDirty(rd);
+                AssetDatabase.SaveAssets();
+                Debug.Log("[RoomScan Setup] Wired composite shader on existing GSplatRenderFeature");
+            }
+        }
+
         static void AddGSplatRenderFeature()
         {
             var rd = FindActiveRendererData();
@@ -698,6 +721,18 @@ namespace Genesis.RoomScan.Editor
             var feature = CreateInstance<GSplatRenderFeature>();
             feature.name = "GSplat Render";
             feature.SetActive(true);
+
+            var compShader = Shader.Find("Genesis/SplatComposite");
+            if (compShader != null)
+            {
+                var fso = new SerializedObject(feature);
+                var shaderProp = fso.FindProperty("compositeShader");
+                if (shaderProp != null)
+                {
+                    shaderProp.objectReferenceValue = compShader;
+                    fso.ApplyModifiedPropertiesWithoutUndo();
+                }
+            }
             Undo.RecordObject(rd, "Add GSplat Render Feature");
             AssetDatabase.AddObjectToAsset(feature, rd);
 
