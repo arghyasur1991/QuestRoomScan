@@ -26,6 +26,7 @@ Shader "Genesis/ScanMeshVertexColor"
             #pragma shader_feature_local _SHOW_NORMALS
             #pragma shader_feature_local _TRIPLANAR_ONLY
             #pragma shader_feature_local _VERTEX_ONLY
+            #pragma multi_compile _ _GSPLAT_SECTOR_MASK
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
@@ -72,6 +73,27 @@ Shader "Genesis/ScanMeshVertexColor"
             // Volume params (set by VolumeIntegrator as globals)
             float4 gsVoxCount;
             float gsVoxSize;
+
+            #ifdef _GSPLAT_SECTOR_MASK
+            uint _SectorSplatMask0;  // bits 0-31
+            uint _SectorSplatMask1;  // bits 32-63
+
+            uint GetSectorID(float3 worldPos)
+            {
+                float3 uvw = WorldToVoxelUVW(worldPos);
+                uint3 sid = (uint3)(uvw * 4.0);
+                sid = clamp(sid, uint3(0,0,0), uint3(3,3,3));
+                return sid.x + sid.y * 4 + sid.z * 16;
+            }
+
+            bool IsSectorMasked(uint secID)
+            {
+                uint word = secID / 32;
+                uint bit = secID % 32;
+                uint mask = (word == 0) ? _SectorSplatMask0 : _SectorSplatMask1;
+                return (mask & (1u << bit)) != 0;
+            }
+            #endif
 
             float3 WorldToVoxelUVW(float3 pos)
             {
@@ -155,6 +177,15 @@ Shader "Genesis/ScanMeshVertexColor"
 
                 uint idx = _SurfaceIndices[vertID];
                 GPUVertex gv = _SurfaceVerts[idx];
+
+                #ifdef _GSPLAT_SECTOR_MASK
+                uint secID = GetSectorID(gv.pos);
+                if (IsSectorMasked(secID))
+                {
+                    OUT.positionHCS = float4(0, 0, -1, 0);
+                    return OUT;
+                }
+                #endif
 
                 OUT.positionWS  = gv.pos;
                 OUT.positionHCS = TransformWorldToHClip(gv.pos);

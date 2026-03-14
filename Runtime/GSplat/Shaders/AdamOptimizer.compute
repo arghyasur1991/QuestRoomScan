@@ -1,0 +1,68 @@
+// Fused Adam optimizer + gradient stats accumulation — ported from msplat.
+#pragma kernel AdamStep
+#pragma kernel AccumulateGradStats
+#pragma kernel ZeroBuffer
+
+// ---- Adam step: one thread per float element ----
+
+RWStructuredBuffer<float> _Params;
+StructuredBuffer<float>   _Grads;
+RWStructuredBuffer<float> _ExpAvg;
+RWStructuredBuffer<float> _ExpAvgSq;
+float _StepSize;
+float _Beta1;
+float _Beta2;
+float _Bc2Sqrt;
+float _Eps;
+uint _N;
+
+[numthreads(256, 1, 1)]
+void AdamStep(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _N) return;
+
+    float g = _Grads[id.x];
+    float m = _Beta1 * _ExpAvg[id.x] + (1.0f - _Beta1) * g;
+    float v = _Beta2 * _ExpAvgSq[id.x] + (1.0f - _Beta2) * g * g;
+
+    _Params[id.x] -= _StepSize * m / (sqrt(v) / _Bc2Sqrt + _Eps);
+    _ExpAvg[id.x] = m;
+    _ExpAvgSq[id.x] = v;
+}
+
+// ---- Gradient stats for densification ----
+
+uint _NumPoints2;
+StructuredBuffer<int>   _Radii;
+StructuredBuffer<float> _XYGrad;   // [N*2]
+RWStructuredBuffer<float> _VisCounts;
+RWStructuredBuffer<float> _XYGradNorm;
+RWStructuredBuffer<float> _Max2DSize;
+float _InvMaxDim;
+
+[numthreads(256, 1, 1)]
+void AccumulateGradStats(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _NumPoints2) return;
+    if (_Radii[id.x] <= 0) return;
+
+    _VisCounts[id.x] += 1.0f;
+
+    float gx = _XYGrad[id.x * 2];
+    float gy = _XYGrad[id.x * 2 + 1];
+    _XYGradNorm[id.x] += sqrt(gx * gx + gy * gy);
+
+    float r = (float)_Radii[id.x] * _InvMaxDim;
+    _Max2DSize[id.x] = max(_Max2DSize[id.x], r);
+}
+
+// ---- Zero buffer utility ----
+
+RWStructuredBuffer<uint> _ZeroBuf;
+uint _ZeroCount;
+
+[numthreads(256, 1, 1)]
+void ZeroBuffer(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < _ZeroCount) _ZeroBuf[id.x] = 0;
+}

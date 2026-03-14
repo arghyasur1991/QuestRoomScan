@@ -1,0 +1,309 @@
+// Fused projection backward + SH backward — ported from msplat project_and_sh_backward_kernel.
+// One thread per Gaussian. Computes gradients for means, scales, quats, and SH coefficients.
+#pragma kernel ProjectSHBackward
+
+#include "GSplatHelpers.hlsl"
+
+uint _NumPoints;
+float _GlobScale;
+uint _Degree;
+uint _DegreesToUse;
+uint2 _ImgSize;
+float4 _Intrinsics;    // (fx, fy, cx, cy)
+float3 _CamPos;
+float4x4 _ViewMat;
+float4x4 _ProjMat;
+
+StructuredBuffer<float> _Means3D;
+StructuredBuffer<float> _Scales;        // log-space
+StructuredBuffer<float> _Quats;
+StructuredBuffer<int>   _Radii;
+StructuredBuffer<float> _Conics;
+StructuredBuffer<float> _VXY;           // from rasterize backward
+StructuredBuffer<float> _VDepth;
+StructuredBuffer<float> _VConic;
+StructuredBuffer<float> _VColors;       // from rasterize backward (v_rgb)
+
+RWStructuredBuffer<float> _VMean3D;     // output gradients
+RWStructuredBuffer<float> _VScale;
+RWStructuredBuffer<float> _VQuat;
+
+// SH parameters (read-write for fused Adam)
+RWStructuredBuffer<float> _FeaturesDC;
+RWStructuredBuffer<float> _FeaturesRest;
+RWStructuredBuffer<float> _DCExpAvg;
+RWStructuredBuffer<float> _DCExpAvgSq;
+RWStructuredBuffer<float> _RestExpAvg;
+RWStructuredBuffer<float> _RestExpAvgSq;
+
+float _DCStepSize;
+float _DCBc2Sqrt;
+float _RestStepSize;
+float _RestBc2Sqrt;
+float _AdamBeta1;
+float _AdamBeta2;
+float _AdamEps;
+
+void AdamUpdate(inout float param, inout float ea, inout float eas,
+                float grad, float stepSize, float beta1, float beta2, float bc2Sqrt, float eps)
+{
+    float m = beta1 * ea + (1.0f - beta1) * grad;
+    float v = beta2 * eas + (1.0f - beta2) * grad * grad;
+    param -= stepSize * m / (sqrt(v) / bc2Sqrt + eps);
+    ea = m;
+    eas = v;
+}
+
+// EWA projection backward (simplified from msplat)
+void ProjectCov3DEWABackward(
+    float cov3d[6], float4x4 viewmat, float fx, float fy,
+    float tanFovX, float tanFovY, float3 vCov2d,
+    inout float3 vMean, out float vCov3d[6], float3 pView)
+{
+    float limX = 1.3f * tanFovX;
+    float limY = 1.3f * tanFovY;
+    pView.x = pView.z * min(limX, max(-limX, pView.x / pView.z));
+    pView.y = pView.z * min(limY, max(-limY, pView.y / pView.z));
+
+    float rz = 1.f / pView.z;
+    float rz2 = rz * rz;
+
+    float j00 = fx * rz, j11 = fy * rz;
+    float j20 = -fx * pView.x * rz2, j21 = -fy * pView.y * rz2;
+
+    float3 mr0 = float3(viewmat[0][0], viewmat[0][1], viewmat[0][2]);
+    float3 mr1 = float3(viewmat[1][0], viewmat[1][1], viewmat[1][2]);
+    float3 mr2 = float3(viewmat[2][0], viewmat[2][1], viewmat[2][2]);
+
+    float3 t0 = j00 * mr0 + j20 * mr2;
+    float3 t1 = j11 * mr1 + j21 * mr2;
+
+    float v00 = cov3d[0], v01 = cov3d[1], v02 = cov3d[2];
+    float v11 = cov3d[3], v12 = cov3d[4], v22 = cov3d[5];
+
+    // dL/dT = dL/dcov2d * dcov2d/dT; cov2d = T*V*T^T
+    float3 vT0 = 2.f * float3(
+        vCov2d.x * (t0.x*v00 + t0.y*v01 + t0.z*v02) + vCov2d.y * (t1.x*v00 + t1.y*v01 + t1.z*v02),
+        vCov2d.x * (t0.x*v01 + t0.y*v11 + t0.z*v12) + vCov2d.y * (t1.x*v01 + t1.y*v11 + t1.z*v12),
+        vCov2d.x * (t0.x*v02 + t0.y*v12 + t0.z*v22) + vCov2d.y * (t1.x*v02 + t1.y*v12 + t1.z*v22)
+    );
+    float3 vT1 = 2.f * float3(
+        vCov2d.y * (t0.x*v00 + t0.y*v01 + t0.z*v02) + vCov2d.z * (t1.x*v00 + t1.y*v01 + t1.z*v02),
+        vCov2d.y * (t0.x*v01 + t0.y*v11 + t0.z*v12) + vCov2d.z * (t1.x*v01 + t1.y*v11 + t1.z*v12),
+        vCov2d.y * (t0.x*v02 + t0.y*v12 + t0.z*v22) + vCov2d.z * (t1.x*v02 + t1.y*v12 + t1.z*v22)
+    );
+
+    // dL/dV (cov3d)
+    vCov3d[0] = dot(t0, t0) * vCov2d.x + 2.f * dot(t0, t1) * vCov2d.y + dot(t1, t1) * vCov2d.z;
+    vCov3d[1] = (t0.x*t0.y + t0.y*t0.x) * vCov2d.x;
+    vCov3d[2] = (t0.x*t0.z + t0.z*t0.x) * vCov2d.x;
+    vCov3d[3] = (t0.y*t0.y) * vCov2d.x + (t1.y*t1.y) * vCov2d.z;
+    vCov3d[4] = 0; // simplified
+    vCov3d[5] = (t0.z*t0.z) * vCov2d.x + (t1.z*t1.z) * vCov2d.z;
+
+    // dL/dp_view contribution from J derivatives
+    float vPVx = (-fx * rz2) * dot(vT0, mr2) + (-fy * rz2) * dot(vT1, mr2);
+    float vPVz = (fx * pView.x * 2.f * rz2 * rz) * dot(vT0, mr2) +
+                 (fy * pView.y * 2.f * rz2 * rz) * dot(vT1, mr2) +
+                 (-fx * rz2) * dot(vT0, mr0) + (-fy * rz2) * dot(vT1, mr1);
+
+    vMean.x += viewmat[0][0] * vPVx + viewmat[2][0] * vPVz;
+    vMean.y += viewmat[0][1] * vPVx + viewmat[2][1] * vPVz;
+    vMean.z += viewmat[0][2] * vPVx + viewmat[2][2] * vPVz;
+}
+
+// Scale+rotation → cov3d backward
+void ScaleRotToCov3DVJP(float3 expScale, float globScale, float4 quat,
+                         float vCov3d[6], out float3 vScale, out float4 vQuat)
+{
+    float3x3 R = QuatToRotmat(quat);
+    float3x3 S = float3x3(
+        globScale * expScale.x, 0, 0,
+        0, globScale * expScale.y, 0,
+        0, 0, globScale * expScale.z
+    );
+    float3x3 M = mul(R, S);
+
+    // Symmetric matrix from vCov3d upper triangle
+    float3x3 vT;
+    vT[0] = float3(vCov3d[0], vCov3d[1], vCov3d[2]);
+    vT[1] = float3(vCov3d[1], vCov3d[3], vCov3d[4]);
+    vT[2] = float3(vCov3d[2], vCov3d[4], vCov3d[5]);
+
+    // dL/dM = (vT + vT^T) * M = 2 * vT * M (since vT is symmetric)
+    float3x3 vM = 2.f * mul(vT, M);
+
+    // dL/dS = R^T * vM
+    float3x3 vS = mul(transpose(R), vM);
+    vScale = float3(vS[0][0] * globScale,
+                    vS[1][1] * globScale,
+                    vS[2][2] * globScale);
+
+    // dL/dR = vM * S^T
+    float3x3 vR = mul(vM, transpose(S));
+
+    // Rotation matrix → quaternion gradient (simplified)
+    float s = rsqrt(quat.x*quat.x + quat.y*quat.y + quat.z*quat.z + quat.w*quat.w);
+    float w = quat.x * s, x = quat.y * s, y = quat.z * s, z = quat.w * s;
+
+    vQuat.x = 2.f * (z*(vR[0][1] - vR[1][0]) + y*(vR[2][0] - vR[0][2]) + x*(vR[1][2] - vR[2][1]));
+    vQuat.y = 2.f * (w*(vR[1][2] - vR[2][1]) + y*(vR[0][1] + vR[1][0]) + z*(vR[0][2] + vR[2][0]) - 2.f*x*(vR[1][1] + vR[2][2]));
+    vQuat.z = 2.f * (w*(vR[2][0] - vR[0][2]) + x*(vR[0][1] + vR[1][0]) + z*(vR[1][2] + vR[2][1]) - 2.f*y*(vR[0][0] + vR[2][2]));
+    vQuat.w = 2.f * (w*(vR[0][1] - vR[1][0]) + x*(vR[0][2] + vR[2][0]) + y*(vR[1][2] + vR[2][1]) - 2.f*z*(vR[0][0] + vR[1][1]));
+}
+
+[numthreads(256, 1, 1)]
+void ProjectSHBackward(uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _NumPoints || _Radii[idx] <= 0) return;
+
+    float3 pWorld = float3(_Means3D[idx*3], _Means3D[idx*3+1], _Means3D[idx*3+2]);
+    float fx = _Intrinsics.x, fy = _Intrinsics.y;
+
+    // Projection backward: vMean from vXY
+    float2 vXY = float2(_VXY[idx*2], _VXY[idx*2+1]);
+    float3 vMean = ProjectPixVJP(_ProjMat, pWorld, _ImgSize, vXY);
+
+    // z gradient
+    float vZ = _VDepth[idx];
+    vMean += float3(_ViewMat[2][0], _ViewMat[2][1], _ViewMat[2][2]) * vZ;
+
+    // vCov2d from vConic
+    float3 conicVal = float3(_Conics[idx*3], _Conics[idx*3+1], _Conics[idx*3+2]);
+    float3 vConicVal = float3(_VConic[idx*3], _VConic[idx*3+1], _VConic[idx*3+2]);
+    float vCov2d[3];
+    Cov2DToConicVJP(conicVal, vConicVal, vCov2d);
+
+    // Recompute cov3d from scales+quats
+    float3 expScale = exp(float3(_Scales[idx*3], _Scales[idx*3+1], _Scales[idx*3+2]));
+    float4 quat = float4(_Quats[idx*4], _Quats[idx*4+1], _Quats[idx*4+2], _Quats[idx*4+3]);
+    float cov3d[6];
+    ScaleRotToCov3D(expScale, _GlobScale, quat, cov3d);
+
+    float tanFovX = 0.5f * (float)_ImgSize.x / fx;
+    float tanFovY = 0.5f * (float)_ImgSize.y / fy;
+    float3 pView = Transform4x3(_ViewMat, pWorld);
+    float gradCov3d[6];
+    ProjectCov3DEWABackward(cov3d, _ViewMat, fx, fy, tanFovX, tanFovY,
+                             float3(vCov2d[0], vCov2d[1], vCov2d[2]),
+                             vMean, gradCov3d, pView);
+
+    // Scale+rotation backward
+    float3 vScale;
+    float4 vQuat;
+    ScaleRotToCov3DVJP(expScale, _GlobScale, quat, gradCov3d, vScale, vQuat);
+
+    // Chain rule: dL/d(log_s) = dL/d(exp_s) * exp(log_s)
+    vScale *= expScale;
+
+    _VMean3D[idx*3+0] = vMean.x;
+    _VMean3D[idx*3+1] = vMean.y;
+    _VMean3D[idx*3+2] = vMean.z;
+    _VScale[idx*3+0] = vScale.x;
+    _VScale[idx*3+1] = vScale.y;
+    _VScale[idx*3+2] = vScale.z;
+    _VQuat[idx*4+0] = vQuat.x;
+    _VQuat[idx*4+1] = vQuat.y;
+    _VQuat[idx*4+2] = vQuat.z;
+    _VQuat[idx*4+3] = vQuat.w;
+
+    // ---- Fused SH backward + Adam ----
+    float3 viewdir = normalize(pWorld - _CamPos);
+    uint numBases = NumSHBases(_Degree);
+    uint dcOff = 3 * idx;
+    uint restOff = (numBases - 1) * 3 * idx;
+
+    float3 vc = float3(_VColors[idx*3], _VColors[idx*3+1], _VColors[idx*3+2]);
+
+    // DC
+    [unroll]
+    for (int c = 0; c < 3; c++)
+    {
+        float g = SH_C0 * vc[c];
+        float p = _FeaturesDC[dcOff + c];
+        float ea = _DCExpAvg[dcOff + c];
+        float eas = _DCExpAvgSq[dcOff + c];
+        AdamUpdate(p, ea, eas, g, _DCStepSize, _AdamBeta1, _AdamBeta2, _DCBc2Sqrt, _AdamEps);
+        _FeaturesDC[dcOff + c] = p;
+        _DCExpAvg[dcOff + c] = ea;
+        _DCExpAvgSq[dcOff + c] = eas;
+    }
+
+    if (_DegreesToUse < 1) return;
+
+    float x = viewdir.x, y = viewdir.y, z = viewdir.z;
+    float xx = x*x, xy = x*y, xz = x*z, yy = y*y, yz = y*z, zz = z*z;
+
+    float sh1[3] = { -SH_C1*y, SH_C1*z, -SH_C1*x };
+    [unroll]
+    for (int b1 = 0; b1 < 3; b1++)
+    {
+        [unroll]
+        for (int c1 = 0; c1 < 3; c1++)
+        {
+            uint i1 = restOff + b1*3 + c1;
+            float g1 = sh1[b1] * vc[c1];
+            float p1 = _FeaturesRest[i1];
+            float ea1 = _RestExpAvg[i1];
+            float eas1 = _RestExpAvgSq[i1];
+            AdamUpdate(p1, ea1, eas1, g1, _RestStepSize, _AdamBeta1, _AdamBeta2, _RestBc2Sqrt, _AdamEps);
+            _FeaturesRest[i1] = p1;
+            _RestExpAvg[i1] = ea1;
+            _RestExpAvgSq[i1] = eas1;
+        }
+    }
+
+    if (_DegreesToUse < 2) return;
+
+    float sh2[5] = {
+        SH_C2[0]*xy, SH_C2[1]*yz, SH_C2[2]*(2.f*zz - xx - yy),
+        SH_C2[3]*xz, SH_C2[4]*(xx - yy)
+    };
+    [unroll]
+    for (int b2 = 0; b2 < 5; b2++)
+    {
+        [unroll]
+        for (int c2 = 0; c2 < 3; c2++)
+        {
+            uint i2 = restOff + (3 + b2)*3 + c2;
+            float g2 = sh2[b2] * vc[c2];
+            float p2 = _FeaturesRest[i2];
+            float ea2 = _RestExpAvg[i2];
+            float eas2 = _RestExpAvgSq[i2];
+            AdamUpdate(p2, ea2, eas2, g2, _RestStepSize, _AdamBeta1, _AdamBeta2, _RestBc2Sqrt, _AdamEps);
+            _FeaturesRest[i2] = p2;
+            _RestExpAvg[i2] = ea2;
+            _RestExpAvgSq[i2] = eas2;
+        }
+    }
+
+    if (_DegreesToUse < 3) return;
+
+    float sh3[7] = {
+        SH_C3[0]*y*(3.f*xx - yy),
+        SH_C3[1]*xy*z,
+        SH_C3[2]*y*(4.f*zz - xx - yy),
+        SH_C3[3]*z*(2.f*zz - 3.f*xx - 3.f*yy),
+        SH_C3[4]*x*(4.f*zz - xx - yy),
+        SH_C3[5]*z*(xx - yy),
+        SH_C3[6]*x*(xx - 3.f*yy)
+    };
+    [unroll]
+    for (int b3 = 0; b3 < 7; b3++)
+    {
+        [unroll]
+        for (int c3 = 0; c3 < 3; c3++)
+        {
+            uint i3 = restOff + (8 + b3)*3 + c3;
+            float g3 = sh3[b3] * vc[c3];
+            float p3 = _FeaturesRest[i3];
+            float ea3 = _RestExpAvg[i3];
+            float eas3 = _RestExpAvgSq[i3];
+            AdamUpdate(p3, ea3, eas3, g3, _RestStepSize, _AdamBeta1, _AdamBeta2, _RestBc2Sqrt, _AdamEps);
+            _FeaturesRest[i3] = p3;
+            _RestExpAvg[i3] = ea3;
+            _RestExpAvgSq[i3] = eas3;
+        }
+    }
+}

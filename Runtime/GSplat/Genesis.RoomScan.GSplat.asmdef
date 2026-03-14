@@ -1,0 +1,18 @@
+{
+    "name": "Genesis.RoomScan.GSplat",
+    "rootNamespace": "Genesis.RoomScan.GSplat",
+    "references": [
+        "Genesis.RoomScan",
+        "Unity.Mathematics",
+        "Unity.RenderPipelines.Universal.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
