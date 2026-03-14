@@ -6,6 +6,7 @@ using Meta.XR;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.Rendering.Universal;
 using UnityEngine.XR.ARFoundation;
 using Unity.XR.CoreUtils;
 
@@ -41,6 +42,7 @@ namespace Genesis.RoomScan.Editor
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
         bool _gsplatComputeWired, _gsRendererComputeWired;
+        bool _gsplatRenderFeatureAdded;
         bool _boundarylessManifest;
 
         // Style
@@ -127,6 +129,7 @@ namespace Genesis.RoomScan.Editor
                 "initGaussiansCompute");
             _gsRendererComputeWired = _gsSectorRenderer != null && AreFieldsAssigned(_gsSectorRenderer,
                 "viewPrepassCompute", "sortCompute", "radixSortCompute", "splatMaterial");
+            _gsplatRenderFeatureAdded = HasGSplatRenderFeature();
 
             _boundarylessManifest = ManifestHasBoundaryless();
         }
@@ -462,11 +465,12 @@ namespace Genesis.RoomScan.Editor
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
             StatusRow("GSplatManager compute shaders (8)", _gsplatComputeWired);
             StatusRow("GSSectorRenderer prepass + material", _gsRendererComputeWired);
+            StatusRow("GSplatRenderFeature on URP Renderer", _gsplatRenderFeatureAdded);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
                             !_meshMatWired || !_triplanarWired ||
                             !_computeShaderWired || !_gsplatComputeWired ||
-                            !_gsRendererComputeWired;
+                            !_gsRendererComputeWired || !_gsplatRenderFeatureAdded;
             if (needsFix)
             {
                 GUILayout.Space(2);
@@ -586,6 +590,9 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_gsSectorRenderer);
             }
 
+            if (!_gsplatRenderFeatureAdded)
+                AddGSplatRenderFeature();
+
             MarkDirty();
             Refresh();
         }
@@ -656,6 +663,59 @@ namespace Genesis.RoomScan.Editor
             AssetDatabase.CreateAsset(mat, matPath);
             AssetDatabase.SaveAssets();
             return mat;
+        }
+
+        // -- URP Renderer Feature -----------------------------------------
+
+        static UniversalRendererData FindActiveRendererData()
+        {
+            var pipeline = UnityEngine.Rendering.GraphicsSettings.currentRenderPipeline
+                as UniversalRenderPipelineAsset;
+            if (pipeline == null) return null;
+
+            var so = new SerializedObject(pipeline);
+            var list = so.FindProperty("m_RendererDataList");
+            if (list == null || list.arraySize == 0) return null;
+
+            return list.GetArrayElementAtIndex(0).objectReferenceValue
+                as UniversalRendererData;
+        }
+
+        static bool HasGSplatRenderFeature()
+        {
+            var rd = FindActiveRendererData();
+            if (rd == null) return false;
+            foreach (var f in rd.rendererFeatures)
+            {
+                if (f is GSplatRenderFeature) return true;
+            }
+            return false;
+        }
+
+        static void AddGSplatRenderFeature()
+        {
+            var rd = FindActiveRendererData();
+            if (rd == null)
+            {
+                Debug.LogWarning("[RoomScan Setup] No active URP RendererData found");
+                return;
+            }
+
+            var feature = CreateInstance<GSplatRenderFeature>();
+            feature.name = "GSplat Render";
+            feature.SetActive(true);
+            Undo.RecordObject(rd, "Add GSplat Render Feature");
+            AssetDatabase.AddObjectToAsset(feature, rd);
+
+            var so = new SerializedObject(rd);
+            var features = so.FindProperty("m_RendererFeatures");
+            features.arraySize++;
+            features.GetArrayElementAtIndex(features.arraySize - 1).objectReferenceValue = feature;
+            so.ApplyModifiedProperties();
+
+            EditorUtility.SetDirty(rd);
+            AssetDatabase.SaveAssets();
+            Debug.Log("[RoomScan Setup] Added GSplatRenderFeature to URP Renderer");
         }
 
         // -- Master Button ------------------------------------------------

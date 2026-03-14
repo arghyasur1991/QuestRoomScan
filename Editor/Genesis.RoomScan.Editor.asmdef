@@ -5,6 +5,8 @@
     "Genesis.RoomScan",
     "Unity.XR.ARFoundation",
     "Unity.XR.CoreUtils",
+    "Unity.RenderPipelines.Universal.Runtime",
+    "Unity.RenderPipelines.Core.Runtime",
     "meta.xr.mrutilitykit"
   ],
   "includePlatforms": [

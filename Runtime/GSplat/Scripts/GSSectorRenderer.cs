@@ -6,9 +6,11 @@ using UnityEngine.XR;
 namespace Genesis.RoomScan.GSplat
 {
     /// <summary>
-    /// Renders Gaussian splats via compute prepass → GPU sort → lightweight render.
+    /// Renders Gaussian splats via compute prepass → GPU sort → URP render pass.
     /// Zero-copy from training buffers. All sectors concatenated into one draw call.
     /// Uses radix sort (13 dispatches) with bitonic fallback for Quest compatibility.
+    /// Drawing is deferred to <see cref="GSplatRenderFeature"/> which handles
+    /// per-eye RT slice targeting required for Quest stereo.
     /// </summary>
     public class GSSectorRenderer : MonoBehaviour
     {
@@ -19,11 +21,22 @@ namespace Genesis.RoomScan.GSplat
         [SerializeField, Range(0.1f, 4f)] float splatSizeMultiplier = 1f;
         [SerializeField] int shDegree = 2;
 
+        public static GSSectorRenderer ActiveInstance { get; private set; }
+
         SectorScheduler _scheduler;
         MaterialPropertyBlock _props;
         readonly List<(int id, GSplatBuffers buffers)> _readySectors = new();
         bool _ready;
         bool _loggedFirstDraw;
+
+        int _preparedTotalCount;
+        bool _preparedIsStereo;
+
+        /// <summary>True when LateUpdate has prepared splat data for the current frame.</summary>
+        public bool HasPreparedSplats => _preparedTotalCount > 0;
+
+        /// <summary>Whether the current frame's prepared data is for stereo rendering.</summary>
+        public bool IsStereoMode => _preparedIsStereo;
 
         GraphicsBuffer _viewDataBuffer;
         int _viewDataCapacity;
@@ -79,6 +92,11 @@ namespace Genesis.RoomScan.GSplat
         {
             get => splatMaterial;
             set => splatMaterial = value;
+        }
+
+        void OnEnable()
+        {
+            ActiveInstance = this;
         }
 
         public void Initialize(SectorScheduler scheduler)
@@ -165,6 +183,8 @@ namespace Genesis.RoomScan.GSplat
 
         void LateUpdate()
         {
+            _preparedTotalCount = 0;
+
             if (!_ready || _scheduler == null || splatMaterial == null || _prepassKernel < 0)
                 return;
 
@@ -247,8 +267,6 @@ namespace Genesis.RoomScan.GSplat
             // 2 entries (left + right), so the shader computes: _WriteOffset + idx*2 (stereo)
             // or _WriteOffset + idx (mono). C# advances by n*2 or n accordingly.
             int writeOffset = 0;
-            Bounds combinedBounds = default;
-            bool first = true;
 
             foreach (var (id, buffers) in _readySectors)
             {
@@ -267,10 +285,6 @@ namespace Genesis.RoomScan.GSplat
                 int groups = (n + 255) / 256;
                 viewPrepassCompute.Dispatch(_prepassKernel, groups, 1, 1);
 
-                var bounds = _scheduler.GetSectorBounds(id);
-                if (first) { combinedBounds = bounds; first = false; }
-                else combinedBounds.Encapsulate(bounds);
-
                 writeOffset += isStereo ? n * 2 : n;
             }
 
@@ -280,36 +294,35 @@ namespace Genesis.RoomScan.GSplat
             else if (_initSortBitonicKernel >= 0 && _bitonicStepKernel >= 0)
                 DispatchBitonicSort(totalCount, isStereo);
 
-            // --- Phase 3: Render ---
+            // --- Phase 3: Bind buffers on material for the URP render pass ---
             splatMaterial.SetBuffer(ID_SplatViewData, _viewDataBuffer);
             if (_useRadixSort)
                 splatMaterial.SetBuffer(ID_OrderBuffer, _sortPayloadBuffer);
             else
                 splatMaterial.SetBuffer(ID_SortBuffer, _bitonicSortBuffer);
             splatMaterial.SetInt(ID_SplatCount, totalCount);
-            splatMaterial.SetInt(ID_IsStereo, isStereo ? 1 : 0);
 
-            var rp = new RenderParams(splatMaterial)
-            {
-                worldBounds = combinedBounds,
-                matProps = _props,
-                receiveShadows = false,
-                shadowCastingMode = ShadowCastingMode.Off,
-                layer = gameObject.layer
-            };
+            _preparedTotalCount = totalCount;
+            _preparedIsStereo = isStereo;
+        }
 
-            if (isStereo)
-            {
-                splatMaterial.SetInt(ID_EyeIndex, 0);
-                Graphics.RenderPrimitives(rp, MeshTopology.Quads, totalCount * 4);
-                splatMaterial.SetInt(ID_EyeIndex, 1);
-                Graphics.RenderPrimitives(rp, MeshTopology.Quads, totalCount * 4);
-            }
-            else
-            {
-                splatMaterial.SetInt(ID_EyeIndex, 0);
-                Graphics.RenderPrimitives(rp, MeshTopology.Quads, totalCount * 4);
-            }
+        /// <summary>
+        /// Called by <see cref="GSplatRenderFeature"/> from the URP render pass.
+        /// Issues a DrawProcedural for all prepared splats.
+        /// </summary>
+        /// <param name="cmd">URP command buffer.</param>
+        /// <param name="eyeIndex">0 = left, 1 = right, -1 = mono.</param>
+        public void DrawSplats(CommandBuffer cmd, int eyeIndex)
+        {
+            if (_preparedTotalCount <= 0 || splatMaterial == null) return;
+
+            bool stereo = eyeIndex >= 0;
+            _props.SetInteger(ID_IsStereo, stereo ? 1 : 0);
+            _props.SetInteger(ID_EyeIndex, stereo ? eyeIndex : 0);
+
+            cmd.DrawProcedural(
+                Matrix4x4.identity, splatMaterial, 0,
+                MeshTopology.Quads, _preparedTotalCount * 4, 1, _props);
         }
 
         void DispatchRadixSort(int totalCount, bool stereo = false)
@@ -354,6 +367,8 @@ namespace Genesis.RoomScan.GSplat
 
         void OnDisable()
         {
+            if (ActiveInstance == this) ActiveInstance = null;
+            _preparedTotalCount = 0;
             _ready = false;
             _viewDataBuffer?.Release(); _viewDataBuffer = null; _viewDataCapacity = 0;
             _sortKeysBuffer?.Release(); _sortKeysBuffer = null;
