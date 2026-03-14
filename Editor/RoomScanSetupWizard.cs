@@ -699,6 +699,7 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "keyframeCollector", _keyframeCollector);
                 SetRef(so, "pointCloudExporter", _pointCloudExporter);
                 SetRef(so, "planeDetector", _planeDetector);
+                SetRef(so, "gsplatManager", _gsplatManager);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }

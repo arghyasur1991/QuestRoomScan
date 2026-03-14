@@ -1,4 +1,3 @@
-using System;
 using System.Collections.Generic;
 using Unity.Mathematics;
 using UnityEngine;
@@ -10,8 +9,8 @@ namespace Genesis.RoomScan.GSplat
     /// Integrates with the scan pipeline: seeds from mesh, trains per-sector,
     /// masks mesh where splats are ready, renders splats.
     ///
-    /// Self-wires at runtime by subscribing to RoomScanner events — no
-    /// cross-assembly reference needed from RoomScanner to this assembly.
+    /// RoomScanner calls OnCameraFrame / OnMeshExtracted directly (same assembly).
+    /// TrainFrame runs in this component's own Update().
     /// </summary>
     public class GSplatManager : MonoBehaviour
     {
@@ -44,7 +43,6 @@ namespace Genesis.RoomScan.GSplat
         SectorScheduler _scheduler;
         GSplatTrainer _trainer;
         bool _initialized;
-        RoomScanner _scanner;
         Camera _mainCam;
         Plane[] _frustumPlanes = new Plane[6];
 
@@ -69,20 +67,6 @@ namespace Genesis.RoomScan.GSplat
         void Start()
         {
             _mainCam = Camera.main;
-            _scanner = RoomScanner.Instance;
-            if (_scanner == null)
-            {
-                _scanner = FindFirstObjectByType<RoomScanner>();
-                if (_scanner == null)
-                {
-                    Debug.LogWarning("[GSplatManager] RoomScanner not found — disabling");
-                    enabled = false;
-                    return;
-                }
-            }
-
-            _scanner.ColorFrameCaptured += OnColorFrame;
-            _scanner.MeshExtracted += OnMeshExtracted;
         }
 
         void TryInitialize()
@@ -110,22 +94,23 @@ namespace Genesis.RoomScan.GSplat
             Debug.Log($"[GSplatManager] Initialized — voxels={vi.VoxelCount}, voxelSize={vi.VoxelSize}");
         }
 
-        void OnColorFrame(CameraFrameArgs args)
+        /// <summary>
+        /// Called by RoomScanner each integration tick with the current camera frame.
+        /// Converts to a keyframe for the training ring buffer.
+        /// </summary>
+        public void OnCameraFrame(Texture frame, Vector3 pos, Quaternion rot,
+                                   Vector2 focalLen, Vector2 principalPt, Vector2 currentRes)
         {
-            if (!_initialized) return;
-            if (args.Frame == null) return;
+            if (!_initialized || frame == null) return;
 
-            Texture2D snap = ToTexture2D(args.Frame);
+            Texture2D snap = ToTexture2D(frame);
             if (snap == null) return;
 
-            Matrix4x4 view = Matrix4x4.TRS(args.Position, args.Rotation, Vector3.one).inverse;
+            Matrix4x4 view = Matrix4x4.TRS(pos, rot, Vector3.one).inverse;
 
-            float fx = args.FocalLength.x;
-            float fy = args.FocalLength.y;
-            float cx = args.PrincipalPoint.x;
-            float cy = args.PrincipalPoint.y;
-            float w = args.CurrentResolution.x;
-            float h = args.CurrentResolution.y;
+            float fx = focalLen.x, fy = focalLen.y;
+            float cx = principalPt.x, cy = principalPt.y;
+            float w = currentRes.x, h = currentRes.y;
 
             float n = 0.1f, f = 100f;
             var proj = new Matrix4x4();
@@ -144,8 +129,33 @@ namespace Genesis.RoomScan.GSplat
                 ProjMatrix = proj,
                 Fx = fx, Fy = fy,
                 Cx = cx, Cy = cy,
-                CamPos = args.Position
+                CamPos = pos
             });
+        }
+
+        /// <summary>
+        /// Called by RoomScanner after each mesh extraction cycle.
+        /// </summary>
+        public void OnMeshExtracted()
+        {
+            if (!_initialized) return;
+            var me = MeshExtractor.Instance;
+            if (me?.GpuSurfaceNets == null) return;
+            var vi = VolumeIntegrator.Instance;
+            if (vi == null) return;
+
+            for (int i = 0; i < SectorScheduler.TotalSectors; i++)
+                _scheduler.MarkMeshReady(i);
+        }
+
+        void Update()
+        {
+            TryInitialize();
+            if (!_initialized || _mainCam == null) return;
+
+            var camTr = _mainCam.transform;
+            GeometryUtility.CalculateFrustumPlanes(_mainCam, _frustumPlanes);
+            TrainFrame(camTr.position, camTr.forward, _frustumPlanes);
         }
 
         static Texture2D ToTexture2D(Texture src)
@@ -164,27 +174,7 @@ namespace Genesis.RoomScan.GSplat
             return null;
         }
 
-        void OnMeshExtracted()
-        {
-            if (!_initialized) return;
-            var me = MeshExtractor.Instance;
-            if (me?.GpuSurfaceNets == null) return;
-            var vi = VolumeIntegrator.Instance;
-            if (vi == null) return;
-            NotifyMeshUpdated(me.GpuSurfaceNets, vi.VoxelSize);
-        }
-
-        void Update()
-        {
-            TryInitialize();
-            if (!_initialized || _mainCam == null) return;
-
-            var camTr = _mainCam.transform;
-            GeometryUtility.CalculateFrustumPlanes(_mainCam, _frustumPlanes);
-            TrainFrame(camTr.position, camTr.forward, _frustumPlanes);
-        }
-
-        public void AddKeyframe(KeyframeData kf)
+        void AddKeyframe(KeyframeData kf)
         {
             if (_keyframes.Count >= MaxKeyframes)
             {
@@ -195,16 +185,9 @@ namespace Genesis.RoomScan.GSplat
             _keyframes.Add(kf);
         }
 
-        public void NotifyMeshUpdated(GPUSurfaceNets surfaceNets, float voxelSize)
-        {
-            if (!_initialized || surfaceNets == null) return;
-            for (int i = 0; i < SectorScheduler.TotalSectors; i++)
-                _scheduler.MarkMeshReady(i);
-        }
-
         void TrainFrame(Vector3 headPos, Vector3 gazeDir, Plane[] frustumPlanes)
         {
-            if (!_initialized || _keyframes.Count < 2) return;
+            if (_keyframes.Count < 2) return;
 
             int sectorId = _scheduler.PickNextSector(headPos, gazeDir, frustumPlanes, Time.time);
             if (sectorId < 0) return;
@@ -250,8 +233,7 @@ namespace Genesis.RoomScan.GSplat
 
             for (int i = 0; i < _keyframes.Count; i++)
             {
-                var kf = _keyframes[i];
-                float dist = Vector3.Distance(bounds.center, kf.CamPos);
+                float dist = Vector3.Distance(bounds.center, _keyframes[i].CamPos);
                 float score = 1f / (1f + dist);
                 if (score > bestScore)
                 {
@@ -286,12 +268,6 @@ namespace Genesis.RoomScan.GSplat
 
         void OnDestroy()
         {
-            if (_scanner != null)
-            {
-                _scanner.ColorFrameCaptured -= OnColorFrame;
-                _scanner.MeshExtracted -= OnMeshExtracted;
-            }
-
             foreach (var kf in _keyframes)
             {
                 if (kf.Texture != null) Destroy(kf.Texture);

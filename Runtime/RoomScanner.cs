@@ -1,19 +1,9 @@
 using System;
+using Genesis.RoomScan.GSplat;
 using UnityEngine;
 
 namespace Genesis.RoomScan
 {
-    public struct CameraFrameArgs
-    {
-        public Texture Frame;
-        public Vector3 Position;
-        public Quaternion Rotation;
-        public Vector2 FocalLength;
-        public Vector2 PrincipalPoint;
-        public Vector2 SensorResolution;
-        public Vector2 CurrentResolution;
-    }
-
     public enum ScanMode
     {
         Passive,
@@ -48,6 +38,7 @@ namespace Genesis.RoomScan
         [SerializeField] private PointCloudExporter pointCloudExporter;
         [SerializeField] private PlaneDetector planeDetector;
         [SerializeField] private RoomAnchorManager roomAnchorManager;
+        [SerializeField] private GSplatManager gsplatManager;
 
         [Header("Camera")]
         [SerializeField] private PassthroughCameraProvider cameraProvider;
@@ -89,8 +80,6 @@ namespace Genesis.RoomScan
         public event Action<ScanMode> ModeChanged;
         public event Action ScanStarted;
         public event Action ScanStopped;
-        public event Action<CameraFrameArgs> ColorFrameCaptured;
-        public event Action MeshExtracted;
 
         private float _lastIntegrationTime;
         private float _lastMeshTime;
@@ -216,7 +205,9 @@ namespace Genesis.RoomScan
                 {
                     _lastMeshTime = t;
                     meshExtractor.Extract();
-                    MeshExtracted?.Invoke();
+
+                    if (gsplatManager != null && gsplatManager.enabled)
+                        gsplatManager.OnMeshExtracted();
 
                     if (planeDetector != null)
                         planeDetector.OnMeshCycleComplete();
@@ -332,6 +323,7 @@ namespace Genesis.RoomScan
             if (keyframeCollector == null) keyframeCollector = FindFirstObjectByType<KeyframeCollector>();
             if (pointCloudExporter == null) pointCloudExporter = FindFirstObjectByType<PointCloudExporter>();
             if (planeDetector == null) planeDetector = FindFirstObjectByType<PlaneDetector>();
+            if (gsplatManager == null) gsplatManager = FindFirstObjectByType<GSplatManager>();
 
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");
@@ -407,16 +399,11 @@ namespace Genesis.RoomScan
                             volumeIntegrator.ExclusionZones);
                     }
 
-                    ColorFrameCaptured?.Invoke(new CameraFrameArgs
+                    if (gsplatManager != null && gsplatManager.enabled)
                     {
-                        Frame = frame,
-                        Position = pose.position,
-                        Rotation = pose.rotation,
-                        FocalLength = focal,
-                        PrincipalPoint = principal,
-                        SensorResolution = sensor,
-                        CurrentResolution = current
-                    });
+                        gsplatManager.OnCameraFrame(frame, pose.position, pose.rotation,
+                            focal, principal, current);
+                    }
 
                     _colorFrameLog++;
                     if (_colorFrameLog <= 3 || _colorFrameLog % 50 == 0)
