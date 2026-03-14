@@ -17,6 +17,7 @@ namespace Genesis.RoomScan.GSplat
         MaterialPropertyBlock _props;
         readonly List<(int id, GSplatBuffers buffers)> _readySectors = new();
         bool _ready;
+        bool _loggedFirstDraw;
 
         static readonly int ID_Means = Shader.PropertyToID("_Means");
         static readonly int ID_FeaturesDC = Shader.PropertyToID("_FeaturesDC");
@@ -45,6 +46,15 @@ namespace Genesis.RoomScan.GSplat
 
             _scheduler.GetSplatReadySectors(_readySectors);
             if (_readySectors.Count == 0) return;
+
+            if (!_loggedFirstDraw)
+            {
+                _loggedFirstDraw = true;
+                int totalGaussians = 0;
+                foreach (var (sid, buf) in _readySectors) totalGaussians += buf.CurrentCount;
+                Debug.Log($"[GSSectorRenderer] First draw: {_readySectors.Count} sector(s), {totalGaussians} total gaussians, " +
+                          $"splatSize={splatSizeMultiplier}");
+            }
 
             foreach (var (id, buffers) in _readySectors)
             {

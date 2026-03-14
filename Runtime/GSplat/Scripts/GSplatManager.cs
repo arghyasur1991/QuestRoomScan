@@ -40,6 +40,12 @@ namespace Genesis.RoomScan.GSplat
         [SerializeField, Tooltip("Min integration count before GSplat training begins")]
         int minIntegrationsBeforeTraining = 60;
 
+        [Header("Debug")]
+        [SerializeField, Tooltip("Skip training; render seeded Gaussians directly")]
+        bool debugSkipTraining;
+        [SerializeField, Tooltip("Disable mesh masking (show both mesh and splats)")]
+        bool debugDisableMeshMask = true;
+
         SectorScheduler _scheduler;
         GSplatTrainer _trainer;
         bool _initialized;
@@ -185,9 +191,11 @@ namespace Genesis.RoomScan.GSplat
             _keyframes.Add(kf);
         }
 
+        readonly HashSet<int> _diagnosticLogged = new();
+
         void TrainFrame(Vector3 headPos, Vector3 gazeDir, Plane[] frustumPlanes)
         {
-            if (_keyframes.Count < 2) return;
+            if (!debugSkipTraining && _keyframes.Count < 2) return;
 
             // Phase 1: Opportunistically seed 1 MeshOnly sector per frame
             int seedId = _scheduler.PickNextMeshOnlySector(headPos, gazeDir, frustumPlanes);
@@ -196,10 +204,21 @@ namespace Genesis.RoomScan.GSplat
                 var seedBuf = _scheduler.GetOrCreateBuffers(seedId);
                 SeedFromMesh(seedId, seedBuf);
                 if (seedBuf.CurrentCount == 0)
+                {
                     _scheduler.MarkNoGeometry(seedId);
+                }
+                else if (debugSkipTraining)
+                {
+                    _scheduler.AdvanceTraining(seedId, targetItersPerSector, float.MaxValue, seedBuf.CurrentCount);
+                    LogGaussianDiagnostics(seedId, seedBuf, "seed-only");
+                }
                 else
+                {
                     _scheduler.AdvanceTraining(seedId, 0, float.MaxValue, seedBuf.CurrentCount);
+                }
             }
+
+            if (debugSkipTraining) return;
 
             // Phase 2: Train the best Training-state sector
             int sectorId = _scheduler.PickNextTrainingSector(headPos, gazeDir, frustumPlanes);
@@ -228,7 +247,47 @@ namespace Genesis.RoomScan.GSplat
                           $"gaussians={buffers.CurrentCount}, state={trained.State}");
             }
 
-            UpdateMeshMask();
+            if (trained.State == SectorState.SplatReady)
+                LogGaussianDiagnostics(sectorId, buffers, "trained");
+
+            if (!debugDisableMeshMask)
+                UpdateMeshMask();
+        }
+
+        void LogGaussianDiagnostics(int sectorId, GSplatBuffers buffers, string tag)
+        {
+            if (_diagnosticLogged.Contains(sectorId)) return;
+            _diagnosticLogged.Add(sectorId);
+
+            int n = Mathf.Min(buffers.CurrentCount, 8);
+            if (n == 0) return;
+
+            var means = new float[n * 3];
+            var dc = new float[n * 3];
+            var opac = new float[n];
+            var scales = new float[n * 3];
+
+            buffers.Means.GetData(means, 0, 0, n * 3);
+            buffers.FeaturesDC.GetData(dc, 0, 0, n * 3);
+            buffers.Opacities.GetData(opac, 0, 0, n);
+            buffers.Scales.GetData(scales, 0, 0, n * 3);
+
+            for (int i = 0; i < n; i++)
+            {
+                float3 pos = new(means[i*3], means[i*3+1], means[i*3+2]);
+                float3 shDC = new(dc[i*3], dc[i*3+1], dc[i*3+2]);
+                float3 col = math.saturate(0.28209479f * shDC + 0.5f);
+                float3 logS = new(scales[i*3], scales[i*3+1], scales[i*3+2]);
+                float3 expS = new(math.exp(logS.x), math.exp(logS.y), math.exp(logS.z));
+                float alpha = 1f / (1f + math.exp(-opac[i]));
+
+                Debug.Log($"[GSplat-Diag] sector={sectorId} [{tag}] #{i}: " +
+                          $"pos=({pos.x:F3},{pos.y:F3},{pos.z:F3}) " +
+                          $"col=({col.x:F2},{col.y:F2},{col.z:F2}) " +
+                          $"alpha={alpha:F3} " +
+                          $"scale=({expS.x:F4},{expS.y:F4},{expS.z:F4}) " +
+                          $"logS=({logS.x:F2},{logS.y:F2},{logS.z:F2})");
+            }
         }
 
         static readonly int ID_NumVertices = Shader.PropertyToID("_NumVertices");

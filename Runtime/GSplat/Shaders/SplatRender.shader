@@ -72,8 +72,6 @@ Shader "Genesis/SplatRender"
                 float avgScale = (exp(logScale.x) + exp(logScale.y) + exp(logScale.z)) / 3.0;
                 float splatWorld = max(avgScale * _SplatSize, 0.005);
 
-                float4 clipPos = TransformWorldToHClip(pos);
-
                 float2 offsets[4] = {
                     float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1)
                 };
