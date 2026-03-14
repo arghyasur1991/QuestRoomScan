@@ -10,6 +10,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Mesh Persistence** — Save/load full scan state (TSDF + color volumes + triplanar textures) to disk
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction
+- **Light Estimation** — GPU-driven detection of emissive surfaces (ceiling lights, windows, lamps) from scanned color volume; places Unity lights with position freezing and dynamic intensity
 - **Gaussian Splat Export** — Automatic keyframe capture + dense point cloud export for PC-side GS training
 
 ## Requirements
@@ -75,6 +76,7 @@ MeshExtractor → GPUSurfaceNets (compute: classify → smooth → snap → temp
        │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
        │
        ├── PlaneDetector (periodic RANSAC on background thread → persistent plane list)
+       ├── LightEstimator (GPU bright voxel detection → cluster → Unity lights)
        ├── TriplanarCache (bake camera → 3 world-space textures)
        └── KeyframeStore (ring buffer of camera frames)
                 │
@@ -135,6 +137,7 @@ The trained PLY can be imported into Unity with any Gaussian Splat renderer.
 | GPU Surface Nets (coord map, vertices, indices, smoothing, temporal 3D texture) | ~83 MB |
 | Triplanar textures (3x 1024x1024, RGBA8) | ~12 MB |
 | Keyframe ring buffer (8x 1280x960, RGBA8) | ~40 MB |
+| Light estimation (candidate buffer + ambient) | ~0.05 MB |
 | **Total GPU** | **~155 MB** |
 
 ## Comparison with Hyperscape
@@ -167,6 +170,7 @@ QuestRoomScan builds on that foundation with significant extensions:
 | **Texturing** | Geometry only — no camera RGB texturing | Full camera-based texturing at three resolution tiers: keyframe projection (pixel-level), triplanar world-space cache (~8mm/texel), and vertex colors (~5cm) — all sourced from passthrough camera RGB |
 | **Persistence** | None — mesh lost on restart | Save/load of TSDF + color volumes + triplanar textures to disk (experimental, not well tested) |
 | **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, GPU temporal stabilization, RANSAC plane detection & snapping |
+| **Light estimation** | — | GPU-driven light source detection from color volume, automatic Unity light placement with position freezing and dynamic intensity |
 | **Gaussian Splat export** | — | On-device keyframe + point cloud capture, PC pipeline for COLMAP conversion and GS training |
 | **Packaging** | Embedded in a game | Standalone Unity package with one-click editor setup wizard |
 

@@ -1,0 +1,142 @@
+// GPU light source detection from TSDF color volume.
+// Finds bright (emissive) voxels and computes ambient color from the scene.
+//
+// Dispatch sequence (C# orchestrator):
+//   1. ClearBuffers
+//   2. DetectBrightVoxels (3D over volume)
+//   3. ComputeAmbient     (3D over volume, parallel accumulation)
+
+#pragma kernel ClearBuffers
+#pragma kernel DetectBrightVoxels
+#pragma kernel ComputeAmbient
+
+// Volume textures (bound by VolumeIntegrator)
+Texture3D<float2> _TsdfVolume;   // R = signed distance, G = weight
+Texture3D<float4> _ColorVolume;  // RGBA8 UNorm: RGB = color, A = coverage
+
+uint3  _VoxCount;
+float  _VoxSize;
+float  _CameraExposure;
+float  _BrightThreshold;
+float  _MinVoxelWeight;
+uint   _MaxCandidates;
+
+struct LightCandidate
+{
+    float3 position;
+    float  luminance;
+    float3 color;
+    float  _pad0;
+    float3 normal;
+    float  _pad1;
+};
+
+RWStructuredBuffer<LightCandidate> _Candidates;
+RWStructuredBuffer<uint>           _CandidateCount; // [0] = count
+
+float3 VoxelToWorld(uint3 idx)
+{
+    float3 pos = (float3)idx + 0.5;
+    pos -= (float3)_VoxCount / 2.0;
+    pos *= _VoxSize;
+    return pos;
+}
+
+float3 ComputeTsdfGradient(uint3 coord)
+{
+    float3 grad;
+    uint3 lo, hi;
+
+    lo = uint3(max(coord.x, 1u) - 1u, coord.y, coord.z);
+    hi = uint3(min(coord.x + 1u, _VoxCount.x - 1u), coord.y, coord.z);
+    grad.x = _TsdfVolume[hi].x - _TsdfVolume[lo].x;
+
+    lo = uint3(coord.x, max(coord.y, 1u) - 1u, coord.z);
+    hi = uint3(coord.x, min(coord.y + 1u, _VoxCount.y - 1u), coord.z);
+    grad.y = _TsdfVolume[hi].x - _TsdfVolume[lo].x;
+
+    lo = uint3(coord.x, coord.y, max(coord.z, 1u) - 1u);
+    hi = uint3(coord.x, coord.y, min(coord.z + 1u, _VoxCount.z - 1u));
+    grad.z = _TsdfVolume[hi].x - _TsdfVolume[lo].x;
+
+    float len = length(grad);
+    return len > 0.0001 ? grad / len : float3(0, -1, 0);
+}
+
+// ─────────────────────────────────────────────────────────────────
+
+RWStructuredBuffer<uint> _AmbientAccumInt; // [0]=R, [1]=G, [2]=B, [3]=weight (fixed-point x65536)
+
+[numthreads(64, 1, 1)]
+void ClearBuffers(uint id : SV_DispatchThreadID)
+{
+    if (id == 0)
+    {
+        _CandidateCount[0] = 0;
+        _AmbientAccumInt[0] = 0;
+        _AmbientAccumInt[1] = 0;
+        _AmbientAccumInt[2] = 0;
+        _AmbientAccumInt[3] = 0;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+
+[numthreads(4, 4, 4)]
+void DetectBrightVoxels(uint3 coord : SV_DispatchThreadID)
+{
+    if (any(coord >= _VoxCount)) return;
+
+    float4 col = _ColorVolume[coord];
+    if (col.a < _MinVoxelWeight) return;
+
+    float2 tsdf = _TsdfVolume[coord];
+    if (tsdf.y < _MinVoxelWeight) return;
+
+    // Undo exposure boost to get relative brightness
+    float3 rgb = col.rgb / max(_CameraExposure, 0.01);
+
+    float lum = 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+    if (lum < _BrightThreshold) return;
+
+    uint idx;
+    InterlockedAdd(_CandidateCount[0], 1u, idx);
+    if (idx >= _MaxCandidates) return;
+
+    LightCandidate c;
+    c.position  = VoxelToWorld(coord);
+    c.luminance = lum;
+    c.color     = rgb;
+    c._pad0     = 0;
+    c.normal    = ComputeTsdfGradient(coord);
+    c._pad1     = 0;
+    _Candidates[idx] = c;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Ambient: parallel fixed-point accumulation over all observed voxels.
+// Uses InterlockedAdd on uint (16.16 fixed-point) since GLES3 lacks float atomics.
+// Final division happens on CPU after readback.
+
+[numthreads(4, 4, 4)]
+void ComputeAmbient(uint3 coord : SV_DispatchThreadID)
+{
+    if (any(coord >= _VoxCount)) return;
+
+    float4 col = _ColorVolume[coord];
+    if (col.a < 0.05) return;
+
+    float3 rgb = col.rgb / max(_CameraExposure, 0.01);
+    float w = col.a;
+
+    // Fixed-point accumulation (16.16)
+    uint rFix = (uint)(rgb.r * w * 65536.0);
+    uint gFix = (uint)(rgb.g * w * 65536.0);
+    uint bFix = (uint)(rgb.b * w * 65536.0);
+    uint wFix = (uint)(w * 65536.0);
+
+    InterlockedAdd(_AmbientAccumInt[0], rFix);
+    InterlockedAdd(_AmbientAccumInt[1], gFix);
+    InterlockedAdd(_AmbientAccumInt[2], bFix);
+    InterlockedAdd(_AmbientAccumInt[3], wFix);
+}

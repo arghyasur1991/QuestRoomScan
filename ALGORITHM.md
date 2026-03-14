@@ -13,6 +13,7 @@ MeshExtractor → GPUSurfaceNets (compute shader: classify → compact → smoot
        │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
        │
        ├── PlaneDetector (periodic RANSAC on background thread → persistent plane list)
+       ├── LightEstimator (GPU bright voxel detection → cluster → Unity lights)
        ├── TriplanarCache (bake camera → 3 world-space textures, persistent)
        └── KeyframeStore (ring buffer of camera frames, live quality)
                 │
@@ -390,10 +391,80 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | GPU Surface Nets — temporal state (160³ × 16B, RWTexture3D RGBA32F) | ~50 MB |
 | Triplanar textures (3x 1024x1024 RGBA8) | ~12 MB |
 | Keyframe array (8x 1280x960 RGBA8) | ~40 MB |
+| Light estimation (candidate buffer + ambient) | ~0.05 MB |
 | **Total GPU** | **~155 MB** |
 | **Persistence on disk** | **~31 MB** |
 
-## 12. Gaussian Splat Export Pipeline
+## 12. Light Estimation
+
+`LightEstimator` detects emissive surfaces (ceiling lights, windows, lamps) from the color volume and places Unity `Light` objects at estimated positions. Since Quest 3 has no built-in light estimation API, this uses the scanned color data directly.
+
+### GPU Detection (`LightDetection.compute`)
+
+Two kernels dispatch over the color volume (same grid as TSDF, 160×128×160):
+
+**DetectBrightVoxels** — For each observed voxel (alpha ≥ `minVoxelWeight`):
+1. Undo camera exposure boost (`color / cameraExposure`) to recover relative brightness
+2. Compute luminance: `L = 0.2126R + 0.7152G + 0.0722B`
+3. If `L > brightThreshold` (default 0.7): compute TSDF gradient for surface normal, emit to candidate buffer via `InterlockedAdd`
+4. Candidate struct: position (float3), luminance (float), color (float3), normal (float3) — 48 bytes, capped at 1024 candidates
+
+**ComputeAmbient** — Fixed-point parallel reduction over all observed voxels. Accumulates weighted RGB + total weight into a 4-uint buffer. CPU divides to get average scene color → `RenderSettings.ambientLight`.
+
+### CPU Clustering (`LightEstimator.cs`)
+
+Runs every `detectionIntervalCycles` (default 3) mesh extraction cycles:
+
+1. `AsyncGPUReadback` candidate count → candidate buffer → ambient buffer (chained)
+2. Sort candidates by luminance (descending)
+3. Greedy agglomerative clustering: each candidate merges into the nearest existing cluster within `mergeRadius` (0.3m), or starts a new cluster (up to `maxLights` = 12)
+4. Each cluster tracks: position, normal, color, intensity, confidence, frozen state
+
+### Position Freezing & Dynamic Intensity
+
+- Each cycle confirming a light (candidates matched within radius): confidence increments
+- When `confidence ≥ freezeConfidence` (default 5): position freezes permanently
+- Frozen lights still receive dynamic intensity and color updates from current candidates
+- If no candidates match a frozen light: intensity fades toward zero over `fadeSeconds` (2s), but position stays — light recovers immediately if candidates reappear
+- Handles real-world events: switching lights on/off, opening/closing curtains
+
+### Unity Light Placement
+
+`LightEstimator` manages a pool of `Light` GameObjects:
+- Normal pointing **downward** (ceiling light): `LightType.Spot`, aimed down, 120° cone
+- Other orientations: `LightType.Point`
+- `Light.color` = cluster average color, `Light.intensity` = cluster luminance × `intensityScale`
+- `Light.range` = configurable (default 8m)
+
+### Public API
+
+```csharp
+LightEstimator.Instance.Lights          // ReadOnlyCollection<EstimatedLight>
+LightEstimator.Instance.AmbientColor    // Color
+LightEstimator.Instance.LightsUpdated   // event Action
+LightEstimator.Instance.LightAdded      // event Action<EstimatedLight>
+LightEstimator.Instance.LightRemoved    // event Action<EstimatedLight>
+```
+
+### Light Estimation Parameters
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `brightThreshold` | 0.7 | Luminance cutoff for candidate emission |
+| `minVoxelWeight` | 0.15 | Min color volume alpha to consider |
+| `mergeRadius` | 0.3m | Clustering radius for grouping bright voxels |
+| `maxLights` | 12 | Maximum simultaneous light sources |
+| `freezeConfidence` | 5 | Detection cycles to freeze position |
+| `fadeSeconds` | 2.0s | Time to fade intensity when light disappears |
+| `detectionIntervalCycles` | 3 | Mesh cycles between detection runs |
+| `lightRange` | 8.0m | Default Unity light range |
+| `intensityScale` | 2.0 | Multiplier from luminance to Unity light intensity |
+
+### Memory Budget
+- Candidate buffer: 1024 × 48 bytes = ~48 KB
+- Ambient accumulator: 16 bytes
+- Total additional GPU: **~50 KB** (negligible)
+
+## 13. Gaussian Splat Export Pipeline
 
 Automatic export of camera keyframes and dense point cloud for PC-side Gaussian Splat training.
 

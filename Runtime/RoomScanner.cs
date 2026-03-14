@@ -36,6 +36,7 @@ namespace Genesis.RoomScan
         [SerializeField] private KeyframeCollector keyframeCollector;
         [SerializeField] private PointCloudExporter pointCloudExporter;
         [SerializeField] private PlaneDetector planeDetector;
+        [SerializeField] private LightEstimator lightEstimator;
 
         [Header("Camera")]
         [SerializeField] private PassthroughCameraProvider cameraProvider;
@@ -181,6 +182,9 @@ namespace Genesis.RoomScan
 
                     if (planeDetector != null)
                         planeDetector.OnMeshCycleComplete();
+
+                    if (lightEstimator != null)
+                        lightEstimator.OnMeshCycleComplete();
                 }
             }
 
@@ -293,6 +297,7 @@ namespace Genesis.RoomScan
             if (keyframeCollector == null) keyframeCollector = FindFirstObjectByType<KeyframeCollector>();
             if (pointCloudExporter == null) pointCloudExporter = FindFirstObjectByType<PointCloudExporter>();
             if (planeDetector == null) planeDetector = FindFirstObjectByType<PlaneDetector>();
+            if (lightEstimator == null) lightEstimator = FindFirstObjectByType<LightEstimator>();
 
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");

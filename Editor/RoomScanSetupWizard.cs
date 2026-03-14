@@ -33,8 +33,9 @@ namespace Genesis.RoomScan.Editor
         KeyframeCollector _keyframeCollector;
         PointCloudExporter _pointCloudExporter;
         PlaneDetector _planeDetector;
+        LightEstimator _lightEstimator;
 
-        bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
+        bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired, _lightDetectWired;
 
         // Style
         static readonly Color COL_OK   = new(0.25f, 0.82f, 0.35f);
@@ -100,6 +101,7 @@ namespace Genesis.RoomScan.Editor
             _keyframeCollector = FindAny<KeyframeCollector>();
             _pointCloudExporter = FindAny<PointCloudExporter>();
             _planeDetector = FindAny<PlaneDetector>();
+            _lightEstimator = FindAny<LightEstimator>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -111,6 +113,8 @@ namespace Genesis.RoomScan.Editor
                 "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
+            _lightDetectWired = _lightEstimator != null && AreFieldsAssigned(_lightEstimator,
+                "lightDetectionCompute");
         }
 
         // =================================================================
@@ -245,6 +249,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
             StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
             StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
+            StatusRow("LightEstimator (light detection)", _lightEstimator != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _meshExtractor == null ||
@@ -252,7 +257,8 @@ namespace Genesis.RoomScan.Editor
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null || _keyframeStore == null ||
                               _persistence == null || _keyframeCollector == null ||
-                              _pointCloudExporter == null || _planeDetector == null;
+                              _pointCloudExporter == null || _planeDetector == null ||
+                              _lightEstimator == null;
 
             if (anyMissing)
             {
@@ -329,6 +335,8 @@ namespace Genesis.RoomScan.Editor
                 var planeDetector = Undo.AddComponent<PlaneDetector>(root);
                 planeDetector.enabled = false;
             }
+            if (root.GetComponent<LightEstimator>() == null)
+                Undo.AddComponent<LightEstimator>(root);
 
             MarkDirty();
             Refresh();
@@ -345,10 +353,11 @@ namespace Genesis.RoomScan.Editor
             StatusRow("MeshExtractor scan material", _meshMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
+            StatusRow("LightDetection compute shader", _lightDetectWired);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
                             !_meshMatWired || !_triplanarWired ||
-                            !_computeShaderWired;
+                            !_computeShaderWired || !_lightDetectWired;
             if (needsFix)
             {
                 GUILayout.Space(2);
@@ -399,6 +408,15 @@ namespace Genesis.RoomScan.Editor
                 AssignAsset<Shader>(so, "depthVisualizeShader", PKG + "DepthVisualize.shader");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_depthDebug);
+            }
+
+            // LightEstimator
+            if (_lightEstimator != null)
+            {
+                var so = new SerializedObject(_lightEstimator);
+                AssignCompute(so, "lightDetectionCompute", PKG + "LightDetection.compute");
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_lightEstimator);
             }
 
             // MeshExtractor — needs a Material + compute shader
@@ -513,6 +531,7 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "keyframeCollector", _keyframeCollector);
                 SetRef(so, "pointCloudExporter", _pointCloudExporter);
                 SetRef(so, "planeDetector", _planeDetector);
+                SetRef(so, "lightEstimator", _lightEstimator);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }
