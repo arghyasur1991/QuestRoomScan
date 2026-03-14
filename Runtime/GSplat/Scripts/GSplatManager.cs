@@ -45,6 +45,7 @@ namespace Genesis.RoomScan.GSplat
         bool _initialized;
         Camera _mainCam;
         Plane[] _frustumPlanes = new Plane[6];
+        readonly HashSet<int> _seedAttempted = new();
 
         readonly List<KeyframeData> _keyframes = new();
         const int MaxKeyframes = 16;
@@ -197,6 +198,8 @@ namespace Genesis.RoomScan.GSplat
 
             if (buffers.CurrentCount == 0 && sector.State == SectorState.MeshOnly)
             {
+                if (_seedAttempted.Contains(sectorId)) return;
+                _seedAttempted.Add(sectorId);
                 SeedFromMesh(sectorId, buffers);
                 if (buffers.CurrentCount == 0) return;
             }
