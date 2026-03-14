@@ -40,7 +40,7 @@ namespace Genesis.RoomScan.Editor
         GSSectorRenderer _gsSectorRenderer;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
-        bool _gsplatComputeWired;
+        bool _gsplatComputeWired, _gsRendererComputeWired;
         bool _boundarylessManifest;
 
         // Style
@@ -125,6 +125,8 @@ namespace Genesis.RoomScan.Editor
                 "projectSHCompute", "tileSortCompute", "rasterizeCompute",
                 "lossCompute", "rasterBwdCompute", "projBwdCompute", "adamCompute",
                 "initGaussiansCompute");
+            _gsRendererComputeWired = _gsSectorRenderer != null && AreFieldsAssigned(_gsSectorRenderer,
+                "viewPrepassCompute", "splatMaterial");
 
             _boundarylessManifest = ManifestHasBoundaryless();
         }
@@ -459,10 +461,12 @@ namespace Genesis.RoomScan.Editor
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
             StatusRow("GSplatManager compute shaders (8)", _gsplatComputeWired);
+            StatusRow("GSSectorRenderer prepass + material", _gsRendererComputeWired);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
                             !_meshMatWired || !_triplanarWired ||
-                            !_computeShaderWired || !_gsplatComputeWired;
+                            !_computeShaderWired || !_gsplatComputeWired ||
+                            !_gsRendererComputeWired;
             if (needsFix)
             {
                 GUILayout.Space(2);
@@ -564,10 +568,11 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_gsplatManager);
             }
 
-            // GSSectorRenderer — splat material
+            // GSSectorRenderer — view prepass compute + splat material
             if (_gsSectorRenderer != null)
             {
                 var so = new SerializedObject(_gsSectorRenderer);
+                AssignCompute(so, "viewPrepassCompute", GSPLAT_PKG + "SplatViewPrepass.compute");
                 var matProp = so.FindProperty("splatMaterial");
                 if (matProp != null && matProp.objectReferenceValue == null)
                 {
