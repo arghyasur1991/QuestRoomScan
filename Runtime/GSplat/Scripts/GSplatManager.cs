@@ -53,7 +53,15 @@ namespace Genesis.RoomScan.GSplat
         Plane[] _frustumPlanes = new Plane[6];
         int _lastTrainedSectorId = -1;
         readonly List<KeyframeData> _keyframes = new();
-        const int MaxKeyframes = 16;
+        const int MaxKeyframes = 32;
+
+        // Motion gating for keyframe diversity
+        const float MinKeyframeDist = 0.10f;   // meters
+        const float MinKeyframeAngle = 10f;    // degrees
+        const int MinKeyframesForTraining = 5;
+        Vector3 _lastKeyframeCamPos = Vector3.positiveInfinity;
+        Quaternion _lastKeyframeCamRot = Quaternion.identity;
+        bool _hasLastKeyframePose;
 
         static readonly int ID_SectorSplatMask0 = Shader.PropertyToID("_SectorSplatMask0");
         static readonly int ID_SectorSplatMask1 = Shader.PropertyToID("_SectorSplatMask1");
@@ -109,6 +117,16 @@ namespace Genesis.RoomScan.GSplat
         {
             if (!_initialized || frame == null) return;
 
+            // Motion gating: only capture keyframes when the camera has moved
+            // enough for diverse multi-view supervision
+            if (_hasLastKeyframePose)
+            {
+                float dist = Vector3.Distance(pos, _lastKeyframeCamPos);
+                float angle = Quaternion.Angle(rot, _lastKeyframeCamRot);
+                if (dist < MinKeyframeDist && angle < MinKeyframeAngle)
+                    return;
+            }
+
             Texture2D snap = ToTexture2D(frame);
             if (snap == null) return;
 
@@ -137,6 +155,10 @@ namespace Genesis.RoomScan.GSplat
                 Cx = cx, Cy = cy,
                 CamPos = pos
             });
+
+            _lastKeyframeCamPos = pos;
+            _lastKeyframeCamRot = rot;
+            _hasLastKeyframePose = true;
         }
 
         /// <summary>
@@ -195,7 +217,7 @@ namespace Genesis.RoomScan.GSplat
 
         void TrainFrame(Vector3 headPos, Vector3 gazeDir, Plane[] frustumPlanes)
         {
-            if (!debugSkipTraining && _keyframes.Count < 2) return;
+            if (!debugSkipTraining && _keyframes.Count < MinKeyframesForTraining) return;
 
             // Phase 1: Opportunistically seed 1 MeshOnly sector per frame
             int seedId = _scheduler.PickNextMeshOnlySector(headPos, gazeDir, frustumPlanes);
@@ -394,26 +416,40 @@ namespace Genesis.RoomScan.GSplat
                       $"from {numVertices} mesh verts (AABB {sMin} → {sMax})");
         }
 
+        /// <summary>
+        /// Randomly sample a keyframe, weighted by inverse distance to the sector.
+        /// Ensures multi-view supervision rather than always training from the same viewpoint.
+        /// </summary>
         KeyframeData? PickBestKeyframe(int sectorId)
         {
             if (_keyframes.Count == 0) return null;
 
             var bounds = _scheduler.GetSectorBounds(sectorId);
-            float bestScore = -1;
-            int bestIdx = -1;
 
+            // Compute weights: inverse distance with a floor so distant views still participate
+            float totalWeight = 0f;
             for (int i = 0; i < _keyframes.Count; i++)
             {
                 float dist = Vector3.Distance(bounds.center, _keyframes[i].CamPos);
-                float score = 1f / (1f + dist);
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    bestIdx = i;
-                }
+                float weight = 1f / (0.5f + dist);
+                totalWeight += weight;
             }
 
-            return bestIdx >= 0 ? _keyframes[bestIdx] : null;
+            if (totalWeight <= 0f)
+                return _keyframes[UnityEngine.Random.Range(0, _keyframes.Count)];
+
+            // Weighted random selection
+            float r = UnityEngine.Random.value * totalWeight;
+            float cumulative = 0f;
+            for (int i = 0; i < _keyframes.Count; i++)
+            {
+                float dist = Vector3.Distance(bounds.center, _keyframes[i].CamPos);
+                cumulative += 1f / (0.5f + dist);
+                if (r <= cumulative)
+                    return _keyframes[i];
+            }
+
+            return _keyframes[_keyframes.Count - 1];
         }
 
         void UpdateMeshMask()

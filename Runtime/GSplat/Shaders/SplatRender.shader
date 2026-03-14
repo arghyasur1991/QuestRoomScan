@@ -30,6 +30,8 @@ Shader "Genesis/SplatRender"
 
             StructuredBuffer<SplatViewData> _SplatViewData;
             uint _SplatCount;
+            uint _EyeIndex;
+            uint _IsStereo;
 
 #ifdef _SORT_RADIX
             StructuredBuffer<uint> _OrderBuffer;
@@ -60,10 +62,11 @@ Shader "Genesis/SplatRender"
                 }
 
 #ifdef _SORT_RADIX
-                uint dataIdx = _OrderBuffer[splatIdx];
+                uint origIdx = _OrderBuffer[splatIdx];
 #else
-                uint dataIdx = _SortBuffer[splatIdx].y;
+                uint origIdx = _SortBuffer[splatIdx].y;
 #endif
+                uint dataIdx = _IsStereo ? (origIdx * 2 + _EyeIndex) : origIdx;
                 SplatViewData view = _SplatViewData[dataIdx];
 
                 float4 centerClip = view.pos;

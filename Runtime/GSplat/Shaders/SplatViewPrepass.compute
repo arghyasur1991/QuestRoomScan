@@ -19,8 +19,10 @@ uint _NumPoints;
 uint _WriteOffset;
 float _SplatSize;
 uint _SHDegree;
-float4x4 _ViewMatrix;      // positive-Z-forward view (for cov2d computation)
-float4x4 _ViewProjMatrix;  // GPU VP matrix (for clip-space output)
+uint _IsStereo;
+float4x4 _ViewMatrix;          // positive-Z-forward view (for cov2d computation)
+float4x4 _ViewProjMatrix;      // GPU VP matrix: mono or left-eye
+float4x4 _ViewProjMatrixRight; // right-eye VP matrix (stereo only)
 float2 _Focal;
 float2 _ScreenSize;
 float3 _CamPos;
@@ -62,19 +64,24 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
 
     float3 pos = float3(_Means[idx*3], _Means[idx*3+1], _Means[idx*3+2]);
 
-    // Clip-space position for rendering (stored directly, no re-projection)
-    float4 clipPos = mul(_ViewProjMatrix, float4(pos, 1));
-    if (clipPos.w <= 0.01)
-    {
-        _ViewData[_WriteOffset + idx] = view;
-        return;
-    }
-    view.pos = clipPos;
-
     // View-space position for covariance projection (positive-Z forward)
     float3 pView = Transform4x3(_ViewMatrix, pos);
+    if (pView.z <= 0.01)
+    {
+        if (_IsStereo)
+        {
+            uint baseOut = _WriteOffset + idx * 2;
+            _ViewData[baseOut] = view;
+            _ViewData[baseOut + 1] = view;
+        }
+        else
+        {
+            _ViewData[_WriteOffset + idx] = view;
+        }
+        return;
+    }
 
-    // 3D covariance
+    // 3D covariance → 2D decomposition (shared for both eyes — small approximation)
     float3 expScale = exp(float3(_Scales[idx*3], _Scales[idx*3+1], _Scales[idx*3+2]));
     float4 quat = float4(_Quats[idx*4], _Quats[idx*4+1], _Quats[idx*4+2], _Quats[idx*4+3]);
 
@@ -87,7 +94,8 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
 
     float3 cov2d = ProjectCov3DEWA(cov3d, _ViewMatrix, fx, fy, tanFovX, tanFovY, pView);
 
-    DecomposeCovariance(cov2d, view.axis1, view.axis2);
+    float2 ax1, ax2;
+    DecomposeCovariance(cov2d, ax1, ax2);
 
     // SH color evaluation
     float3 viewdir = normalize(pos - _CamPos);
@@ -99,8 +107,36 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
 
     float alpha = 1.0 / (1.0 + exp(-_Opacities[idx]));
 
-    view.color.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
-    view.color.y = (f32tof16(col.b) << 16) | f32tof16(alpha);
+    uint2 packedColor;
+    packedColor.x = (f32tof16(col.r) << 16) | f32tof16(col.g);
+    packedColor.y = (f32tof16(col.b) << 16) | f32tof16(alpha);
 
-    _ViewData[_WriteOffset + idx] = view;
+    if (_IsStereo)
+    {
+        // Per-eye clip positions, shared axes/color (UGS uses per-eye cov2d too,
+        // but the difference is negligible for ~63mm IPD)
+        uint baseOut = _WriteOffset + idx * 2;
+
+        SplatViewData viewL = (SplatViewData)0;
+        viewL.pos = mul(_ViewProjMatrix, float4(pos, 1));
+        viewL.axis1 = ax1;
+        viewL.axis2 = ax2;
+        viewL.color = packedColor;
+        _ViewData[baseOut] = viewL;
+
+        SplatViewData viewR = (SplatViewData)0;
+        viewR.pos = mul(_ViewProjMatrixRight, float4(pos, 1));
+        viewR.axis1 = ax1;
+        viewR.axis2 = ax2;
+        viewR.color = packedColor;
+        _ViewData[baseOut + 1] = viewR;
+    }
+    else
+    {
+        view.pos = mul(_ViewProjMatrix, float4(pos, 1));
+        view.axis1 = ax1;
+        view.axis2 = ax2;
+        view.color = packedColor;
+        _ViewData[_WriteOffset + idx] = view;
+    }
 }

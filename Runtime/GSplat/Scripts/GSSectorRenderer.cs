@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.XR;
 
 namespace Genesis.RoomScan.GSplat
 {
@@ -70,6 +71,9 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_GroupSize     = Shader.PropertyToID("_GroupSize");
         static readonly int ID_SortBuffer    = Shader.PropertyToID("_SortBuffer");
         static readonly int ID_ViewProjMatrix = Shader.PropertyToID("_ViewProjMatrix");
+        static readonly int ID_ViewProjMatrixRight = Shader.PropertyToID("_ViewProjMatrixRight");
+        static readonly int ID_IsStereo   = Shader.PropertyToID("_IsStereo");
+        static readonly int ID_EyeIndex   = Shader.PropertyToID("_EyeIndex");
 
         public Material SplatMaterial
         {
@@ -118,13 +122,14 @@ namespace Genesis.RoomScan.GSplat
                       $"sort={(_useRadixSort ? "radix(13 dispatches)" : "bitonic(O(log²N))")}");
         }
 
-        void EnsureBuffers(int totalCount)
+        void EnsureBuffers(int totalCount, bool stereo)
         {
-            // View data buffer (shared)
-            if (_viewDataBuffer == null || _viewDataCapacity < totalCount)
+            // View data buffer: 2x for stereo (left + right per Gaussian)
+            int viewDataNeeded = stereo ? totalCount * 2 : totalCount;
+            if (_viewDataBuffer == null || _viewDataCapacity < viewDataNeeded)
             {
                 _viewDataBuffer?.Release();
-                _viewDataCapacity = Mathf.Max(totalCount, 1024);
+                _viewDataCapacity = Mathf.Max(viewDataNeeded, 1024);
                 _viewDataBuffer = new GraphicsBuffer(
                     GraphicsBuffer.Target.Structured, _viewDataCapacity, 40);
             }
@@ -182,30 +187,65 @@ namespace Genesis.RoomScan.GSplat
                           $"sort={(_useRadixSort ? "radix" : "bitonic")}");
             }
 
-            EnsureBuffers(totalCount);
+            // Detect stereo early (needed for buffer sizing)
+            bool isStereoEarly = XRSettings.enabled && cam.stereoEnabled;
+            EnsureBuffers(totalCount, isStereoEarly);
 
             var camT = cam.transform;
             Matrix4x4 viewPosZ = Matrix4x4.TRS(camT.position, camT.rotation, Vector3.one).inverse;
 
-            float screenW = cam.pixelWidth;
-            float screenH = cam.pixelHeight;
+            // Detect stereo XR rendering
+            bool isStereo = XRSettings.enabled && cam.stereoEnabled;
+
+            float screenW, screenH;
+            if (isStereo)
+            {
+                screenW = XRSettings.eyeTextureWidth;
+                screenH = XRSettings.eyeTextureHeight;
+            }
+            else
+            {
+                screenW = cam.pixelWidth;
+                screenH = cam.pixelHeight;
+            }
+
             float fx = Mathf.Abs(cam.projectionMatrix[0, 0]) * screenW / 2f;
             float fy = Mathf.Abs(cam.projectionMatrix[1, 1]) * screenH / 2f;
 
-            // VP matrix for clip-space output — must match what the GPU uses for rendering
-            Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
-            Matrix4x4 vpMatrix = gpuProj * cam.worldToCameraMatrix;
+            // VP matrices for clip-space output
+            Matrix4x4 vpLeft, vpRight;
+            if (isStereo)
+            {
+                var viewL = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Left);
+                var projL = cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Left);
+                vpLeft = GL.GetGPUProjectionMatrix(projL, true) * viewL;
+
+                var viewR = cam.GetStereoViewMatrix(Camera.StereoscopicEye.Right);
+                var projR = cam.GetStereoProjectionMatrix(Camera.StereoscopicEye.Right);
+                vpRight = GL.GetGPUProjectionMatrix(projR, true) * viewR;
+            }
+            else
+            {
+                Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
+                vpLeft = gpuProj * cam.worldToCameraMatrix;
+                vpRight = vpLeft;
+            }
 
             // --- Phase 1: Compute prepass ---
             viewPrepassCompute.SetFloat(ID_SplatSize, splatSizeMultiplier);
             viewPrepassCompute.SetInt(ID_SHDegree, shDegree);
+            viewPrepassCompute.SetInt(ID_IsStereo, isStereo ? 1 : 0);
             viewPrepassCompute.SetMatrix(ID_ViewMatrix, viewPosZ);
-            viewPrepassCompute.SetMatrix(ID_ViewProjMatrix, vpMatrix);
+            viewPrepassCompute.SetMatrix(ID_ViewProjMatrix, vpLeft);
+            viewPrepassCompute.SetMatrix(ID_ViewProjMatrixRight, vpRight);
             viewPrepassCompute.SetVector(ID_Focal, new Vector4(fx, fy, 0, 0));
             viewPrepassCompute.SetVector(ID_ScreenSize, new Vector4(screenW, screenH, 0, 0));
             viewPrepassCompute.SetVector(ID_CamPos, (Vector4)camT.position);
             viewPrepassCompute.SetBuffer(_prepassKernel, ID_ViewData, _viewDataBuffer);
 
+            // _WriteOffset is in view data entries. In stereo, each Gaussian writes
+            // 2 entries (left + right), so the shader computes: _WriteOffset + idx*2 (stereo)
+            // or _WriteOffset + idx (mono). C# advances by n*2 or n accordingly.
             int writeOffset = 0;
             Bounds combinedBounds = default;
             bool first = true;
@@ -231,24 +271,23 @@ namespace Genesis.RoomScan.GSplat
                 if (first) { combinedBounds = bounds; first = false; }
                 else combinedBounds.Encapsulate(bounds);
 
-                writeOffset += n;
+                writeOffset += isStereo ? n * 2 : n;
             }
 
-            // --- Phase 2: Sort ---
+            // --- Phase 2: Sort (by splat index, same order for both eyes) ---
             if (_useRadixSort)
-                DispatchRadixSort(totalCount);
+                DispatchRadixSort(totalCount, isStereo);
             else if (_initSortBitonicKernel >= 0 && _bitonicStepKernel >= 0)
-                DispatchBitonicSort(totalCount);
+                DispatchBitonicSort(totalCount, isStereo);
 
             // --- Phase 3: Render ---
-            // Bind buffers directly on Material (MaterialPropertyBlock.SetBuffer
-            // silently fails on Vulkan for StructuredBuffer bindings).
             splatMaterial.SetBuffer(ID_SplatViewData, _viewDataBuffer);
             if (_useRadixSort)
                 splatMaterial.SetBuffer(ID_OrderBuffer, _sortPayloadBuffer);
             else
                 splatMaterial.SetBuffer(ID_SortBuffer, _bitonicSortBuffer);
             splatMaterial.SetInt(ID_SplatCount, totalCount);
+            splatMaterial.SetInt(ID_IsStereo, isStereo ? 1 : 0);
 
             var rp = new RenderParams(splatMaterial)
             {
@@ -259,16 +298,27 @@ namespace Genesis.RoomScan.GSplat
                 layer = gameObject.layer
             };
 
-            Graphics.RenderPrimitives(rp, MeshTopology.Quads, totalCount * 4);
+            if (isStereo)
+            {
+                splatMaterial.SetInt(ID_EyeIndex, 0);
+                Graphics.RenderPrimitives(rp, MeshTopology.Quads, totalCount * 4);
+                splatMaterial.SetInt(ID_EyeIndex, 1);
+                Graphics.RenderPrimitives(rp, MeshTopology.Quads, totalCount * 4);
+            }
+            else
+            {
+                splatMaterial.SetInt(ID_EyeIndex, 0);
+                Graphics.RenderPrimitives(rp, MeshTopology.Quads, totalCount * 4);
+            }
         }
 
-        void DispatchRadixSort(int totalCount)
+        void DispatchRadixSort(int totalCount, bool stereo = false)
         {
             int threadGroups = (totalCount + 255) / 256;
 
-            // Init sort keys from view depths
             sortCompute.SetInt(ID_Count, totalCount);
             sortCompute.SetInt(ID_PaddedCount, totalCount);
+            sortCompute.SetInt(ID_IsStereo, stereo ? 1 : 0);
             sortCompute.SetBuffer(_initSortKernel, ID_ViewData, _viewDataBuffer);
             sortCompute.SetBuffer(_initSortKernel, ID_SortKeys, _sortKeysBuffer);
             sortCompute.SetBuffer(_initSortKernel, ID_SortPayload, _sortPayloadBuffer);
@@ -278,13 +328,14 @@ namespace Genesis.RoomScan.GSplat
             _radixSort.Dispatch(totalCount, _sortKeysBuffer, _sortPayloadBuffer, _radixResources);
         }
 
-        void DispatchBitonicSort(int totalCount)
+        void DispatchBitonicSort(int totalCount, bool stereo = false)
         {
             int padded = Mathf.NextPowerOfTwo(totalCount);
             int threadGroups = (padded + 255) / 256;
 
             sortCompute.SetInt(ID_Count, totalCount);
             sortCompute.SetInt(ID_PaddedCount, padded);
+            sortCompute.SetInt(ID_IsStereo, stereo ? 1 : 0);
             sortCompute.SetBuffer(_initSortBitonicKernel, ID_ViewData, _viewDataBuffer);
             sortCompute.SetBuffer(_initSortBitonicKernel, ID_SortBuffer, _bitonicSortBuffer);
             sortCompute.Dispatch(_initSortBitonicKernel, threadGroups, 1, 1);
