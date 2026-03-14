@@ -91,6 +91,15 @@ namespace Genesis.RoomScan.GSplat
         }
 
         /// <summary>
+        /// Revert a sector to Empty (e.g. seeding found no vertices in its AABB).
+        /// Prevents PickNextSector from ever selecting it again.
+        /// </summary>
+        public void MarkEmpty(int sectorId)
+        {
+            _sectors[sectorId].State = SectorState.Empty;
+        }
+
+        /// <summary>
         /// Returns the world-space AABB for a given sector.
         /// </summary>
         public Bounds GetSectorBounds(int sectorId) => _sectors[sectorId].WorldAABB;

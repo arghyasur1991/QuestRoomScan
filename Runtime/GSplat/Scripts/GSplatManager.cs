@@ -45,7 +45,6 @@ namespace Genesis.RoomScan.GSplat
         bool _initialized;
         Camera _mainCam;
         Plane[] _frustumPlanes = new Plane[6];
-        readonly HashSet<int> _seedAttempted = new();
 
         readonly List<KeyframeData> _keyframes = new();
         const int MaxKeyframes = 16;
@@ -190,33 +189,43 @@ namespace Genesis.RoomScan.GSplat
         {
             if (_keyframes.Count < 2) return;
 
-            int sectorId = _scheduler.PickNextSector(headPos, gazeDir, frustumPlanes, Time.time);
-            if (sectorId < 0) return;
+            const int maxSeedAttemptsPerFrame = 4;
+            int seedAttempts = 0;
 
-            ref var sector = ref _scheduler.Sectors[sectorId];
-            var buffers = _scheduler.GetOrCreateBuffers(sectorId);
-
-            if (buffers.CurrentCount == 0 && sector.State == SectorState.MeshOnly)
+            while (seedAttempts < maxSeedAttemptsPerFrame)
             {
-                if (_seedAttempted.Contains(sectorId)) return;
-                _seedAttempted.Add(sectorId);
-                SeedFromMesh(sectorId, buffers);
-                if (buffers.CurrentCount == 0) return;
+                int sectorId = _scheduler.PickNextSector(headPos, gazeDir, frustumPlanes, Time.time);
+                if (sectorId < 0) return;
+
+                ref var sector = ref _scheduler.Sectors[sectorId];
+                var buffers = _scheduler.GetOrCreateBuffers(sectorId);
+
+                if (buffers.CurrentCount == 0 && sector.State == SectorState.MeshOnly)
+                {
+                    seedAttempts++;
+                    SeedFromMesh(sectorId, buffers);
+                    if (buffers.CurrentCount == 0)
+                    {
+                        _scheduler.MarkEmpty(sectorId);
+                        continue;
+                    }
+                }
+
+                var kf = PickBestKeyframe(sectorId);
+                if (!kf.HasValue) return;
+
+                for (int i = 0; i < itersPerFrame; i++)
+                {
+                    _trainer.TrainStep(buffers, kf.Value.Texture,
+                                       kf.Value.ViewMatrix, kf.Value.ProjMatrix,
+                                       kf.Value.Fx, kf.Value.Fy, kf.Value.Cx, kf.Value.Cy,
+                                       kf.Value.CamPos);
+                }
+
+                _scheduler.AdvanceTraining(sectorId, itersPerFrame, 0f, buffers.CurrentCount);
+                UpdateMeshMask();
+                return;
             }
-
-            var kf = PickBestKeyframe(sectorId);
-            if (!kf.HasValue) return;
-
-            for (int i = 0; i < itersPerFrame; i++)
-            {
-                _trainer.TrainStep(buffers, kf.Value.Texture,
-                                   kf.Value.ViewMatrix, kf.Value.ProjMatrix,
-                                   kf.Value.Fx, kf.Value.Fy, kf.Value.Cx, kf.Value.Cy,
-                                   kf.Value.CamPos);
-            }
-
-            _scheduler.AdvanceTraining(sectorId, itersPerFrame, 0f, buffers.CurrentCount);
-            UpdateMeshMask();
         }
 
         static readonly int ID_NumVertices = Shader.PropertyToID("_NumVertices");
@@ -234,6 +243,7 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_OutCount = Shader.PropertyToID("_OutCount");
 
         readonly int[] _countReadback = new int[1];
+        readonly int[] _meshCountReadback = new int[2];
 
         void SeedFromMesh(int sectorId, GSplatBuffers buffers)
         {
@@ -243,10 +253,12 @@ namespace Genesis.RoomScan.GSplat
             if (me?.GpuSurfaceNets == null) return;
 
             var vertBuf = me.GpuSurfaceNets.VertexBuffer;
-            if (vertBuf == null) return;
+            var countersBuf = me.GpuSurfaceNets.CountersBuffer;
+            if (vertBuf == null || countersBuf == null) return;
 
-            int numVertices = vertBuf.count;
-            if (numVertices == 0) return;
+            countersBuf.GetData(_meshCountReadback);
+            int numVertices = _meshCountReadback[0];
+            if (numVertices <= 0) return;
 
             var bounds = _scheduler.GetSectorBounds(sectorId);
             Vector3 sMin = bounds.center - bounds.extents;

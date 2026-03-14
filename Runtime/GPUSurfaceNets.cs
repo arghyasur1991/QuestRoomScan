@@ -57,6 +57,7 @@ namespace Genesis.RoomScan
         public GraphicsBuffer VertexBuffer => _vertices;
         public GraphicsBuffer IndexBuffer => _indices;
         public GraphicsBuffer DrawIndirectArgs => _drawIndirectArgs;
+        public GraphicsBuffer CountersBuffer => _counters;
 
         private static readonly int ID_TsdfVolume = Shader.PropertyToID("_TsdfVolume");
         private static readonly int ID_ColorVolume = Shader.PropertyToID("_ColorVolume");
