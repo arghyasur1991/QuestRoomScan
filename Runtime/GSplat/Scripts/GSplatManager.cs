@@ -336,7 +336,8 @@ namespace Genesis.RoomScan.GSplat
             }
 
             // Diagnostic: log rendered image + keyframe stats on first few iterations per sector
-            if (trained.TrainingIteration <= 3 || trained.TrainingIteration == 30)
+            if (trained.TrainingIteration <= 3 || trained.TrainingIteration == 30 ||
+                trained.TrainingIteration % 300 == 0)
             {
                 LogTrainingDiag(sectorId, trained.TrainingIteration, kf.Value, buffers);
             }
@@ -392,13 +393,25 @@ namespace Genesis.RoomScan.GSplat
             Destroy(kfRead);
             RenderTexture.ReleaseTemporary(kfRT);
 
-            // Gradient magnitude sample
-            int n = Mathf.Min(buffers.CurrentCount, 4);
-            var gMeans = new float[n * 3];
-            buffers.GradMeans.GetData(gMeans, 0, 0, n * 3);
-            float gradMag = 0;
-            for (int i = 0; i < n * 3; i++) gradMag += gMeans[i] * gMeans[i];
-            gradMag = Mathf.Sqrt(gradMag / (n * 3));
+            // Gradient magnitude: sample from beginning, middle, and end of the buffer
+            int N = buffers.CurrentCount;
+            int samplesPerRegion = 4;
+            int[] offsets = { 0, Mathf.Max(0, N / 2 - samplesPerRegion / 2), Mathf.Max(0, N - samplesPerRegion) };
+            float gradSumSq = 0; int gradCount = 0; int gradNonZero = 0;
+            foreach (int off in offsets)
+            {
+                int cnt = Mathf.Min(samplesPerRegion, N - off);
+                if (cnt <= 0) continue;
+                var gSlice = new float[cnt * 3];
+                buffers.GradMeans.GetData(gSlice, 0, off * 3, cnt * 3);
+                for (int i = 0; i < cnt * 3; i++)
+                {
+                    gradSumSq += gSlice[i] * gSlice[i];
+                    if (gSlice[i] != 0f) gradNonZero++;
+                }
+                gradCount += cnt * 3;
+            }
+            float gradMag = gradCount > 0 ? Mathf.Sqrt(gradSumSq / gradCount) : 0f;
 
             // Top-half vs bottom-half brightness (detects Y-flip: if rendered top is dark
             // but keyframe top is bright, the images are vertically misaligned)
@@ -425,7 +438,7 @@ namespace Genesis.RoomScan.GSplat
             Debug.Log($"[GSplat-TrainDiag] sector={sectorId} iter={iter}: " +
                       $"rendered=({rAvg:F1},{gAvg:F1},{bAvg:F1}) nonBlack={nonBlack}/{total} " +
                       $"keyframe=({krAvg:F1},{kgAvg:F1},{kbAvg:F1}) size={kf.Texture.width}x{kf.Texture.height} " +
-                      $"gradMeanRMS={gradMag:E2} " +
+                      $"gradMeanRMS={gradMag:E2} gradNonZero={gradNonZero}/{gradCount} " +
                       $"rendTopR={rendTopAvg:F1} rendBotR={rendBotAvg:F1} " +
                       $"kfTopR={kfTopAvg:F1} kfBotR={kfBotAvg:F1}");
 
