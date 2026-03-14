@@ -1,25 +1,27 @@
 // Compute prepass: projects Gaussians to 2D, decomposes covariance into
 // oriented axis vectors, evaluates SH color, packs into SplatViewData.
 // One thread per Gaussian. Runs once per frame per visible sector.
+// Stores clip-space position directly — vertex shader uses it as-is,
+// ensuring center position and covariance axes are consistent.
 #pragma kernel CSCalcViewData
 
 #include "GSplatHelpers.hlsl"
 
 struct SplatViewData
 {
-    float3 worldPos;
-    float viewDepth;
+    float4 pos;     // clip-space position (VP matrix)
     float2 axis1;
     float2 axis2;
-    uint2 color;   // packed fp16: x = (r<<16)|g, y = (b<<16)|a
+    uint2 color;    // packed fp16: x = (r<<16)|g, y = (b<<16)|a
 };
 
 uint _NumPoints;
-uint _WriteOffset;      // offset into output buffer (for concatenating sectors)
-float _SplatSize;       // globScale multiplier
+uint _WriteOffset;
+float _SplatSize;
 uint _SHDegree;
-float4x4 _ViewMatrix;  // positive-Z-forward convention
-float2 _Focal;          // (fx, fy) in pixels
+float4x4 _ViewMatrix;      // positive-Z-forward view (for cov2d computation)
+float4x4 _ViewProjMatrix;  // GPU VP matrix (for clip-space output)
+float2 _Focal;
 float2 _ScreenSize;
 float3 _CamPos;
 
@@ -59,17 +61,18 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
     SplatViewData view = (SplatViewData)0;
 
     float3 pos = float3(_Means[idx*3], _Means[idx*3+1], _Means[idx*3+2]);
-    float3 pView = Transform4x3(_ViewMatrix, pos);
 
-    if (pView.z <= 0.01)
+    // Clip-space position for rendering (stored directly, no re-projection)
+    float4 clipPos = mul(_ViewProjMatrix, float4(pos, 1));
+    if (clipPos.w <= 0.01)
     {
-        view.viewDepth = -1;
         _ViewData[_WriteOffset + idx] = view;
         return;
     }
+    view.pos = clipPos;
 
-    view.worldPos = pos;
-    view.viewDepth = pView.z;
+    // View-space position for covariance projection (positive-Z forward)
+    float3 pView = Transform4x3(_ViewMatrix, pos);
 
     // 3D covariance
     float3 expScale = exp(float3(_Scales[idx*3], _Scales[idx*3+1], _Scales[idx*3+2]));

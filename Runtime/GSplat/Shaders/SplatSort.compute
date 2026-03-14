@@ -8,8 +8,7 @@
 
 struct SplatViewData
 {
-    float3 worldPos;
-    float viewDepth;
+    float4 pos;     // clip-space position; .w = linear depth
     float2 axis1;
     float2 axis2;
     uint2 color;
@@ -37,7 +36,7 @@ void CSInitSortKeys(uint3 id : SV_DispatchThreadID)
 
     if (i < _Count)
     {
-        float depth = _ViewData[i].viewDepth;
+        float depth = _ViewData[i].pos.w;
         // Negate so ascending sort yields back-to-front (farther = smaller key = first)
         _SortKeys[i] = (depth > 0) ? FloatToSortableUint(-depth) : 0xFFFFFFFFu;
         _SortPayload[i] = i;
@@ -62,7 +61,7 @@ void CSInitSortKeysBitonic(uint3 id : SV_DispatchThreadID)
 
     if (i < _Count)
     {
-        float depth = _ViewData[i].viewDepth;
+        float depth = _ViewData[i].pos.w;
         uint key = (depth > 0)
             ? (0xFFFFFFFFu - FloatToSortableUint(depth))
             : 0xFFFFFFFFu;

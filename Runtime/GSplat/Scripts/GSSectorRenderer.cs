@@ -69,6 +69,7 @@ namespace Genesis.RoomScan.GSplat
         static readonly int ID_StepSize      = Shader.PropertyToID("_StepSize");
         static readonly int ID_GroupSize     = Shader.PropertyToID("_GroupSize");
         static readonly int ID_SortBuffer    = Shader.PropertyToID("_SortBuffer");
+        static readonly int ID_ViewProjMatrix = Shader.PropertyToID("_ViewProjMatrix");
 
         public Material SplatMaterial
         {
@@ -191,10 +192,15 @@ namespace Genesis.RoomScan.GSplat
             float fx = Mathf.Abs(cam.projectionMatrix[0, 0]) * screenW / 2f;
             float fy = Mathf.Abs(cam.projectionMatrix[1, 1]) * screenH / 2f;
 
+            // VP matrix for clip-space output — must match what the GPU uses for rendering
+            Matrix4x4 gpuProj = GL.GetGPUProjectionMatrix(cam.projectionMatrix, true);
+            Matrix4x4 vpMatrix = gpuProj * cam.worldToCameraMatrix;
+
             // --- Phase 1: Compute prepass ---
             viewPrepassCompute.SetFloat(ID_SplatSize, splatSizeMultiplier);
             viewPrepassCompute.SetInt(ID_SHDegree, shDegree);
             viewPrepassCompute.SetMatrix(ID_ViewMatrix, viewPosZ);
+            viewPrepassCompute.SetMatrix(ID_ViewProjMatrix, vpMatrix);
             viewPrepassCompute.SetVector(ID_Focal, new Vector4(fx, fy, 0, 0));
             viewPrepassCompute.SetVector(ID_ScreenSize, new Vector4(screenW, screenH, 0, 0));
             viewPrepassCompute.SetVector(ID_CamPos, (Vector4)camT.position);

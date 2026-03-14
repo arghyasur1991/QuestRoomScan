@@ -70,8 +70,8 @@ void InitFromMeshVertices(uint3 id : SV_DispatchThreadID)
     _OutQuats[slot*4 + 2] = 0.0f;
     _OutQuats[slot*4 + 3] = 0.0f;
 
-    // Opacity: inverse sigmoid of 0.1 ≈ -2.2 (start nearly transparent)
-    _OutOpacities[slot] = -2.197f;
+    // Opacity: inverse sigmoid of 0.5 = 0 (50% opacity — visible enough for gradient flow)
+    _OutOpacities[slot] = 0.0f;
 
     // SH DC: from vertex color (convert to SH basis)
     float3 col = UnpackColor(v.packedColor);

@@ -22,8 +22,7 @@ Shader "Genesis/SplatRender"
 
             struct SplatViewData
             {
-                float3 worldPos;
-                float viewDepth;
+                float4 pos;     // clip-space position
                 float2 axis1;
                 float2 axis2;
                 uint2 color;
@@ -67,7 +66,8 @@ Shader "Genesis/SplatRender"
 #endif
                 SplatViewData view = _SplatViewData[dataIdx];
 
-                if (view.viewDepth <= 0)
+                float4 centerClip = view.pos;
+                if (centerClip.w <= 0)
                 {
                     o.positionHCS = asfloat(0x7fc00000);
                     return o;
@@ -81,13 +81,6 @@ Shader "Genesis/SplatRender"
                 float2 quadPos = float2(quadVert & 1, (quadVert >> 1) & 1) * 2.0 - 1.0;
                 quadPos *= 2.0;
                 o.quadUV = quadPos;
-
-                float4 centerClip = TransformWorldToHClip(view.worldPos);
-                if (centerClip.w <= 0)
-                {
-                    o.positionHCS = asfloat(0x7fc00000);
-                    return o;
-                }
 
                 float2 deltaScreen = (quadPos.x * view.axis1 + quadPos.y * view.axis2)
                                      * 2.0 / _ScreenParams.xy;

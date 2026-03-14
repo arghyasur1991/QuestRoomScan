@@ -30,7 +30,7 @@ namespace Genesis.RoomScan.GSplat
 
         [Header("Training")]
         [SerializeField] int maxGaussiansPerSector = 10000;
-        [SerializeField] int targetItersPerSector = 300;
+        [SerializeField] int targetItersPerSector = 1500;
         [SerializeField] int itersPerFrame = 3;
         [SerializeField] int trainingResWidth = 640;
         [SerializeField] int trainingResHeight = 480;
@@ -364,7 +364,7 @@ namespace Genesis.RoomScan.GSplat
             Vector3 sMax = bounds.center + bounds.extents;
 
             float vi_voxelSize = VolumeIntegrator.Instance?.VoxelSize ?? 0.05f;
-            float initScale = Mathf.Log(vi_voxelSize * 0.3f);
+            float initScale = Mathf.Log(vi_voxelSize * 1.0f);
 
             buffers.CountBuffer.SetData(new int[] { 0 });
 
