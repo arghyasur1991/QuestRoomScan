@@ -12,20 +12,20 @@ namespace Genesis.RoomScan.UI
     {
         [Header("Placement")]
         [SerializeField, Tooltip("Distance from the camera in meters")]
-        private float panelDistance = 1.2f;
+        private float panelDistance = 0.75f;
 
-        [SerializeField, Tooltip("Vertical offset from eye level in meters")]
-        private float verticalOffset = -0.05f;
+        [SerializeField, Tooltip("Vertical offset from gaze point in meters (negative = below)")]
+        private float verticalOffset = -0.08f;
 
         [Header("Lazy Follow")]
-        [SerializeField, Tooltip("Angle (degrees) before the panel starts following")]
-        private float followThreshold = 30f;
+        [SerializeField, Tooltip("Angle (degrees) the panel must drift off-center before it re-centers")]
+        private float followThreshold = 40f;
 
         [SerializeField, Tooltip("How fast the panel catches up (higher = snappier)")]
-        private float followSpeed = 4f;
+        private float followSpeed = 3f;
 
         [SerializeField, Tooltip("Rotation lerp speed for billboarding")]
-        private float rotationSpeed = 8f;
+        private float rotationSpeed = 6f;
 
         private Transform _cam;
         private bool _tracking;
@@ -48,9 +48,16 @@ namespace Genesis.RoomScan.UI
             if (angle > followThreshold)
                 _targetPosition = ComputeTargetPosition();
 
-            transform.position = Vector3.Lerp(transform.position, _targetPosition,
-                followSpeed * Time.deltaTime);
+            // Only lerp position when the panel needs to re-center;
+            // otherwise keep it locked so it doesn't drift when the user looks at it.
+            float dist = Vector3.Distance(transform.position, _targetPosition);
+            if (dist > 0.005f)
+            {
+                transform.position = Vector3.Lerp(transform.position, _targetPosition,
+                    followSpeed * Time.deltaTime);
+            }
 
+            // Always billboard toward the camera
             Quaternion lookRot = Quaternion.LookRotation(transform.position - _cam.position);
             transform.rotation = Quaternion.Slerp(transform.rotation, lookRot,
                 rotationSpeed * Time.deltaTime);
@@ -84,15 +91,17 @@ namespace Genesis.RoomScan.UI
 
         private Vector3 ComputeTargetPosition()
         {
-            Vector3 forward = _cam.forward;
-            forward.y = 0f;
-            if (forward.sqrMagnitude < 0.001f)
-                forward = _cam.forward;
-            forward.Normalize();
+            // Use the horizontal component of the camera forward so the panel
+            // stays at a consistent height regardless of head pitch.
+            Vector3 flatForward = _cam.forward;
+            flatForward.y = 0f;
+            if (flatForward.sqrMagnitude < 0.001f)
+                flatForward = Vector3.forward;
+            flatForward.Normalize();
 
             return _cam.position
-                + forward * panelDistance
-                + Vector3.up * verticalOffset;
+                + flatForward * panelDistance
+                + Vector3.up * (_cam.forward.y * panelDistance * 0.3f + verticalOffset);
         }
     }
 }
