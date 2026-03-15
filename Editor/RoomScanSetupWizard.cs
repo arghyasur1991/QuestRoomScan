@@ -973,8 +973,17 @@ namespace Genesis.RoomScan.Editor
             if (uiDoc.panelSettings != null)
                 SetPanelRenderModeWorldSpace(uiDoc.panelSettings);
 
-            // World-space UI Toolkit: 480px / 100 PPU = 4.8 local units.
-            // Scale 0.08 → 4.8 * 0.08 = 0.384m wide — comfortable at arm's length.
+            // World-space UIDocument properties:
+            // - Pivot = Center so the transform position = center of the panel
+            // - SizeMode = Fixed at 480×640 so the collider exactly matches the content
+            if (uiDoc.pivot != Pivot.Center)
+                uiDoc.pivot = Pivot.Center;
+            if (uiDoc.worldSpaceSizeMode != UIDocument.WorldSpaceSizeMode.Fixed)
+                uiDoc.worldSpaceSizeMode = UIDocument.WorldSpaceSizeMode.Fixed;
+            if (uiDoc.worldSpaceSize != new Vector2(480, 640))
+                uiDoc.worldSpaceSize = new Vector2(480, 640);
+
+            // 480px / 100 PPU = 4.8 local units. Scale 0.08 → 0.384m wide.
             const float worldScale = 0.08f;
             if (Mathf.Abs(ctrl.transform.localScale.x - worldScale) > 0.01f)
             {

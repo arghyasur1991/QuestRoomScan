@@ -56,13 +56,6 @@ namespace Genesis.RoomScan.UI
         private void OnEnable()
         {
             _root = _doc.rootVisualElement;
-
-            // Constrain the rootVisualElement to the content size so the
-            // world-space collider matches the visible panel exactly.
-            _root.style.width = 480;
-            _root.style.height = 640;
-            _root.style.overflow = Overflow.Hidden;
-
             _root.style.display = DisplayStyle.None;
             _visible = false;
 
