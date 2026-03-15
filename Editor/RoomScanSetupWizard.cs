@@ -54,6 +54,7 @@ namespace Genesis.RoomScan.Editor
         bool _gsplatRenderFeatureAdded;
         bool _boundarylessManifest;
         bool _cleartextAllowed;
+        bool _insecureHttpAllowed;
 
         // Style
         static readonly Color COL_OK   = new(0.25f, 0.82f, 0.35f);
@@ -145,6 +146,7 @@ namespace Genesis.RoomScan.Editor
 
             _boundarylessManifest = ManifestHasBoundaryless();
             _cleartextAllowed = ManifestHasCleartextTraffic();
+            _insecureHttpAllowed = PlayerSettings.insecureHttpOption != InsecureHttpOption.NotAllowed;
         }
 
         // =================================================================
@@ -271,6 +273,7 @@ namespace Genesis.RoomScan.Editor
 
             StatusRow("AndroidManifest boundaryless entry", _boundarylessManifest);
             StatusRow("AndroidManifest cleartext HTTP (LAN)", _cleartextAllowed);
+            StatusRow("Player Settings: Allow HTTP", _insecureHttpAllowed);
 
             if (!_boundarylessManifest)
             {
@@ -293,6 +296,20 @@ namespace Genesis.RoomScan.Editor
                 if (GUILayout.Button("Allow Cleartext HTTP", GUILayout.Width(200)))
                 {
                     FixCleartextTraffic();
+                    Refresh();
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
+            if (!_insecureHttpAllowed)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Allow HTTP in Player Settings", GUILayout.Width(200)))
+                {
+                    PlayerSettings.insecureHttpOption = InsecureHttpOption.AlwaysAllowed;
+                    Debug.Log("[RoomScan Setup] Set Player Settings > insecureHttpOption to AlwaysAllowed");
                     Refresh();
                 }
                 EditorGUILayout.EndHorizontal();
@@ -946,6 +963,11 @@ namespace Genesis.RoomScan.Editor
             if (_arOcclusion == null) FixAROcclusion();
             if (!_boundarylessManifest) FixBoundarylessManifest();
             if (!_cleartextAllowed) FixCleartextTraffic();
+            if (!_insecureHttpAllowed)
+            {
+                PlayerSettings.insecureHttpOption = InsecureHttpOption.AlwaysAllowed;
+                Debug.Log("[RoomScan Setup] Set Player Settings > insecureHttpOption to AlwaysAllowed");
+            }
             FixComponents();
             FixShaderWiring();
 
