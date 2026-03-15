@@ -36,6 +36,8 @@ namespace Genesis.RoomScan.UI
 
         // Action buttons
         private Button _btnToggleScan;
+        private Button _btnSaveScan;
+        private Button _btnLoadScan;
         private Button _btnClearAll;
         private Button _btnExportPc;
         private Button _btnGsTrain;
@@ -119,6 +121,8 @@ namespace Genesis.RoomScan.UI
             _valFps = _root.Q<Label>("val-fps");
 
             _btnToggleScan = _root.Q<Button>("btn-toggle-scan");
+            _btnSaveScan = _root.Q<Button>("btn-save-scan");
+            _btnLoadScan = _root.Q<Button>("btn-load-scan");
             _btnClearAll = _root.Q<Button>("btn-clear-all");
             _btnExportPc = _root.Q<Button>("btn-export-pc");
             _btnGsTrain = _root.Q<Button>("btn-gs-train");
@@ -129,26 +133,38 @@ namespace Genesis.RoomScan.UI
             _btnToggleScan?.RegisterCallback<ClickEvent>(_ =>
                 RoomScanner.Instance?.ToggleScanning());
 
+            _btnSaveScan?.RegisterCallback<ClickEvent>(async _ =>
+            {
+                if (RoomScanner.Instance == null) return;
+                SetButtonBusy(_btnSaveScan, "Saving...");
+                bool ok = await RoomScanner.Instance.SaveScanAsync();
+                SetButtonReady(_btnSaveScan, "Save Scan");
+                FlashStatus(_btnSaveScan, ok);
+            });
+
+            _btnLoadScan?.RegisterCallback<ClickEvent>(async _ =>
+            {
+                if (RoomScanner.Instance == null) return;
+                SetButtonBusy(_btnLoadScan, "Loading...");
+                bool ok = await RoomScanner.Instance.LoadScanAsync();
+                SetButtonReady(_btnLoadScan, "Load Scan");
+                FlashStatus(_btnLoadScan, ok);
+            });
+
             _btnClearAll?.RegisterCallback<ClickEvent>(async _ =>
             {
                 if (RoomScanner.Instance == null) return;
-                if (_btnClearAll != null)
-                {
-                    _btnClearAll.text = "Clearing...";
-                    _btnClearAll.SetEnabled(false);
-                }
+                SetButtonBusy(_btnClearAll, "Clearing...");
                 await RoomScanner.Instance.ClearAllDataAsync();
-                if (_btnClearAll != null)
-                {
-                    _btnClearAll.text = "Clear All Data";
-                    _btnClearAll.SetEnabled(true);
-                }
+                SetButtonReady(_btnClearAll, "Clear All Data");
             });
 
             _btnExportPc?.RegisterCallback<ClickEvent>(async _ =>
             {
-                if (RoomScanner.Instance != null)
-                    await RoomScanner.Instance.ExportPointCloudAsync();
+                if (RoomScanner.Instance == null) return;
+                SetButtonBusy(_btnExportPc, "Exporting...");
+                await RoomScanner.Instance.ExportPointCloudAsync();
+                SetButtonReady(_btnExportPc, "Export Point Cloud");
             });
 
             _btnGsTrain?.RegisterCallback<ClickEvent>(_ =>
@@ -210,6 +226,29 @@ namespace Genesis.RoomScan.UI
         private static void SetLabel(Label label, string text)
         {
             if (label != null) label.text = text;
+        }
+
+        private static void SetButtonBusy(Button btn, string text)
+        {
+            if (btn == null) return;
+            btn.text = text;
+            btn.SetEnabled(false);
+        }
+
+        private static void SetButtonReady(Button btn, string text)
+        {
+            if (btn == null) return;
+            btn.text = text;
+            btn.SetEnabled(true);
+        }
+
+        private static async void FlashStatus(Button btn, bool success)
+        {
+            if (btn == null) return;
+            string original = btn.text;
+            btn.text = success ? "Done!" : "Failed";
+            await System.Threading.Tasks.Task.Delay(1500);
+            if (btn != null) btn.text = original;
         }
     }
 }

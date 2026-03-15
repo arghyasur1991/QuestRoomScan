@@ -64,8 +64,8 @@ namespace Genesis.RoomScan
         [SerializeField] private float guidedTimeoutSeconds = 60f;
 
         [Header("Persistence")]
-        [SerializeField, Tooltip("Seconds between autosaves during scanning (0 = disabled)")]
-        private float autoSaveIntervalSeconds = 10f;
+        [SerializeField, Tooltip("Auto-save scan data when the application quits")]
+        private bool saveOnQuit = true;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
@@ -121,7 +121,6 @@ namespace Genesis.RoomScan
         private float _lastIntegrationTime;
         private float _lastMeshTime;
         private float _guidedStartTime;
-        private float _lastAutoSaveTime;
         private bool _started;
         private bool _serverTrainingInProgress;
 
@@ -160,14 +159,8 @@ namespace Genesis.RoomScan
             _debugMenu = GetComponentInChildren<DebugMenuController>();
         }
 
-        private async void OnRoomReady()
+        private void OnRoomReady()
         {
-            if (_persistence != null && _persistence.HasSavedScan())
-            {
-                Debug.Log("[RoomScan] Found saved scan, loading...");
-                await _persistence.LoadAsync();
-            }
-
             if (autoStartOnLoad)
                 StartScanning();
 
@@ -186,27 +179,15 @@ namespace Genesis.RoomScan
             StopScanning();
         }
 
-        private async void OnApplicationPause(bool paused)
-        {
-            if (!paused) return;
-
-            if (_persistence != null && _started && _volumeIntegrator != null
-                && _volumeIntegrator.IntegrationCount > _volumeIntegrator.WarmupIntegrations)
-            {
-                Debug.Log("[RoomScan] App pausing, saving scan...");
-                await _persistence.SaveAsync();
-            }
-        }
-
         private async void OnApplicationQuit()
         {
-            if (_persistence != null && _started && _volumeIntegrator != null
-                && _volumeIntegrator.IntegrationCount > _volumeIntegrator.WarmupIntegrations
-                && !_persistence.IsSaving)
-            {
-                Debug.Log("[RoomScan] App quitting, saving scan...");
-                await _persistence.SaveAsync();
-            }
+            if (!saveOnQuit || _persistence == null || !_started) return;
+            if (_volumeIntegrator == null
+                || _volumeIntegrator.IntegrationCount <= _volumeIntegrator.WarmupIntegrations) return;
+            if (_persistence.IsSaving) return;
+
+            Debug.Log("[RoomScan] App quitting, saving scan...");
+            await _persistence.SaveAsync();
         }
 
         private float _lastScannerLog;
@@ -244,14 +225,6 @@ namespace Genesis.RoomScan
 
             if (mode == ScanMode.Guided && t - _guidedStartTime >= guidedTimeoutSeconds)
                 SetMode(ScanMode.Passive);
-
-            if (autoSaveIntervalSeconds > 0 && _persistence != null && !_persistence.IsSaving
-                && t - _lastAutoSaveTime >= autoSaveIntervalSeconds
-                && _volumeIntegrator.IntegrationCount > _volumeIntegrator.WarmupIntegrations)
-            {
-                _lastAutoSaveTime = t;
-                _ = _persistence.SaveAsync();
-            }
         }
 
         // ═════════════════════════════════════════════════════════════
@@ -266,7 +239,6 @@ namespace Genesis.RoomScan
             float t = Time.time;
             _lastIntegrationTime = t;
             _lastMeshTime = t;
-            _lastAutoSaveTime = t;
 
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StartCapture();
@@ -395,6 +367,18 @@ namespace Genesis.RoomScan
 
             _volumeIntegrator.UnfreezeInView(pose.position, pose.rotation,
                 focal, principal, sensor, current);
+        }
+
+        public async Task<bool> SaveScanAsync()
+        {
+            if (_persistence == null) return false;
+            return await _persistence.SaveAsync();
+        }
+
+        public async Task<bool> LoadScanAsync()
+        {
+            if (_persistence == null) return false;
+            return await _persistence.LoadAsync();
         }
 
         public async Task ExportPointCloudAsync()

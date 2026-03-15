@@ -18,6 +18,8 @@ namespace Genesis.RoomScan
         ExportPointCloud,
         StartServerTraining,
         ToggleDebugMenu,
+        SaveScan,
+        LoadScan,
     }
 
     /// <summary>
@@ -139,6 +141,12 @@ namespace Genesis.RoomScan
                     break;
                 case ScanAction.ToggleDebugMenu:
                     scanner.ToggleDebugMenu();
+                    break;
+                case ScanAction.SaveScan:
+                    _ = scanner.SaveScanAsync();
+                    break;
+                case ScanAction.LoadScan:
+                    _ = scanner.LoadScanAsync();
                     break;
             }
         }
