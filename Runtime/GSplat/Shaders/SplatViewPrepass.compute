@@ -124,8 +124,10 @@ void CSCalcViewData(uint3 id : SV_DispatchThreadID)
     float2 ax1, ax2;
     DecomposeCovariance(cov2d, ax1, ax2);
 
-    // SH color
+    // SH color — SH coefficients were trained in COLMAP space (Y-down),
+    // so negate viewdir.y to evaluate in the same frame
     float3 viewdir = normalize(wpos - _CamPos);
+    viewdir.y = -viewdir.y;
     uint numBases = NumSHBases(_SHDegree);
     uint restSize = (numBases - 1) * 3;
     float3 col;

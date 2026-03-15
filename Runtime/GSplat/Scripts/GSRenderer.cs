@@ -104,7 +104,9 @@ namespace Genesis.RoomScan.GSplat
         public void SetServerTrainedBuffers(GSplatBuffers buffers)
         {
             _serverTrainedBuffers = buffers;
-            Debug.Log($"[GSRenderer] Server-trained buffers set: {buffers?.CurrentCount ?? 0} Gaussians");
+            if (buffers != null)
+                shDegree = buffers.SHDegree;
+            Debug.Log($"[GSRenderer] Server-trained buffers set: {buffers?.CurrentCount ?? 0} Gaussians, SH degree {shDegree}");
         }
 
         void OnEnable() => ActiveInstance = this;
