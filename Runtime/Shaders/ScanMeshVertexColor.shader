@@ -70,6 +70,10 @@ Shader "Genesis/ScanMeshVertexColor"
             TEXTURE2D(_RSTriYZ);  SAMPLER(sampler_RSTriYZ);
             float _RSTriAvailable;
 
+            // TSDF volume (for freeze tint feedback)
+            TEXTURE3D(gsVolume);
+            SAMPLER(sampler_gsVolume);
+
             // Volume params (set by VolumeIntegrator as globals)
             float4 gsVoxCount;
             float gsVoxSize;
@@ -194,22 +198,36 @@ Shader "Genesis/ScanMeshVertexColor"
                 return OUT;
             }
 
+            bool IsVoxelFrozen(float3 worldPos)
+            {
+                float3 uvw = WorldToVoxelUVW(worldPos);
+                float2 tsdf = SAMPLE_TEXTURE3D_LOD(gsVolume, sampler_gsVolume, uvw, 0).rg;
+                return tsdf.g < 0;
+            }
+
+            half3 ApplyFreezeTint(half3 color, float3 worldPos)
+            {
+                if (IsVoxelFrozen(worldPos))
+                    color = lerp(color, half3(0.3, 0.5, 0.9), 0.25);
+                return color;
+            }
+
             half4 frag(Varyings IN) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(IN);
 
                 #ifdef _DEBUG_SOLID
-                return half4(1, 0.2, 0.1, 1);
+                return half4(ApplyFreezeTint(half3(1, 0.2, 0.1), IN.positionWS), 1);
                 #endif
 
                 float3 normal = normalize(IN.normalWS);
 
                 #ifdef _SHOW_NORMALS
-                return half4(normal * 0.5 + 0.5, 1);
+                return half4(ApplyFreezeTint(half3(normal * 0.5 + 0.5), IN.positionWS), 1);
                 #endif
 
                 #ifdef _VERTEX_ONLY
-                return half4(IN.color.rgb, 1);
+                return half4(ApplyFreezeTint(IN.color.rgb, IN.positionWS), 1);
                 #endif
 
                 // Priority 1: Best keyframe match (skipped in triplanar-only eval mode)
@@ -241,7 +259,7 @@ Shader "Genesis/ScanMeshVertexColor"
                     {
                         half3 c = SAMPLE_TEXTURE2D_ARRAY(
                             _RSKeyframeTex, sampler_RSKeyframeTex, bestUV, bestIdx).rgb;
-                        return half4(saturate(c * _RSCamExposure), 1);
+                        return half4(ApplyFreezeTint(saturate(c * _RSCamExposure), IN.positionWS), 1);
                     }
                 }
                 #endif
@@ -250,11 +268,11 @@ Shader "Genesis/ScanMeshVertexColor"
                 if (_RSTriAvailable > 0.5)
                 {
                     half3 tri = SampleTriplanar(IN.positionWS, normal);
-                    if (tri.r >= 0) return half4(tri, 1);
+                    if (tri.r >= 0) return half4(ApplyFreezeTint(tri, IN.positionWS), 1);
                 }
 
                 // Priority 3: Vertex colors
-                return half4(IN.color.rgb, 1);
+                return half4(ApplyFreezeTint(IN.color.rgb, IN.positionWS), 1);
             }
             ENDHLSL
         }

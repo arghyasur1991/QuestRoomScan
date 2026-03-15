@@ -127,7 +127,7 @@ float SampleSDF(int3 coord)
 {
     float2 s = _TsdfVolume[coord];
     if (s.x <= -0.99) return 0.0;
-    if (s.y < _MinWeight) return 0.0;
+    if (abs(s.y) < _MinWeight) return 0.0;
     return s.x;
 }
 
@@ -179,8 +179,8 @@ void ClassifyAndEmit(uint3 id : SV_DispatchThreadID)
         bool emptyA = (sA.x <= -0.99);
         bool emptyB = (sB.x <= -0.99);
 
-        if (!emptyA && sA.y < _MinWeight) emptyA = true;
-        if (!emptyB && sB.y < _MinWeight) emptyB = true;
+        if (!emptyA && abs(sA.y) < _MinWeight) emptyA = true;
+        if (!emptyB && abs(sB.y) < _MinWeight) emptyB = true;
 
         float valA = emptyA ? 0.0 : sA.x;
         float valB = emptyB ? 0.0 : sB.x;

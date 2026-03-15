@@ -39,6 +39,7 @@ namespace Genesis.RoomScan.Editor
         PlaneDetector _planeDetector;
         GSplatManager _gsplatManager;
         GSSectorRenderer _gsSectorRenderer;
+        GSplatServerClient _gsplatServerClient;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
         bool _gsplatComputeWired, _gsRendererComputeWired;
@@ -112,6 +113,7 @@ namespace Genesis.RoomScan.Editor
             _planeDetector = FindAny<PlaneDetector>();
             _gsplatManager = FindAny<GSplatManager>();
             _gsSectorRenderer = FindAny<GSSectorRenderer>();
+            _gsplatServerClient = FindAny<GSplatServerClient>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -350,8 +352,9 @@ namespace Genesis.RoomScan.Editor
             StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
             StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
             StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
-            StatusRow("GSplatManager (on-device training)", _gsplatManager != null);
+            StatusRow("GSplatManager (training + PLY loader)", _gsplatManager != null);
             StatusRow("GSSectorRenderer (splat rendering)", _gsSectorRenderer != null);
+            StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _meshExtractor == null ||
@@ -360,7 +363,8 @@ namespace Genesis.RoomScan.Editor
                               _triplanarCache == null || _keyframeStore == null ||
                               _persistence == null || _keyframeCollector == null ||
                               _pointCloudExporter == null || _planeDetector == null ||
-                              _gsplatManager == null || _gsSectorRenderer == null;
+                              _gsplatManager == null || _gsSectorRenderer == null ||
+                              _gsplatServerClient == null;
 
             if (anyMissing)
             {
@@ -441,6 +445,8 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<GSSectorRenderer>(root);
             if (root.GetComponent<GSplatManager>() == null)
                 Undo.AddComponent<GSplatManager>(root);
+            if (root.GetComponent<GSplatServerClient>() == null)
+                Undo.AddComponent<GSplatServerClient>(root);
 
             MarkDirty();
             Refresh();
@@ -797,6 +803,7 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "pointCloudExporter", _pointCloudExporter);
                 SetRef(so, "planeDetector", _planeDetector);
                 SetRef(so, "gsplatManager", _gsplatManager);
+                SetRef(so, "gsplatServerClient", _gsplatServerClient);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }

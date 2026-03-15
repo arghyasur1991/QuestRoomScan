@@ -91,6 +91,8 @@ namespace Genesis.RoomScan
         private ComputeKernelHelper _clearKernel;
         private ComputeKernelHelper _integrateKernel;
         private ComputeKernelHelper _pruneKernel;
+        private ComputeKernelHelper _freezeKernel;
+        private ComputeKernelHelper _unfreezeKernel;
 
         private ComputeBuffer _frustumVolume;
         private bool _frustumReady;
@@ -134,6 +136,12 @@ namespace Genesis.RoomScan
             _pruneKernel = new ComputeKernelHelper(compute, "Prune");
             _pruneKernel.Set(VolumeRWID, _volume);
             _pruneKernel.Set(ColorVolumeRWID, _colorVolume);
+
+            _freezeKernel = new ComputeKernelHelper(compute, "FreezeInFrustum");
+            _freezeKernel.Set(VolumeRWID, _volume);
+
+            _unfreezeKernel = new ComputeKernelHelper(compute, "UnfreezeInFrustum");
+            _unfreezeKernel.Set(VolumeRWID, _volume);
 
             SetShaderConstants();
             Clear();
@@ -208,6 +216,46 @@ namespace Genesis.RoomScan
             _clearKernel.Set(ColorVolumeRWID, _colorVolume);
             _clearKernel.DispatchFit(_volume);
             Cleared?.Invoke();
+        }
+
+        /// <summary>
+        /// Freeze all voxels currently visible in the camera frustum.
+        /// Frozen voxels are encoded as negative weight and skip integration.
+        /// Requires camera data to have been provided via SetCameraData.
+        /// </summary>
+        public void FreezeInView(Vector3 camPos, Quaternion camRot,
+            Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
+        {
+            SetFrustumCameraUniforms(_freezeKernel, camPos, camRot,
+                focalLen, principalPt, sensorRes, currentRes);
+            _freezeKernel.Set(VolumeRWID, _volume);
+            _freezeKernel.DispatchFit(_volume);
+            Debug.Log("[RoomScan] FreezeInView dispatched");
+        }
+
+        /// <summary>
+        /// Unfreeze all frozen voxels currently visible in the camera frustum.
+        /// </summary>
+        public void UnfreezeInView(Vector3 camPos, Quaternion camRot,
+            Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
+        {
+            SetFrustumCameraUniforms(_unfreezeKernel, camPos, camRot,
+                focalLen, principalPt, sensorRes, currentRes);
+            _unfreezeKernel.Set(VolumeRWID, _volume);
+            _unfreezeKernel.DispatchFit(_volume);
+            Debug.Log("[RoomScan] UnfreezeInView dispatched");
+        }
+
+        private void SetFrustumCameraUniforms(ComputeKernelHelper kernel, Vector3 camPos,
+            Quaternion camRot, Vector2 focalLen, Vector2 principalPt,
+            Vector2 sensorRes, Vector2 currentRes)
+        {
+            compute.SetVector(CamPosID, camPos);
+            compute.SetMatrix(CamInvRotID, Matrix4x4.Rotate(Quaternion.Inverse(camRot)));
+            compute.SetVector(CamFocalLenID, focalLen);
+            compute.SetVector(CamPrincipalPtID, principalPt);
+            compute.SetVector(CamSensorResID, sensorRes);
+            compute.SetVector(CamCurrentResID, currentRes);
         }
 
         /// <summary>

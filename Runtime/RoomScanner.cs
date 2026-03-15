@@ -18,6 +18,13 @@ namespace Genesis.RoomScan
         Hidden
     }
 
+    public enum RenderMode
+    {
+        Mesh,
+        Splat,
+        Both
+    }
+
     /// <summary>
     /// Top-level orchestrator for room scanning. Manages the scanning pipeline:
     /// DepthCapture → VolumeIntegrator → MeshExtractor.
@@ -38,6 +45,7 @@ namespace Genesis.RoomScan
         [SerializeField] private PointCloudExporter pointCloudExporter;
         [SerializeField] private PlaneDetector planeDetector;
         [SerializeField] private GSplatManager gsplatManager;
+        [SerializeField] private GSplat.GSplatServerClient gsplatServerClient;
 
         [Header("Camera")]
         [SerializeField] private PassthroughCameraProvider cameraProvider;
@@ -58,6 +66,9 @@ namespace Genesis.RoomScan
 
         [Header("Mesh Quality")]
         [SerializeField] private int minIntegrationsBeforeMesh = 5;
+
+        [Header("Render Mode")]
+        [SerializeField] private RenderMode renderMode = RenderMode.Mesh;
 
         [Header("Guided Mode")]
         [SerializeField] private float guidedTimeoutSeconds = 60f;
@@ -209,6 +220,9 @@ namespace Genesis.RoomScan
                 SetMode(ScanMode.Passive);
             }
 
+            PollFreezeInput();
+            PollTrainingTrigger();
+
             if (autoSaveIntervalSeconds > 0 && persistence != null && !persistence.IsSaving
                 && t - _lastAutoSaveTime >= autoSaveIntervalSeconds
                 && volumeIntegrator != null
@@ -306,6 +320,7 @@ namespace Genesis.RoomScan
             if (pointCloudExporter == null) pointCloudExporter = FindFirstObjectByType<PointCloudExporter>();
             if (planeDetector == null) planeDetector = FindFirstObjectByType<PlaneDetector>();
             if (gsplatManager == null) gsplatManager = FindFirstObjectByType<GSplatManager>();
+            if (gsplatServerClient == null) gsplatServerClient = FindFirstObjectByType<GSplat.GSplatServerClient>();
 
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");
@@ -407,6 +422,130 @@ namespace Genesis.RoomScan
 
             volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);
+        }
+
+        private bool _serverTrainingInProgress;
+
+        private void PollTrainingTrigger()
+        {
+            // Right controller B button = cycle render mode
+            if (OVRInput.GetDown(OVRInput.Button.Two))
+            {
+                renderMode = renderMode switch
+                {
+                    RenderMode.Mesh => RenderMode.Splat,
+                    RenderMode.Splat => RenderMode.Both,
+                    _ => RenderMode.Mesh,
+                };
+                ApplyRenderMode();
+                Debug.Log($"[RoomScan] Render mode: {renderMode}");
+            }
+
+            if (_serverTrainingInProgress) return;
+            if (gsplatServerClient == null || pointCloudExporter == null) return;
+
+            // Right controller A button = start server-side GS training
+            if (OVRInput.GetDown(OVRInput.Button.One))
+            {
+                Debug.Log("[RoomScan] GS training trigger pressed (A button)");
+                _ = RunServerTrainingAsync();
+            }
+        }
+
+        private void ApplyRenderMode()
+        {
+            var gpuRenderer = meshExtractor?.GetComponent<GPUMeshRenderer>();
+            var splatRend = gsplatManager != null
+                ? gsplatManager.GetComponent<GSplat.GSSectorRenderer>()
+                  ?? FindFirstObjectByType<GSplat.GSSectorRenderer>()
+                : null;
+
+            if (gpuRenderer != null)
+                gpuRenderer.enabled = renderMode == RenderMode.Mesh || renderMode == RenderMode.Both;
+            if (splatRend != null)
+                splatRend.enabled = renderMode == RenderMode.Splat || renderMode == RenderMode.Both;
+        }
+
+        private async void RunServerTrainingAsync()
+        {
+            if (_serverTrainingInProgress) return;
+            _serverTrainingInProgress = true;
+
+            try
+            {
+                Debug.Log("[RoomScan] Starting server-side GS training pipeline...");
+
+                // Step 1: Export latest point cloud
+                Debug.Log("[RoomScan] Exporting point cloud...");
+                await pointCloudExporter.ExportAsync();
+
+                // Step 2: Upload to server
+                Debug.Log("[RoomScan] Uploading training data to PC server...");
+                bool uploaded = await gsplatServerClient.UploadTrainingData();
+                if (!uploaded)
+                {
+                    Debug.LogError("[RoomScan] Upload failed, aborting training");
+                    return;
+                }
+
+                // Step 3: Poll until done
+                Debug.Log("[RoomScan] Waiting for server training to complete...");
+                bool success = await gsplatServerClient.PollUntilDone();
+                if (!success)
+                {
+                    Debug.LogError("[RoomScan] Server training failed or was cancelled");
+                    return;
+                }
+
+                // Step 4: Download trained PLY
+                Debug.Log("[RoomScan] Downloading trained Gaussians...");
+                byte[] plyData = await gsplatServerClient.DownloadResult();
+                if (plyData == null || plyData.Length == 0)
+                {
+                    Debug.LogError("[RoomScan] Download returned no data");
+                    return;
+                }
+
+                // Step 5: Load into renderer
+                if (gsplatManager != null)
+                {
+                    gsplatManager.LoadTrainedPly(plyData);
+                    Debug.Log("[RoomScan] Trained Gaussians loaded and ready for rendering");
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[RoomScan] Server training pipeline error: {e.Message}\n{e.StackTrace}");
+            }
+            finally
+            {
+                _serverTrainingInProgress = false;
+            }
+        }
+
+        private void PollFreezeInput()
+        {
+            if (volumeIntegrator == null) return;
+
+            bool freeze = OVRInput.GetDown(OVRInput.Button.Three);   // X on left controller
+            bool unfreeze = OVRInput.GetDown(OVRInput.Button.Four);  // Y on left controller
+            if (!freeze && !unfreeze) return;
+
+            ICameraProvider provider = GetActiveCameraProvider();
+            if (provider is not PassthroughCameraProvider pcp || !pcp.IsReady) return;
+
+            Pose pose = pcp.CameraPose;
+            Vector2 focal = pcp.FocalLength;
+            Vector2 principal = pcp.PrincipalPoint;
+            Vector2 sensor = pcp.SensorResolution;
+            Vector2 current = pcp.CurrentResolution;
+
+            if (freeze)
+                volumeIntegrator.FreezeInView(pose.position, pose.rotation,
+                    focal, principal, sensor, current);
+            else
+                volumeIntegrator.UnfreezeInView(pose.position, pose.rotation,
+                    focal, principal, sensor, current);
         }
 
         private ICameraProvider GetActiveCameraProvider()

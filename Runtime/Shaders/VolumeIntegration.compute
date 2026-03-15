@@ -1,5 +1,6 @@
 // Genesis RoomScan - TSDF volume integration compute shader
-// Volume format: RG8_SNorm — R = signed distance, G = confidence weight [0,1]
+// Volume format: RG8_SNorm — R = signed distance, G = confidence weight
+//   weight > 0 = unfrozen, weight < 0 = frozen (abs = real weight), 0 = empty
 // Color volume: RGBA8_UNorm — RGB = accumulated color, A = coverage weight
 //
 // Uses quality^2 modulated running average with slow weight growth.
@@ -145,6 +146,7 @@ void Integrate(uint id : SV_DispatchThreadID)
     float q2 = quality * quality;
 
     float2 old = gsVolumeRW[coord];
+    if (old.y < 0) return; // frozen voxel — skip integration
     float oldVal = old.x;
     float weight = max(old.y, 0);
     bool wasEmpty = weight < 0.001;
@@ -192,4 +194,37 @@ void Integrate(uint id : SV_DispatchThreadID)
             gsColorVolumeRW[coord] = float4(rgb, newAlpha);
         }
     }
+}
+
+#pragma kernel FreezeInFrustum
+#pragma kernel UnfreezeInFrustum
+
+[numthreads(4, 4, 4)]
+void FreezeInFrustum(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= gsVoxCount)) return;
+    float2 vol = gsVolumeRW[id];
+    if (vol.y <= 0) return; // empty or already frozen
+
+    float3 worldPos = gsVoxelToWorld(id);
+    float2 uv = ProjectToCameraUV(worldPos);
+    if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99)
+        return;
+
+    gsVolumeRW[id] = float2(vol.x, -vol.y);
+}
+
+[numthreads(4, 4, 4)]
+void UnfreezeInFrustum(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= gsVoxCount)) return;
+    float2 vol = gsVolumeRW[id];
+    if (vol.y >= 0) return; // not frozen
+
+    float3 worldPos = gsVoxelToWorld(id);
+    float2 uv = ProjectToCameraUV(worldPos);
+    if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99)
+        return;
+
+    gsVolumeRW[id] = float2(vol.x, -vol.y);
 }
