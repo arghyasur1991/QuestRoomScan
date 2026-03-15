@@ -93,28 +93,6 @@ namespace Genesis.RoomScan
             bindings.Clear();
         }
 
-        private void Awake()
-        {
-            MigrateStaleBindings();
-        }
-
-        /// <summary>
-        /// Fixes bindings serialized before a default was changed (e.g. Button.Start
-        /// which the Quest OS intercepts). Safe to call multiple times.
-        /// </summary>
-        private void MigrateStaleBindings()
-        {
-            for (int i = 0; i < bindings.Count; i++)
-            {
-                var b = bindings[i];
-                if (b.action == ScanAction.ToggleDebugMenu && b.button == OVRInput.Button.Start)
-                {
-                    b.button = OVRInput.Button.PrimaryThumbstick;
-                    Debug.Log("[RoomScan] Migrated ToggleDebugMenu binding from Button.Start → PrimaryThumbstick");
-                }
-            }
-        }
-
         private void Update()
         {
             var scanner = RoomScanner.Instance;
