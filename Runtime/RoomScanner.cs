@@ -42,7 +42,6 @@ namespace Genesis.RoomScan
         [SerializeField] private RoomScanPersistence persistence;
         [SerializeField] private KeyframeCollector keyframeCollector;
         [SerializeField] private PointCloudExporter pointCloudExporter;
-        [SerializeField] private PlaneDetector planeDetector;
         [SerializeField] private GSplatManager gsplatManager;
         [SerializeField] private GSplat.GSplatServerClient gsplatServerClient;
 
@@ -197,9 +196,6 @@ namespace Genesis.RoomScan
                 {
                     _lastMeshTime = t;
                     meshExtractor.Extract();
-
-                    if (planeDetector != null)
-                        planeDetector.OnMeshCycleComplete();
                 }
             }
 
@@ -313,7 +309,6 @@ namespace Genesis.RoomScan
             if (persistence == null) persistence = FindFirstObjectByType<RoomScanPersistence>();
             if (keyframeCollector == null) keyframeCollector = FindFirstObjectByType<KeyframeCollector>();
             if (pointCloudExporter == null) pointCloudExporter = FindFirstObjectByType<PointCloudExporter>();
-            if (planeDetector == null) planeDetector = FindFirstObjectByType<PlaneDetector>();
             if (gsplatManager == null) gsplatManager = FindFirstObjectByType<GSplatManager>();
             if (gsplatServerClient == null) gsplatServerClient = FindFirstObjectByType<GSplat.GSplatServerClient>();
 

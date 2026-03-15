@@ -35,7 +35,6 @@ namespace Genesis.RoomScan.Editor
         RoomScanPersistence _persistence;
         KeyframeCollector _keyframeCollector;
         PointCloudExporter _pointCloudExporter;
-        PlaneDetector _planeDetector;
         GSplatManager _gsplatManager;
         GSRenderer _gsRenderer;
         GSplatServerClient _gsplatServerClient;
@@ -108,7 +107,6 @@ namespace Genesis.RoomScan.Editor
             _persistence = FindAny<RoomScanPersistence>();
             _keyframeCollector = FindAny<KeyframeCollector>();
             _pointCloudExporter = FindAny<PointCloudExporter>();
-            _planeDetector = FindAny<PlaneDetector>();
             _gsplatManager = FindAny<GSplatManager>();
             _gsRenderer = FindAny<GSRenderer>();
             _gsplatServerClient = FindAny<GSplatServerClient>();
@@ -344,7 +342,6 @@ namespace Genesis.RoomScan.Editor
             StatusRow("RoomScanPersistence", _persistence != null);
             StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
             StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
-            StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
             StatusRow("GSplatManager (PLY loader)", _gsplatManager != null);
             StatusRow("GSRenderer (splat rendering)", _gsRenderer != null);
             StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
@@ -355,7 +352,7 @@ namespace Genesis.RoomScan.Editor
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null ||
                               _persistence == null || _keyframeCollector == null ||
-                              _pointCloudExporter == null || _planeDetector == null ||
+                              _pointCloudExporter == null ||
                               _gsplatManager == null || _gsRenderer == null ||
                               _gsplatServerClient == null;
 
@@ -418,20 +415,9 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<RoomScanPersistence>() == null)
                 Undo.AddComponent<RoomScanPersistence>(root);
             if (root.GetComponent<KeyframeCollector>() == null)
-            {
-                var keyframeCollector = Undo.AddComponent<KeyframeCollector>(root);
-                keyframeCollector.enabled = false;
-            }
+                Undo.AddComponent<KeyframeCollector>(root);
             if (root.GetComponent<PointCloudExporter>() == null)
-            {
-                var pointCloudExporter = Undo.AddComponent<PointCloudExporter>(root);
-                pointCloudExporter.enabled = false;
-            }
-            if (root.GetComponent<PlaneDetector>() == null)
-            {
-                var planeDetector = Undo.AddComponent<PlaneDetector>(root);
-                planeDetector.enabled = false;
-            }
+                Undo.AddComponent<PointCloudExporter>(root);
             if (root.GetComponent<GSRenderer>() == null)
                 Undo.AddComponent<GSRenderer>(root);
             if (root.GetComponent<GSplatManager>() == null)
@@ -768,7 +754,6 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "persistence", _persistence);
                 SetRef(so, "keyframeCollector", _keyframeCollector);
                 SetRef(so, "pointCloudExporter", _pointCloudExporter);
-                SetRef(so, "planeDetector", _planeDetector);
                 SetRef(so, "gsplatManager", _gsplatManager);
                 SetRef(so, "gsplatServerClient", _gsplatServerClient);
                 so.ApplyModifiedProperties();
