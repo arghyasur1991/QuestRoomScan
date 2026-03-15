@@ -1,28 +1,42 @@
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.UIElements;
 
 namespace Genesis.RoomScan.UI
 {
     /// <summary>
     /// Picks the active VR controller, keeps <see cref="OVRInputModule.rayTransform"/>
-    /// pointing along the controller ray, and draws a laser visual.
+    /// pointing along the controller ray, and draws a laser + cursor dot.
     /// Place on the same GameObject as the <c>EventSystem</c> / <c>OVRInputModule</c>.
     /// </summary>
     [RequireComponent(typeof(OVRInputModule))]
     public class ControllerRayDriver : MonoBehaviour
     {
-        [Header("Laser Visual")]
+        [Header("Ray")]
+        [SerializeField, Tooltip("Forward offset from controller origin (meters)")]
+        private float rayStartOffset = 0.05f;
         [SerializeField] private float maxLength = 5f;
-        [SerializeField] private float beamWidth = 0.003f;
-        [SerializeField] private Color idleColor = new(1f, 1f, 1f, 0.25f);
-        [SerializeField] private Color hoverColor = new(0f, 0.8f, 1f, 0.8f);
+
+        [Header("Laser Visual")]
+        [SerializeField] private float beamWidth = 0.002f;
+        [SerializeField] private Color idleColor = new(1f, 1f, 1f, 0.15f);
+        [SerializeField] private Color hoverColor = new(0f, 0.8f, 1f, 0.7f);
+
+        [Header("Cursor Dot")]
+        [SerializeField] private float cursorRadius = 0.006f;
+        [SerializeField] private Color cursorColor = new(1f, 1f, 1f, 0.9f);
 
         private OVRInputModule _inputModule;
         private Transform _rayHelper;
         private LineRenderer _line;
+        private GameObject _cursor;
+        private MeshRenderer _cursorRenderer;
         private OVRInput.Controller _activeController = OVRInput.Controller.RTouch;
 
         private static OVRPlugin.HandState _handState = new();
+
+        // Layer mask matching the debug menu's panel collider layer
+        private int _uiLayerMask;
 
         private void Awake()
         {
@@ -33,7 +47,10 @@ namespace Genesis.RoomScan.UI
             _inputModule.rayTransform = _rayHelper;
             _inputModule.joyPadClickButton = OVRInput.Button.PrimaryIndexTrigger;
 
+            _uiLayerMask = LayerMask.GetMask("Default", "UI");
+
             SetupLineRenderer();
+            SetupCursor();
         }
 
         private void Update()
@@ -49,8 +66,8 @@ namespace Genesis.RoomScan.UI
 
         private void OnDestroy()
         {
-            if (_rayHelper != null)
-                Destroy(_rayHelper.gameObject);
+            if (_rayHelper != null) Destroy(_rayHelper.gameObject);
+            if (_cursor != null) Destroy(_cursor);
         }
 
         // ─── Controller Selection (adapted from Meta ImmersiveDebugger) ───
@@ -113,7 +130,7 @@ namespace Genesis.RoomScan.UI
             _line = gameObject.AddComponent<LineRenderer>();
             _line.positionCount = 2;
             _line.startWidth = beamWidth;
-            _line.endWidth = beamWidth * 0.3f;
+            _line.endWidth = beamWidth * 0.5f;
             _line.material = new Material(Shader.Find("Sprites/Default"));
             _line.startColor = _line.endColor = idleColor;
             _line.useWorldSpace = true;
@@ -121,24 +138,63 @@ namespace Genesis.RoomScan.UI
             _line.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
         }
 
+        private void SetupCursor()
+        {
+            _cursor = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            _cursor.name = "RayCursor";
+            _cursor.transform.localScale = Vector3.one * (cursorRadius * 2f);
+
+            // Remove the collider so it doesn't interfere with raycasts
+            var col = _cursor.GetComponent<Collider>();
+            if (col != null) Destroy(col);
+
+            _cursorRenderer = _cursor.GetComponent<MeshRenderer>();
+            _cursorRenderer.material = new Material(Shader.Find("Sprites/Default"));
+            _cursorRenderer.material.color = cursorColor;
+            _cursorRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+            _cursorRenderer.receiveShadows = false;
+
+            _cursor.SetActive(false);
+        }
+
         private void DrawLaser()
         {
             if (_rayHelper == null || _line == null) return;
 
-            var start = _rayHelper.position;
+            var origin = _rayHelper.position;
             var dir = _rayHelper.forward;
+            var start = origin + dir * rayStartOffset;
             var end = start + dir * maxLength;
-            bool hovering = false;
+            bool hoveringUI = false;
 
-            if (Physics.Raycast(start, dir, out var hit, maxLength))
+            // Only highlight when hitting a world-space UI Toolkit panel collider
+            if (Physics.Raycast(origin, dir, out var hit, maxLength + rayStartOffset))
             {
                 end = hit.point;
-                hovering = true;
+
+                // Check if we hit a UIDocument's auto-generated panel collider
+                var uiDoc = hit.collider.GetComponentInParent<UIDocument>();
+                hoveringUI = uiDoc != null;
             }
 
             _line.SetPosition(0, start);
             _line.SetPosition(1, end);
-            _line.startColor = _line.endColor = hovering ? hoverColor : idleColor;
+
+            var color = hoveringUI ? hoverColor : idleColor;
+            _line.startColor = _line.endColor = color;
+
+            // Position cursor dot at the end of the ray
+            if (_cursor != null)
+            {
+                bool showCursor = hoveringUI;
+                _cursor.SetActive(showCursor);
+                if (showCursor)
+                {
+                    _cursor.transform.position = end;
+                    _cursor.transform.LookAt(_rayHelper);
+                    _cursorRenderer.material.color = hoverColor;
+                }
+            }
         }
     }
 }
