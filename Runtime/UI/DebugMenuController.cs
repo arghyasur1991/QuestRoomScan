@@ -201,13 +201,13 @@ namespace Genesis.RoomScan.UI
             _btnGsTrain?.RegisterCallback<ClickEvent>(_ =>
                 RoomScanner.Instance?.StartServerTraining());
 
-            _btnCancelTrain?.RegisterCallback<ClickEvent>(_ =>
+            _btnCancelTrain?.RegisterCallback<ClickEvent>(evt =>
             {
                 if (_cachedClient == null)
                     _cachedClient = FindAnyObjectByType<GSplatServerClient>();
                 if (_cachedClient == null) return;
                 SetButtonBusy(_btnCancelTrain, "Cancelling...");
-                _ = CancelAndResetButton();
+                CancelAndResetButton();
             });
         }
 
@@ -319,7 +319,7 @@ namespace Genesis.RoomScan.UI
             if (label != null) label.text = text;
         }
 
-        private async System.Threading.Tasks.Task CancelAndResetButton()
+        private async void CancelAndResetButton()
         {
             if (_cachedClient != null)
                 await _cachedClient.CancelTraining();
