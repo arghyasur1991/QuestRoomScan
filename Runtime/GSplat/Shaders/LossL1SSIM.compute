@@ -15,7 +15,7 @@ Texture2D<float4> _GroundTruth; // keyframe — sRGB-encoded (ARGB32 RT from cam
 // Convert GT from sRGB to linear so the loss compares values in the same color space.
 float SRGBToLinear(float c)
 {
-    return (c <= 0.04045f) ? c / 12.92f : pow((c + 0.055f) / 1.055f, 2.4f);
+    return (c <= 0.04045f) ? c / 12.92f : pow(abs((c + 0.055f) / 1.055f), 2.4f);
 }
 
 float3 ReadGTLinear(uint2 coord)
