@@ -1,3 +1,8 @@
-numpy
-scipy
-plyfile
+# Training server and pipeline have moved to:
+#   https://github.com/arghyasur1991/RoomScan-GaussianSplatServer
+#
+# See gs-server/server/requirements.txt for the full dependency list.
+#
+# Training backend (install one):
+#   pip install "msplat[cli]"    # Apple Silicon (Metal)
+#   pip install gsplat           # NVIDIA GPU (CUDA)
