@@ -37,7 +37,7 @@ namespace Genesis.RoomScan.Editor
         PointCloudExporter _pointCloudExporter;
         PlaneDetector _planeDetector;
         GSplatManager _gsplatManager;
-        GSSectorRenderer _gsSectorRenderer;
+        GSRenderer _gsRenderer;
         GSplatServerClient _gsplatServerClient;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
@@ -110,7 +110,7 @@ namespace Genesis.RoomScan.Editor
             _pointCloudExporter = FindAny<PointCloudExporter>();
             _planeDetector = FindAny<PlaneDetector>();
             _gsplatManager = FindAny<GSplatManager>();
-            _gsSectorRenderer = FindAny<GSSectorRenderer>();
+            _gsRenderer = FindAny<GSRenderer>();
             _gsplatServerClient = FindAny<GSplatServerClient>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
@@ -123,7 +123,7 @@ namespace Genesis.RoomScan.Editor
                 "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
-            _gsRendererComputeWired = _gsSectorRenderer != null && AreFieldsAssigned(_gsSectorRenderer,
+            _gsRendererComputeWired = _gsRenderer != null && AreFieldsAssigned(_gsRenderer,
                 "viewPrepassCompute", "sortCompute", "radixSortCompute", "splatMaterial");
             _gsplatRenderFeatureAdded = HasGSplatRenderFeature();
 
@@ -346,7 +346,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
             StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
             StatusRow("GSplatManager (PLY loader)", _gsplatManager != null);
-            StatusRow("GSSectorRenderer (splat rendering)", _gsSectorRenderer != null);
+            StatusRow("GSRenderer (splat rendering)", _gsRenderer != null);
             StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
@@ -356,7 +356,7 @@ namespace Genesis.RoomScan.Editor
                               _triplanarCache == null ||
                               _persistence == null || _keyframeCollector == null ||
                               _pointCloudExporter == null || _planeDetector == null ||
-                              _gsplatManager == null || _gsSectorRenderer == null ||
+                              _gsplatManager == null || _gsRenderer == null ||
                               _gsplatServerClient == null;
 
             if (anyMissing)
@@ -432,8 +432,8 @@ namespace Genesis.RoomScan.Editor
                 var planeDetector = Undo.AddComponent<PlaneDetector>(root);
                 planeDetector.enabled = false;
             }
-            if (root.GetComponent<GSSectorRenderer>() == null)
-                Undo.AddComponent<GSSectorRenderer>(root);
+            if (root.GetComponent<GSRenderer>() == null)
+                Undo.AddComponent<GSRenderer>(root);
             if (root.GetComponent<GSplatManager>() == null)
                 Undo.AddComponent<GSplatManager>(root);
             if (root.GetComponent<GSplatServerClient>() == null)
@@ -454,7 +454,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("MeshExtractor scan material", _meshMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
-            StatusRow("GSSectorRenderer prepass + material", _gsRendererComputeWired);
+            StatusRow("GSRenderer prepass + material", _gsRendererComputeWired);
             StatusRow("GSplatRenderFeature on URP Renderer", _gsplatRenderFeatureAdded);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
@@ -535,16 +535,16 @@ namespace Genesis.RoomScan.Editor
                 var so = new SerializedObject(_gsplatManager);
                 Refresh();
                 var rendProp = so.FindProperty("splatRenderer");
-                if (rendProp != null && rendProp.objectReferenceValue == null && _gsSectorRenderer != null)
-                    rendProp.objectReferenceValue = _gsSectorRenderer;
+                if (rendProp != null && rendProp.objectReferenceValue == null && _gsRenderer != null)
+                    rendProp.objectReferenceValue = _gsRenderer;
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_gsplatManager);
             }
 
-            // GSSectorRenderer — view prepass + sort compute + splat material
-            if (_gsSectorRenderer != null)
+            // GSRenderer — view prepass + sort compute + splat material
+            if (_gsRenderer != null)
             {
-                var so = new SerializedObject(_gsSectorRenderer);
+                var so = new SerializedObject(_gsRenderer);
                 AssignCompute(so, "viewPrepassCompute", GSPLAT_PKG + "SplatViewPrepass.compute");
                 AssignCompute(so, "sortCompute", GSPLAT_PKG + "SplatSort.compute");
                 AssignCompute(so, "radixSortCompute", GSPLAT_PKG + "RadixSort.compute");
@@ -556,7 +556,7 @@ namespace Genesis.RoomScan.Editor
                         matProp.objectReferenceValue = mat;
                 }
                 so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_gsSectorRenderer);
+                EditorUtility.SetDirty(_gsRenderer);
             }
 
             if (!_gsplatRenderFeatureAdded)

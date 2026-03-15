@@ -7,11 +7,11 @@ namespace Genesis.RoomScan.GSplat
 {
     /// <summary>
     /// Loads server-trained Gaussian splats from PLY data and uploads them
-    /// to GPU buffers for rendering via <see cref="GSSectorRenderer"/>.
+    /// to GPU buffers for rendering via <see cref="GSRenderer"/>.
     /// </summary>
     public class GSplatManager : MonoBehaviour
     {
-        [SerializeField] GSSectorRenderer splatRenderer;
+        [SerializeField] GSRenderer splatRenderer;
 
         GSplatBuffers _serverTrainedBuffers;
 

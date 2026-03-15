@@ -13,7 +13,7 @@ namespace Genesis.RoomScan.GSplat
     /// For stereo, writes 2 SplatViewData entries per splat (L+R).
     /// Front-to-back sort + Blend OneMinusDstAlpha One.
     /// </summary>
-    public class GSSectorRenderer : MonoBehaviour
+    public class GSRenderer : MonoBehaviour
     {
         [SerializeField] Material splatMaterial;
         [SerializeField] ComputeShader viewPrepassCompute;
@@ -22,7 +22,7 @@ namespace Genesis.RoomScan.GSplat
         [SerializeField, Range(0.1f, 4f)] float splatSizeMultiplier = 1f;
         [SerializeField] int shDegree = 2;
 
-        public static GSSectorRenderer ActiveInstance { get; private set; }
+        public static GSRenderer ActiveInstance { get; private set; }
 
         MaterialPropertyBlock _props;
         readonly List<(int id, GSplatBuffers buffers)> _readySectors = new();
@@ -93,7 +93,7 @@ namespace Genesis.RoomScan.GSplat
         public void SetServerTrainedBuffers(GSplatBuffers buffers)
         {
             _serverTrainedBuffers = buffers;
-            Debug.Log($"[GSSectorRenderer] Server-trained buffers set: {buffers?.CurrentCount ?? 0} Gaussians");
+            Debug.Log($"[GSRenderer] Server-trained buffers set: {buffers?.CurrentCount ?? 0} Gaussians");
         }
 
         void OnEnable() => ActiveInstance = this;
@@ -106,7 +106,7 @@ namespace Genesis.RoomScan.GSplat
             if (viewPrepassCompute != null)
                 _prepassKernel = viewPrepassCompute.FindKernel("CSCalcViewData");
             else
-                Debug.LogWarning("[GSSectorRenderer] No viewPrepassCompute shader assigned!");
+                Debug.LogWarning("[GSRenderer] No viewPrepassCompute shader assigned!");
 
             if (sortCompute != null)
             {
@@ -121,7 +121,7 @@ namespace Genesis.RoomScan.GSplat
                 _useRadixSort = _radixSort.Valid;
             }
             if (!_useRadixSort)
-                Debug.LogWarning("[GSSectorRenderer] Radix sort unavailable, using bitonic fallback");
+                Debug.LogWarning("[GSRenderer] Radix sort unavailable, using bitonic fallback");
 
             if (splatMaterial != null)
             {
@@ -132,7 +132,7 @@ namespace Genesis.RoomScan.GSplat
             }
 
             _ready = true;
-            Debug.Log($"[GSSectorRenderer] Initialized, sort={(_useRadixSort ? "radix" : "bitonic")}");
+            Debug.Log($"[GSRenderer] Initialized, sort={(_useRadixSort ? "radix" : "bitonic")}");
         }
 
         void EnsureBuffers(int totalCount, bool stereo)
@@ -211,8 +211,7 @@ namespace Genesis.RoomScan.GSplat
             if (!_loggedFirstDraw)
             {
                 _loggedFirstDraw = true;
-                Debug.Log($"[GSSectorRenderer] First draw: {_readySectors.Count} sector(s), " +
-                          $"{totalCount} gaussians, stereo={isStereo}");
+                Debug.Log($"[GSRenderer] First draw: {totalCount} gaussians, stereo={isStereo}");
             }
 
             // Mono view matrix (Unity convention: -Z forward)

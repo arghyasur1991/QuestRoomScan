@@ -431,8 +431,8 @@ namespace Genesis.RoomScan
         {
             var gpuRenderer = meshExtractor?.GetComponent<GPUMeshRenderer>();
             var splatRend = gsplatManager != null
-                ? gsplatManager.GetComponent<GSplat.GSSectorRenderer>()
-                  ?? FindFirstObjectByType<GSplat.GSSectorRenderer>()
+                ? gsplatManager.GetComponent<GSplat.GSRenderer>()
+                  ?? FindFirstObjectByType<GSplat.GSRenderer>()
                 : null;
 
             if (gpuRenderer != null)

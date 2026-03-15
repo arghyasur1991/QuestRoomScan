@@ -45,7 +45,7 @@ namespace Genesis.RoomScan.GSplat
             public override void RecordRenderGraph(RenderGraph renderGraph,
                 ContextContainer frameData)
             {
-                var inst = GSSectorRenderer.ActiveInstance;
+                var inst = GSRenderer.ActiveInstance;
                 if (inst == null || !inst.HasSplatsReady) return;
                 if (m_CompositeMaterial == null) return;
 
@@ -86,7 +86,7 @@ namespace Genesis.RoomScan.GSplat
                 builder.SetRenderFunc(
                     (PassData data, UnsafeGraphContext context) =>
                     {
-                        var renderer = GSSectorRenderer.ActiveInstance;
+                        var renderer = GSRenderer.ActiveInstance;
                         if (renderer == null || !renderer.HasSplatsReady) return;
 
                         var cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
@@ -187,7 +187,7 @@ namespace Genesis.RoomScan.GSplat
         public override void AddRenderPasses(ScriptableRenderer renderer,
             ref RenderingData renderingData)
         {
-            var inst = GSSectorRenderer.ActiveInstance;
+            var inst = GSRenderer.ActiveInstance;
             if (inst == null || !inst.HasSplatsReady) return;
             renderer.EnqueuePass(m_Pass);
         }
