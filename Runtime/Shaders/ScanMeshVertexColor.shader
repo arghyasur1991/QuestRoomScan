@@ -5,7 +5,6 @@ Shader "Genesis/ScanMeshVertexColor"
         _Smoothness ("Smoothness", Range(0,1)) = 0.3
         [Toggle(_DEBUG_SOLID)] _DebugSolid ("Debug Solid Color", Float) = 0
         [Toggle(_SHOW_NORMALS)] _ShowNormals ("Show Normals", Float) = 0
-        [Toggle(_TRIPLANAR_ONLY)] _TriplanarOnly ("Triplanar Only (persistence eval)", Float) = 0
         [Toggle(_VERTEX_ONLY)] _VertexOnly ("Vertex Colors Only", Float) = 0
     }
     SubShader
@@ -24,9 +23,7 @@ Shader "Genesis/ScanMeshVertexColor"
             #pragma fragment frag
             #pragma shader_feature_local _DEBUG_SOLID
             #pragma shader_feature_local _SHOW_NORMALS
-            #pragma shader_feature_local _TRIPLANAR_ONLY
             #pragma shader_feature_local _VERTEX_ONLY
-            #pragma multi_compile _ _GSPLAT_SECTOR_MASK
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
@@ -34,7 +31,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 float _Smoothness;
                 float _DebugSolid;
                 float _ShowNormals;
-                float _TriplanarOnly;
                 float _VertexOnly;
             CBUFFER_END
 
@@ -57,13 +53,6 @@ Shader "Genesis/ScanMeshVertexColor"
                     ((packed >> 24)& 0xFF) / 255.0h);
             }
 
-            // Keyframe data (uniform array, max 16 keyframes × 7 float4s = 112)
-            TEXTURE2D_ARRAY(_RSKeyframeTex);
-            SAMPLER(sampler_RSKeyframeTex);
-            float4 _RSKeyframeData[112];
-            int _RSKeyframeCount;
-            float _RSCamExposure;
-
             // Triplanar persistent textures
             TEXTURE2D(_RSTriXZ);  SAMPLER(sampler_RSTriXZ);
             TEXTURE2D(_RSTriXY);  SAMPLER(sampler_RSTriXY);
@@ -84,60 +73,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 pos += gsVoxCount.xyz / 2.0;
                 pos /= gsVoxCount.xyz;
                 return saturate(pos);
-            }
-
-            #ifdef _GSPLAT_SECTOR_MASK
-            uint _SectorSplatMask0;  // bits 0-31
-            uint _SectorSplatMask1;  // bits 32-63
-
-            uint GetSectorID(float3 worldPos)
-            {
-                float3 uvw = WorldToVoxelUVW(worldPos);
-                uint3 sid = (uint3)(uvw * 4.0);
-                sid = clamp(sid, uint3(0,0,0), uint3(3,3,3));
-                return sid.x + sid.y * 4 + sid.z * 16;
-            }
-
-            bool IsSectorMasked(uint secID)
-            {
-                uint word = secID / 32;
-                uint bit = secID % 32;
-                uint mask = (word == 0) ? _SectorSplatMask0 : _SectorSplatMask1;
-                return (mask & (1u << bit)) != 0;
-            }
-            #endif
-
-            float2 ProjectToKeyframeUV(float3 worldPos, int idx)
-            {
-                int o = idx * 7;
-                float3 camPos = _RSKeyframeData[o + 0].xyz;
-
-                float4x4 invRot;
-                invRot[0] = _RSKeyframeData[o + 1];
-                invRot[1] = _RSKeyframeData[o + 2];
-                invRot[2] = _RSKeyframeData[o + 3];
-                invRot[3] = _RSKeyframeData[o + 4];
-
-                float4 intrA = _RSKeyframeData[o + 5];
-                float2 focalLen = intrA.xy;
-                float2 principalPt = intrA.zw;
-
-                float4 intrB = _RSKeyframeData[o + 6];
-                float2 sensorRes = intrB.xy;
-                float2 currentRes = intrB.zw;
-
-                float3 localPos = mul((float3x3)invRot, worldPos - camPos);
-                if (localPos.z <= 0.001) return float2(-1, -1);
-
-                float2 sensorPt = float2(
-                    (localPos.x / localPos.z) * focalLen.x + principalPt.x,
-                    (localPos.y / localPos.z) * focalLen.y + principalPt.y);
-
-                float2 scaleFactor = currentRes / sensorRes;
-                scaleFactor /= max(scaleFactor.x, scaleFactor.y);
-                float2 cropMin = sensorRes * (1.0 - scaleFactor) * 0.5;
-                float2 cropSize = sensorRes * scaleFactor;
-                return (sensorPt - cropMin) / cropSize;
             }
 
             float2 SignedTriUV(float2 baseUV, float normalComponent)
@@ -182,15 +117,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 uint idx = _SurfaceIndices[vertID];
                 GPUVertex gv = _SurfaceVerts[idx];
 
-                #ifdef _GSPLAT_SECTOR_MASK
-                uint secID = GetSectorID(gv.pos);
-                if (IsSectorMasked(secID))
-                {
-                    OUT.positionHCS = float4(0, 0, -1, 0);
-                    return OUT;
-                }
-                #endif
-
                 OUT.positionWS  = gv.pos;
                 OUT.positionHCS = TransformWorldToHClip(gv.pos);
                 OUT.normalWS    = gv.norm;
@@ -230,48 +156,14 @@ Shader "Genesis/ScanMeshVertexColor"
                 return half4(ApplyFreezeTint(IN.color.rgb, IN.positionWS), 1);
                 #endif
 
-                // Priority 1: Best keyframe match (skipped in triplanar-only eval mode)
-                #ifndef _TRIPLANAR_ONLY
-                if (_RSKeyframeCount > 0)
-                {
-                    float bestScore = -1;
-                    float2 bestUV = float2(0, 0);
-                    int bestIdx = -1;
-
-                    [loop] for (int i = 0; i < _RSKeyframeCount; i++)
-                    {
-                        float2 uv = ProjectToKeyframeUV(IN.positionWS, i);
-                        if (uv.x < 0.02 || uv.x > 0.98 || uv.y < 0.02 || uv.y > 0.98)
-                            continue;
-
-                        float3 camPos = _RSKeyframeData[i * 7 + 0].xyz;
-                        float3 viewDir = normalize(IN.positionWS - camPos);
-                        float score = -dot(viewDir, normal);
-                        if (score > bestScore)
-                        {
-                            bestScore = score;
-                            bestUV = uv;
-                            bestIdx = i;
-                        }
-                    }
-
-                    if (bestIdx >= 0)
-                    {
-                        half3 c = SAMPLE_TEXTURE2D_ARRAY(
-                            _RSKeyframeTex, sampler_RSKeyframeTex, bestUV, bestIdx).rgb;
-                        return half4(ApplyFreezeTint(saturate(c * _RSCamExposure), IN.positionWS), 1);
-                    }
-                }
-                #endif
-
-                // Priority 2: Triplanar persistent texture
+                // Priority 1: Triplanar persistent texture
                 if (_RSTriAvailable > 0.5)
                 {
                     half3 tri = SampleTriplanar(IN.positionWS, normal);
                     if (tri.r >= 0) return half4(ApplyFreezeTint(tri, IN.positionWS), 1);
                 }
 
-                // Priority 3: Vertex colors
+                // Priority 2: Vertex colors
                 return half4(ApplyFreezeTint(IN.color.rgb, IN.positionWS), 1);
             }
             ENDHLSL

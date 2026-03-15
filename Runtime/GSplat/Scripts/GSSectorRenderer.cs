@@ -24,7 +24,6 @@ namespace Genesis.RoomScan.GSplat
 
         public static GSSectorRenderer ActiveInstance { get; private set; }
 
-        SectorScheduler _scheduler;
         MaterialPropertyBlock _props;
         readonly List<(int id, GSplatBuffers buffers)> _readySectors = new();
         bool _ready;
@@ -91,10 +90,6 @@ namespace Genesis.RoomScan.GSplat
             set => splatMaterial = value;
         }
 
-        /// <summary>
-        /// Sets server-trained whole-room Gaussian buffers for rendering.
-        /// When set, these take priority over per-sector training buffers.
-        /// </summary>
         public void SetServerTrainedBuffers(GSplatBuffers buffers)
         {
             _serverTrainedBuffers = buffers;
@@ -103,9 +98,9 @@ namespace Genesis.RoomScan.GSplat
 
         void OnEnable() => ActiveInstance = this;
 
-        public void Initialize(SectorScheduler scheduler)
+        public void Initialize()
         {
-            _scheduler = scheduler;
+            if (_ready) return;
             _props = new MaterialPropertyBlock();
 
             if (viewPrepassCompute != null)
@@ -179,41 +174,20 @@ namespace Genesis.RoomScan.GSplat
             }
         }
 
-        /// <summary>
-        /// Called each frame from LateUpdate to count ready splats.
-        /// Prefers server-trained whole-room buffers when available.
-        /// Buffer allocation is done here; actual compute is deferred to PrepareAndSort.
-        /// </summary>
         void LateUpdate()
         {
             _preparedTotalCount = 0;
-            if (splatMaterial == null || _prepassKernel < 0)
+            if (!_ready || splatMaterial == null || _prepassKernel < 0)
+                return;
+            if (_serverTrainedBuffers == null || _serverTrainedBuffers.CurrentCount <= 0)
                 return;
 
             var cam = Camera.main;
             if (cam == null) return;
 
-            int totalCount;
-
-            // Prefer server-trained whole-room buffers
-            if (_serverTrainedBuffers != null && _serverTrainedBuffers.CurrentCount > 0)
-            {
-                _readySectors.Clear();
-                _readySectors.Add((-1, _serverTrainedBuffers));
-                totalCount = _serverTrainedBuffers.CurrentCount;
-            }
-            else
-            {
-                if (!_ready || _scheduler == null) return;
-
-                _scheduler.GetSplatReadySectors(_readySectors);
-                if (_readySectors.Count == 0) return;
-
-                totalCount = 0;
-                foreach (var (_, buf) in _readySectors)
-                    totalCount += buf.CurrentCount;
-                if (totalCount <= 0) return;
-            }
+            _readySectors.Clear();
+            _readySectors.Add((-1, _serverTrainedBuffers));
+            int totalCount = _serverTrainedBuffers.CurrentCount;
 
             bool isStereo = XRSettings.enabled && cam.stereoEnabled;
             EnsureBuffers(totalCount, isStereo);

@@ -39,7 +39,6 @@ namespace Genesis.RoomScan
         [SerializeField] private VolumeIntegrator volumeIntegrator;
         [SerializeField] private MeshExtractor meshExtractor;
         [SerializeField] private TriplanarCache triplanarCache;
-        [SerializeField] private KeyframeStore keyframeStore;
         [SerializeField] private RoomScanPersistence persistence;
         [SerializeField] private KeyframeCollector keyframeCollector;
         [SerializeField] private PointCloudExporter pointCloudExporter;
@@ -199,9 +198,6 @@ namespace Genesis.RoomScan
                     _lastMeshTime = t;
                     meshExtractor.Extract();
 
-                    if (gsplatManager != null && gsplatManager.enabled)
-                        gsplatManager.OnMeshExtracted();
-
                     if (planeDetector != null)
                         planeDetector.OnMeshCycleComplete();
                 }
@@ -314,7 +310,6 @@ namespace Genesis.RoomScan
             if (volumeIntegrator == null) volumeIntegrator = FindFirstObjectByType<VolumeIntegrator>();
             if (meshExtractor == null) meshExtractor = FindFirstObjectByType<MeshExtractor>();
             if (triplanarCache == null) triplanarCache = FindFirstObjectByType<TriplanarCache>();
-            if (keyframeStore == null) keyframeStore = FindFirstObjectByType<KeyframeStore>();
             if (persistence == null) persistence = FindFirstObjectByType<RoomScanPersistence>();
             if (keyframeCollector == null) keyframeCollector = FindFirstObjectByType<KeyframeCollector>();
             if (pointCloudExporter == null) pointCloudExporter = FindFirstObjectByType<PointCloudExporter>();
@@ -345,12 +340,7 @@ namespace Genesis.RoomScan
 
         private void SetSafeShaderDefaults()
         {
-            Shader.SetGlobalInt(Shader.PropertyToID("_RSKeyframeCount"), 0);
-            Shader.SetGlobalFloat(Shader.PropertyToID("_RSCamExposure"), 3f);
             Shader.SetGlobalFloat(Shader.PropertyToID("_RSTriAvailable"), 0f);
-
-            var dummyVecs = new Vector4[112];
-            Shader.SetGlobalVectorArray(Shader.PropertyToID("_RSKeyframeData"), dummyVecs);
         }
 
         private int _colorFrameLog;
@@ -374,14 +364,6 @@ namespace Genesis.RoomScan
                         frame, pose.position, pose.rotation,
                         focal, principal, sensor, current);
 
-                    if (keyframeStore != null)
-                    {
-                        keyframeStore.SetLiveFrame(frame, pose.position, pose.rotation,
-                            focal, principal, sensor, current);
-                        keyframeStore.TryInsertKeyframe(frame, pose.position, pose.rotation,
-                            focal, principal, sensor, current);
-                    }
-
                     if (keyframeCollector != null)
                     {
                         keyframeCollector.TrySaveKeyframe(frame, pose.position, pose.rotation,
@@ -396,18 +378,11 @@ namespace Genesis.RoomScan
                             volumeIntegrator.ExclusionZones);
                     }
 
-                    if (gsplatManager != null && gsplatManager.enabled)
-                    {
-                        gsplatManager.OnCameraFrame(frame, pose.position, pose.rotation,
-                            focal, principal, sensor, current);
-                    }
-
                     _colorFrameLog++;
                     if (_colorFrameLog <= 3 || _colorFrameLog % 50 == 0)
                         Debug.Log($"[RoomScan] ColorFrame #{_colorFrameLog}: " +
                             $"frame={frame.width}x{frame.height}, " +
-                            $"triCache={triplanarCache != null}, " +
-                            $"keyframes={keyframeStore != null}");
+                            $"triCache={triplanarCache != null}");
 
                     return;
                 }

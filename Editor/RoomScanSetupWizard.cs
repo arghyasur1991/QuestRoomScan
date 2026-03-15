@@ -32,7 +32,6 @@ namespace Genesis.RoomScan.Editor
         CameraDebugOverlay _cameraDebug;
         DepthDebugOverlay _depthDebug;
         TriplanarCache _triplanarCache;
-        KeyframeStore _keyframeStore;
         RoomScanPersistence _persistence;
         KeyframeCollector _keyframeCollector;
         PointCloudExporter _pointCloudExporter;
@@ -42,7 +41,7 @@ namespace Genesis.RoomScan.Editor
         GSplatServerClient _gsplatServerClient;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
-        bool _gsplatComputeWired, _gsRendererComputeWired;
+        bool _gsRendererComputeWired;
         bool _gsplatRenderFeatureAdded;
         bool _boundarylessManifest;
 
@@ -106,7 +105,6 @@ namespace Genesis.RoomScan.Editor
             _cameraDebug = FindAny<CameraDebugOverlay>();
             _depthDebug = FindAny<DepthDebugOverlay>();
             _triplanarCache = FindAny<TriplanarCache>();
-            _keyframeStore = FindAny<KeyframeStore>();
             _persistence = FindAny<RoomScanPersistence>();
             _keyframeCollector = FindAny<KeyframeCollector>();
             _pointCloudExporter = FindAny<PointCloudExporter>();
@@ -125,10 +123,6 @@ namespace Genesis.RoomScan.Editor
                 "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
-            _gsplatComputeWired = _gsplatManager != null && AreFieldsAssigned(_gsplatManager,
-                "projectSHCompute", "tileSortCompute", "rasterizeCompute",
-                "lossCompute", "rasterBwdCompute", "projBwdCompute", "adamCompute",
-                "densifyCompute", "initGaussiansCompute");
             _gsRendererComputeWired = _gsSectorRenderer != null && AreFieldsAssigned(_gsSectorRenderer,
                 "viewPrepassCompute", "sortCompute", "radixSortCompute", "splatMaterial");
             _gsplatRenderFeatureAdded = HasGSplatRenderFeature();
@@ -347,12 +341,11 @@ namespace Genesis.RoomScan.Editor
             StatusRow("CameraDebugOverlay", _cameraDebug != null);
             StatusRow("DepthDebugOverlay", _depthDebug != null);
             StatusRow("TriplanarCache", _triplanarCache != null);
-            StatusRow("KeyframeStore", _keyframeStore != null);
             StatusRow("RoomScanPersistence", _persistence != null);
             StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
             StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
             StatusRow("PlaneDetector (mesh regularization)", _planeDetector != null);
-            StatusRow("GSplatManager (training + PLY loader)", _gsplatManager != null);
+            StatusRow("GSplatManager (PLY loader)", _gsplatManager != null);
             StatusRow("GSSectorRenderer (splat rendering)", _gsSectorRenderer != null);
             StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
 
@@ -360,7 +353,7 @@ namespace Genesis.RoomScan.Editor
                               _meshExtractor == null ||
                               _roomScanner == null || _cameraProvider == null ||
                               _pcaComponent == null || _cameraDebug == null ||
-                              _triplanarCache == null || _keyframeStore == null ||
+                              _triplanarCache == null ||
                               _persistence == null || _keyframeCollector == null ||
                               _pointCloudExporter == null || _planeDetector == null ||
                               _gsplatManager == null || _gsSectorRenderer == null ||
@@ -422,8 +415,6 @@ namespace Genesis.RoomScan.Editor
             }
             if (root.GetComponent<TriplanarCache>() == null)
                 Undo.AddComponent<TriplanarCache>(root);
-            if (root.GetComponent<KeyframeStore>() == null)
-                Undo.AddComponent<KeyframeStore>(root);
             if (root.GetComponent<RoomScanPersistence>() == null)
                 Undo.AddComponent<RoomScanPersistence>(root);
             if (root.GetComponent<KeyframeCollector>() == null)
@@ -463,13 +454,12 @@ namespace Genesis.RoomScan.Editor
             StatusRow("MeshExtractor scan material", _meshMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
-            StatusRow("GSplatManager compute shaders (9)", _gsplatComputeWired);
             StatusRow("GSSectorRenderer prepass + material", _gsRendererComputeWired);
             StatusRow("GSplatRenderFeature on URP Renderer", _gsplatRenderFeatureAdded);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
                             !_meshMatWired || !_triplanarWired ||
-                            !_computeShaderWired || !_gsplatComputeWired ||
+                            !_computeShaderWired ||
                             !_gsRendererComputeWired || !_gsplatRenderFeatureAdded;
             if (needsFix)
             {
@@ -539,36 +529,14 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_meshExtractor);
             }
 
-            // GSplatManager — 8 compute shaders + mesh material + sector renderer
+            // GSplatManager — wire sector renderer reference
             if (_gsplatManager != null)
             {
                 var so = new SerializedObject(_gsplatManager);
-                AssignCompute(so, "projectSHCompute", GSPLAT_PKG + "ProjectSH.compute");
-                AssignCompute(so, "tileSortCompute", GSPLAT_PKG + "TileSort.compute");
-                AssignCompute(so, "rasterizeCompute", GSPLAT_PKG + "Rasterize.compute");
-                AssignCompute(so, "lossCompute", GSPLAT_PKG + "LossL1SSIM.compute");
-                AssignCompute(so, "rasterBwdCompute", GSPLAT_PKG + "RasterizeBackward.compute");
-                AssignCompute(so, "projBwdCompute", GSPLAT_PKG + "ProjectSHBackward.compute");
-                AssignCompute(so, "adamCompute", GSPLAT_PKG + "AdamOptimizer.compute");
-                AssignCompute(so, "densifyCompute", GSPLAT_PKG + "Densify.compute");
-                AssignCompute(so, "initGaussiansCompute", GSPLAT_PKG + "InitGaussians.compute");
-
-                // Wire mesh material from MeshExtractor
-                var matProp = so.FindProperty("meshMaterial");
-                if (matProp != null && matProp.objectReferenceValue == null && _meshExtractor != null)
-                {
-                    var meSO = new SerializedObject(_meshExtractor);
-                    var scanMat = meSO.FindProperty("scanMeshMaterial");
-                    if (scanMat?.objectReferenceValue != null)
-                        matProp.objectReferenceValue = scanMat.objectReferenceValue;
-                }
-
-                // Wire sector renderer reference
                 Refresh();
                 var rendProp = so.FindProperty("splatRenderer");
                 if (rendProp != null && rendProp.objectReferenceValue == null && _gsSectorRenderer != null)
                     rendProp.objectReferenceValue = _gsSectorRenderer;
-
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_gsplatManager);
             }
@@ -797,7 +765,6 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "meshExtractor", _meshExtractor);
                 SetRef(so, "cameraProvider", _cameraProvider);
                 SetRef(so, "triplanarCache", _triplanarCache);
-                SetRef(so, "keyframeStore", _keyframeStore);
                 SetRef(so, "persistence", _persistence);
                 SetRef(so, "keyframeCollector", _keyframeCollector);
                 SetRef(so, "pointCloudExporter", _pointCloudExporter);
