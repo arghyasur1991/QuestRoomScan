@@ -1,0 +1,77 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements"
+    xsi="http://www.w3.org/2001/XMLSchema-instance"
+    engine="UnityEngine.UIElements"
+    noNamespaceSchemaLocation="../../UIElementsSchema/UIElements.xsd"
+    editor-extension-mode="False">
+
+    <Style src="DebugMenu.uss" />
+
+    <ui:VisualElement name="debug-root" class="debug-root">
+
+        <!-- Header -->
+        <ui:VisualElement class="debug-header">
+            <ui:Label text="SENTIENCE" class="header-title" />
+            <ui:Label text="DEBUG" class="header-subtitle" />
+        </ui:VisualElement>
+
+        <!-- Status Section -->
+        <ui:VisualElement class="section">
+            <ui:Label text="STATUS" class="section-label" />
+
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Scanning" class="status-key" />
+                <ui:Label name="val-scanning" text="--" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Mode" class="status-key" />
+                <ui:Label name="val-mode" text="--" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Integrations" class="status-key" />
+                <ui:Label name="val-integrations" text="0" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Keyframes" class="status-key" />
+                <ui:Label name="val-keyframes" text="0" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Render" class="status-key" />
+                <ui:Label name="val-render" text="--" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="GS Training" class="status-key" />
+                <ui:Label name="val-gs-training" text="Idle" class="status-val" />
+            </ui:VisualElement>
+        </ui:VisualElement>
+
+        <!-- Persistence Section -->
+        <ui:VisualElement class="section">
+            <ui:Label text="PERSISTENCE" class="section-label" />
+
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Saved Scan" class="status-key" />
+                <ui:Label name="val-saved-scan" text="--" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="GSExport" class="status-key" />
+                <ui:Label name="val-gsexport" text="--" class="status-val" />
+            </ui:VisualElement>
+        </ui:VisualElement>
+
+        <!-- Actions Section -->
+        <ui:VisualElement class="section">
+            <ui:Label text="ACTIONS" class="section-label" />
+
+            <ui:Button name="btn-toggle-scan" text="Stop Scanning" class="action-btn" />
+            <ui:Button name="btn-clear-all" text="Clear All Data" class="action-btn action-btn--danger" />
+            <ui:Button name="btn-export-pc" text="Export Point Cloud" class="action-btn" />
+            <ui:Button name="btn-gs-train" text="Start GS Training" class="action-btn action-btn--primary" />
+        </ui:VisualElement>
+
+        <!-- Footer -->
+        <ui:VisualElement class="debug-footer">
+            <ui:Label name="val-fps" text="-- FPS" class="footer-text" />
+        </ui:VisualElement>
+
+    </ui:VisualElement>
+</ui:UXML>

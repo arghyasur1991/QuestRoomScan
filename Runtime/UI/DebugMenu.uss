@@ -1,0 +1,132 @@
+/* ============================================
+   SENTIENCE DEBUG MENU
+   Dark technical HUD for VR overlay
+   ============================================ */
+
+.debug-root {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    background-color: rgba(10, 12, 16, 0.92);
+    padding: 24px 32px;
+    flex-direction: column;
+}
+
+/* === Header === */
+.debug-header {
+    flex-direction: row;
+    align-items: flex-end;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom-width: 2px;
+    border-bottom-color: rgba(0, 180, 255, 0.4);
+}
+
+.header-title {
+    font-size: 28px;
+    -unity-font-style: bold;
+    color: rgb(0, 200, 255);
+    letter-spacing: 6px;
+}
+
+.header-subtitle {
+    font-size: 14px;
+    color: rgba(0, 200, 255, 0.5);
+    letter-spacing: 4px;
+    margin-left: 12px;
+    margin-bottom: 2px;
+}
+
+/* === Sections === */
+.section {
+    margin-bottom: 16px;
+}
+
+.section-label {
+    font-size: 11px;
+    -unity-font-style: bold;
+    color: rgba(0, 180, 255, 0.6);
+    letter-spacing: 3px;
+    margin-bottom: 8px;
+}
+
+/* === Status Rows === */
+.status-row {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+}
+
+.status-key {
+    font-size: 14px;
+    color: rgb(140, 150, 170);
+}
+
+.status-val {
+    font-size: 14px;
+    -unity-font-style: bold;
+    color: rgb(220, 230, 245);
+    -unity-text-align: middle-right;
+    min-width: 120px;
+}
+
+/* === Action Buttons === */
+.action-btn {
+    height: 40px;
+    margin-top: 6px;
+    background-color: rgba(40, 50, 70, 0.9);
+    border-width: 1px;
+    border-color: rgba(0, 160, 220, 0.4);
+    border-radius: 6px;
+    color: rgb(200, 215, 235);
+    font-size: 14px;
+    -unity-font-style: bold;
+    letter-spacing: 1px;
+}
+
+.action-btn:hover {
+    background-color: rgba(50, 65, 90, 0.95);
+    border-color: rgba(0, 200, 255, 0.7);
+}
+
+.action-btn:active {
+    background-color: rgba(30, 40, 60, 0.95);
+    scale: 0.98;
+}
+
+.action-btn--primary {
+    background-color: rgba(0, 100, 160, 0.5);
+    border-color: rgba(0, 200, 255, 0.6);
+    color: rgb(180, 230, 255);
+}
+
+.action-btn--primary:hover {
+    background-color: rgba(0, 120, 180, 0.6);
+    border-color: rgb(0, 220, 255);
+}
+
+.action-btn--danger {
+    background-color: rgba(120, 30, 30, 0.5);
+    border-color: rgba(255, 80, 60, 0.5);
+    color: rgb(255, 180, 170);
+}
+
+.action-btn--danger:hover {
+    background-color: rgba(150, 40, 40, 0.6);
+    border-color: rgba(255, 100, 80, 0.8);
+}
+
+/* === Footer === */
+.debug-footer {
+    flex-grow: 1;
+    justify-content: flex-end;
+    align-items: flex-end;
+}
+
+.footer-text {
+    font-size: 12px;
+    color: rgba(140, 150, 170, 0.6);
+}

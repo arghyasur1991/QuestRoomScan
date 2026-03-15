@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using Genesis.RoomScan.GSplat;
+using Genesis.RoomScan.UI;
 using UnityEngine;
 
 namespace Genesis.RoomScan
@@ -45,6 +46,7 @@ namespace Genesis.RoomScan
         [SerializeField] private PointCloudExporter pointCloudExporter;
         [SerializeField] private GSplatManager gsplatManager;
         [SerializeField] private GSplat.GSplatServerClient gsplatServerClient;
+        [SerializeField] private DebugMenuController debugMenu;
 
         [Header("Camera")]
         [SerializeField] private PassthroughCameraProvider cameraProvider;
@@ -85,6 +87,8 @@ namespace Genesis.RoomScan
         }
 
         public bool IsScanning { get; private set; }
+        public ScanRenderMode CurrentRenderMode => renderMode;
+        public bool IsGsTrainingInProgress => _serverTrainingInProgress;
 
         public event Action<ScanMode> ModeChanged;
         public event Action ScanStarted;
@@ -113,6 +117,7 @@ namespace Genesis.RoomScan
         {
             ValidateComponents();
             SetupHeadExclusion();
+            WireDebugMenu();
 
             OnRoomReady();
         }
@@ -179,6 +184,10 @@ namespace Genesis.RoomScan
 
         private void Update()
         {
+            PollMenuInput();
+            PollFreezeInput();
+            PollTrainingTrigger();
+
             if (!IsScanning || !DepthCapture.DepthAvailable) return;
 
             float t = Time.time;
@@ -203,7 +212,6 @@ namespace Genesis.RoomScan
             if (t - _lastScannerLog >= 5f)
             {
                 _lastScannerLog = t;
-                ICameraProvider camProv = GetActiveCameraProvider();
                 Debug.Log($"[RoomScan] Scanner: integrations={_integrateCount}, mode={mode}, " +
                     $"depthAvail={DepthCapture.DepthAvailable}");
             }
@@ -212,10 +220,6 @@ namespace Genesis.RoomScan
             {
                 SetMode(ScanMode.Passive);
             }
-
-            PollFreezeInput();
-            PollTrainingTrigger();
-            PollClearInput();
 
             if (autoSaveIntervalSeconds > 0 && persistence != null && !persistence.IsSaving
                 && t - _lastAutoSaveTime >= autoSaveIntervalSeconds
@@ -339,6 +343,7 @@ namespace Genesis.RoomScan
             if (pointCloudExporter == null) pointCloudExporter = FindFirstObjectByType<PointCloudExporter>();
             if (gsplatManager == null) gsplatManager = FindFirstObjectByType<GSplatManager>();
             if (gsplatServerClient == null) gsplatServerClient = FindFirstObjectByType<GSplat.GSplatServerClient>();
+            if (debugMenu == null) debugMenu = FindFirstObjectByType<DebugMenuController>();
 
             if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
             if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");
@@ -359,6 +364,28 @@ namespace Genesis.RoomScan
             {
                 Debug.LogWarning("[RoomScan] No main camera found for head exclusion zone");
             }
+        }
+
+        private void WireDebugMenu()
+        {
+            if (debugMenu == null) return;
+
+            debugMenu.ToggleScanRequested += () =>
+            {
+                if (IsScanning) StopScanning();
+                else StartScanning();
+            };
+            debugMenu.ClearAllRequested += ClearAllData;
+            debugMenu.ExportPointCloudRequested += async () =>
+            {
+                if (pointCloudExporter != null)
+                    await pointCloudExporter.ExportAsync();
+            };
+            debugMenu.StartGsTrainingRequested += () =>
+            {
+                if (!_serverTrainingInProgress)
+                    RunServerTrainingAsync();
+            };
         }
 
         private void SetSafeShaderDefaults()
@@ -421,9 +448,6 @@ namespace Genesis.RoomScan
             volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);
         }
-
-        private float _menuHoldTime;
-        private const float ClearHoldDuration = 2f;
 
         private bool _serverTrainingInProgress;
 
@@ -524,22 +548,11 @@ namespace Genesis.RoomScan
             }
         }
 
-        private void PollClearInput()
+        private void PollMenuInput()
         {
-            if (OVRInput.Get(OVRInput.Button.Start))
-            {
-                _menuHoldTime += Time.deltaTime;
-                if (_menuHoldTime >= ClearHoldDuration)
-                {
-                    _menuHoldTime = 0f;
-                    Debug.Log("[RoomScan] Menu held for 2s — clearing all data");
-                    ClearAllData();
-                }
-            }
-            else
-            {
-                _menuHoldTime = 0f;
-            }
+            if (debugMenu == null) return;
+            if (OVRInput.GetDown(OVRInput.Button.Start))
+                debugMenu.Toggle();
         }
 
         private void PollFreezeInput()

@@ -2,6 +2,7 @@ using System.IO;
 using System.Linq;
 using System.Xml.Linq;
 using Genesis.RoomScan.GSplat;
+using Genesis.RoomScan.UI;
 using Meta.XR;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -38,6 +39,7 @@ namespace Genesis.RoomScan.Editor
         GSplatManager _gsplatManager;
         GSRenderer _gsRenderer;
         GSplatServerClient _gsplatServerClient;
+        DebugMenuController _debugMenu;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
         bool _gsRendererComputeWired;
@@ -110,6 +112,7 @@ namespace Genesis.RoomScan.Editor
             _gsplatManager = FindAny<GSplatManager>();
             _gsRenderer = FindAny<GSRenderer>();
             _gsplatServerClient = FindAny<GSplatServerClient>();
+            _debugMenu = FindAny<DebugMenuController>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -345,6 +348,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("GSplatManager (PLY loader)", _gsplatManager != null);
             StatusRow("GSRenderer (splat rendering)", _gsRenderer != null);
             StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
+            StatusRow("DebugMenuController (HUD)", _debugMenu != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _meshExtractor == null ||
@@ -354,7 +358,8 @@ namespace Genesis.RoomScan.Editor
                               _persistence == null || _keyframeCollector == null ||
                               _pointCloudExporter == null ||
                               _gsplatManager == null || _gsRenderer == null ||
-                              _gsplatServerClient == null;
+                              _gsplatServerClient == null ||
+                              _debugMenu == null;
 
             if (anyMissing)
             {
@@ -424,6 +429,26 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<GSplatManager>(root);
             if (root.GetComponent<GSplatServerClient>() == null)
                 Undo.AddComponent<GSplatServerClient>(root);
+
+            if (FindAny<DebugMenuController>() == null)
+            {
+                var debugGo = new GameObject("DebugMenu");
+                debugGo.transform.SetParent(root.transform);
+                Undo.RegisterCreatedObjectUndo(debugGo, "Create DebugMenu");
+
+                var uiDoc = Undo.AddComponent<UnityEngine.UIElements.UIDocument>(debugGo);
+                var uxml = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.VisualTreeAsset>(
+                    "Packages/com.genesis.roomscan/Runtime/UI/DebugMenu.uxml");
+                if (uxml != null)
+                {
+                    var so = new SerializedObject(uiDoc);
+                    var vta = so.FindProperty("sourceAsset");
+                    if (vta != null) vta.objectReferenceValue = uxml;
+                    so.ApplyModifiedProperties();
+                }
+
+                Undo.AddComponent<DebugMenuController>(debugGo);
+            }
 
             MarkDirty();
             Refresh();
@@ -756,6 +781,7 @@ namespace Genesis.RoomScan.Editor
                 SetRef(so, "pointCloudExporter", _pointCloudExporter);
                 SetRef(so, "gsplatManager", _gsplatManager);
                 SetRef(so, "gsplatServerClient", _gsplatServerClient);
+                SetRef(so, "debugMenu", _debugMenu);
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }
