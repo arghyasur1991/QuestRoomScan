@@ -170,7 +170,7 @@ namespace Genesis.RoomScan.UI
                 }
                 else
                 {
-                    scanner.ToggleRenderMode();
+                    scanner.CycleRenderMode();
                 }
             });
 
