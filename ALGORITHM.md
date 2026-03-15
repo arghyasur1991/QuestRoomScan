@@ -393,11 +393,11 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | **Total GPU** | **~155 MB** |
 | **Persistence on disk** | **~31 MB** |
 
-## 12. Gaussian Splat Export Pipeline
+## 12. Gaussian Splat Pipeline
 
-Automatic export of camera keyframes and dense point cloud for PC-side Gaussian Splat training.
+End-to-end pipeline: on-device keyframe + point cloud capture → server-based COLMAP conversion + GS training → on-device rendering via Unity Gaussian Splatting (UGS).
 
-### KeyframeCollector (Quest side, automatic)
+### 12.1 KeyframeCollector (Quest, automatic)
 Runs alongside scanning with no user interaction. Saves posed camera frames to `{persistentDataPath}/GSExport/`:
 - **Selection**: Motion-gated — translation > 0.3m OR rotation > 20 deg from any saved keyframe
 - **Rejection**: Frames with angular velocity > 120 deg/s are discarded (motion blur)
@@ -405,10 +405,10 @@ Runs alongside scanning with no user interaction. Saves posed camera frames to `
   - Position (px, py, pz), rotation quaternion (qx, qy, qz, qw)
   - Intrinsics (fx, fy, cx, cy), sensor resolution, current resolution
 - **I/O**: `AsyncGPUReadback` → JPEG encode → `Task.Run` file write (zero frame stalls)
-- **Deduplication**: Multiple pose entries per image ID may occur; the PC pipeline keeps only the last pose per image
+- **Deduplication**: Multiple pose entries per image ID may occur; the server keeps only the last pose per image
 - **Typical output**: 100-300 keyframes, 10-30MB total
 
-### PointCloudExporter (Quest side, periodic)
+### 12.2 PointCloudExporter (Quest, periodic)
 Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
 - Async GPU readback of the `GPUSurfaceNets` vertex buffer
 - Parses `GPUVertex` structs: position (float3), normal (float3), packedColor (uint) → RGB
@@ -416,19 +416,76 @@ Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
 - Runs every 30s automatically
 - Provides dense initialization for GS training (10-100x more points than SfM)
 
-### PC Pipeline (`Tools~/gs_pipeline.py`)
-Single-command pipeline: `python Tools~/gs_pipeline.py --package com.your.app`
+### 12.3 Server Training (RoomScan-GaussianSplatServer)
 
-1. **Pull**: `adb pull` GSExport directory from Quest, symlinks `captures/latest`
-2. **Convert**: `frames.jsonl` → COLMAP binary format (`cameras.bin`, `images.bin`, `points3D.bin`)
-   - Coordinate transform: Unity (left-handed Y-up) → COLMAP (right-handed Y-down) via `diag(1,-1,1)` flip
-   - Single PINHOLE camera model from Quest passthrough intrinsics, with principal point crop adjustment
-   - Deduplicates frames by image ID, validates image existence
-3. **Train**: Auto-detects best backend — msplat (Metal), gsplat (CUDA), or original 3DGS repo
-4. **Output**: Trained `splat.ply` ready for Unity import via any Gaussian Splat renderer
+The Quest app's `GSplatServerClient` uploads a ZIP of keyframes + point cloud to a PC-based FastAPI server (`/upload`), then polls for status and downloads the result.
 
-### Coordinate Conversion Detail
-Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The conversion:
+#### COLMAP Conversion
+`frames.jsonl` → COLMAP binary format (`cameras.bin`, `images.bin`, `points3D.bin`):
+- Coordinate transform: Unity (left-handed Y-up) → COLMAP (right-handed Y-down) via `diag(1,-1,1)` flip
+- Single PINHOLE camera model from Quest passthrough intrinsics, with principal point crop adjustment
+- Deduplicates frames by image ID, validates image existence
+
+#### Scene Normalization
+Computed during COLMAP conversion and saved to `scene_norm.json`:
+- **Center** = mean of camera positions in COLMAP space
+- **Scale** = `1 / mean(distance_from_center)`
+- Required because training backends (msplat/nerfstudio) internally normalize the scene but don't expose the parameters
+
+#### Training
+Auto-detects best backend — msplat (Metal), gsplat (CUDA), or original 3DGS repo. Default 7,000 iterations.
+
+#### Denormalization
+After training, `denormalize_ply()` reverses the scene normalization on the output `splat.ply`:
+- **Positions**: `P_world = P_normalized × avg_dist + center`
+- **Scales** (log-space): `s_world = s_normalized + ln(avg_dist)`
+
+The output PLY is in COLMAP world coordinates (right-handed Y-down).
+
+#### Run Management
+Each upload creates a timestamped directory. A `current_run` symlink points to the active run. Past runs can be browsed, activated, or deleted via the web dashboard API.
+
+### 12.4 On-Device Rendering (UGS)
+
+Trained PLY is rendered using a [fork of Unity Gaussian Splatting](https://github.com/arghyasur1991/UnityGaussianSplatting/tree/feature/runtime-ply-loading) with runtime loading support.
+
+#### Runtime PLY Loading (`GaussianSplatPlyLoader`)
+Parses binary little-endian PLY and converts to UGS internal format (VeryHigh / Float32):
+
+1. **PLY header parsing** from `byte[]` — extracts vertex count, stride, attribute types
+2. **Attribute mapping**: Raw PLY fields → `InputSplatData` struct (position, normals, DC color, 15 SH bands × 3 channels, opacity, scale, rotation)
+3. **SH reordering**: PLY stores coefficients per-channel (all R, then all G, then all B); UGS expects coeff-major order (R0 G0 B0, R1 G1 B1, ...) — `ReorderSHs()` transposes in-place
+4. **Linearization** (`LinearizeDataJob`, parallel):
+   - Rotation: normalize → swizzle → PackSmallest3 → Norm10 packed uint
+   - Scale: `exp(log_scale)` → linear
+   - Color: `SH0ToColor(dc0)` → sigmoid → linear RGB
+   - Opacity: `sigmoid(raw_opacity)`
+5. **COLMAP → Unity conversion** (`ConvertColmapJob`): negate Y position
+6. **Buffer construction**:
+   - Position: 3 × Float32 per splat
+   - Other: Norm10-packed rotation (uint32) + 3 × Float32 scale
+   - Color: Float32×4 (RGBA) in Morton-ordered texture layout (`SplatIndexToTextureIndex` via `DecodeMorton2D_16x16`)
+   - SH: Float32 table (15 bands × 3 channels per splat)
+7. **Bounds**: AABB computed from all splat positions
+
+#### `GaussianSplatRenderer.SetRuntimeSplatData()`
+Accepts pre-built `NativeArray<byte>` buffers and directly creates GPU resources:
+- `GraphicsBuffer` for positions, other (rot+scale), and SH data
+- `Texture2D` for Morton-ordered color data
+- Stores format metadata (`VectorFormat.Float32`, `SHFormat.Float32`, `ColorFormat.Float32x4`)
+- No dependency on `GaussianSplatAsset`, `TextAsset`, or `ScriptableObject`
+
+#### Visibility Control
+`GaussianSplatRenderer.renderVisible` boolean — checked in `GatherSplatsForCamera()` — allows toggling rendering without disabling the component or releasing GPU resources. Used by `GSplatManager.RenderVisible` → `RoomScanner.ApplyRenderMode()` for Mesh/Splat/Both switching.
+
+### 12.5 Coordinate Conversion Detail
+Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-trip:
+
+**Quest → Server (export)**:
 - **Positions**: Negate Y component
 - **Rotations**: Apply `flip @ R_unity @ flip` where `flip = diag(1, -1, 1)` (determinant = -1, changes handedness)
 - **Intrinsics**: Adjust principal point (cx, cy) for center crop from sensor resolution to JPEG resolution
+
+**Server → Quest (denormalized PLY)**:
+- PLY is in COLMAP world coordinates (Y-down)
+- `GaussianSplatPlyLoader` negates Y position during loading to convert back to Unity space
