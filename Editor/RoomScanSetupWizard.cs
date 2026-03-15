@@ -359,7 +359,8 @@ namespace Genesis.RoomScan.Editor
 
         // -- Cleartext HTTP -----------------------------------------------
 
-        const string NET_SEC_CONFIG_PATH = "Assets/Plugins/Android/res/xml/network_security_config.xml";
+        const string ANDROIDLIB_DIR = "Assets/Plugins/Android/NetworkSecurityConfig.androidlib";
+        const string ANDROIDLIB_NSC = ANDROIDLIB_DIR + "/res/xml/network_security_config.xml";
 
         static bool ManifestHasCleartextTraffic()
         {
@@ -374,7 +375,10 @@ namespace Genesis.RoomScan.Editor
                 if (app == null) return false;
 
                 string val = app.Attribute(android + "usesCleartextTraffic")?.Value;
-                return val == "true";
+                if (val != "true") return false;
+
+                string nscFull = Path.Combine(Application.dataPath, "..", ANDROIDLIB_NSC);
+                return File.Exists(nscFull);
             }
             catch
             {
@@ -419,12 +423,13 @@ namespace Genesis.RoomScan.Editor
                 doc.Save(manifestFull);
                 Debug.Log("[RoomScan Setup] Added cleartext HTTP attributes to AndroidManifest.xml");
 
-                // Create the network security config XML
-                string nscFull = Path.Combine(Application.dataPath, "..", NET_SEC_CONFIG_PATH);
-                string nscDir = Path.GetDirectoryName(nscFull);
+                // Unity 6+ requires Android resources in an .androidlib, not raw res/
+                string libRoot = Path.Combine(Application.dataPath, "..", ANDROIDLIB_DIR);
+                string nscDir = Path.Combine(libRoot, "res", "xml");
                 if (!Directory.Exists(nscDir))
                     Directory.CreateDirectory(nscDir);
 
+                string nscFull = Path.Combine(nscDir, "network_security_config.xml");
                 if (!File.Exists(nscFull))
                 {
                     const string nscContent =
@@ -437,9 +442,26 @@ namespace Genesis.RoomScan.Editor
                         "    </base-config>\n" +
                         "</network-security-config>\n";
                     File.WriteAllText(nscFull, nscContent);
-                    Debug.Log($"[RoomScan Setup] Created {NET_SEC_CONFIG_PATH}");
                 }
 
+                // AndroidManifest.xml for the library module
+                string libManifest = Path.Combine(libRoot, "AndroidManifest.xml");
+                if (!File.Exists(libManifest))
+                {
+                    const string libManifestContent =
+                        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n" +
+                        "    package=\"com.genesis.roomscan.netsecconfig\">\n" +
+                        "</manifest>\n";
+                    File.WriteAllText(libManifest, libManifestContent);
+                }
+
+                // project.properties marks it as a library
+                string projProps = Path.Combine(libRoot, "project.properties");
+                if (!File.Exists(projProps))
+                    File.WriteAllText(projProps, "android.library=true\n");
+
+                Debug.Log($"[RoomScan Setup] Created {ANDROIDLIB_DIR} with network_security_config.xml");
                 AssetDatabase.Refresh();
             }
             catch (System.Exception ex)
