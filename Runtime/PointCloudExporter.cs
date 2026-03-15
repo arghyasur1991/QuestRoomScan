@@ -60,6 +60,19 @@ namespace Genesis.RoomScan
                     return;
                 }
 
+                // Read actual vertex count from the GPU counters buffer (index 0)
+                int activeVertCount = 0;
+                if (gpuSN.CountersBuffer != null)
+                {
+                    var counterReq = await AsyncGPUReadback.RequestAsync(gpuSN.CountersBuffer);
+                    if (!counterReq.hasError)
+                    {
+                        var counterData = counterReq.GetData<int>();
+                        if (counterData.Length > 0)
+                            activeVertCount = counterData[0];
+                    }
+                }
+
                 var vertBuf = gpuSN.VertexBuffer;
                 var req = await AsyncGPUReadback.RequestAsync(vertBuf);
                 if (req.hasError)
@@ -70,7 +83,13 @@ namespace Genesis.RoomScan
                 }
 
                 var raw = req.GetData<byte>();
-                int vertCount = raw.Length / GpuVertexStride;
+                int bufferCapacity = raw.Length / GpuVertexStride;
+
+                // Use the GPU counter if valid, otherwise fall back to buffer capacity
+                int vertCount = (activeVertCount > 0 && activeVertCount <= bufferCapacity)
+                    ? activeVertCount
+                    : bufferCapacity;
+
                 if (vertCount == 0)
                 {
                     Debug.Log("[RoomScan] PointCloudExporter: no vertices to export");
@@ -78,14 +97,14 @@ namespace Genesis.RoomScan
                     return;
                 }
 
-                // Copy to managed array for background thread
                 byte[] data = new byte[raw.Length];
                 NativeArray<byte>.Copy(raw, data, raw.Length);
                 string path = _plyPath;
 
                 await Task.Run(() => WritePly(path, data, vertCount));
 
-                Debug.Log($"[RoomScan] PointCloudExporter: saved {vertCount} vertices to {path} ({new FileInfo(path).Length / 1024}KB)");
+                Debug.Log($"[RoomScan] PointCloudExporter: saved {vertCount} vertices " +
+                          $"(buffer capacity: {bufferCapacity}) to {path} ({new FileInfo(path).Length / 1024}KB)");
             }
             catch (Exception e)
             {
