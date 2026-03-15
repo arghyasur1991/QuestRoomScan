@@ -17,7 +17,6 @@ namespace Genesis.RoomScan
         private readonly int _kInitSmooth;
         private readonly int _kSmoothVertices;
         private readonly int _kApplySmooth;
-        private readonly int _kPlaneSnap;
         private readonly int _kTemporalBlend;
         private readonly int _kGenerateIndices;
         private readonly int _kBuildIndirectArgs;
@@ -47,7 +46,6 @@ namespace Genesis.RoomScan
         public int SmoothIterations { get; set; } = 1;
         public float SmoothLambda { get; set; } = 0.33f;
         public float SmoothBeta { get; set; } = 0.5f;
-        public float PlaneSnapThreshold { get; set; } = 0.03f;
         public float TemporalAlphaMax { get; set; } = 0.85f;
         public float TemporalAlphaMin { get; set; } = 0.1f;
         public float TemporalDecayRate { get; set; } = 0.15f;
@@ -68,10 +66,6 @@ namespace Genesis.RoomScan
         private static readonly int ID_MaxVertices = Shader.PropertyToID("_MaxVertices");
         private static readonly int ID_SmoothLambda = Shader.PropertyToID("_SmoothLambda");
         private static readonly int ID_SmoothBeta = Shader.PropertyToID("_SmoothBeta");
-        private static readonly int ID_NumPlanes = Shader.PropertyToID("_NumPlanes");
-        private static readonly int ID_SnapThreshold = Shader.PropertyToID("_SnapThreshold");
-        private static readonly int ID_PlaneNormals = Shader.PropertyToID("_PlaneNormals");
-        private static readonly int ID_PlaneParams = Shader.PropertyToID("_PlaneParams");
         private static readonly int ID_TemporalAlphaMax = Shader.PropertyToID("_TemporalAlphaMax");
         private static readonly int ID_TemporalAlphaMin = Shader.PropertyToID("_TemporalAlphaMin");
         private static readonly int ID_TemporalDecayRate = Shader.PropertyToID("_TemporalDecayRate");
@@ -101,7 +95,6 @@ namespace Genesis.RoomScan
             _kInitSmooth = compute.FindKernel("InitSmooth");
             _kSmoothVertices = compute.FindKernel("SmoothVertices");
             _kApplySmooth = compute.FindKernel("ApplySmooth");
-            _kPlaneSnap = compute.FindKernel("PlaneSnap");
             _kTemporalBlend = compute.FindKernel("TemporalBlend");
             _kGenerateIndices = compute.FindKernel("GenerateIndices");
             _kBuildIndirectArgs = compute.FindKernel("BuildIndirectArgs");
@@ -171,8 +164,7 @@ namespace Genesis.RoomScan
             _temporalInitialized = true;
         }
 
-        public void Extract(RenderTexture tsdfVolume, RenderTexture colorVolume,
-                            float voxelSize, PlaneData[] planes = null, int numPlanes = 0)
+        public void Extract(RenderTexture tsdfVolume, RenderTexture colorVolume, float voxelSize)
         {
             if (_coordVertMap == null)
                 throw new InvalidOperationException("Call EnsureBuffers before Extract");
@@ -227,24 +219,17 @@ namespace Genesis.RoomScan
                 _compute.DispatchIndirect(_kApplySmooth, _dispatchArgs);
             }
 
-            // 5. Plane snap (optional)
-            if (planes != null && numPlanes > 0 && PlaneSnapThreshold > 0)
-            {
-                SetPlaneData(planes, numPlanes);
-                _compute.DispatchIndirect(_kPlaneSnap, _dispatchArgs);
-            }
-
-            // 6. Temporal blend (optional)
+            // 5. Temporal blend (optional)
             if (TemporalAlphaMax < 1f)
             {
                 _compute.SetTexture(_kTemporalBlend, ID_TemporalState, _temporalState);
                 _compute.DispatchIndirect(_kTemporalBlend, _dispatchArgs);
             }
 
-            // 7. Generate indices
+            // 6. Generate indices
             _compute.DispatchIndirect(_kGenerateIndices, _dispatchArgs);
 
-            // 8. Build draw indirect args
+            // 7. Build draw indirect args
             _compute.Dispatch(_kBuildIndirectArgs, 1, 1, 1);
         }
 
@@ -263,7 +248,6 @@ namespace Genesis.RoomScan
             _compute.SetInt(ID_MaxVertices, _maxVertices);
             _compute.SetFloat(ID_SmoothLambda, SmoothLambda);
             _compute.SetFloat(ID_SmoothBeta, SmoothBeta);
-            _compute.SetFloat(ID_SnapThreshold, PlaneSnapThreshold);
             _compute.SetFloat(ID_TemporalAlphaMax, TemporalAlphaMax);
             _compute.SetFloat(ID_TemporalAlphaMin, TemporalAlphaMin);
             _compute.SetFloat(ID_TemporalDecayRate, TemporalDecayRate);
@@ -296,9 +280,6 @@ namespace Genesis.RoomScan
             BindBuffer(_kApplySmooth, ID_SmoothPosA, _smoothPosA);
             BindBuffer(_kApplySmooth, ID_Counters, _counters);
 
-            BindBuffer(_kPlaneSnap, ID_Vertices, _vertices);
-            BindBuffer(_kPlaneSnap, ID_Counters, _counters);
-
             BindBuffer(_kTemporalBlend, ID_Vertices, _vertices);
             BindBuffer(_kTemporalBlend, ID_Counters, _counters);
 
@@ -314,22 +295,6 @@ namespace Genesis.RoomScan
         private void BindBuffer(int kernel, int nameID, GraphicsBuffer buffer)
         {
             _compute.SetBuffer(kernel, nameID, buffer);
-        }
-
-        private void SetPlaneData(PlaneData[] planes, int count)
-        {
-            count = Mathf.Min(count, 8);
-            _compute.SetInt(ID_NumPlanes, count);
-
-            var normals = new Vector4[8];
-            var pars = new Vector4[8];
-            for (int i = 0; i < count; i++)
-            {
-                normals[i] = new Vector4(planes[i].Normal.x, planes[i].Normal.y, planes[i].Normal.z, 0);
-                pars[i] = new Vector4(planes[i].Distance, planes[i].Confidence, 0, 0);
-            }
-            _compute.SetVectorArray(ID_PlaneNormals, normals);
-            _compute.SetVectorArray(ID_PlaneParams, pars);
         }
 
         public void Dispose()

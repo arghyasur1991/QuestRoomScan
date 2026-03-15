@@ -21,10 +21,6 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("HC back-projection strength to prevent volume shrinkage.")]
         [Range(0f, 1f)] private float meshSmoothBeta = 0.5f;
 
-        [Header("Plane Snapping")]
-        [SerializeField, Tooltip("Max vertex-to-plane distance for snapping. 0 = disabled.")]
-        [Range(0f, 0.1f)] private float planeSnapThreshold = 0.03f;
-
         [Header("Temporal Stability")]
         [SerializeField, Tooltip("Alpha for large displacements (fast convergence).")]
         [Range(0.1f, 1f)] private float temporalAlphaMax = 0.85f;
@@ -52,7 +48,6 @@ namespace Genesis.RoomScan
         public GPUSurfaceNets GpuSurfaceNets => _gpuSurfaceNets;
 
         private VolumeIntegrator _volume;
-        private PlaneDetector _planeDetector;
 
         private void Awake()
         {
@@ -64,8 +59,6 @@ namespace Genesis.RoomScan
             _volume = VolumeIntegrator.Instance;
             if (_volume == null)
                 throw new Exception("[RoomScan] VolumeIntegrator not found");
-
-            _planeDetector = GetComponent<PlaneDetector>();
 
             if (surfaceNetsCompute == null)
                 throw new Exception("[RoomScan] surfaceNetsCompute not assigned on MeshExtractor");
@@ -93,7 +86,6 @@ namespace Genesis.RoomScan
                 SmoothIterations = meshSmoothIterations,
                 SmoothLambda = meshSmoothLambda,
                 SmoothBeta = meshSmoothBeta,
-                PlaneSnapThreshold = planeSnapThreshold,
                 TemporalAlphaMax = temporalAlphaMax,
                 TemporalAlphaMin = temporalAlphaMin,
                 TemporalDecayRate = temporalDecayRate,
@@ -121,19 +113,7 @@ namespace Genesis.RoomScan
             _extractCount++;
             _gpuSurfaceNets.MinMeshWeight = _volume.MinMeshWeight;
 
-            PlaneData[] planes = null;
-            int numPlanes = 0;
-            if (_planeDetector != null && _planeDetector.Planes.IsCreated && _planeDetector.PlaneCount > 0)
-            {
-                numPlanes = _planeDetector.PlaneCount;
-                planes = new PlaneData[numPlanes];
-                for (int i = 0; i < numPlanes; i++)
-                    planes[i] = _planeDetector.Planes[i];
-            }
-
-            _gpuSurfaceNets.Extract(
-                _volume.Volume, _volume.ColorVolume,
-                _volume.VoxelSize, planes, numPlanes);
+            _gpuSurfaceNets.Extract(_volume.Volume, _volume.ColorVolume, _volume.VoxelSize);
 
             if (_extractCount <= 3 || _extractCount % 50 == 0)
                 Debug.Log($"[RoomScan] GPU extraction #{_extractCount}");
