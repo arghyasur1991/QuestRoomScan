@@ -899,9 +899,10 @@ namespace Genesis.RoomScan.Editor
             if (uiDoc.panelSettings != null)
                 SetPanelRenderModeWorldSpace(uiDoc.panelSettings);
 
-            // Scale the panel to a comfortable VR size (~0.4m wide for a 480px panel)
-            const float worldScale = 0.0008f;
-            if (ctrl.transform.localScale.x > 0.5f)
+            // World-space UI Toolkit: 480px / 100 PPU = 4.8 local units.
+            // Scale 0.08 → 4.8 * 0.08 = 0.384m wide — comfortable at arm's length.
+            const float worldScale = 0.08f;
+            if (Mathf.Abs(ctrl.transform.localScale.x - worldScale) > 0.01f)
             {
                 Undo.RecordObject(ctrl.transform, "Scale DebugMenu for VR");
                 ctrl.transform.localScale = Vector3.one * worldScale;
