@@ -21,8 +21,8 @@ namespace Genesis.RoomScan
         private const int FormatVersion = 1;
 
         private string SaveDirectory => Path.Combine(Application.persistentDataPath, "RoomScans");
-        private string SaveFilePath => Path.Combine(SaveDirectory, "scan.bin");
-        private string TriplanarDirectory => Path.Combine(SaveDirectory, "triplanar");
+        public string SaveFilePath => Path.Combine(SaveDirectory, "scan.bin");
+        public string TriplanarDirectory => Path.Combine(SaveDirectory, "triplanar");
 
         public bool IsSaving { get; private set; }
         public bool IsLoading { get; private set; }

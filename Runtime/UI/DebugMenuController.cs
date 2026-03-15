@@ -45,6 +45,11 @@ namespace Genesis.RoomScan.UI
         private int _fpsFrames;
         private float _currentFps;
 
+        // Cached file checks (avoid per-frame I/O)
+        private float _ioCheckTimer;
+        private bool _hasGsExport;
+        private bool _hasSavedScan;
+
         public bool IsVisible => _visible;
 
         private void Awake()
@@ -124,8 +129,21 @@ namespace Genesis.RoomScan.UI
             _btnToggleScan?.RegisterCallback<ClickEvent>(_ =>
                 RoomScanner.Instance?.ToggleScanning());
 
-            _btnClearAll?.RegisterCallback<ClickEvent>(_ =>
-                RoomScanner.Instance?.ClearAllData());
+            _btnClearAll?.RegisterCallback<ClickEvent>(async _ =>
+            {
+                if (RoomScanner.Instance == null) return;
+                if (_btnClearAll != null)
+                {
+                    _btnClearAll.text = "Clearing...";
+                    _btnClearAll.SetEnabled(false);
+                }
+                await RoomScanner.Instance.ClearAllDataAsync();
+                if (_btnClearAll != null)
+                {
+                    _btnClearAll.text = "Clear All Data";
+                    _btnClearAll.SetEnabled(true);
+                }
+            });
 
             _btnExportPc?.RegisterCallback<ClickEvent>(async _ =>
             {
@@ -158,14 +176,21 @@ namespace Genesis.RoomScan.UI
             if (kf != null)
                 SetLabel(_valKeyframes, kf.SavedCount.ToString());
 
-            var persistence = RoomScanPersistence.Instance;
-            if (persistence != null)
-                SetLabel(_valSavedScan, persistence.HasSavedScan() ? "Yes" : "No");
+            _ioCheckTimer -= Time.deltaTime;
+            if (_ioCheckTimer <= 0f)
+            {
+                _ioCheckTimer = 2f;
 
-            string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
-            bool hasExport = Directory.Exists(gsExportDir)
-                && Directory.GetFiles(gsExportDir, "*.jpg", SearchOption.AllDirectories).Length > 0;
-            SetLabel(_valGsExport, hasExport ? "Yes" : "No");
+                var persistence = RoomScanPersistence.Instance;
+                if (persistence != null)
+                    _hasSavedScan = persistence.HasSavedScan();
+
+                string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
+                _hasGsExport = Directory.Exists(gsExportDir)
+                    && Directory.GetFiles(gsExportDir, "*.jpg", SearchOption.AllDirectories).Length > 0;
+            }
+            SetLabel(_valSavedScan, _hasSavedScan ? "Yes" : "No");
+            SetLabel(_valGsExport, _hasGsExport ? "Yes" : "No");
 
             SetLabel(_valFps, $"{_currentFps:F0} FPS");
         }

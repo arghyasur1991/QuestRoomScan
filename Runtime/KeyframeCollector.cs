@@ -185,16 +185,35 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Clears the export directory for a fresh capture session.
+        /// Clears in-memory state only. Call before background file deletion.
+        /// </summary>
+        public void ClearInMemory()
+        {
+            _savedPositions.Clear();
+            _savedRotations.Clear();
+            _nextId = 0;
+        }
+
+        /// <summary>
+        /// Recreates the export directory after a background deletion completes.
+        /// Must be called on the main thread.
+        /// </summary>
+        public void ReinitExportDir()
+        {
+            Directory.CreateDirectory(_imagesDir);
+            Debug.Log("[RoomScan] KeyframeCollector: export cleared");
+        }
+
+        /// <summary>
+        /// Clears the export directory for a fresh capture session (synchronous).
+        /// Prefer ClearInMemory + background delete + ReinitExportDir for non-blocking clear.
         /// </summary>
         public void ClearExport()
         {
             if (Directory.Exists(_exportDir))
                 Directory.Delete(_exportDir, true);
             Directory.CreateDirectory(_imagesDir);
-            _savedPositions.Clear();
-            _savedRotations.Clear();
-            _nextId = 0;
+            ClearInMemory();
             Debug.Log("[RoomScan] KeyframeCollector: export cleared");
         }
     }

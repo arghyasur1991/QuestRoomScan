@@ -318,21 +318,39 @@ namespace Genesis.RoomScan
         /// <summary>
         /// Clears all persisted data: in-memory scan, saved scan files, triplanar
         /// textures, and GSExport (keyframes + point cloud). Safe to call at runtime.
+        /// File I/O runs on a background thread to avoid freezing the app.
         /// </summary>
-        public void ClearAllData()
+        public async Task ClearAllDataAsync()
         {
             StopScanning();
             ClearScan();
 
-            if (_persistence != null)
-                _persistence.DeleteSavedScan();
+            if (_keyframeCollector != null)
+                _keyframeCollector.ClearInMemory();
+
+            string scanFile = _persistence != null ? _persistence.SaveFilePath : null;
+            string triDir = _persistence != null ? _persistence.TriplanarDirectory : null;
+            string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
+
+            await Task.Run(() =>
+            {
+                try
+                {
+                    if (scanFile != null && File.Exists(scanFile))
+                        File.Delete(scanFile);
+                    if (triDir != null && Directory.Exists(triDir))
+                        Directory.Delete(triDir, true);
+                    if (Directory.Exists(gsExportDir))
+                        Directory.Delete(gsExportDir, true);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"[RoomScan] ClearAllData I/O error: {e.Message}");
+                }
+            });
 
             if (_keyframeCollector != null)
-                _keyframeCollector.ClearExport();
-
-            string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
-            if (Directory.Exists(gsExportDir))
-                Directory.Delete(gsExportDir, true);
+                _keyframeCollector.ReinitExportDir();
 
             Debug.Log("[RoomScan] All scan + export data cleared");
 

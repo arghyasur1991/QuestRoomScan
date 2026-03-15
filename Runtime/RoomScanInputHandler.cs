@@ -129,7 +129,7 @@ namespace Genesis.RoomScan
                     scanner.CycleRenderMode();
                     break;
                 case ScanAction.ClearAllData:
-                    scanner.ClearAllData();
+                    _ = scanner.ClearAllDataAsync();
                     break;
                 case ScanAction.ExportPointCloud:
                     _ = scanner.ExportPointCloudAsync();
