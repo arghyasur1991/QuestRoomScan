@@ -862,29 +862,22 @@ namespace Genesis.RoomScan.Editor
             var uiDoc = ctrl.GetComponent<UnityEngine.UIElements.UIDocument>();
             if (uiDoc == null) return;
 
-            var so = new SerializedObject(uiDoc);
-            bool changed = false;
+            Undo.RecordObject(uiDoc, "Assign DebugMenu UIDocument assets");
 
-            var vtaProp = so.FindProperty("sourceAsset");
-            if (vtaProp != null && vtaProp.objectReferenceValue == null)
+            if (uiDoc.visualTreeAsset == null)
             {
                 var uxml = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.VisualTreeAsset>(
                     "Packages/com.genesis.roomscan/Runtime/UI/DebugMenu.uxml");
-                if (uxml != null) { vtaProp.objectReferenceValue = uxml; changed = true; }
+                if (uxml != null) uiDoc.visualTreeAsset = uxml;
             }
 
-            var psProp = so.FindProperty("panelSettings");
-            if (psProp != null && psProp.objectReferenceValue == null)
+            if (uiDoc.panelSettings == null)
             {
                 var panel = FindOrCreatePanelSettings();
-                if (panel != null) { psProp.objectReferenceValue = panel; changed = true; }
+                if (panel != null) uiDoc.panelSettings = panel;
             }
 
-            if (changed)
-            {
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(uiDoc);
-            }
+            EditorUtility.SetDirty(uiDoc);
         }
 
         static UnityEngine.UIElements.PanelSettings FindOrCreatePanelSettings()
