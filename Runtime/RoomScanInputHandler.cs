@@ -49,10 +49,10 @@ namespace Genesis.RoomScan
         private List<ScanInputBinding> bindings = new()
         {
             new() { action = ScanAction.ToggleDebugMenu,    button = OVRInput.Button.Start, enabled = true },
-            new() { action = ScanAction.FreezeInView,       button = OVRInput.Button.Three, enabled = true },
-            new() { action = ScanAction.UnfreezeInView,     button = OVRInput.Button.Four,  enabled = true },
-            new() { action = ScanAction.CycleRenderMode,    button = OVRInput.Button.Two,   enabled = true },
-            new() { action = ScanAction.StartServerTraining, button = OVRInput.Button.One,  enabled = true },
+            new() { action = ScanAction.FreezeInView,       button = OVRInput.Button.One, enabled = true },
+            new() { action = ScanAction.UnfreezeInView,     button = OVRInput.Button.Two,  enabled = true },
+            new() { action = ScanAction.CycleRenderMode,    button = OVRInput.Button.Three,   enabled = false },
+            new() { action = ScanAction.StartServerTraining, button = OVRInput.Button.Four,  enabled = false },
         };
 
         /// <summary>

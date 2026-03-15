@@ -877,12 +877,31 @@ namespace Genesis.RoomScan.Editor
                 if (panel != null) uiDoc.panelSettings = panel;
             }
 
+            // Ensure PanelSettings is configured for world-space VR rendering
+            if (uiDoc.panelSettings != null
+                && uiDoc.panelSettings.renderMode != UnityEngine.UIElements.PanelRenderMode.WorldSpace)
+            {
+                Undo.RecordObject(uiDoc.panelSettings, "Set PanelSettings to WorldSpace");
+                uiDoc.panelSettings.renderMode = UnityEngine.UIElements.PanelRenderMode.WorldSpace;
+                EditorUtility.SetDirty(uiDoc.panelSettings);
+            }
+
+            // Scale the panel to a comfortable VR size (~0.4m wide for a 480px panel)
+            const float worldScale = 0.0008f;
+            if (ctrl.transform.localScale.x > 0.5f)
+            {
+                Undo.RecordObject(ctrl.transform, "Scale DebugMenu for VR");
+                ctrl.transform.localScale = Vector3.one * worldScale;
+            }
+
             EditorUtility.SetDirty(uiDoc);
         }
 
         static UnityEngine.UIElements.PanelSettings FindOrCreatePanelSettings()
         {
-            string[] guids = AssetDatabase.FindAssets("t:PanelSettings");
+            const string assetName = "DebugMenuPanelSettings";
+
+            string[] guids = AssetDatabase.FindAssets($"t:PanelSettings {assetName}");
             if (guids.Length > 0)
             {
                 string path = AssetDatabase.GUIDToAssetPath(guids[0]);
@@ -894,13 +913,12 @@ namespace Genesis.RoomScan.Editor
             if (!AssetDatabase.IsValidFolder(dir))
                 AssetDatabase.CreateFolder("Assets", "Settings");
 
-            const string assetPath = dir + "/DebugMenuPanelSettings.asset";
+            const string assetPath = dir + "/" + assetName + ".asset";
             var panel = ScriptableObject.CreateInstance<UnityEngine.UIElements.PanelSettings>();
-            panel.scaleMode = UnityEngine.UIElements.PanelScaleMode.ScaleWithScreenSize;
-            panel.referenceResolution = new Vector2Int(1920, 1080);
+            panel.renderMode = UnityEngine.UIElements.PanelRenderMode.WorldSpace;
             AssetDatabase.CreateAsset(panel, assetPath);
             AssetDatabase.SaveAssets();
-            Debug.Log($"[RoomScanWizard] Created PanelSettings at {assetPath}");
+            Debug.Log($"[RoomScanWizard] Created PanelSettings (WorldSpace) at {assetPath}");
             return panel;
         }
     }

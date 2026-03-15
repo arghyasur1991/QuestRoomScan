@@ -7,6 +7,7 @@ namespace Genesis.RoomScan.UI
     /// <summary>
     /// Controls the debug HUD panel. Reads live status from <see cref="RoomScanner"/>
     /// and related components. Action buttons call the RoomScanner public API directly.
+    /// Uses <see cref="DebugMenuFollower"/> for world-space head-tracked positioning.
     ///
     /// Clients can:
     ///   - Call <see cref="Toggle"/>, <see cref="Show"/>, <see cref="Hide"/> from any script.
@@ -14,10 +15,11 @@ namespace Genesis.RoomScan.UI
     ///   - Override button behavior by subclassing or by disabling this component
     ///     and driving the UIDocument directly.
     /// </summary>
-    [RequireComponent(typeof(UIDocument))]
+    [RequireComponent(typeof(UIDocument), typeof(DebugMenuFollower))]
     public class DebugMenuController : MonoBehaviour
     {
         private UIDocument _doc;
+        private DebugMenuFollower _follower;
         private VisualElement _root;
         private bool _visible;
 
@@ -48,6 +50,7 @@ namespace Genesis.RoomScan.UI
         private void Awake()
         {
             _doc = GetComponent<UIDocument>();
+            _follower = GetComponent<DebugMenuFollower>();
         }
 
         private void OnEnable()
@@ -80,6 +83,9 @@ namespace Genesis.RoomScan.UI
         {
             _visible = true;
             _root.style.display = DisplayStyle.Flex;
+
+            if (_follower != null) _follower.SnapToView();
+
             RefreshStatus();
         }
 
@@ -87,6 +93,8 @@ namespace Genesis.RoomScan.UI
         {
             _visible = false;
             _root.style.display = DisplayStyle.None;
+
+            if (_follower != null) _follower.StopTracking();
         }
 
         // ─────────────────────────────────────────────────────────────

@@ -1,17 +1,17 @@
 /* ============================================
    SENTIENCE DEBUG MENU
-   Dark technical HUD for VR overlay
+   Dark technical HUD — world-space VR panel
    ============================================ */
 
 .debug-root {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    bottom: 0;
+    width: 480px;
+    height: 640px;
     background-color: rgba(10, 12, 16, 0.92);
     padding: 24px 32px;
     flex-direction: column;
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: rgba(0, 180, 255, 0.25);
 }
 
 /* === Header === */
