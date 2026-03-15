@@ -1,4 +1,5 @@
 using System.IO;
+using Genesis.RoomScan.GSplat;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -23,13 +24,24 @@ namespace Genesis.RoomScan.UI
         private VisualElement _root;
         private bool _visible;
 
-        // Status labels
+        // Scan status labels
         private Label _valScanning;
         private Label _valMode;
         private Label _valIntegrations;
         private Label _valKeyframes;
         private Label _valRender;
-        private Label _valGsTraining;
+
+        // Server training labels
+        private Label _valServerUrl;
+        private Label _valTrainState;
+        private VisualElement _progressFill;
+        private Label _valTrainProgress;
+        private Label _valTrainIter;
+        private Label _valTrainElapsed;
+        private Label _valTrainBackend;
+        private Label _valTrainMessage;
+
+        // Persistence labels
         private Label _valSavedScan;
         private Label _valGsExport;
         private Label _valFps;
@@ -41,6 +53,7 @@ namespace Genesis.RoomScan.UI
         private Button _btnClearAll;
         private Button _btnExportPc;
         private Button _btnGsTrain;
+        private Button _btnCancelTrain;
 
         // FPS tracking
         private float _fpsTimer;
@@ -115,7 +128,16 @@ namespace Genesis.RoomScan.UI
             _valIntegrations = _root.Q<Label>("val-integrations");
             _valKeyframes = _root.Q<Label>("val-keyframes");
             _valRender = _root.Q<Label>("val-render");
-            _valGsTraining = _root.Q<Label>("val-gs-training");
+
+            _valServerUrl = _root.Q<Label>("val-server-url");
+            _valTrainState = _root.Q<Label>("val-train-state");
+            _progressFill = _root.Q<VisualElement>("progress-fill");
+            _valTrainProgress = _root.Q<Label>("val-train-progress");
+            _valTrainIter = _root.Q<Label>("val-train-iter");
+            _valTrainElapsed = _root.Q<Label>("val-train-elapsed");
+            _valTrainBackend = _root.Q<Label>("val-train-backend");
+            _valTrainMessage = _root.Q<Label>("val-train-message");
+
             _valSavedScan = _root.Q<Label>("val-saved-scan");
             _valGsExport = _root.Q<Label>("val-gsexport");
             _valFps = _root.Q<Label>("val-fps");
@@ -126,6 +148,7 @@ namespace Genesis.RoomScan.UI
             _btnClearAll = _root.Q<Button>("btn-clear-all");
             _btnExportPc = _root.Q<Button>("btn-export-pc");
             _btnGsTrain = _root.Q<Button>("btn-gs-train");
+            _btnCancelTrain = _root.Q<Button>("btn-cancel-train");
         }
 
         private void BindButtons()
@@ -169,6 +192,15 @@ namespace Genesis.RoomScan.UI
 
             _btnGsTrain?.RegisterCallback<ClickEvent>(_ =>
                 RoomScanner.Instance?.StartServerTraining());
+
+            _btnCancelTrain?.RegisterCallback<ClickEvent>(async _ =>
+            {
+                var client = FindAnyObjectByType<GSplatServerClient>();
+                if (client == null) return;
+                SetButtonBusy(_btnCancelTrain, "Cancelling...");
+                await client.CancelTraining();
+                SetButtonReady(_btnCancelTrain, "Cancel Training");
+            });
         }
 
         private void RefreshStatus()
@@ -176,10 +208,10 @@ namespace Genesis.RoomScan.UI
             var scanner = RoomScanner.Instance;
             if (scanner == null) return;
 
+            // Scan status
             SetLabel(_valScanning, scanner.IsScanning ? "Active" : "Stopped");
             SetLabel(_valMode, scanner.Mode.ToString());
             SetLabel(_valRender, scanner.CurrentRenderMode.ToString());
-            SetLabel(_valGsTraining, scanner.IsGsTrainingInProgress ? "Running..." : "Idle");
 
             if (_btnToggleScan != null)
                 _btnToggleScan.text = scanner.IsScanning ? "Stop Scanning" : "Start Scanning";
@@ -192,6 +224,10 @@ namespace Genesis.RoomScan.UI
             if (kf != null)
                 SetLabel(_valKeyframes, kf.SavedCount.ToString());
 
+            // Server training status
+            RefreshTrainingStatus();
+
+            // Persistence (throttled I/O)
             _ioCheckTimer -= Time.deltaTime;
             if (_ioCheckTimer <= 0f)
             {
@@ -209,6 +245,55 @@ namespace Genesis.RoomScan.UI
             SetLabel(_valGsExport, _hasGsExport ? "Yes" : "No");
 
             SetLabel(_valFps, $"{_currentFps:F0} FPS");
+        }
+
+        private void RefreshTrainingStatus()
+        {
+            var client = FindAnyObjectByType<GSplatServerClient>();
+            if (client == null)
+            {
+                SetLabel(_valServerUrl, "No client");
+                return;
+            }
+
+            SetLabel(_valServerUrl, client.ServerUrl);
+
+            var ts = client.LastStatus;
+            if (ts == null)
+            {
+                SetLabel(_valTrainState, "No data");
+                return;
+            }
+
+            SetLabel(_valTrainState, ts.state ?? "--");
+
+            float pct = ts.progress * 100f;
+            if (_progressFill != null)
+                _progressFill.style.width = new Length(pct, LengthUnit.Percent);
+            SetLabel(_valTrainProgress, $"{pct:F0}%");
+
+            if (ts.total_iterations > 0)
+                SetLabel(_valTrainIter, $"{ts.current_iteration} / {ts.total_iterations}");
+            else
+                SetLabel(_valTrainIter, "--");
+
+            SetLabel(_valTrainElapsed, ts.elapsed_seconds > 0 ? FormatElapsed(ts.elapsed_seconds) : "--");
+            SetLabel(_valTrainBackend, string.IsNullOrEmpty(ts.backend) ? "--" : ts.backend);
+            SetLabel(_valTrainMessage, string.IsNullOrEmpty(ts.message) ? "--" : ts.message);
+
+            bool isTraining = ts.state == "training";
+            if (_btnGsTrain != null) _btnGsTrain.SetEnabled(!isTraining);
+            if (_btnCancelTrain != null) _btnCancelTrain.SetEnabled(isTraining);
+        }
+
+        private static string FormatElapsed(float seconds)
+        {
+            if (seconds < 60f) return $"{seconds:F0}s";
+            int m = (int)(seconds / 60f);
+            int s = (int)(seconds % 60f);
+            if (m < 60) return $"{m}m {s}s";
+            int h = m / 60;
+            return $"{h}h {m % 60}m";
         }
 
         private void UpdateFps()

@@ -1,11 +1,11 @@
 /* ============================================
-   SENTIENCE DEBUG MENU
+   QUESTROOMSCAN DEBUG MENU
    Dark technical HUD — world-space VR panel
    ============================================ */
 
 .debug-root {
     width: 480px;
-    height: 740px;
+    height: 980px;
     background-color: rgba(10, 12, 16, 0.92);
     padding: 24px 32px;
     flex-direction: column;
@@ -71,6 +71,33 @@
     color: rgb(220, 230, 245);
     -unity-text-align: middle-right;
     min-width: 120px;
+}
+
+/* === Progress Bar === */
+.progress-bar {
+    height: 6px;
+    background-color: rgba(40, 50, 70, 0.8);
+    border-radius: 3px;
+    margin: 6px 0 4px 0;
+    overflow: hidden;
+}
+
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    background-color: rgb(0, 200, 255);
+    border-radius: 3px;
+    transition-property: width;
+    transition-duration: 0.5s;
+}
+
+/* === Small status value variant === */
+.status-val--small {
+    font-size: 11px;
+    -unity-font-style: normal;
+    min-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 /* === Action Buttons === */

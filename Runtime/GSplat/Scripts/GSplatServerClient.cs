@@ -37,6 +37,10 @@ namespace Genesis.RoomScan.GSplat
             public string state;
             public float progress;
             public string message;
+            public string backend;
+            public int current_iteration;
+            public int total_iterations;
+            public float elapsed_seconds;
         }
 
         /// <summary>
@@ -116,7 +120,7 @@ namespace Genesis.RoomScan.GSplat
         {
             try
             {
-                string url = $"{serverUrl}/status";
+                string url = $"{serverUrl}/api/status";
                 using var request = UnityWebRequest.Get(url);
                 request.timeout = 10;
 

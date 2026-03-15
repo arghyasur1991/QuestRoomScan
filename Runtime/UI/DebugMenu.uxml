@@ -10,13 +10,13 @@
 
         <!-- Header -->
         <ui:VisualElement class="debug-header">
-            <ui:Label text="SENTIENCE" class="header-title" />
+            <ui:Label text="QUESTROOMSCAN" class="header-title" />
             <ui:Label text="DEBUG" class="header-subtitle" />
         </ui:VisualElement>
 
         <!-- Status Section -->
         <ui:VisualElement class="section">
-            <ui:Label text="STATUS" class="section-label" />
+            <ui:Label text="SCAN STATUS" class="section-label" />
 
             <ui:VisualElement class="status-row">
                 <ui:Label text="Scanning" class="status-key" />
@@ -38,9 +38,45 @@
                 <ui:Label text="Render" class="status-key" />
                 <ui:Label name="val-render" text="--" class="status-val" />
             </ui:VisualElement>
+        </ui:VisualElement>
+
+        <!-- Server Training Section -->
+        <ui:VisualElement class="section">
+            <ui:Label text="SERVER TRAINING" class="section-label" />
+
             <ui:VisualElement class="status-row">
-                <ui:Label text="GS Training" class="status-key" />
-                <ui:Label name="val-gs-training" text="Idle" class="status-val" />
+                <ui:Label text="Server" class="status-key" />
+                <ui:Label name="val-server-url" text="--" class="status-val status-val--small" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="State" class="status-key" />
+                <ui:Label name="val-train-state" text="--" class="status-val" />
+            </ui:VisualElement>
+
+            <!-- Progress bar -->
+            <ui:VisualElement class="progress-bar">
+                <ui:VisualElement name="progress-fill" class="progress-fill" />
+            </ui:VisualElement>
+
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Progress" class="status-key" />
+                <ui:Label name="val-train-progress" text="--" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Iteration" class="status-key" />
+                <ui:Label name="val-train-iter" text="--" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Elapsed" class="status-key" />
+                <ui:Label name="val-train-elapsed" text="--" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Backend" class="status-key" />
+                <ui:Label name="val-train-backend" text="--" class="status-val" />
+            </ui:VisualElement>
+            <ui:VisualElement class="status-row">
+                <ui:Label text="Message" class="status-key" />
+                <ui:Label name="val-train-message" text="--" class="status-val status-val--small" />
             </ui:VisualElement>
         </ui:VisualElement>
 
@@ -67,6 +103,7 @@
             <ui:Button name="btn-load-scan" text="Load Scan" class="action-btn" />
             <ui:Button name="btn-export-pc" text="Export Point Cloud" class="action-btn" />
             <ui:Button name="btn-gs-train" text="Start GS Training" class="action-btn action-btn--primary" />
+            <ui:Button name="btn-cancel-train" text="Cancel Training" class="action-btn action-btn--danger" />
             <ui:Button name="btn-clear-all" text="Clear All Data" class="action-btn action-btn--danger" />
         </ui:VisualElement>
 
