@@ -7,7 +7,9 @@ using Meta.XR;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.Rendering.Universal;
+using UnityEngine.UIElements;
 using UnityEngine.XR.ARFoundation;
 using Unity.XR.CoreUtils;
 
@@ -41,6 +43,11 @@ namespace Genesis.RoomScan.Editor
         GSplatServerClient _gsplatServerClient;
         DebugMenuController _debugMenu;
         RoomScanInputHandler _inputHandler;
+        EventSystem _eventSystem;
+        OVRInputModule _ovrInputModule;
+        VRDocumentRaycaster _vrRaycaster;
+        ControllerRayDriver _rayDriver;
+        PanelInputConfiguration _panelInputConfig;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
         bool _gsRendererComputeWired;
@@ -115,6 +122,11 @@ namespace Genesis.RoomScan.Editor
             _gsplatServerClient = FindAny<GSplatServerClient>();
             _debugMenu = FindAny<DebugMenuController>();
             _inputHandler = FindAny<RoomScanInputHandler>();
+            _eventSystem = FindAny<EventSystem>();
+            _ovrInputModule = FindAny<OVRInputModule>();
+            _vrRaycaster = FindAny<VRDocumentRaycaster>();
+            _rayDriver = FindAny<ControllerRayDriver>();
+            _panelInputConfig = FindAny<PanelInputConfiguration>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -352,6 +364,10 @@ namespace Genesis.RoomScan.Editor
             StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
             StatusRow("DebugMenuController (HUD)", _debugMenu != null);
             StatusRow("RoomScanInputHandler (bindings)", _inputHandler != null);
+            StatusRow("EventSystem + OVRInputModule", _eventSystem != null && _ovrInputModule != null);
+            StatusRow("VRDocumentRaycaster (UI pointer)", _vrRaycaster != null);
+            StatusRow("ControllerRayDriver (laser)", _rayDriver != null);
+            StatusRow("PanelInputConfiguration", _panelInputConfig != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _meshExtractor == null ||
@@ -362,7 +378,10 @@ namespace Genesis.RoomScan.Editor
                               _pointCloudExporter == null ||
                               _gsplatManager == null || _gsRenderer == null ||
                               _gsplatServerClient == null ||
-                              _debugMenu == null || _inputHandler == null;
+                              _debugMenu == null || _inputHandler == null ||
+                              _eventSystem == null || _ovrInputModule == null ||
+                              _vrRaycaster == null || _rayDriver == null ||
+                              _panelInputConfig == null;
 
             if (anyMissing)
             {
@@ -431,15 +450,70 @@ namespace Genesis.RoomScan.Editor
                 debugGo.transform.SetParent(root.transform);
                 Undo.RegisterCreatedObjectUndo(debugGo, "Create DebugMenu");
 
-                Undo.AddComponent<UnityEngine.UIElements.UIDocument>(debugGo);
+                Undo.AddComponent<UIDocument>(debugGo);
                 Undo.AddComponent<DebugMenuController>(debugGo);
             }
 
             // Always ensure UIDocument has its assets assigned
             EnsureDebugMenuAssets();
 
+            // EventSystem + VR controller UI input pipeline
+            EnsureVRInputInfrastructure();
+
             MarkDirty();
             Refresh();
+        }
+
+        /// <summary>
+        /// Sets up EventSystem, OVRInputModule, PanelInputConfiguration,
+        /// VRDocumentRaycaster, and ControllerRayDriver so that VR controller
+        /// rays can interact with world-space UI Toolkit panels.
+        /// </summary>
+        void EnsureVRInputInfrastructure()
+        {
+            // EventSystem
+            var es = FindAny<EventSystem>();
+            if (es == null)
+            {
+                var esGo = new GameObject("EventSystem");
+                Undo.RegisterCreatedObjectUndo(esGo, "Create EventSystem");
+                es = Undo.AddComponent<EventSystem>(esGo);
+            }
+
+            // OVRInputModule (replaces StandaloneInputModule for VR)
+            if (es.GetComponent<OVRInputModule>() == null)
+            {
+                // Remove StandaloneInputModule if present — only one input module should be active
+                var standalone = es.GetComponent<StandaloneInputModule>();
+                if (standalone != null) Undo.DestroyObjectImmediate(standalone);
+
+                Undo.AddComponent<OVRInputModule>(es.gameObject);
+            }
+
+            // PanelInputConfiguration (auto-creates PanelEventHandler per panel)
+            if (es.GetComponent<PanelInputConfiguration>() == null)
+            {
+                var pic = Undo.AddComponent<PanelInputConfiguration>(es.gameObject);
+                var so = new SerializedObject(pic);
+                SetBool(so, "m_DefaultEventCameraIsMainCamera", true);
+                SetBool(so, "m_AutoCreatePanelComponents", true);
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(pic);
+            }
+
+            // VRDocumentRaycaster (overrides GetWorldRay for controller rays)
+            if (es.GetComponent<VRDocumentRaycaster>() == null)
+                Undo.AddComponent<VRDocumentRaycaster>(es.gameObject);
+
+            // ControllerRayDriver (laser visual + auto-picks active controller)
+            if (es.GetComponent<ControllerRayDriver>() == null)
+                Undo.AddComponent<ControllerRayDriver>(es.gameObject);
+        }
+
+        static void SetBool(SerializedObject so, string fieldName, bool value)
+        {
+            var prop = so.FindProperty(fieldName);
+            if (prop != null) prop.boolValue = value;
         }
 
         // -- Shader / Material Wiring ------------------------------------
@@ -858,7 +932,7 @@ namespace Genesis.RoomScan.Editor
         /// Sets m_RenderMode to 1 (WorldSpace). The public renderMode property
         /// and PanelRenderMode enum are internal in Unity 6000.3.
         /// </summary>
-        static void SetPanelRenderModeWorldSpace(UnityEngine.UIElements.PanelSettings panel)
+        static void SetPanelRenderModeWorldSpace(PanelSettings panel)
         {
             const int WorldSpace = 1;
             var so = new SerializedObject(panel);
@@ -876,14 +950,14 @@ namespace Genesis.RoomScan.Editor
             var ctrl = FindAny<DebugMenuController>();
             if (ctrl == null) return;
 
-            var uiDoc = ctrl.GetComponent<UnityEngine.UIElements.UIDocument>();
+            var uiDoc = ctrl.GetComponent<UIDocument>();
             if (uiDoc == null) return;
 
             Undo.RecordObject(uiDoc, "Assign DebugMenu UIDocument assets");
 
             if (uiDoc.visualTreeAsset == null)
             {
-                var uxml = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.VisualTreeAsset>(
+                var uxml = AssetDatabase.LoadAssetAtPath<VisualTreeAsset>(
                     "Packages/com.genesis.roomscan/Runtime/UI/DebugMenu.uxml");
                 if (uxml != null) uiDoc.visualTreeAsset = uxml;
             }
@@ -911,7 +985,7 @@ namespace Genesis.RoomScan.Editor
             EditorUtility.SetDirty(uiDoc);
         }
 
-        static UnityEngine.UIElements.PanelSettings FindOrCreatePanelSettings()
+        static PanelSettings FindOrCreatePanelSettings()
         {
             const string assetName = "DebugMenuPanelSettings";
 
@@ -919,7 +993,7 @@ namespace Genesis.RoomScan.Editor
             if (guids.Length > 0)
             {
                 string path = AssetDatabase.GUIDToAssetPath(guids[0]);
-                var existing = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.PanelSettings>(path);
+                var existing = AssetDatabase.LoadAssetAtPath<PanelSettings>(path);
                 if (existing != null) return existing;
             }
 
@@ -928,7 +1002,7 @@ namespace Genesis.RoomScan.Editor
                 AssetDatabase.CreateFolder("Assets", "Settings");
 
             const string assetPath = dir + "/" + assetName + ".asset";
-            var panel = ScriptableObject.CreateInstance<UnityEngine.UIElements.PanelSettings>();
+            var panel = ScriptableObject.CreateInstance<PanelSettings>();
             AssetDatabase.CreateAsset(panel, assetPath);
             SetPanelRenderModeWorldSpace(panel);
             AssetDatabase.SaveAssets();
