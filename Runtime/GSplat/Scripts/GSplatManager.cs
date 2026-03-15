@@ -22,6 +22,7 @@ namespace Genesis.RoomScan.GSplat
         [SerializeField] ComputeShader rasterBwdCompute;
         [SerializeField] ComputeShader projBwdCompute;
         [SerializeField] ComputeShader adamCompute;
+        [SerializeField] ComputeShader densifyCompute;
         [SerializeField] ComputeShader initGaussiansCompute;
 
         [Header("Rendering")]
@@ -48,6 +49,7 @@ namespace Genesis.RoomScan.GSplat
 
         SectorScheduler _scheduler;
         GSplatTrainer _trainer;
+        TrainingPacer _pacer;
         bool _initialized;
         Camera _mainCam;
         Plane[] _frustumPlanes = new Plane[6];
@@ -98,8 +100,14 @@ namespace Genesis.RoomScan.GSplat
             _trainer = new GSplatTrainer(
                 projectSHCompute, tileSortCompute, rasterizeCompute,
                 lossCompute, rasterBwdCompute, projBwdCompute, adamCompute,
+                densifyCompute,
                 maxGaussiansPerSector, trainingResWidth, trainingResHeight,
                 config);
+
+            var pacerCfg = TrainingPacer.Config.Default;
+            pacerCfg.MaxIterations = targetItersPerSector;
+            pacerCfg.DensifyStopIter = Mathf.Min(pacerCfg.DensifyStopIter, targetItersPerSector - 200);
+            _pacer = new TrainingPacer(pacerCfg);
 
             if (splatRenderer != null)
                 splatRenderer.Initialize(_scheduler);
@@ -275,17 +283,25 @@ namespace Genesis.RoomScan.GSplat
             var buffers = _scheduler.GetOrCreateBuffers(sectorId);
             if (buffers.CurrentCount == 0) return;
 
-            // Reset Adam state when switching to a new sector
+            // Reset when switching to a new sector
             if (sectorId != _lastTrainedSectorId)
             {
                 _trainer.ResetStep();
+                _pacer.Reset();
                 _lastTrainedSectorId = sectorId;
             }
+
+            ref var sector = ref _scheduler.Sectors[sectorId];
+            int recommendedIters = _pacer.UpdatePace(
+                sector.TrainingIteration, 0f,
+                Time.deltaTime * 1000f, 0f);
+
+            int iters = Mathf.Max(1, Mathf.Min(itersPerFrame, recommendedIters));
 
             var kf = PickBestKeyframe(sectorId);
             if (!kf.HasValue) return;
 
-            for (int i = 0; i < itersPerFrame; i++)
+            for (int i = 0; i < iters; i++)
             {
                 _trainer.TrainStep(buffers, kf.Value.Texture,
                                    kf.Value.ViewMatrix, kf.Value.ProjMatrix,
@@ -293,26 +309,34 @@ namespace Genesis.RoomScan.GSplat
                                    kf.Value.CamPos);
             }
 
-            _scheduler.AdvanceTraining(sectorId, itersPerFrame, 0f, buffers.CurrentCount);
+            // Densify when the pacer says so
+            if (_pacer.ShouldDensify)
+            {
+                int prevCount = buffers.CurrentCount;
+                _trainer.Densify(buffers);
+                Debug.Log($"[GSplatManager] Densified sector {sectorId}: {prevCount} → {buffers.CurrentCount}");
+            }
 
-            ref var trained = ref _scheduler.Sectors[sectorId];
-            bool shouldLog = trained.TrainingIteration % 30 == 0 ||
-                             trained.State == SectorState.SplatReady;
+            _scheduler.AdvanceTraining(sectorId, iters, 0f, buffers.CurrentCount);
+
+            // Re-read sector (AdvanceTraining may have updated it)
+            sector = ref _scheduler.Sectors[sectorId];
+            bool shouldLog = sector.TrainingIteration % 30 == 0 ||
+                             sector.State == SectorState.SplatReady;
 
             if (shouldLog)
             {
-                Debug.Log($"[GSplatManager] Training sector {sectorId}: iter={trained.TrainingIteration}/{targetItersPerSector}, " +
-                          $"gaussians={buffers.CurrentCount}, state={trained.State}");
+                Debug.Log($"[GSplatManager] Training sector {sectorId}: iter={sector.TrainingIteration}/{targetItersPerSector}, " +
+                          $"gaussians={buffers.CurrentCount}, state={sector.State}");
             }
 
-            // Diagnostic: log rendered image + keyframe stats on first few iterations per sector
-            if (trained.TrainingIteration <= 3 || trained.TrainingIteration == 30 ||
-                trained.TrainingIteration % 300 == 0)
+            if (sector.TrainingIteration <= 3 || sector.TrainingIteration == 30 ||
+                sector.TrainingIteration % 300 == 0)
             {
-                LogTrainingDiag(sectorId, trained.TrainingIteration, kf.Value, buffers);
+                LogTrainingDiag(sectorId, sector.TrainingIteration, kf.Value, buffers);
             }
 
-            if (trained.State == SectorState.SplatReady)
+            if (sector.State == SectorState.SplatReady)
                 LogGaussianDiagnostics(sectorId, buffers, "trained");
 
             if (!debugDisableMeshMask)

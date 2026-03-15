@@ -27,6 +27,13 @@ namespace Genesis.RoomScan.GSplat
             public float AdamBeta2;
             public float AdamEps;
 
+            public float DensifyGradThresh;
+            public float DensifySizeThresh;
+            public float DensifyScreenThresh;
+            public float DensifyCullAlpha;
+            public float DensifyCullScale;
+            public float DensifyCullScreenSize;
+
             public static Config Default => new()
             {
                 SHDegree = 2,
@@ -43,6 +50,12 @@ namespace Genesis.RoomScan.GSplat
                 AdamBeta1 = 0.9f,
                 AdamBeta2 = 0.999f,
                 AdamEps = 1e-15f,
+                DensifyGradThresh = 0.0002f,
+                DensifySizeThresh = 0.01f,
+                DensifyScreenThresh = 20f,
+                DensifyCullAlpha = 0.005f,
+                DensifyCullScale = 0.5f,
+                DensifyCullScreenSize = 40f,
             };
         }
 
@@ -51,26 +64,34 @@ namespace Genesis.RoomScan.GSplat
         readonly ComputeShader _rasterBwdCS;
         readonly ComputeShader _projBwdCS;
         readonly ComputeShader _adamCS;
+        readonly ComputeShader _densifyCS;
 
         readonly int _kLossFwd, _kLossBwd;
         readonly int _kRastBwd;
         readonly int _kProjBwd, _kSHBwd;
         readonly int _kAdam, _kGradStats, _kZero;
+        int _kDensifyClassify, _kAppendSplit, _kAppendDup, _kCullClassify;
+        int _kPrefixSum, _kCompactScatter, _kCompactCopyBack;
 
         GraphicsBuffer _lossBuffer;
         GraphicsBuffer _intermediates;
         RenderTexture _vRendered;
 
-        // Intermediate gradient buffers from rasterize backward.
-        // MUST be separate from GradMeans/GradScales/GradQuats to avoid aliasing
-        // with the projection backward pass which reads these and writes to the final grads.
-        GraphicsBuffer _vxy;     // [maxPoints * 2] dL/d(screen_xy)
-        GraphicsBuffer _vConic;  // [maxPoints * 3] dL/d(conic)
-        GraphicsBuffer _vDepth;  // [maxPoints]     dL/d(depth)
+        GraphicsBuffer _vxy;
+        GraphicsBuffer _vConic;
+        GraphicsBuffer _vDepth;
+
+        // Densification scratch buffers
+        GraphicsBuffer _splitFlag, _dupFlag, _splitPrefix, _dupPrefix;
+        GraphicsBuffer _keepFlag, _keepPrefix;
+        GraphicsBuffer _randomSamples;
+        GraphicsBuffer _compactTemp;
 
         readonly Config _config;
         int _step;
         int _imgW, _imgH;
+        int _maxPoints;
+        readonly int[] _readback1 = new int[1];
 
         static readonly int ID_ImgSize = Shader.PropertyToID("_ImgSize");
         static readonly int ID_SSIMWeight = Shader.PropertyToID("_SSIMWeight");
@@ -94,13 +115,14 @@ namespace Genesis.RoomScan.GSplat
         public GSplatTrainer(ComputeShader projectSH, ComputeShader tileSort,
                              ComputeShader rasterize, ComputeShader lossCS,
                              ComputeShader rasterBwdCS, ComputeShader projBwdCS,
-                             ComputeShader adamCS,
+                             ComputeShader adamCS, ComputeShader densifyCS,
                              int maxPoints, int imgW, int imgH,
                              Config? config = null)
         {
             _config = config ?? Config.Default;
             _imgW = imgW;
             _imgH = imgH;
+            _maxPoints = maxPoints;
 
             _forward = new GSplatForwardPass(projectSH, tileSort, rasterize, maxPoints, imgW, imgH);
 
@@ -130,13 +152,36 @@ namespace Genesis.RoomScan.GSplat
             };
             _vRendered.Create();
 
-            Debug.Log($"[GSplatTrainer] graphicsDeviceType={SystemInfo.graphicsDeviceType}");
-
             const GraphicsBuffer.Target s = GraphicsBuffer.Target.Structured;
             _vxy    = new GraphicsBuffer(s, maxPoints * 2, 4);
             _vConic = new GraphicsBuffer(s, maxPoints * 3, 4);
             _vDepth = new GraphicsBuffer(s, maxPoints, 4);
+
+            // Densification
+            _densifyCS = densifyCS;
+            if (densifyCS != null)
+            {
+                _kDensifyClassify = densifyCS.FindKernel("DensifyClassify");
+                _kAppendSplit = densifyCS.FindKernel("DensifyAppendSplit");
+                _kAppendDup = densifyCS.FindKernel("DensifyAppendDup");
+                _kCullClassify = densifyCS.FindKernel("DensifyCullClassify");
+                _kPrefixSum = densifyCS.FindKernel("PrefixSum");
+                _kCompactScatter = densifyCS.FindKernel("CompactScatter");
+                _kCompactCopyBack = densifyCS.FindKernel("CompactCopyBack");
+
+                _splitFlag    = new GraphicsBuffer(s, maxPoints, 4);
+                _dupFlag      = new GraphicsBuffer(s, maxPoints, 4);
+                _splitPrefix  = new GraphicsBuffer(s, maxPoints, 4);
+                _dupPrefix    = new GraphicsBuffer(s, maxPoints, 4);
+                _keepFlag     = new GraphicsBuffer(s, maxPoints, 4);
+                _keepPrefix   = new GraphicsBuffer(s, maxPoints, 4);
+                _randomSamples = new GraphicsBuffer(s, maxPoints * 6, 4);
+                int maxStride = Mathf.Max(24, (_config.SHDegree > 0 ? (NumSHBases(_config.SHDegree) - 1) * 3 : 1));
+                _compactTemp  = new GraphicsBuffer(s, maxPoints * maxStride, 4);
+            }
         }
+
+        static int NumSHBases(int d) => d switch { 0 => 1, 1 => 4, 2 => 9, 3 => 16, _ => 25 };
 
         /// <summary>
         /// Run one complete training iteration against a keyframe.
@@ -294,6 +339,183 @@ namespace Genesis.RoomScan.GSplat
             _adamCS.Dispatch(_kAdam, CeilDiv(n, 256), 1, 1);
         }
 
+        /// <summary>
+        /// Run densification: classify → split/dup → cull → compact.
+        /// Returns the new Gaussian count.
+        /// </summary>
+        public int Densify(GSplatBuffers gaussians)
+        {
+            if (_densifyCS == null) return gaussians.CurrentCount;
+
+            int N = gaussians.CurrentCount;
+            if (N == 0 || N > _maxPoints / 3) return N;
+
+            float halfMaxDim = 0.5f * Mathf.Max(_imgW, _imgH);
+
+            // 1. Classify: split vs dup vs nothing
+            _densifyCS.SetInt("_N", N);
+            _densifyCS.SetFloat("_GradThresh", _config.DensifyGradThresh);
+            _densifyCS.SetFloat("_SizeThresh", _config.DensifySizeThresh);
+            _densifyCS.SetFloat("_ScreenThresh", _config.DensifyScreenThresh);
+            _densifyCS.SetFloat("_HalfMaxDim", halfMaxDim);
+            _densifyCS.SetInt("_CheckScreen", 1);
+            _densifyCS.SetBuffer(_kDensifyClassify, "_XYGradNorm", gaussians.XYGradNorm);
+            _densifyCS.SetBuffer(_kDensifyClassify, "_VisCounts", gaussians.VisCounts);
+            _densifyCS.SetBuffer(_kDensifyClassify, "_Scales", gaussians.Scales);
+            _densifyCS.SetBuffer(_kDensifyClassify, "_Max2DSize", gaussians.Max2DSize);
+            _densifyCS.SetBuffer(_kDensifyClassify, "_SplitFlag", _splitFlag);
+            _densifyCS.SetBuffer(_kDensifyClassify, "_DupFlag", _dupFlag);
+            _densifyCS.Dispatch(_kDensifyClassify, CeilDiv(N, 256), 1, 1);
+
+            // 2–3. Prefix sums
+            RunPrefixSum(_splitFlag, _splitPrefix, N);
+            RunPrefixSum(_dupFlag, _dupPrefix, N);
+
+            // 4. Read back counts (GPU sync — acceptable at densify cadence)
+            _splitPrefix.GetData(_readback1, 0, N - 1, 1);
+            int splitCount = _readback1[0];
+            _dupPrefix.GetData(_readback1, 0, N - 1, 1);
+            int dupCount = _readback1[0];
+
+            int nNew = N + 2 * splitCount + dupCount;
+            if (nNew > _maxPoints)
+            {
+                Debug.LogWarning($"[GSplat] Densify overflow ({nNew} > {_maxPoints}), skipping");
+                ResetDensifyStats(gaussians);
+                return N;
+            }
+
+            // 5. Upload random normal samples for split children (Box-Muller)
+            if (splitCount > 0)
+            {
+                int numR = splitCount * 2 * 3;
+                var rands = new float[numR];
+                for (int i = 0; i < numR; i += 2)
+                {
+                    float u1 = UnityEngine.Random.Range(1e-6f, 1f);
+                    float u2 = UnityEngine.Random.Range(0f, 2f * Mathf.PI);
+                    float mag = Mathf.Sqrt(-2f * Mathf.Log(u1));
+                    rands[i] = mag * Mathf.Cos(u2);
+                    if (i + 1 < numR) rands[i + 1] = mag * Mathf.Sin(u2);
+                }
+                _randomSamples.SetData(rands, 0, 0, numR);
+            }
+
+            // 6. Append split children
+            if (splitCount > 0)
+            {
+                _densifyCS.SetInt("_N", N);
+                _densifyCS.SetFloat("_LogSizeFac", Mathf.Log(1.6f));
+                _densifyCS.SetBuffer(_kAppendSplit, "_SplitFlag", _splitFlag);
+                _densifyCS.SetBuffer(_kAppendSplit, "_SplitPrefix", _splitPrefix);
+                _densifyCS.SetBuffer(_kAppendSplit, "_RandomSamples", _randomSamples);
+                _densifyCS.SetBuffer(_kAppendSplit, "_MeansBuf", gaussians.Means);
+                _densifyCS.SetBuffer(_kAppendSplit, "_ScalesBuf", gaussians.Scales);
+                _densifyCS.SetBuffer(_kAppendSplit, "_QuatsBuf", gaussians.Quats);
+                _densifyCS.SetBuffer(_kAppendSplit, "_FeaturesDCBuf", gaussians.FeaturesDC);
+                _densifyCS.SetBuffer(_kAppendSplit, "_OpacitiesBuf", gaussians.Opacities);
+                _densifyCS.Dispatch(_kAppendSplit, CeilDiv(N, 256), 1, 1);
+            }
+
+            // 7. Append duplicates
+            if (dupCount > 0)
+            {
+                _densifyCS.SetInt("_N", N);
+                _densifyCS.SetInt("_NSplits", splitCount);
+                _densifyCS.SetBuffer(_kAppendDup, "_DupFlag", _dupFlag);
+                _densifyCS.SetBuffer(_kAppendDup, "_DupPrefix", _dupPrefix);
+                _densifyCS.SetBuffer(_kAppendDup, "_MeansBuf", gaussians.Means);
+                _densifyCS.SetBuffer(_kAppendDup, "_ScalesBuf", gaussians.Scales);
+                _densifyCS.SetBuffer(_kAppendDup, "_QuatsBuf", gaussians.Quats);
+                _densifyCS.SetBuffer(_kAppendDup, "_FeaturesDCBuf", gaussians.FeaturesDC);
+                _densifyCS.SetBuffer(_kAppendDup, "_OpacitiesBuf", gaussians.Opacities);
+                _densifyCS.Dispatch(_kAppendDup, CeilDiv(N, 256), 1, 1);
+            }
+
+            // 8. Cull classify
+            _densifyCS.SetInt("_NOld", N);
+            _densifyCS.SetFloat("_CullAlphaThresh", _config.DensifyCullAlpha);
+            _densifyCS.SetFloat("_CullScaleThresh", _config.DensifyCullScale);
+            _densifyCS.SetFloat("_CullScreenSize", _config.DensifyCullScreenSize);
+            _densifyCS.SetInt("_CheckHuge", 1);
+            _densifyCS.SetBuffer(_kCullClassify, "_SplitPrefix", _splitPrefix);
+            _densifyCS.SetBuffer(_kCullClassify, "_DupPrefix", _dupPrefix);
+            _densifyCS.SetBuffer(_kCullClassify, "_SplitFlag", _splitFlag);
+            _densifyCS.SetBuffer(_kCullClassify, "_OpacitiesBuf", gaussians.Opacities);
+            _densifyCS.SetBuffer(_kCullClassify, "_ScalesBuf", gaussians.Scales);
+            _densifyCS.SetBuffer(_kCullClassify, "_Max2DSize", gaussians.Max2DSize);
+            _densifyCS.SetBuffer(_kCullClassify, "_KeepFlag", _keepFlag);
+            _densifyCS.Dispatch(_kCullClassify, CeilDiv(nNew, 256), 1, 1);
+
+            // 9. Prefix sum of keep flags
+            RunPrefixSum(_keepFlag, _keepPrefix, nNew);
+
+            // 10. Compact each parameter buffer
+            CompactBuffer(gaussians.Means, nNew, 3);
+            CompactBuffer(gaussians.Scales, nNew, 3);
+            CompactBuffer(gaussians.Quats, nNew, 4);
+            CompactBuffer(gaussians.Opacities, nNew, 1);
+            CompactBuffer(gaussians.FeaturesDC, nNew, 3);
+            if (gaussians.SHRestSize > 0)
+                CompactBuffer(gaussians.FeaturesRest, nNew, gaussians.SHRestSize);
+
+            // 11. Read back final count
+            _keepPrefix.GetData(_readback1, 0, nNew - 1, 1);
+            int finalCount = Mathf.Min(_readback1[0], _maxPoints);
+            gaussians.CurrentCount = finalCount;
+
+            Debug.Log($"[GSplat] Densify: {N} → {nNew} (split={splitCount} dup={dupCount}) → {finalCount} after cull");
+
+            // 12. Reset Adam state (indices changed) and densify stats
+            ResetAdamState(gaussians);
+            ResetDensifyStats(gaussians);
+
+            return finalCount;
+        }
+
+        public void ResetDensifyStats(GSplatBuffers g)
+        {
+            ZeroBufGPU(g.VisCounts);
+            ZeroBufGPU(g.XYGradNorm);
+            ZeroBufGPU(g.Max2DSize);
+        }
+
+        void ResetAdamState(GSplatBuffers g)
+        {
+            ZeroBufGPU(g.AdamMeanM); ZeroBufGPU(g.AdamMeanV);
+            ZeroBufGPU(g.AdamScaleM); ZeroBufGPU(g.AdamScaleV);
+            ZeroBufGPU(g.AdamQuatM); ZeroBufGPU(g.AdamQuatV);
+            ZeroBufGPU(g.AdamOpacM); ZeroBufGPU(g.AdamOpacV);
+            ZeroBufGPU(g.AdamDCM); ZeroBufGPU(g.AdamDCV);
+            ZeroBufGPU(g.AdamRestM); ZeroBufGPU(g.AdamRestV);
+        }
+
+        void RunPrefixSum(GraphicsBuffer input, GraphicsBuffer output, int n)
+        {
+            _densifyCS.SetInt("_PrefixN", n);
+            _densifyCS.SetBuffer(_kPrefixSum, "_PrefixInput", input);
+            _densifyCS.SetBuffer(_kPrefixSum, "_PrefixOutput", output);
+            _densifyCS.Dispatch(_kPrefixSum, 1, 1, 1);
+        }
+
+        void CompactBuffer(GraphicsBuffer buf, int nNew, int stride)
+        {
+            _densifyCS.SetInt("_CompactN", nNew);
+            _densifyCS.SetInt("_CompactStride", stride);
+            _densifyCS.SetBuffer(_kCompactScatter, "_CompactSrc", buf);
+            _densifyCS.SetBuffer(_kCompactScatter, "_CompactDst", _compactTemp);
+            _densifyCS.SetBuffer(_kCompactScatter, "_KeepPrefix", _keepPrefix);
+            _densifyCS.SetBuffer(_kCompactScatter, "_KeepFlagRead", _keepFlag);
+            _densifyCS.Dispatch(_kCompactScatter, CeilDiv(nNew * stride, 256), 1, 1);
+
+            _densifyCS.SetInt("_CopyStride", stride);
+            _densifyCS.SetInt("_LastPrefixIdx", nNew - 1);
+            _densifyCS.SetBuffer(_kCompactCopyBack, "_CopySrc", _compactTemp);
+            _densifyCS.SetBuffer(_kCompactCopyBack, "_CopyDst", buf);
+            _densifyCS.SetBuffer(_kCompactCopyBack, "_KeepPrefix", _keepPrefix);
+            _densifyCS.Dispatch(_kCompactCopyBack, CeilDiv(nNew * stride, 256), 1, 1);
+        }
+
         public void Dispose()
         {
             _forward?.Dispose();
@@ -302,6 +524,14 @@ namespace Genesis.RoomScan.GSplat
             _vxy?.Release();
             _vConic?.Release();
             _vDepth?.Release();
+            _splitFlag?.Release();
+            _dupFlag?.Release();
+            _splitPrefix?.Release();
+            _dupPrefix?.Release();
+            _keepFlag?.Release();
+            _keepPrefix?.Release();
+            _randomSamples?.Release();
+            _compactTemp?.Release();
             if (_vRendered) UnityEngine.Object.Destroy(_vRendered);
         }
 
