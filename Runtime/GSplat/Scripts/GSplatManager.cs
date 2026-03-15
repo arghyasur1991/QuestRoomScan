@@ -9,10 +9,10 @@ namespace Genesis.RoomScan.GSplat
     /// Loads server-trained Gaussian splats from PLY data and uploads them
     /// to GPU buffers for rendering via <see cref="GSRenderer"/>.
     /// </summary>
+    [RequireComponent(typeof(GSRenderer))]
     public class GSplatManager : MonoBehaviour
     {
-        [SerializeField] GSRenderer splatRenderer;
-
+        GSRenderer _splatRenderer;
         GSplatBuffers _serverTrainedBuffers;
 
         public bool HasServerTrainedSplats => _serverTrainedBuffers != null && _serverTrainedBuffers.CurrentCount > 0;
@@ -50,10 +50,11 @@ namespace Genesis.RoomScan.GSplat
 
             Debug.Log($"[GSplatManager] Loaded {count} trained Gaussians (SH degree {shDegree})");
 
-            if (splatRenderer != null)
+            if (_splatRenderer == null) _splatRenderer = GetComponent<GSRenderer>();
+            if (_splatRenderer != null)
             {
-                splatRenderer.Initialize();
-                splatRenderer.SetServerTrainedBuffers(_serverTrainedBuffers);
+                _splatRenderer.Initialize();
+                _splatRenderer.SetServerTrainedBuffers(_serverTrainedBuffers);
             }
         }
 

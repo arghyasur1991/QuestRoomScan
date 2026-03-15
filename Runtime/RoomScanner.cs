@@ -29,29 +29,17 @@ namespace Genesis.RoomScan
     }
 
     /// <summary>
-    /// Top-level orchestrator for room scanning. Exposes a public API surface
-    /// that any client can call directly. Input bindings are handled by the
-    /// separate <see cref="RoomScanInputHandler"/> component which is optional.
+    /// Top-level orchestrator for room scanning. All sibling components live on
+    /// the same GameObject and are resolved automatically via GetComponent.
+    /// Input bindings are handled by <see cref="RoomScanInputHandler"/> (optional).
     /// </summary>
+    [RequireComponent(typeof(DepthCapture), typeof(VolumeIntegrator), typeof(MeshExtractor))]
+    [RequireComponent(typeof(PassthroughCameraProvider), typeof(TriplanarCache), typeof(RoomScanPersistence))]
+    [RequireComponent(typeof(KeyframeCollector), typeof(PointCloudExporter), typeof(GSplatManager))]
+    [RequireComponent(typeof(GSplatServerClient))]
     public class RoomScanner : MonoBehaviour
     {
         public static RoomScanner Instance { get; private set; }
-
-        [Header("Components")]
-        [SerializeField] private DepthCapture depthCapture;
-        [SerializeField] private VolumeIntegrator volumeIntegrator;
-        [SerializeField] private MeshExtractor meshExtractor;
-        [SerializeField] private TriplanarCache triplanarCache;
-        [SerializeField] private RoomScanPersistence persistence;
-        [SerializeField] private KeyframeCollector keyframeCollector;
-        [SerializeField] private PointCloudExporter pointCloudExporter;
-        [SerializeField] private GSplatManager gsplatManager;
-        [SerializeField] private GSplat.GSplatServerClient gsplatServerClient;
-        [SerializeField] private DebugMenuController debugMenu;
-
-        [Header("Camera")]
-        [SerializeField] private PassthroughCameraProvider cameraProvider;
-        private ICameraProvider _customCameraProvider;
 
         [Header("Scan Settings")]
         [SerializeField] private ScanMode mode = ScanMode.Passive;
@@ -80,6 +68,23 @@ namespace Genesis.RoomScan
         private float autoSaveIntervalSeconds = 10f;
 
         // ─────────────────────────────────────────────────────────────
+        //  Sibling component cache (resolved in Awake)
+        // ─────────────────────────────────────────────────────────────
+
+        private DepthCapture _depthCapture;
+        private VolumeIntegrator _volumeIntegrator;
+        private MeshExtractor _meshExtractor;
+        private PassthroughCameraProvider _cameraProvider;
+        private TriplanarCache _triplanarCache;
+        private RoomScanPersistence _persistence;
+        private KeyframeCollector _keyframeCollector;
+        private PointCloudExporter _pointCloudExporter;
+        private GSplatManager _gsplatManager;
+        private GSplatServerClient _gsplatServerClient;
+        private DebugMenuController _debugMenu;
+        private ICameraProvider _customCameraProvider;
+
+        // ─────────────────────────────────────────────────────────────
         //  Public read-only state
         // ─────────────────────────────────────────────────────────────
 
@@ -98,7 +103,7 @@ namespace Genesis.RoomScan
         public bool IsScanning { get; private set; }
         public ScanRenderMode CurrentRenderMode => renderMode;
         public bool IsGsTrainingInProgress => _serverTrainingInProgress;
-        public DebugMenuController DebugMenu => debugMenu;
+        public DebugMenuController DebugMenu => _debugMenu;
 
         // ─────────────────────────────────────────────────────────────
         //  Events
@@ -130,22 +135,37 @@ namespace Genesis.RoomScan
         private void Awake()
         {
             Instance = this;
+            CacheComponents();
             SetSafeShaderDefaults();
         }
 
         private void Start()
         {
-            ValidateComponents();
             SetupHeadExclusion();
             OnRoomReady();
         }
 
+        private void CacheComponents()
+        {
+            _depthCapture = GetComponent<DepthCapture>();
+            _volumeIntegrator = GetComponent<VolumeIntegrator>();
+            _meshExtractor = GetComponent<MeshExtractor>();
+            _cameraProvider = GetComponent<PassthroughCameraProvider>();
+            _triplanarCache = GetComponent<TriplanarCache>();
+            _persistence = GetComponent<RoomScanPersistence>();
+            _keyframeCollector = GetComponent<KeyframeCollector>();
+            _pointCloudExporter = GetComponent<PointCloudExporter>();
+            _gsplatManager = GetComponent<GSplatManager>();
+            _gsplatServerClient = GetComponent<GSplatServerClient>();
+            _debugMenu = GetComponentInChildren<DebugMenuController>();
+        }
+
         private async void OnRoomReady()
         {
-            if (persistence != null && persistence.HasSavedScan())
+            if (_persistence != null && _persistence.HasSavedScan())
             {
                 Debug.Log("[RoomScan] Found saved scan, loading...");
-                await persistence.LoadAsync();
+                await _persistence.LoadAsync();
             }
 
             if (autoStartOnLoad)
@@ -170,30 +190,22 @@ namespace Genesis.RoomScan
         {
             if (!paused) return;
 
-            Debug.Log($"[RoomScan] OnApplicationPause: persistence={persistence != null}, " +
-                      $"started={_started}, vi={volumeIntegrator != null}, " +
-                      $"intCount={volumeIntegrator?.IntegrationCount ?? -1}, " +
-                      $"warmup={volumeIntegrator?.WarmupIntegrations ?? -1}");
-
-            if (persistence != null && _started && volumeIntegrator != null
-                && volumeIntegrator.IntegrationCount > volumeIntegrator.WarmupIntegrations)
+            if (_persistence != null && _started && _volumeIntegrator != null
+                && _volumeIntegrator.IntegrationCount > _volumeIntegrator.WarmupIntegrations)
             {
                 Debug.Log("[RoomScan] App pausing, saving scan...");
-                await persistence.SaveAsync();
+                await _persistence.SaveAsync();
             }
         }
 
         private async void OnApplicationQuit()
         {
-            Debug.Log($"[RoomScan] OnApplicationQuit: persistence={persistence != null}, " +
-                      $"started={_started}, intCount={volumeIntegrator?.IntegrationCount ?? -1}");
-
-            if (persistence != null && _started && volumeIntegrator != null
-                && volumeIntegrator.IntegrationCount > volumeIntegrator.WarmupIntegrations
-                && !persistence.IsSaving)
+            if (_persistence != null && _started && _volumeIntegrator != null
+                && _volumeIntegrator.IntegrationCount > _volumeIntegrator.WarmupIntegrations
+                && !_persistence.IsSaving)
             {
                 Debug.Log("[RoomScan] App quitting, saving scan...");
-                await persistence.SaveAsync();
+                await _persistence.SaveAsync();
             }
         }
 
@@ -211,15 +223,15 @@ namespace Genesis.RoomScan
                 _lastIntegrationTime = t;
 
                 ProvideColorFrame();
-                volumeIntegrator.Integrate();
+                _volumeIntegrator.Integrate();
                 _integrateCount++;
 
-                int effectiveCount = volumeIntegrator.IntegrationCount - volumeIntegrator.WarmupIntegrations;
+                int effectiveCount = _volumeIntegrator.IntegrationCount - _volumeIntegrator.WarmupIntegrations;
                 if (effectiveCount >= minIntegrationsBeforeMesh
                     && t - _lastMeshTime >= MeshInterval)
                 {
                     _lastMeshTime = t;
-                    meshExtractor.Extract();
+                    _meshExtractor.Extract();
                 }
             }
 
@@ -231,22 +243,19 @@ namespace Genesis.RoomScan
             }
 
             if (mode == ScanMode.Guided && t - _guidedStartTime >= guidedTimeoutSeconds)
-            {
                 SetMode(ScanMode.Passive);
-            }
 
-            if (autoSaveIntervalSeconds > 0 && persistence != null && !persistence.IsSaving
+            if (autoSaveIntervalSeconds > 0 && _persistence != null && !_persistence.IsSaving
                 && t - _lastAutoSaveTime >= autoSaveIntervalSeconds
-                && volumeIntegrator != null
-                && volumeIntegrator.IntegrationCount > volumeIntegrator.WarmupIntegrations)
+                && _volumeIntegrator.IntegrationCount > _volumeIntegrator.WarmupIntegrations)
             {
                 _lastAutoSaveTime = t;
-                _ = persistence.SaveAsync();
+                _ = _persistence.SaveAsync();
             }
         }
 
         // ═════════════════════════════════════════════════════════════
-        //  PUBLIC API — call these from any client, input handler, or UI
+        //  PUBLIC API — call from any client, input handler, or UI
         // ═════════════════════════════════════════════════════════════
 
         public void StartScanning()
@@ -301,9 +310,9 @@ namespace Genesis.RoomScan
 
         public void ClearScan()
         {
-            volumeIntegrator.Clear();
-            meshExtractor.Reinitialize();
-            if (triplanarCache != null) triplanarCache.Clear();
+            _volumeIntegrator.Clear();
+            _meshExtractor.Reinitialize();
+            if (_triplanarCache != null) _triplanarCache.Clear();
         }
 
         /// <summary>
@@ -315,11 +324,11 @@ namespace Genesis.RoomScan
             StopScanning();
             ClearScan();
 
-            if (persistence != null)
-                persistence.DeleteSavedScan();
+            if (_persistence != null)
+                _persistence.DeleteSavedScan();
 
-            if (keyframeCollector != null)
-                keyframeCollector.ClearExport();
+            if (_keyframeCollector != null)
+                _keyframeCollector.ClearExport();
 
             string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
             if (Directory.Exists(gsExportDir))
@@ -331,9 +340,6 @@ namespace Genesis.RoomScan
                 StartScanning();
         }
 
-        /// <summary>
-        /// Sets the render mode and applies it immediately.
-        /// </summary>
         public void SetRenderMode(ScanRenderMode newMode)
         {
             renderMode = newMode;
@@ -342,9 +348,6 @@ namespace Genesis.RoomScan
             Debug.Log($"[RoomScan] Render mode: {renderMode}");
         }
 
-        /// <summary>
-        /// Cycles through Mesh → Splat → Both → Mesh.
-        /// </summary>
         public void CycleRenderMode()
         {
             var next = renderMode switch
@@ -356,57 +359,41 @@ namespace Genesis.RoomScan
             SetRenderMode(next);
         }
 
-        /// <summary>
-        /// Freezes voxels visible from the current passthrough camera frustum.
-        /// </summary>
         public void FreezeInView()
         {
-            if (volumeIntegrator == null) return;
+            if (_volumeIntegrator == null) return;
             if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
                     out var sensor, out var current)) return;
 
-            volumeIntegrator.FreezeInView(pose.position, pose.rotation,
+            _volumeIntegrator.FreezeInView(pose.position, pose.rotation,
                 focal, principal, sensor, current);
         }
 
-        /// <summary>
-        /// Unfreezes voxels visible from the current passthrough camera frustum.
-        /// </summary>
         public void UnfreezeInView()
         {
-            if (volumeIntegrator == null) return;
+            if (_volumeIntegrator == null) return;
             if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
                     out var sensor, out var current)) return;
 
-            volumeIntegrator.UnfreezeInView(pose.position, pose.rotation,
+            _volumeIntegrator.UnfreezeInView(pose.position, pose.rotation,
                 focal, principal, sensor, current);
         }
 
-        /// <summary>
-        /// Exports the current point cloud to disk.
-        /// </summary>
         public async Task ExportPointCloudAsync()
         {
-            if (pointCloudExporter != null)
-                await pointCloudExporter.ExportAsync();
+            if (_pointCloudExporter != null)
+                await _pointCloudExporter.ExportAsync();
         }
 
-        /// <summary>
-        /// Runs the full server-side Gaussian Splatting training pipeline
-        /// (export → upload → train → download → load).
-        /// </summary>
         public void StartServerTraining()
         {
             if (_serverTrainingInProgress) return;
             RunServerTrainingAsync();
         }
 
-        /// <summary>
-        /// Toggles the debug menu visibility.
-        /// </summary>
         public void ToggleDebugMenu()
         {
-            if (debugMenu != null) debugMenu.Toggle();
+            if (_debugMenu != null) _debugMenu.Toggle();
         }
 
         /// <summary>
@@ -419,14 +406,14 @@ namespace Genesis.RoomScan
 
         public void AddExclusionZone(Transform t)
         {
-            if (volumeIntegrator != null)
-                volumeIntegrator.ExclusionZones.Add(t);
+            if (_volumeIntegrator != null)
+                _volumeIntegrator.ExclusionZones.Add(t);
         }
 
         public void RemoveExclusionZone(Transform t)
         {
-            if (volumeIntegrator != null)
-                volumeIntegrator.ExclusionZones.Remove(t);
+            if (_volumeIntegrator != null)
+                _volumeIntegrator.ExclusionZones.Remove(t);
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -451,27 +438,9 @@ namespace Genesis.RoomScan
             return true;
         }
 
-        private void ValidateComponents()
-        {
-            if (depthCapture == null) depthCapture = FindFirstObjectByType<DepthCapture>();
-            if (volumeIntegrator == null) volumeIntegrator = FindFirstObjectByType<VolumeIntegrator>();
-            if (meshExtractor == null) meshExtractor = FindFirstObjectByType<MeshExtractor>();
-            if (triplanarCache == null) triplanarCache = FindFirstObjectByType<TriplanarCache>();
-            if (persistence == null) persistence = FindFirstObjectByType<RoomScanPersistence>();
-            if (keyframeCollector == null) keyframeCollector = FindFirstObjectByType<KeyframeCollector>();
-            if (pointCloudExporter == null) pointCloudExporter = FindFirstObjectByType<PointCloudExporter>();
-            if (gsplatManager == null) gsplatManager = FindFirstObjectByType<GSplatManager>();
-            if (gsplatServerClient == null) gsplatServerClient = FindFirstObjectByType<GSplat.GSplatServerClient>();
-            if (debugMenu == null) debugMenu = FindFirstObjectByType<DebugMenuController>();
-
-            if (depthCapture == null) Debug.LogError("[RoomScan] DepthCapture not found");
-            if (volumeIntegrator == null) Debug.LogError("[RoomScan] VolumeIntegrator not found");
-            if (meshExtractor == null) Debug.LogError("[RoomScan] MeshExtractor not found");
-        }
-
         private void SetupHeadExclusion()
         {
-            if (volumeIntegrator == null) return;
+            if (_volumeIntegrator == null) return;
 
             var cam = Camera.main;
             if (cam != null)
@@ -493,7 +462,6 @@ namespace Genesis.RoomScan
         private int _colorFrameLog;
         private void ProvideColorFrame()
         {
-            if (volumeIntegrator == null) return;
             ICameraProvider provider = GetActiveCameraProvider();
 
             if (provider is PassthroughCameraProvider pcp && pcp.IsReady)
@@ -507,29 +475,26 @@ namespace Genesis.RoomScan
                     Vector2 sensor = pcp.SensorResolution;
                     Vector2 current = pcp.CurrentResolution;
 
-                    volumeIntegrator.SetCameraData(
+                    _volumeIntegrator.SetCameraData(
                         frame, pose.position, pose.rotation,
                         focal, principal, sensor, current);
 
-                    if (keyframeCollector != null)
-                    {
-                        keyframeCollector.TrySaveKeyframe(frame, pose.position, pose.rotation,
-                            focal, principal, sensor, current);
-                    }
+                    _keyframeCollector.TrySaveKeyframe(frame, pose.position, pose.rotation,
+                        focal, principal, sensor, current);
 
-                    if (triplanarCache != null)
+                    if (_triplanarCache != null)
                     {
-                        triplanarCache.DispatchBake(frame, pose.position, pose.rotation,
+                        _triplanarCache.DispatchBake(frame, pose.position, pose.rotation,
                             focal, principal, sensor, current,
-                            volumeIntegrator.CameraExposure,
-                            volumeIntegrator.ExclusionZones);
+                            _volumeIntegrator.CameraExposure,
+                            _volumeIntegrator.ExclusionZones);
                     }
 
                     _colorFrameLog++;
                     if (_colorFrameLog <= 3 || _colorFrameLog % 50 == 0)
                         Debug.Log($"[RoomScan] ColorFrame #{_colorFrameLog}: " +
                             $"frame={frame.width}x{frame.height}, " +
-                            $"triCache={triplanarCache != null}");
+                            $"triCache={_triplanarCache != null}");
 
                     return;
                 }
@@ -542,16 +507,15 @@ namespace Genesis.RoomScan
                     $"isPcp={provider is PassthroughCameraProvider}, " +
                     $"isReady={((provider as PassthroughCameraProvider)?.IsReady ?? false)}");
 
-            volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
+            _volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);
         }
 
         private void ApplyRenderMode()
         {
-            var gpuRenderer = meshExtractor?.GetComponent<GPUMeshRenderer>();
-            var splatRend = gsplatManager != null
-                ? gsplatManager.GetComponent<GSplat.GSRenderer>()
-                  ?? FindFirstObjectByType<GSplat.GSRenderer>()
+            var gpuRenderer = _meshExtractor != null ? _meshExtractor.GetComponent<GPUMeshRenderer>() : null;
+            var splatRend = _gsplatManager != null
+                ? _gsplatManager.GetComponent<GSRenderer>()
                 : null;
 
             if (gpuRenderer != null)
@@ -570,25 +534,22 @@ namespace Genesis.RoomScan
                 Debug.Log("[RoomScan] Starting server-side GS training pipeline...");
 
                 Debug.Log("[RoomScan] Exporting point cloud...");
-                await pointCloudExporter.ExportAsync();
+                await _pointCloudExporter.ExportAsync();
 
                 Debug.Log("[RoomScan] Uploading training data to PC server...");
-                bool uploaded = await gsplatServerClient.UploadTrainingData();
+                bool uploaded = await _gsplatServerClient.UploadTrainingData();
                 if (!uploaded) { Debug.LogError("[RoomScan] Upload failed"); return; }
 
                 Debug.Log("[RoomScan] Waiting for server training to complete...");
-                bool success = await gsplatServerClient.PollUntilDone();
+                bool success = await _gsplatServerClient.PollUntilDone();
                 if (!success) { Debug.LogError("[RoomScan] Server training failed"); return; }
 
                 Debug.Log("[RoomScan] Downloading trained Gaussians...");
-                byte[] plyData = await gsplatServerClient.DownloadResult();
+                byte[] plyData = await _gsplatServerClient.DownloadResult();
                 if (plyData == null || plyData.Length == 0) { Debug.LogError("[RoomScan] Download empty"); return; }
 
-                if (gsplatManager != null)
-                {
-                    gsplatManager.LoadTrainedPly(plyData);
-                    Debug.Log("[RoomScan] Trained Gaussians loaded and ready for rendering");
-                }
+                _gsplatManager.LoadTrainedPly(plyData);
+                Debug.Log("[RoomScan] Trained Gaussians loaded and ready for rendering");
             }
             catch (Exception e)
             {
@@ -603,13 +564,13 @@ namespace Genesis.RoomScan
         private ICameraProvider GetActiveCameraProvider()
         {
             if (_customCameraProvider != null) return _customCameraProvider;
-            return cameraProvider;
+            return _cameraProvider;
         }
 
         private void ApplyVisualization()
         {
-            if (meshExtractor == null) return;
-            var gpuRenderer = meshExtractor.GetComponent<GPUMeshRenderer>();
+            if (_meshExtractor == null) return;
+            var gpuRenderer = _meshExtractor.GetComponent<GPUMeshRenderer>();
             if (gpuRenderer == null) return;
 
             gpuRenderer.enabled = visualization != ScanVisualization.Hidden;

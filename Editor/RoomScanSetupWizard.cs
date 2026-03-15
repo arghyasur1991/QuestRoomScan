@@ -396,46 +396,35 @@ namespace Genesis.RoomScan.Editor
                 }
             }
 
-            if (root.GetComponent<DepthCapture>() == null)
-                Undo.AddComponent<DepthCapture>(root);
-            if (root.GetComponent<VolumeIntegrator>() == null)
-                Undo.AddComponent<VolumeIntegrator>(root);
-            if (root.GetComponent<MeshExtractor>() == null)
-                Undo.AddComponent<MeshExtractor>(root);
+            // PassthroughCameraAccess isn't pulled in by RequireComponent
             if (root.GetComponent<PassthroughCameraAccess>() == null)
                 Undo.AddComponent<PassthroughCameraAccess>(root);
-            if (root.GetComponent<PassthroughCameraProvider>() == null)
-                Undo.AddComponent<PassthroughCameraProvider>(root);
+
+            // Adding RoomScanner auto-adds all [RequireComponent] siblings:
+            // DepthCapture, VolumeIntegrator, MeshExtractor,
+            // PassthroughCameraProvider, TriplanarCache, RoomScanPersistence,
+            // KeyframeCollector, PointCloudExporter, GSplatManager,
+            // GSplatServerClient (which also pulls GSRenderer via its own RequireComponent)
             if (root.GetComponent<RoomScanner>() == null)
                 Undo.AddComponent<RoomScanner>(root);
-            if (root.GetComponent<CameraDebugOverlay>() == null)
-            {
-                var camDebug = Undo.AddComponent<CameraDebugOverlay>(root);
-                camDebug.enabled = false;
-            }
-            if (root.GetComponent<DepthDebugOverlay>() == null)
-            {
-                var depthDebug = Undo.AddComponent<DepthDebugOverlay>(root);
-                depthDebug.enabled = false;
-            }
-            if (root.GetComponent<TriplanarCache>() == null)
-                Undo.AddComponent<TriplanarCache>(root);
-            if (root.GetComponent<RoomScanPersistence>() == null)
-                Undo.AddComponent<RoomScanPersistence>(root);
-            if (root.GetComponent<KeyframeCollector>() == null)
-                Undo.AddComponent<KeyframeCollector>(root);
-            if (root.GetComponent<PointCloudExporter>() == null)
-                Undo.AddComponent<PointCloudExporter>(root);
-            if (root.GetComponent<GSRenderer>() == null)
-                Undo.AddComponent<GSRenderer>(root);
-            if (root.GetComponent<GSplatManager>() == null)
-                Undo.AddComponent<GSplatManager>(root);
-            if (root.GetComponent<GSplatServerClient>() == null)
-                Undo.AddComponent<GSplatServerClient>(root);
 
+            // Optional components not covered by RequireComponent
             if (root.GetComponent<RoomScanInputHandler>() == null)
                 Undo.AddComponent<RoomScanInputHandler>(root);
 
+            // Debug overlays — disabled by default
+            if (root.GetComponent<CameraDebugOverlay>() == null)
+            {
+                var c = Undo.AddComponent<CameraDebugOverlay>(root);
+                c.enabled = false;
+            }
+            if (root.GetComponent<DepthDebugOverlay>() == null)
+            {
+                var c = Undo.AddComponent<DepthDebugOverlay>(root);
+                c.enabled = false;
+            }
+
+            // DebugMenu lives on a child (needs UIDocument)
             if (FindAny<DebugMenuController>() == null)
             {
                 var debugGo = new GameObject("DebugMenu");
@@ -552,18 +541,6 @@ namespace Genesis.RoomScan.Editor
                 AssignCompute(so, "surfaceNetsCompute", PKG + "SurfaceNetsExtract.compute");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_meshExtractor);
-            }
-
-            // GSplatManager — wire sector renderer reference
-            if (_gsplatManager != null)
-            {
-                var so = new SerializedObject(_gsplatManager);
-                Refresh();
-                var rendProp = so.FindProperty("splatRenderer");
-                if (rendProp != null && rendProp.objectReferenceValue == null && _gsRenderer != null)
-                    rendProp.objectReferenceValue = _gsRenderer;
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_gsplatManager);
             }
 
             // GSRenderer — view prepass + sort compute + splat material
@@ -780,37 +757,13 @@ namespace Genesis.RoomScan.Editor
             FixComponents();
             FixShaderWiring();
 
-            // Wire RoomScanner references to sibling components
-            Refresh();
-            if (_roomScanner != null)
-            {
-                var so = new SerializedObject(_roomScanner);
-                SetRef(so, "depthCapture", _depthCapture);
-                SetRef(so, "volumeIntegrator", _volumeIntegrator);
-                SetRef(so, "meshExtractor", _meshExtractor);
-                SetRef(so, "cameraProvider", _cameraProvider);
-                SetRef(so, "triplanarCache", _triplanarCache);
-                SetRef(so, "persistence", _persistence);
-                SetRef(so, "keyframeCollector", _keyframeCollector);
-                SetRef(so, "pointCloudExporter", _pointCloudExporter);
-                SetRef(so, "gsplatManager", _gsplatManager);
-                SetRef(so, "gsplatServerClient", _gsplatServerClient);
-                SetRef(so, "debugMenu", _debugMenu);
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_roomScanner);
-            }
+            // RoomScanner and GSplatManager resolve siblings via GetComponent —
+            // no serialized wiring needed.
 
             MarkDirty();
             Refresh();
 
             Debug.Log("[RoomScan Setup] Scene setup complete.");
-        }
-
-        static void SetRef(SerializedObject so, string field, Object value)
-        {
-            var prop = so.FindProperty(field);
-            if (prop != null && prop.objectReferenceValue == null && value != null)
-                prop.objectReferenceValue = value;
         }
 
         // =================================================================
