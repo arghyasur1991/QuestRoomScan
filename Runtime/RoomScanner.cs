@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using Genesis.RoomScan.GSplat;
 using Genesis.RoomScan.UI;
 using UnityEngine;
@@ -28,9 +29,9 @@ namespace Genesis.RoomScan
     }
 
     /// <summary>
-    /// Top-level orchestrator for room scanning. Manages the scanning pipeline:
-    /// DepthCapture → VolumeIntegrator → MeshExtractor.
-    /// Supports passive (background) and guided (active) scan modes.
+    /// Top-level orchestrator for room scanning. Exposes a public API surface
+    /// that any client can call directly. Input bindings are handled by the
+    /// separate <see cref="RoomScanInputHandler"/> component which is optional.
     /// </summary>
     public class RoomScanner : MonoBehaviour
     {
@@ -74,6 +75,14 @@ namespace Genesis.RoomScan
         [Header("Guided Mode")]
         [SerializeField] private float guidedTimeoutSeconds = 60f;
 
+        [Header("Persistence")]
+        [SerializeField, Tooltip("Seconds between autosaves during scanning (0 = disabled)")]
+        private float autoSaveIntervalSeconds = 10f;
+
+        // ─────────────────────────────────────────────────────────────
+        //  Public read-only state
+        // ─────────────────────────────────────────────────────────────
+
         public ScanMode Mode
         {
             get => mode;
@@ -89,23 +98,34 @@ namespace Genesis.RoomScan
         public bool IsScanning { get; private set; }
         public ScanRenderMode CurrentRenderMode => renderMode;
         public bool IsGsTrainingInProgress => _serverTrainingInProgress;
+        public DebugMenuController DebugMenu => debugMenu;
+
+        // ─────────────────────────────────────────────────────────────
+        //  Events
+        // ─────────────────────────────────────────────────────────────
 
         public event Action<ScanMode> ModeChanged;
         public event Action ScanStarted;
         public event Action ScanStopped;
+        public event Action<ScanRenderMode> RenderModeChanged;
+
+        // ─────────────────────────────────────────────────────────────
+        //  Private state
+        // ─────────────────────────────────────────────────────────────
 
         private float _lastIntegrationTime;
         private float _lastMeshTime;
         private float _guidedStartTime;
         private float _lastAutoSaveTime;
         private bool _started;
-
-        [Header("Persistence")]
-        [SerializeField, Tooltip("Seconds between autosaves during scanning (0 = disabled)")]
-        private float autoSaveIntervalSeconds = 10f;
+        private bool _serverTrainingInProgress;
 
         private float IntegrationInterval => 1f / (mode == ScanMode.Guided ? guidedIntegrationHz : passiveIntegrationHz);
         private float MeshInterval => 1f / (mode == ScanMode.Guided ? guidedMeshExtractionHz : passiveMeshExtractionHz);
+
+        // ─────────────────────────────────────────────────────────────
+        //  Lifecycle
+        // ─────────────────────────────────────────────────────────────
 
         private void Awake()
         {
@@ -117,8 +137,6 @@ namespace Genesis.RoomScan
         {
             ValidateComponents();
             SetupHeadExclusion();
-            WireDebugMenu();
-
             OnRoomReady();
         }
 
@@ -184,10 +202,6 @@ namespace Genesis.RoomScan
 
         private void Update()
         {
-            PollMenuInput();
-            PollFreezeInput();
-            PollTrainingTrigger();
-
             if (!IsScanning || !DepthCapture.DepthAvailable) return;
 
             float t = Time.time;
@@ -231,6 +245,10 @@ namespace Genesis.RoomScan
             }
         }
 
+        // ═════════════════════════════════════════════════════════════
+        //  PUBLIC API — call these from any client, input handler, or UI
+        // ═════════════════════════════════════════════════════════════
+
         public void StartScanning()
         {
             if (IsScanning) return;
@@ -256,6 +274,12 @@ namespace Genesis.RoomScan
             provider?.StopCapture();
 
             ScanStopped?.Invoke();
+        }
+
+        public void ToggleScanning()
+        {
+            if (IsScanning) StopScanning();
+            else StartScanning();
         }
 
         public void SetMode(ScanMode newMode)
@@ -289,7 +313,6 @@ namespace Genesis.RoomScan
         public void ClearAllData()
         {
             StopScanning();
-
             ClearScan();
 
             if (persistence != null)
@@ -309,17 +332,91 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Set a custom camera provider (overrides WebCamProvider).
-        /// Call before StartScanning or during runtime.
+        /// Sets the render mode and applies it immediately.
+        /// </summary>
+        public void SetRenderMode(ScanRenderMode newMode)
+        {
+            renderMode = newMode;
+            ApplyRenderMode();
+            RenderModeChanged?.Invoke(renderMode);
+            Debug.Log($"[RoomScan] Render mode: {renderMode}");
+        }
+
+        /// <summary>
+        /// Cycles through Mesh → Splat → Both → Mesh.
+        /// </summary>
+        public void CycleRenderMode()
+        {
+            var next = renderMode switch
+            {
+                ScanRenderMode.Mesh => ScanRenderMode.Splat,
+                ScanRenderMode.Splat => ScanRenderMode.Both,
+                _ => ScanRenderMode.Mesh,
+            };
+            SetRenderMode(next);
+        }
+
+        /// <summary>
+        /// Freezes voxels visible from the current passthrough camera frustum.
+        /// </summary>
+        public void FreezeInView()
+        {
+            if (volumeIntegrator == null) return;
+            if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
+                    out var sensor, out var current)) return;
+
+            volumeIntegrator.FreezeInView(pose.position, pose.rotation,
+                focal, principal, sensor, current);
+        }
+
+        /// <summary>
+        /// Unfreezes voxels visible from the current passthrough camera frustum.
+        /// </summary>
+        public void UnfreezeInView()
+        {
+            if (volumeIntegrator == null) return;
+            if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
+                    out var sensor, out var current)) return;
+
+            volumeIntegrator.UnfreezeInView(pose.position, pose.rotation,
+                focal, principal, sensor, current);
+        }
+
+        /// <summary>
+        /// Exports the current point cloud to disk.
+        /// </summary>
+        public async Task ExportPointCloudAsync()
+        {
+            if (pointCloudExporter != null)
+                await pointCloudExporter.ExportAsync();
+        }
+
+        /// <summary>
+        /// Runs the full server-side Gaussian Splatting training pipeline
+        /// (export → upload → train → download → load).
+        /// </summary>
+        public void StartServerTraining()
+        {
+            if (_serverTrainingInProgress) return;
+            RunServerTrainingAsync();
+        }
+
+        /// <summary>
+        /// Toggles the debug menu visibility.
+        /// </summary>
+        public void ToggleDebugMenu()
+        {
+            if (debugMenu != null) debugMenu.Toggle();
+        }
+
+        /// <summary>
+        /// Set a custom camera provider (overrides PassthroughCameraProvider).
         /// </summary>
         public void SetCameraProvider(ICameraProvider provider)
         {
             _customCameraProvider = provider;
         }
 
-        /// <summary>
-        /// Add a transform to the exclusion zone list (e.g. player head, tracked controller).
-        /// </summary>
         public void AddExclusionZone(Transform t)
         {
             if (volumeIntegrator != null)
@@ -330,6 +427,28 @@ namespace Genesis.RoomScan
         {
             if (volumeIntegrator != null)
                 volumeIntegrator.ExclusionZones.Remove(t);
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Internal helpers
+        // ─────────────────────────────────────────────────────────────
+
+        private bool TryGetCameraIntrinsics(out Pose pose, out Vector2 focal,
+            out Vector2 principal, out Vector2 sensor, out Vector2 current)
+        {
+            pose = default;
+            focal = principal = sensor = current = default;
+
+            ICameraProvider provider = GetActiveCameraProvider();
+            if (provider is not PassthroughCameraProvider pcp || !pcp.IsReady)
+                return false;
+
+            pose = pcp.CameraPose;
+            focal = pcp.FocalLength;
+            principal = pcp.PrincipalPoint;
+            sensor = pcp.SensorResolution;
+            current = pcp.CurrentResolution;
+            return true;
         }
 
         private void ValidateComponents()
@@ -364,28 +483,6 @@ namespace Genesis.RoomScan
             {
                 Debug.LogWarning("[RoomScan] No main camera found for head exclusion zone");
             }
-        }
-
-        private void WireDebugMenu()
-        {
-            if (debugMenu == null) return;
-
-            debugMenu.ToggleScanRequested += () =>
-            {
-                if (IsScanning) StopScanning();
-                else StartScanning();
-            };
-            debugMenu.ClearAllRequested += ClearAllData;
-            debugMenu.ExportPointCloudRequested += async () =>
-            {
-                if (pointCloudExporter != null)
-                    await pointCloudExporter.ExportAsync();
-            };
-            debugMenu.StartGsTrainingRequested += () =>
-            {
-                if (!_serverTrainingInProgress)
-                    RunServerTrainingAsync();
-            };
         }
 
         private void SetSafeShaderDefaults()
@@ -449,34 +546,6 @@ namespace Genesis.RoomScan
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);
         }
 
-        private bool _serverTrainingInProgress;
-
-        private void PollTrainingTrigger()
-        {
-            // Right controller B button = cycle render mode
-            if (OVRInput.GetDown(OVRInput.Button.Two))
-            {
-                renderMode = renderMode switch
-                {
-                    ScanRenderMode.Mesh => ScanRenderMode.Splat,
-                    ScanRenderMode.Splat => ScanRenderMode.Both,
-                    _ => ScanRenderMode.Mesh,
-                };
-                ApplyRenderMode();
-                Debug.Log($"[RoomScan] Render mode: {renderMode}");
-            }
-
-            if (_serverTrainingInProgress) return;
-            if (gsplatServerClient == null || pointCloudExporter == null) return;
-
-            // Right controller A button = start server-side GS training
-            if (OVRInput.GetDown(OVRInput.Button.One))
-            {
-                Debug.Log("[RoomScan] GS training trigger pressed (A button)");
-                RunServerTrainingAsync();
-            }
-        }
-
         private void ApplyRenderMode()
         {
             var gpuRenderer = meshExtractor?.GetComponent<GPUMeshRenderer>();
@@ -500,38 +569,21 @@ namespace Genesis.RoomScan
             {
                 Debug.Log("[RoomScan] Starting server-side GS training pipeline...");
 
-                // Step 1: Export latest point cloud
                 Debug.Log("[RoomScan] Exporting point cloud...");
                 await pointCloudExporter.ExportAsync();
 
-                // Step 2: Upload to server
                 Debug.Log("[RoomScan] Uploading training data to PC server...");
                 bool uploaded = await gsplatServerClient.UploadTrainingData();
-                if (!uploaded)
-                {
-                    Debug.LogError("[RoomScan] Upload failed, aborting training");
-                    return;
-                }
+                if (!uploaded) { Debug.LogError("[RoomScan] Upload failed"); return; }
 
-                // Step 3: Poll until done
                 Debug.Log("[RoomScan] Waiting for server training to complete...");
                 bool success = await gsplatServerClient.PollUntilDone();
-                if (!success)
-                {
-                    Debug.LogError("[RoomScan] Server training failed or was cancelled");
-                    return;
-                }
+                if (!success) { Debug.LogError("[RoomScan] Server training failed"); return; }
 
-                // Step 4: Download trained PLY
                 Debug.Log("[RoomScan] Downloading trained Gaussians...");
                 byte[] plyData = await gsplatServerClient.DownloadResult();
-                if (plyData == null || plyData.Length == 0)
-                {
-                    Debug.LogError("[RoomScan] Download returned no data");
-                    return;
-                }
+                if (plyData == null || plyData.Length == 0) { Debug.LogError("[RoomScan] Download empty"); return; }
 
-                // Step 5: Load into renderer
                 if (gsplatManager != null)
                 {
                     gsplatManager.LoadTrainedPly(plyData);
@@ -546,38 +598,6 @@ namespace Genesis.RoomScan
             {
                 _serverTrainingInProgress = false;
             }
-        }
-
-        private void PollMenuInput()
-        {
-            if (debugMenu == null) return;
-            if (OVRInput.GetDown(OVRInput.Button.Start))
-                debugMenu.Toggle();
-        }
-
-        private void PollFreezeInput()
-        {
-            if (volumeIntegrator == null) return;
-
-            bool freeze = OVRInput.GetDown(OVRInput.Button.Three);   // X on left controller
-            bool unfreeze = OVRInput.GetDown(OVRInput.Button.Four);  // Y on left controller
-            if (!freeze && !unfreeze) return;
-
-            ICameraProvider provider = GetActiveCameraProvider();
-            if (provider is not PassthroughCameraProvider pcp || !pcp.IsReady) return;
-
-            Pose pose = pcp.CameraPose;
-            Vector2 focal = pcp.FocalLength;
-            Vector2 principal = pcp.PrincipalPoint;
-            Vector2 sensor = pcp.SensorResolution;
-            Vector2 current = pcp.CurrentResolution;
-
-            if (freeze)
-                volumeIntegrator.FreezeInView(pose.position, pose.rotation,
-                    focal, principal, sensor, current);
-            else
-                volumeIntegrator.UnfreezeInView(pose.position, pose.rotation,
-                    focal, principal, sensor, current);
         }
 
         private ICameraProvider GetActiveCameraProvider()

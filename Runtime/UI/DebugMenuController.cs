@@ -1,4 +1,3 @@
-using System;
 using System.IO;
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -6,9 +5,14 @@ using UnityEngine.UIElements;
 namespace Genesis.RoomScan.UI
 {
     /// <summary>
-    /// Controls the debug HUD panel. Toggled by the Menu/Start button.
-    /// Reads live status from RoomScanner and related components, and
-    /// exposes action buttons for clearing data, exporting, and training.
+    /// Controls the debug HUD panel. Reads live status from <see cref="RoomScanner"/>
+    /// and related components. Action buttons call the RoomScanner public API directly.
+    ///
+    /// Clients can:
+    ///   - Call <see cref="Toggle"/>, <see cref="Show"/>, <see cref="Hide"/> from any script.
+    ///   - Read <see cref="IsVisible"/> to check state.
+    ///   - Override button behavior by subclassing or by disabling this component
+    ///     and driving the UIDocument directly.
     /// </summary>
     [RequireComponent(typeof(UIDocument))]
     public class DebugMenuController : MonoBehaviour
@@ -34,16 +38,12 @@ namespace Genesis.RoomScan.UI
         private Button _btnExportPc;
         private Button _btnGsTrain;
 
-        // Events — RoomScanner subscribes to these
-        public event Action ToggleScanRequested;
-        public event Action ClearAllRequested;
-        public event Action ExportPointCloudRequested;
-        public event Action StartGsTrainingRequested;
-
         // FPS tracking
         private float _fpsTimer;
         private int _fpsFrames;
         private float _currentFps;
+
+        public bool IsVisible => _visible;
 
         private void Awake()
         {
@@ -60,24 +60,20 @@ namespace Genesis.RoomScan.UI
             BindButtons();
         }
 
-        private void OnDisable()
-        {
-            UnbindButtons();
-        }
-
         private void Update()
         {
             UpdateFps();
-
-            if (!_visible) return;
-            RefreshStatus();
+            if (_visible) RefreshStatus();
         }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Public API
+        // ─────────────────────────────────────────────────────────────
 
         public void Toggle()
         {
-            _visible = !_visible;
-            _root.style.display = _visible ? DisplayStyle.Flex : DisplayStyle.None;
-            if (_visible) RefreshStatus();
+            if (_visible) Hide();
+            else Show();
         }
 
         public void Show()
@@ -93,7 +89,9 @@ namespace Genesis.RoomScan.UI
             _root.style.display = DisplayStyle.None;
         }
 
-        public bool IsVisible => _visible;
+        // ─────────────────────────────────────────────────────────────
+        //  Internal
+        // ─────────────────────────────────────────────────────────────
 
         private void QueryElements()
         {
@@ -115,18 +113,20 @@ namespace Genesis.RoomScan.UI
 
         private void BindButtons()
         {
-            _btnToggleScan?.RegisterCallback<ClickEvent>(_ => ToggleScanRequested?.Invoke());
-            _btnClearAll?.RegisterCallback<ClickEvent>(_ => ClearAllRequested?.Invoke());
-            _btnExportPc?.RegisterCallback<ClickEvent>(_ => ExportPointCloudRequested?.Invoke());
-            _btnGsTrain?.RegisterCallback<ClickEvent>(_ => StartGsTrainingRequested?.Invoke());
-        }
+            _btnToggleScan?.RegisterCallback<ClickEvent>(_ =>
+                RoomScanner.Instance?.ToggleScanning());
 
-        private void UnbindButtons()
-        {
-            _btnToggleScan?.UnregisterCallback<ClickEvent>(_ => { });
-            _btnClearAll?.UnregisterCallback<ClickEvent>(_ => { });
-            _btnExportPc?.UnregisterCallback<ClickEvent>(_ => { });
-            _btnGsTrain?.UnregisterCallback<ClickEvent>(_ => { });
+            _btnClearAll?.RegisterCallback<ClickEvent>(_ =>
+                RoomScanner.Instance?.ClearAllData());
+
+            _btnExportPc?.RegisterCallback<ClickEvent>(async _ =>
+            {
+                if (RoomScanner.Instance != null)
+                    await RoomScanner.Instance.ExportPointCloudAsync();
+            });
+
+            _btnGsTrain?.RegisterCallback<ClickEvent>(_ =>
+                RoomScanner.Instance?.StartServerTraining());
         }
 
         private void RefreshStatus()
@@ -137,6 +137,7 @@ namespace Genesis.RoomScan.UI
             SetLabel(_valScanning, scanner.IsScanning ? "Active" : "Stopped");
             SetLabel(_valMode, scanner.Mode.ToString());
             SetLabel(_valRender, scanner.CurrentRenderMode.ToString());
+            SetLabel(_valGsTraining, scanner.IsGsTrainingInProgress ? "Running..." : "Idle");
 
             if (_btnToggleScan != null)
                 _btnToggleScan.text = scanner.IsScanning ? "Stop Scanning" : "Start Scanning";
@@ -158,7 +159,6 @@ namespace Genesis.RoomScan.UI
                 && Directory.GetFiles(gsExportDir, "*.jpg", SearchOption.AllDirectories).Length > 0;
             SetLabel(_valGsExport, hasExport ? "Yes" : "No");
 
-            SetLabel(_valGsTraining, scanner.IsGsTrainingInProgress ? "Running..." : "Idle");
             SetLabel(_valFps, $"{_currentFps:F0} FPS");
         }
 

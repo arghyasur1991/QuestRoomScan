@@ -40,6 +40,7 @@ namespace Genesis.RoomScan.Editor
         GSRenderer _gsRenderer;
         GSplatServerClient _gsplatServerClient;
         DebugMenuController _debugMenu;
+        RoomScanInputHandler _inputHandler;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
         bool _gsRendererComputeWired;
@@ -113,6 +114,7 @@ namespace Genesis.RoomScan.Editor
             _gsRenderer = FindAny<GSRenderer>();
             _gsplatServerClient = FindAny<GSplatServerClient>();
             _debugMenu = FindAny<DebugMenuController>();
+            _inputHandler = FindAny<RoomScanInputHandler>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute");
@@ -349,6 +351,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("GSRenderer (splat rendering)", _gsRenderer != null);
             StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
             StatusRow("DebugMenuController (HUD)", _debugMenu != null);
+            StatusRow("RoomScanInputHandler (bindings)", _inputHandler != null);
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _meshExtractor == null ||
@@ -359,7 +362,7 @@ namespace Genesis.RoomScan.Editor
                               _pointCloudExporter == null ||
                               _gsplatManager == null || _gsRenderer == null ||
                               _gsplatServerClient == null ||
-                              _debugMenu == null;
+                              _debugMenu == null || _inputHandler == null;
 
             if (anyMissing)
             {
@@ -429,6 +432,9 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<GSplatManager>(root);
             if (root.GetComponent<GSplatServerClient>() == null)
                 Undo.AddComponent<GSplatServerClient>(root);
+
+            if (root.GetComponent<RoomScanInputHandler>() == null)
+                Undo.AddComponent<RoomScanInputHandler>(root);
 
             if (FindAny<DebugMenuController>() == null)
             {
