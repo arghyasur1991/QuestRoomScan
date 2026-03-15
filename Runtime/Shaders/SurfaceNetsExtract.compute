@@ -7,10 +7,9 @@
 //   2. ClassifyAndEmit  (3D over volume)
 //   3. BuildVertexDispatchArgs  (1 thread)
 //   4. [optional] InitSmooth -> N x SmoothVertices -> ApplySmooth
-//   5. [optional] PlaneSnap
-//   6. [optional] TemporalBlend
-//   7. GenerateIndices  (indirect 1D over vertices)
-//   8. BuildIndirectArgs  (1 thread)
+//   5. [optional] TemporalBlend
+//   6. GenerateIndices  (indirect 1D over vertices)
+//   7. BuildIndirectArgs  (1 thread)
 
 #pragma kernel ClearCounters
 #pragma kernel ClassifyAndEmit
@@ -18,7 +17,6 @@
 #pragma kernel InitSmooth
 #pragma kernel SmoothVertices
 #pragma kernel ApplySmooth
-#pragma kernel PlaneSnap
 #pragma kernel TemporalBlend
 #pragma kernel GenerateIndices
 #pragma kernel BuildIndirectArgs
@@ -41,11 +39,6 @@ uint   _MaxVertices;
 
 float  _SmoothLambda;
 float  _SmoothBeta;
-
-uint   _NumPlanes;
-float  _SnapThreshold;
-float4 _PlaneNormals[8];     // xyz = normal
-float4 _PlaneParams[8];      // x = distance, y = confidence
 
 float  _TemporalAlphaMax;
 float  _TemporalAlphaMin;
@@ -318,46 +311,7 @@ void ApplySmooth(uint3 id : SV_DispatchThreadID)
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  Kernel 6 : PlaneSnap
-// ══════════════════════════════════════════════════════════════════
-[numthreads(64, 1, 1)]
-void PlaneSnap(uint3 id : SV_DispatchThreadID)
-{
-    uint vertCount = min(_Counters[0], _MaxVertices);
-    if (id.x >= vertCount) return;
-
-    GPUVertex v = _Vertices[id.x];
-    float3 pos  = v.pos;
-    float3 norm = v.norm;
-
-    float bestDist  = _SnapThreshold;
-    int   bestPlane = -1;
-
-    for (uint p = 0; p < _NumPlanes; p++)
-    {
-        float3 pn = _PlaneNormals[p].xyz;
-        if (abs(dot(norm, pn)) < 0.9) continue;
-
-        float d = abs(dot(pos, pn) - _PlaneParams[p].x);
-        if (d < bestDist)
-        {
-            bestDist  = d;
-            bestPlane = (int)p;
-        }
-    }
-
-    if (bestPlane >= 0)
-    {
-        float3 pn   = _PlaneNormals[bestPlane].xyz;
-        float  sd   = dot(pos, pn) - _PlaneParams[bestPlane].x;
-        float  str  = saturate(_PlaneParams[bestPlane].y);
-        v.pos = pos - sd * pn * str;
-        _Vertices[id.x] = v;
-    }
-}
-
-// ══════════════════════════════════════════════════════════════════
-//  Kernel 7 : TemporalBlend
+//  Kernel 6 : TemporalBlend
 //  Adaptive temporal damping keyed by voxel 3D coordinate
 //  _TemporalState is a RWTexture3D<float4>
 // ══════════════════════════════════════════════════════════════════
@@ -400,7 +354,7 @@ void TemporalBlend(uint3 id : SV_DispatchThreadID)
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  Kernel 8 : GenerateIndices
+//  Kernel 7 : GenerateIndices
 //  Per vertex: check 3 axes for quad emission
 // ══════════════════════════════════════════════════════════════════
 void TryEmitQuad(int3 coord, int3 axis, int3 d1, int3 d2)
@@ -456,7 +410,7 @@ void GenerateIndices(uint3 id : SV_DispatchThreadID)
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  Kernel 9 : BuildIndirectArgs
+//  Kernel 8 : BuildIndirectArgs
 //  Packs index count into DrawProceduralIndirect args
 // ══════════════════════════════════════════════════════════════════
 [numthreads(1, 1, 1)]
@@ -470,7 +424,7 @@ void BuildIndirectArgs(uint3 id : SV_DispatchThreadID)
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  Kernel 10 : InitTemporal
+//  Kernel 9 : InitTemporal
 //  Sets all voxels in _TemporalState to (0,0,0,-1) (uninitialized)
 // ══════════════════════════════════════════════════════════════════
 [numthreads(4, 4, 4)]
