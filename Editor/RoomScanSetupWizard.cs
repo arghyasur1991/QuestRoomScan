@@ -431,27 +431,12 @@ namespace Genesis.RoomScan.Editor
                 debugGo.transform.SetParent(root.transform);
                 Undo.RegisterCreatedObjectUndo(debugGo, "Create DebugMenu");
 
-                var uiDoc = Undo.AddComponent<UnityEngine.UIElements.UIDocument>(debugGo);
-
-                var uxml = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.VisualTreeAsset>(
-                    "Packages/com.genesis.roomscan/Runtime/UI/DebugMenu.uxml");
-                var panel = FindOrCreatePanelSettings();
-
-                var so = new SerializedObject(uiDoc);
-                if (uxml != null)
-                {
-                    var vta = so.FindProperty("sourceAsset");
-                    if (vta != null) vta.objectReferenceValue = uxml;
-                }
-                if (panel != null)
-                {
-                    var ps = so.FindProperty("panelSettings");
-                    if (ps != null) ps.objectReferenceValue = panel;
-                }
-                so.ApplyModifiedProperties();
-
+                Undo.AddComponent<UnityEngine.UIElements.UIDocument>(debugGo);
                 Undo.AddComponent<DebugMenuController>(debugGo);
             }
+
+            // Always ensure UIDocument has its assets assigned
+            EnsureDebugMenuAssets();
 
             MarkDirty();
             Refresh();
@@ -868,6 +853,39 @@ namespace Genesis.RoomScan.Editor
         static void MarkDirty() =>
             EditorSceneManager.MarkSceneDirty(
                 UnityEngine.SceneManagement.SceneManager.GetActiveScene());
+
+        static void EnsureDebugMenuAssets()
+        {
+            var ctrl = FindAny<DebugMenuController>();
+            if (ctrl == null) return;
+
+            var uiDoc = ctrl.GetComponent<UnityEngine.UIElements.UIDocument>();
+            if (uiDoc == null) return;
+
+            var so = new SerializedObject(uiDoc);
+            bool changed = false;
+
+            var vtaProp = so.FindProperty("sourceAsset");
+            if (vtaProp != null && vtaProp.objectReferenceValue == null)
+            {
+                var uxml = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.VisualTreeAsset>(
+                    "Packages/com.genesis.roomscan/Runtime/UI/DebugMenu.uxml");
+                if (uxml != null) { vtaProp.objectReferenceValue = uxml; changed = true; }
+            }
+
+            var psProp = so.FindProperty("panelSettings");
+            if (psProp != null && psProp.objectReferenceValue == null)
+            {
+                var panel = FindOrCreatePanelSettings();
+                if (panel != null) { psProp.objectReferenceValue = panel; changed = true; }
+            }
+
+            if (changed)
+            {
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(uiDoc);
+            }
+        }
 
         static UnityEngine.UIElements.PanelSettings FindOrCreatePanelSettings()
         {
