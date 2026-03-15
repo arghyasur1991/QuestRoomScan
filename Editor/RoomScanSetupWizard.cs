@@ -443,15 +443,23 @@ namespace Genesis.RoomScan.Editor
                 Undo.RegisterCreatedObjectUndo(debugGo, "Create DebugMenu");
 
                 var uiDoc = Undo.AddComponent<UnityEngine.UIElements.UIDocument>(debugGo);
+
                 var uxml = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.VisualTreeAsset>(
                     "Packages/com.genesis.roomscan/Runtime/UI/DebugMenu.uxml");
+                var panel = FindOrCreatePanelSettings();
+
+                var so = new SerializedObject(uiDoc);
                 if (uxml != null)
                 {
-                    var so = new SerializedObject(uiDoc);
                     var vta = so.FindProperty("sourceAsset");
                     if (vta != null) vta.objectReferenceValue = uxml;
-                    so.ApplyModifiedProperties();
                 }
+                if (panel != null)
+                {
+                    var ps = so.FindProperty("panelSettings");
+                    if (ps != null) ps.objectReferenceValue = panel;
+                }
+                so.ApplyModifiedProperties();
 
                 Undo.AddComponent<DebugMenuController>(debugGo);
             }
@@ -907,5 +915,29 @@ namespace Genesis.RoomScan.Editor
         static void MarkDirty() =>
             EditorSceneManager.MarkSceneDirty(
                 UnityEngine.SceneManagement.SceneManager.GetActiveScene());
+
+        static UnityEngine.UIElements.PanelSettings FindOrCreatePanelSettings()
+        {
+            string[] guids = AssetDatabase.FindAssets("t:PanelSettings");
+            if (guids.Length > 0)
+            {
+                string path = AssetDatabase.GUIDToAssetPath(guids[0]);
+                var existing = AssetDatabase.LoadAssetAtPath<UnityEngine.UIElements.PanelSettings>(path);
+                if (existing != null) return existing;
+            }
+
+            const string dir = "Assets/Settings";
+            if (!AssetDatabase.IsValidFolder(dir))
+                AssetDatabase.CreateFolder("Assets", "Settings");
+
+            const string assetPath = dir + "/DebugMenuPanelSettings.asset";
+            var panel = ScriptableObject.CreateInstance<UnityEngine.UIElements.PanelSettings>();
+            panel.scaleMode = UnityEngine.UIElements.PanelScaleMode.ScaleWithScreenSize;
+            panel.referenceResolution = new Vector2Int(1920, 1080);
+            AssetDatabase.CreateAsset(panel, assetPath);
+            AssetDatabase.SaveAssets();
+            Debug.Log($"[RoomScanWizard] Created PanelSettings at {assetPath}");
+            return panel;
+        }
     }
 }
