@@ -974,14 +974,12 @@ namespace Genesis.RoomScan.Editor
                 SetPanelRenderModeWorldSpace(uiDoc.panelSettings);
 
             // World-space UIDocument properties:
-            // - Pivot = Center so the transform position = center of the panel
-            // - SizeMode = Fixed at 480×640 so the collider exactly matches the content
-            if (uiDoc.pivot != Pivot.Center)
-                uiDoc.pivot = Pivot.Center;
-            if (uiDoc.worldSpaceSizeMode != UIDocument.WorldSpaceSizeMode.Fixed)
-                uiDoc.worldSpaceSizeMode = UIDocument.WorldSpaceSizeMode.Fixed;
-            if (uiDoc.worldSpaceSize != new Vector2(480, 640))
-                uiDoc.worldSpaceSize = new Vector2(480, 640);
+            // - Dynamic size mode: panel auto-sizes to the content layout (480×640 from USS)
+            // - Pivot = Center: transform position = center of the visible panel
+            // - PivotReferenceSize = Layout: pivot calculated from root element layout, not bounding box
+            uiDoc.worldSpaceSizeMode = UIDocument.WorldSpaceSizeMode.Dynamic;
+            uiDoc.pivot = Pivot.Center;
+            uiDoc.pivotReferenceSize = PivotReferenceSize.Layout;
 
             // 480px / 100 PPU = 4.8 local units. Scale 0.08 → 0.384m wide.
             const float worldScale = 0.08f;
