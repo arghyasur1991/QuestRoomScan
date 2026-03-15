@@ -19,6 +19,17 @@ namespace Genesis.RoomScan
         private static readonly int ID_SurfaceVerts = Shader.PropertyToID("_SurfaceVerts");
         private static readonly int ID_SurfaceIndices = Shader.PropertyToID("_SurfaceIndices");
 
+        private bool _renderVisible = true;
+
+        /// <summary>
+        /// Toggle rendering without disabling the component (which destroys state).
+        /// </summary>
+        public bool RenderVisible
+        {
+            get => _renderVisible;
+            set => _renderVisible = value;
+        }
+
         public Material GpuMeshMaterial
         {
             get => gpuMeshMaterial;
@@ -40,7 +51,7 @@ namespace Genesis.RoomScan
 
         private void LateUpdate()
         {
-            if (!_ready || _surfaceNets == null || gpuMeshMaterial == null)
+            if (!_ready || !_renderVisible || _surfaceNets == null || gpuMeshMaterial == null)
                 return;
 
             var vertBuf = _surfaceNets.VertexBuffer;

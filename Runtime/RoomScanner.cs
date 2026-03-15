@@ -543,9 +543,9 @@ namespace Genesis.RoomScan
                 : null;
 
             if (gpuRenderer != null)
-                gpuRenderer.enabled = renderMode == ScanRenderMode.Mesh || renderMode == ScanRenderMode.Both;
+                gpuRenderer.RenderVisible = renderMode == ScanRenderMode.Mesh || renderMode == ScanRenderMode.Both;
             if (splatRend != null)
-                splatRend.enabled = renderMode == ScanRenderMode.Splat || renderMode == ScanRenderMode.Both;
+                splatRend.RenderVisible = renderMode == ScanRenderMode.Splat || renderMode == ScanRenderMode.Both;
         }
 
         /// <summary>
@@ -620,7 +620,7 @@ namespace Genesis.RoomScan
             var gpuRenderer = _meshExtractor.GetComponent<GPUMeshRenderer>();
             if (gpuRenderer == null) return;
 
-            gpuRenderer.enabled = visualization != ScanVisualization.Hidden;
+            gpuRenderer.RenderVisible = visualization != ScanVisualization.Hidden;
         }
     }
 }

@@ -24,6 +24,17 @@ namespace Genesis.RoomScan.GSplat
 
         public static GSRenderer ActiveInstance { get; private set; }
 
+        private bool _renderVisible = true;
+
+        /// <summary>
+        /// Toggle rendering without disabling the component (which releases GPU buffers).
+        /// </summary>
+        public bool RenderVisible
+        {
+            get => _renderVisible;
+            set => _renderVisible = value;
+        }
+
         MaterialPropertyBlock _props;
         readonly List<(int id, GSplatBuffers buffers)> _readySectors = new();
         bool _ready;
@@ -177,7 +188,7 @@ namespace Genesis.RoomScan.GSplat
         void LateUpdate()
         {
             _preparedTotalCount = 0;
-            if (!_ready || splatMaterial == null || _prepassKernel < 0)
+            if (!_ready || !_renderVisible || splatMaterial == null || _prepassKernel < 0)
                 return;
             if (_serverTrainedBuffers == null || _serverTrainedBuffers.CurrentCount <= 0)
                 return;
