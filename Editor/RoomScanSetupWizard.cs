@@ -126,7 +126,7 @@ namespace Genesis.RoomScan.Editor
             _gsplatComputeWired = _gsplatManager != null && AreFieldsAssigned(_gsplatManager,
                 "projectSHCompute", "tileSortCompute", "rasterizeCompute",
                 "lossCompute", "rasterBwdCompute", "projBwdCompute", "adamCompute",
-                "initGaussiansCompute");
+                "densifyCompute", "initGaussiansCompute");
             _gsRendererComputeWired = _gsSectorRenderer != null && AreFieldsAssigned(_gsSectorRenderer,
                 "viewPrepassCompute", "sortCompute", "radixSortCompute", "splatMaterial");
             _gsplatRenderFeatureAdded = HasGSplatRenderFeature();
@@ -457,7 +457,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("MeshExtractor scan material", _meshMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
-            StatusRow("GSplatManager compute shaders (8)", _gsplatComputeWired);
+            StatusRow("GSplatManager compute shaders (9)", _gsplatComputeWired);
             StatusRow("GSSectorRenderer prepass + material", _gsRendererComputeWired);
             StatusRow("GSplatRenderFeature on URP Renderer", _gsplatRenderFeatureAdded);
 
@@ -544,6 +544,7 @@ namespace Genesis.RoomScan.Editor
                 AssignCompute(so, "rasterBwdCompute", GSPLAT_PKG + "RasterizeBackward.compute");
                 AssignCompute(so, "projBwdCompute", GSPLAT_PKG + "ProjectSHBackward.compute");
                 AssignCompute(so, "adamCompute", GSPLAT_PKG + "AdamOptimizer.compute");
+                AssignCompute(so, "densifyCompute", GSPLAT_PKG + "Densify.compute");
                 AssignCompute(so, "initGaussiansCompute", GSPLAT_PKG + "InitGaussians.compute");
 
                 // Wire mesh material from MeshExtractor
