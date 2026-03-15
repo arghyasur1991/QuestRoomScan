@@ -538,14 +538,11 @@ namespace Genesis.RoomScan
         private void ApplyRenderMode()
         {
             var gpuRenderer = _meshExtractor != null ? _meshExtractor.GetComponent<GPUMeshRenderer>() : null;
-            var splatRend = _gsplatManager != null
-                ? _gsplatManager.GetComponent<GSRenderer>()
-                : null;
 
             if (gpuRenderer != null)
                 gpuRenderer.RenderVisible = renderMode == ScanRenderMode.Mesh || renderMode == ScanRenderMode.Both;
-            if (splatRend != null)
-                splatRend.RenderVisible = renderMode == ScanRenderMode.Splat || renderMode == ScanRenderMode.Both;
+            if (_gsplatManager != null)
+                _gsplatManager.RenderVisible = renderMode == ScanRenderMode.Splat || renderMode == ScanRenderMode.Both;
         }
 
         /// <summary>
