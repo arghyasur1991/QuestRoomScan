@@ -53,6 +53,7 @@ namespace Genesis.RoomScan.Editor
         bool _gsRendererComputeWired;
         bool _gsplatRenderFeatureAdded;
         bool _boundarylessManifest;
+        bool _cleartextAllowed;
 
         // Style
         static readonly Color COL_OK   = new(0.25f, 0.82f, 0.35f);
@@ -143,6 +144,7 @@ namespace Genesis.RoomScan.Editor
             _gsplatRenderFeatureAdded = HasGSplatRenderFeature();
 
             _boundarylessManifest = ManifestHasBoundaryless();
+            _cleartextAllowed = ManifestHasCleartextTraffic();
         }
 
         // =================================================================
@@ -268,6 +270,7 @@ namespace Genesis.RoomScan.Editor
             BeginSection("PROJECT SETTINGS");
 
             StatusRow("AndroidManifest boundaryless entry", _boundarylessManifest);
+            StatusRow("AndroidManifest cleartext HTTP (LAN)", _cleartextAllowed);
 
             if (!_boundarylessManifest)
             {
@@ -277,6 +280,19 @@ namespace Genesis.RoomScan.Editor
                 if (GUILayout.Button("Add Boundaryless Manifest", GUILayout.Width(200)))
                 {
                     FixBoundarylessManifest();
+                    Refresh();
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
+            if (!_cleartextAllowed)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Allow Cleartext HTTP", GUILayout.Width(200)))
+                {
+                    FixCleartextTraffic();
                     Refresh();
                 }
                 EditorGUILayout.EndHorizontal();
@@ -338,6 +354,97 @@ namespace Genesis.RoomScan.Editor
             catch (System.Exception ex)
             {
                 Debug.LogError($"[RoomScan Setup] Failed to update manifest: {ex.Message}");
+            }
+        }
+
+        // -- Cleartext HTTP -----------------------------------------------
+
+        const string NET_SEC_CONFIG_PATH = "Assets/Plugins/Android/res/xml/network_security_config.xml";
+
+        static bool ManifestHasCleartextTraffic()
+        {
+            string fullPath = Path.Combine(Application.dataPath, "..", MANIFEST_PATH);
+            if (!File.Exists(fullPath)) return false;
+
+            try
+            {
+                var doc = XDocument.Load(fullPath);
+                XNamespace android = "http://schemas.android.com/apk/res/android";
+                var app = doc.Root?.Element("application");
+                if (app == null) return false;
+
+                string val = app.Attribute(android + "usesCleartextTraffic")?.Value;
+                return val == "true";
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        static void FixCleartextTraffic()
+        {
+            string manifestFull = Path.Combine(Application.dataPath, "..", MANIFEST_PATH);
+
+            if (!File.Exists(manifestFull))
+            {
+                EditorUtility.DisplayDialog("Room Scan Setup",
+                    "AndroidManifest.xml not found at:\n" + MANIFEST_PATH + "\n\n" +
+                    "Build the project once or create a custom manifest first.",
+                    "OK");
+                return;
+            }
+
+            try
+            {
+                var doc = XDocument.Load(manifestFull);
+                XNamespace android = "http://schemas.android.com/apk/res/android";
+                var app = doc.Root?.Element("application");
+                if (app == null) return;
+
+                // android:usesCleartextTraffic="true"
+                var cleartext = app.Attribute(android + "usesCleartextTraffic");
+                if (cleartext == null)
+                    app.Add(new XAttribute(android + "usesCleartextTraffic", "true"));
+                else
+                    cleartext.Value = "true";
+
+                // android:networkSecurityConfig="@xml/network_security_config"
+                var nscAttr = app.Attribute(android + "networkSecurityConfig");
+                if (nscAttr == null)
+                    app.Add(new XAttribute(android + "networkSecurityConfig", "@xml/network_security_config"));
+                else
+                    nscAttr.Value = "@xml/network_security_config";
+
+                doc.Save(manifestFull);
+                Debug.Log("[RoomScan Setup] Added cleartext HTTP attributes to AndroidManifest.xml");
+
+                // Create the network security config XML
+                string nscFull = Path.Combine(Application.dataPath, "..", NET_SEC_CONFIG_PATH);
+                string nscDir = Path.GetDirectoryName(nscFull);
+                if (!Directory.Exists(nscDir))
+                    Directory.CreateDirectory(nscDir);
+
+                if (!File.Exists(nscFull))
+                {
+                    const string nscContent =
+                        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                        "<network-security-config>\n" +
+                        "    <base-config cleartextTrafficPermitted=\"true\">\n" +
+                        "        <trust-anchors>\n" +
+                        "            <certificates src=\"system\" />\n" +
+                        "        </trust-anchors>\n" +
+                        "    </base-config>\n" +
+                        "</network-security-config>\n";
+                    File.WriteAllText(nscFull, nscContent);
+                    Debug.Log($"[RoomScan Setup] Created {NET_SEC_CONFIG_PATH}");
+                }
+
+                AssetDatabase.Refresh();
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[RoomScan Setup] Failed to enable cleartext traffic: {ex.Message}");
             }
         }
 
@@ -816,6 +923,7 @@ namespace Genesis.RoomScan.Editor
             if (_arSession == null) FixARSession();
             if (_arOcclusion == null) FixAROcclusion();
             if (!_boundarylessManifest) FixBoundarylessManifest();
+            if (!_cleartextAllowed) FixCleartextTraffic();
             FixComponents();
             FixShaderWiring();
 
