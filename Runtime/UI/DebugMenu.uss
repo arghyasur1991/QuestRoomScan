@@ -5,7 +5,7 @@
 
 .debug-root {
     width: 480px;
-    height: 980px;
+    height: 1300px;
     background-color: rgba(10, 12, 16, 0.92);
     padding: 24px 32px;
     flex-direction: column;
