@@ -18,7 +18,7 @@ namespace Genesis.RoomScan
         Hidden
     }
 
-    public enum RenderMode
+    public enum ScanRenderMode
     {
         Mesh,
         Splat,
@@ -68,7 +68,7 @@ namespace Genesis.RoomScan
         [SerializeField] private int minIntegrationsBeforeMesh = 5;
 
         [Header("Render Mode")]
-        [SerializeField] private RenderMode renderMode = RenderMode.Mesh;
+        [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Mesh;
 
         [Header("Guided Mode")]
         [SerializeField] private float guidedTimeoutSeconds = 60f;
@@ -433,9 +433,9 @@ namespace Genesis.RoomScan
             {
                 renderMode = renderMode switch
                 {
-                    RenderMode.Mesh => RenderMode.Splat,
-                    RenderMode.Splat => RenderMode.Both,
-                    _ => RenderMode.Mesh,
+                    ScanRenderMode.Mesh => ScanRenderMode.Splat,
+                    ScanRenderMode.Splat => ScanRenderMode.Both,
+                    _ => ScanRenderMode.Mesh,
                 };
                 ApplyRenderMode();
                 Debug.Log($"[RoomScan] Render mode: {renderMode}");
@@ -448,7 +448,7 @@ namespace Genesis.RoomScan
             if (OVRInput.GetDown(OVRInput.Button.One))
             {
                 Debug.Log("[RoomScan] GS training trigger pressed (A button)");
-                _ = RunServerTrainingAsync();
+                RunServerTrainingAsync();
             }
         }
 
@@ -461,9 +461,9 @@ namespace Genesis.RoomScan
                 : null;
 
             if (gpuRenderer != null)
-                gpuRenderer.enabled = renderMode == RenderMode.Mesh || renderMode == RenderMode.Both;
+                gpuRenderer.enabled = renderMode == ScanRenderMode.Mesh || renderMode == ScanRenderMode.Both;
             if (splatRend != null)
-                splatRend.enabled = renderMode == RenderMode.Splat || renderMode == RenderMode.Both;
+                splatRend.enabled = renderMode == ScanRenderMode.Splat || renderMode == ScanRenderMode.Both;
         }
 
         private async void RunServerTrainingAsync()

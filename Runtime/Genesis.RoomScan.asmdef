@@ -10,7 +10,8 @@
     "Unity.Mathematics",
     "Unity.RenderPipelines.Universal.Runtime",
     "Unity.RenderPipelines.Core.Runtime",
-    "meta.xr.mrutilitykit"
+    "meta.xr.mrutilitykit",
+    "Oculus.VR"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],
