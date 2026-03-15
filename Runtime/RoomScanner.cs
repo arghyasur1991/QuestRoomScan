@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using Genesis.RoomScan.GSplat;
 using UnityEngine;
 
@@ -214,6 +215,7 @@ namespace Genesis.RoomScan
 
             PollFreezeInput();
             PollTrainingTrigger();
+            PollClearInput();
 
             if (autoSaveIntervalSeconds > 0 && persistence != null && !persistence.IsSaving
                 && t - _lastAutoSaveTime >= autoSaveIntervalSeconds
@@ -274,6 +276,32 @@ namespace Genesis.RoomScan
             volumeIntegrator.Clear();
             meshExtractor.Reinitialize();
             if (triplanarCache != null) triplanarCache.Clear();
+        }
+
+        /// <summary>
+        /// Clears all persisted data: in-memory scan, saved scan files, triplanar
+        /// textures, and GSExport (keyframes + point cloud). Safe to call at runtime.
+        /// </summary>
+        public void ClearAllData()
+        {
+            StopScanning();
+
+            ClearScan();
+
+            if (persistence != null)
+                persistence.DeleteSavedScan();
+
+            if (keyframeCollector != null)
+                keyframeCollector.ClearExport();
+
+            string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
+            if (Directory.Exists(gsExportDir))
+                Directory.Delete(gsExportDir, true);
+
+            Debug.Log("[RoomScan] All scan + export data cleared");
+
+            if (autoStartOnLoad)
+                StartScanning();
         }
 
         /// <summary>
@@ -394,6 +422,9 @@ namespace Genesis.RoomScan
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);
         }
 
+        private float _menuHoldTime;
+        private const float ClearHoldDuration = 2f;
+
         private bool _serverTrainingInProgress;
 
         private void PollTrainingTrigger()
@@ -490,6 +521,24 @@ namespace Genesis.RoomScan
             finally
             {
                 _serverTrainingInProgress = false;
+            }
+        }
+
+        private void PollClearInput()
+        {
+            if (OVRInput.Get(OVRInput.Button.Start))
+            {
+                _menuHoldTime += Time.deltaTime;
+                if (_menuHoldTime >= ClearHoldDuration)
+                {
+                    _menuHoldTime = 0f;
+                    Debug.Log("[RoomScan] Menu held for 2s — clearing all data");
+                    ClearAllData();
+                }
+            }
+            else
+            {
+                _menuHoldTime = 0f;
             }
         }
 
