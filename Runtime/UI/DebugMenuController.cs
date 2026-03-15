@@ -48,6 +48,7 @@ namespace Genesis.RoomScan.UI
 
         // Action buttons
         private Button _btnToggleScan;
+        private Button _btnRenderMode;
         private Button _btnSaveScan;
         private Button _btnLoadScan;
         private Button _btnClearAll;
@@ -144,6 +145,7 @@ namespace Genesis.RoomScan.UI
             _valFps = _root.Q<Label>("val-fps");
 
             _btnToggleScan = _root.Q<Button>("btn-toggle-scan");
+            _btnRenderMode = _root.Q<Button>("btn-render-mode");
             _btnSaveScan = _root.Q<Button>("btn-save-scan");
             _btnLoadScan = _root.Q<Button>("btn-load-scan");
             _btnClearAll = _root.Q<Button>("btn-clear-all");
@@ -156,6 +158,21 @@ namespace Genesis.RoomScan.UI
         {
             _btnToggleScan?.RegisterCallback<ClickEvent>(_ =>
                 RoomScanner.Instance?.ToggleScanning());
+
+            _btnRenderMode?.RegisterCallback<ClickEvent>(_ =>
+            {
+                var scanner = RoomScanner.Instance;
+                if (scanner == null) return;
+                if (scanner.HasDownloadedSplat &&
+                    scanner.CurrentRenderMode == ScanRenderMode.Mesh)
+                {
+                    scanner.LoadDownloadedSplat();
+                }
+                else
+                {
+                    scanner.ToggleRenderMode();
+                }
+            });
 
             _btnSaveScan?.RegisterCallback<ClickEvent>(async _ =>
             {
@@ -224,6 +241,14 @@ namespace Genesis.RoomScan.UI
             if (_btnToggleScan != null)
                 _btnToggleScan.text = scanner.IsScanning ? "Stop Scanning" : "Start Scanning";
 
+            if (_btnRenderMode != null)
+            {
+                string modeLabel = scanner.CurrentRenderMode.ToString();
+                if (scanner.HasDownloadedSplat && scanner.CurrentRenderMode == ScanRenderMode.Mesh)
+                    modeLabel += " [Splat Ready]";
+                _btnRenderMode.text = $"Render: {modeLabel}";
+            }
+
             var vi = VolumeIntegrator.Instance;
             if (vi != null)
                 SetLabel(_valIntegrations, vi.IntegrationCount.ToString());
@@ -271,7 +296,12 @@ namespace Genesis.RoomScan.UI
                 return;
             }
 
-            SetLabel(_valTrainState, ts.state ?? "--");
+            // Show local client activity (upload/download) as state override
+            string stateDisplay = ts.state ?? "--";
+            if (_cachedClient.IsUploading) stateDisplay = "Uploading...";
+            else if (_cachedClient.IsDownloading) stateDisplay = "Downloading...";
+            else if (_cachedClient.IsPolling && ts.state == "training") stateDisplay = "Training (polling)";
+            SetLabel(_valTrainState, stateDisplay);
 
             float pct = ts.progress * 100f;
             if (_progressFill != null)

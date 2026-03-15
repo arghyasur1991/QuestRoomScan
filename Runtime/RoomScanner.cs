@@ -364,7 +364,11 @@ namespace Genesis.RoomScan
                 ScanRenderMode.Splat => ScanRenderMode.Both,
                 _ => ScanRenderMode.Mesh,
             };
-            SetRenderMode(next);
+
+            if (next != ScanRenderMode.Mesh && HasDownloadedSplat && !_gsplatManager.HasServerTrainedSplats)
+                LoadDownloadedSplat();
+            else
+                SetRenderMode(next);
         }
 
         public void FreezeInView()
@@ -544,6 +548,29 @@ namespace Genesis.RoomScan
                 splatRend.enabled = renderMode == ScanRenderMode.Splat || renderMode == ScanRenderMode.Both;
         }
 
+        /// <summary>
+        /// Whether a trained splat has been downloaded and is ready to load/render.
+        /// </summary>
+        public bool HasDownloadedSplat => _downloadedPlyData != null && _downloadedPlyData.Length > 0;
+
+        private byte[] _downloadedPlyData;
+
+        /// <summary>
+        /// Loads the downloaded splat into GPU buffers and switches to splat render mode.
+        /// Call after training + download completes.
+        /// </summary>
+        public void LoadDownloadedSplat()
+        {
+            if (_downloadedPlyData == null || _downloadedPlyData.Length == 0)
+            {
+                Debug.LogWarning("[RoomScan] No downloaded splat data to load");
+                return;
+            }
+            _gsplatManager.LoadTrainedPly(_downloadedPlyData);
+            SetRenderMode(ScanRenderMode.Splat);
+            Debug.Log("[RoomScan] Trained Gaussians loaded and rendering");
+        }
+
         private async void RunServerTrainingAsync()
         {
             if (_serverTrainingInProgress) return;
@@ -568,8 +595,8 @@ namespace Genesis.RoomScan
                 byte[] plyData = await _gsplatServerClient.DownloadResult();
                 if (plyData == null || plyData.Length == 0) { Debug.LogError("[RoomScan] Download empty"); return; }
 
-                _gsplatManager.LoadTrainedPly(plyData);
-                Debug.Log("[RoomScan] Trained Gaussians loaded and ready for rendering");
+                _downloadedPlyData = plyData;
+                Debug.Log($"[RoomScan] Trained splat downloaded ({plyData.Length / (1024 * 1024f):F1}MB) — use 'Switch Render Mode' to view");
             }
             catch (Exception e)
             {
