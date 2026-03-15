@@ -523,7 +523,7 @@ namespace Genesis.RoomScan.Editor
                               _triplanarCache == null ||
                               _persistence == null || _keyframeCollector == null ||
                               _pointCloudExporter == null ||
-                              _gsplatManager == null || _gsRenderer == null ||
+                              _gsplatManager == null || _ugsRenderer == null ||
                               _gsplatServerClient == null ||
                               _debugMenu == null || _inputHandler == null ||
                               _eventSystem == null || _ovrInputModule == null ||
