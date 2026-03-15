@@ -457,6 +457,9 @@ namespace Genesis.RoomScan.Editor
             // Always ensure UIDocument has its assets assigned
             EnsureDebugMenuAssets();
 
+            // Auto-configure GS training server URL with this PC's LAN IP
+            ConfigureServerUrl();
+
             // EventSystem + VR controller UI input pipeline
             EnsureVRInputInfrastructure();
 
@@ -1015,6 +1018,60 @@ namespace Genesis.RoomScan.Editor
             AssetDatabase.SaveAssets();
             Debug.Log($"[RoomScanWizard] Created PanelSettings (WorldSpace) at {assetPath}");
             return panel;
+        }
+
+        /// <summary>
+        /// Auto-detect this PC's LAN IP and write it into the GSplatServerClient
+        /// serialized field so the Quest connects to the right address at runtime.
+        /// </summary>
+        static void ConfigureServerUrl()
+        {
+            var client = FindAny<GSplatServerClient>();
+            if (client == null) return;
+
+            string lanIp = GetLanIp();
+            if (string.IsNullOrEmpty(lanIp)) return;
+
+            string url = $"http://{lanIp}:8420";
+
+            var so = new SerializedObject(client);
+            var prop = so.FindProperty("serverUrl");
+            if (prop != null && prop.stringValue != url)
+            {
+                prop.stringValue = url;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(client);
+                Debug.Log($"[RoomScanWizard] Server URL set to {url} (detected LAN IP: {lanIp})");
+            }
+        }
+
+        static string GetLanIp()
+        {
+            try
+            {
+                foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up)
+                        continue;
+                    if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback)
+                        continue;
+
+                    var props = ni.GetIPProperties();
+                    foreach (var addr in props.UnicastAddresses)
+                    {
+                        if (addr.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
+                            continue;
+                        string ip = addr.Address.ToString();
+                        if (ip.StartsWith("127.")) continue;
+                        return ip;
+                    }
+                }
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[RoomScanWizard] Failed to detect LAN IP: {e.Message}");
+            }
+            return null;
         }
     }
 }
