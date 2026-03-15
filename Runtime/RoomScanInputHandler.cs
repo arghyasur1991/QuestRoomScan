@@ -48,11 +48,12 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Controller button → action mappings. Editable at runtime.")]
         private List<ScanInputBinding> bindings = new()
         {
-            new() { action = ScanAction.ToggleDebugMenu,    button = OVRInput.Button.Start, enabled = true },
-            new() { action = ScanAction.FreezeInView,       button = OVRInput.Button.One, enabled = true },
-            new() { action = ScanAction.UnfreezeInView,     button = OVRInput.Button.Two,  enabled = true },
-            new() { action = ScanAction.CycleRenderMode,    button = OVRInput.Button.Three,   enabled = true },
-            new() { action = ScanAction.StartServerTraining, button = OVRInput.Button.Four,  enabled = false },
+            // Left thumbstick click — Quest OS intercepts Button.Start for system menu
+            new() { action = ScanAction.ToggleDebugMenu,     button = OVRInput.Button.PrimaryThumbstick, enabled = true },
+            new() { action = ScanAction.FreezeInView,        button = OVRInput.Button.One,   enabled = true },
+            new() { action = ScanAction.UnfreezeInView,      button = OVRInput.Button.Two,   enabled = true },
+            new() { action = ScanAction.CycleRenderMode,     button = OVRInput.Button.Three, enabled = true },
+            new() { action = ScanAction.StartServerTraining,  button = OVRInput.Button.Four,  enabled = false },
         };
 
         /// <summary>
@@ -112,6 +113,7 @@ namespace Genesis.RoomScan
 
         private static void ExecuteAction(RoomScanner scanner, ScanAction action)
         {
+            Debug.Log($"[RoomScan] InputHandler: {action}");
             switch (action)
             {
                 case ScanAction.ToggleScanning:
