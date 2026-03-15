@@ -854,6 +854,23 @@ namespace Genesis.RoomScan.Editor
             EditorSceneManager.MarkSceneDirty(
                 UnityEngine.SceneManagement.SceneManager.GetActiveScene());
 
+        /// <summary>
+        /// Sets m_RenderMode to 1 (WorldSpace). The public renderMode property
+        /// and PanelRenderMode enum are internal in Unity 6000.3.
+        /// </summary>
+        static void SetPanelRenderModeWorldSpace(UnityEngine.UIElements.PanelSettings panel)
+        {
+            const int WorldSpace = 1;
+            var so = new SerializedObject(panel);
+            var prop = so.FindProperty("m_RenderMode");
+            if (prop != null && prop.intValue != WorldSpace)
+            {
+                prop.intValue = WorldSpace;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(panel);
+            }
+        }
+
         static void EnsureDebugMenuAssets()
         {
             var ctrl = FindAny<DebugMenuController>();
@@ -877,14 +894,10 @@ namespace Genesis.RoomScan.Editor
                 if (panel != null) uiDoc.panelSettings = panel;
             }
 
-            // Ensure PanelSettings is configured for world-space VR rendering
-            if (uiDoc.panelSettings != null
-                && uiDoc.panelSettings.renderMode != UnityEngine.UIElements.PanelRenderMode.WorldSpace)
-            {
-                Undo.RecordObject(uiDoc.panelSettings, "Set PanelSettings to WorldSpace");
-                uiDoc.panelSettings.renderMode = UnityEngine.UIElements.PanelRenderMode.WorldSpace;
-                EditorUtility.SetDirty(uiDoc.panelSettings);
-            }
+            // Ensure PanelSettings is configured for world-space VR rendering.
+            // renderMode / PanelRenderMode are internal in 6000.3; use SerializedObject.
+            if (uiDoc.panelSettings != null)
+                SetPanelRenderModeWorldSpace(uiDoc.panelSettings);
 
             // Scale the panel to a comfortable VR size (~0.4m wide for a 480px panel)
             const float worldScale = 0.0008f;
@@ -915,8 +928,8 @@ namespace Genesis.RoomScan.Editor
 
             const string assetPath = dir + "/" + assetName + ".asset";
             var panel = ScriptableObject.CreateInstance<UnityEngine.UIElements.PanelSettings>();
-            panel.renderMode = UnityEngine.UIElements.PanelRenderMode.WorldSpace;
             AssetDatabase.CreateAsset(panel, assetPath);
+            SetPanelRenderModeWorldSpace(panel);
             AssetDatabase.SaveAssets();
             Debug.Log($"[RoomScanWizard] Created PanelSettings (WorldSpace) at {assetPath}");
             return panel;
