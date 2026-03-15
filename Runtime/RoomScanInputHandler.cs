@@ -131,7 +131,7 @@ namespace Genesis.RoomScan
                     scanner.CycleRenderMode();
                     break;
                 case ScanAction.ClearAllData:
-                    _ = scanner.ClearAllDataAsync();
+                    scanner.ClearAllDataAsync();
                     break;
                 case ScanAction.ExportPointCloud:
                     _ = scanner.ExportPointCloudAsync();

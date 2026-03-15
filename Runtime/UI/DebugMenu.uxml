@@ -44,10 +44,7 @@
         <ui:VisualElement class="section">
             <ui:Label text="SERVER TRAINING" class="section-label" />
 
-            <ui:VisualElement class="status-row">
-                <ui:Label text="Server" class="status-key" />
-                <ui:Label name="val-server-url" text="--" class="status-val status-val--small" />
-            </ui:VisualElement>
+            <ui:TextField name="field-server-url" label="Server" value="http://192.168.1.100:8420" class="server-url-field" />
             <ui:VisualElement class="status-row">
                 <ui:Label text="State" class="status-key" />
                 <ui:Label name="val-train-state" text="--" class="status-val" />

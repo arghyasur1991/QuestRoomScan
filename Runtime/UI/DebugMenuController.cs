@@ -31,8 +31,8 @@ namespace Genesis.RoomScan.UI
         private Label _valKeyframes;
         private Label _valRender;
 
-        // Server training labels
-        private Label _valServerUrl;
+        // Server training fields
+        private TextField _fieldServerUrl;
         private Label _valTrainState;
         private VisualElement _progressFill;
         private Label _valTrainProgress;
@@ -60,7 +60,8 @@ namespace Genesis.RoomScan.UI
         private int _fpsFrames;
         private float _currentFps;
 
-        // Cached file checks (avoid per-frame I/O)
+        // Cached references and file checks (avoid per-frame I/O / FindObject)
+        private GSplatServerClient _cachedClient;
         private float _ioCheckTimer;
         private bool _hasGsExport;
         private bool _hasSavedScan;
@@ -129,7 +130,7 @@ namespace Genesis.RoomScan.UI
             _valKeyframes = _root.Q<Label>("val-keyframes");
             _valRender = _root.Q<Label>("val-render");
 
-            _valServerUrl = _root.Q<Label>("val-server-url");
+            _fieldServerUrl = _root.Q<TextField>("field-server-url");
             _valTrainState = _root.Q<Label>("val-train-state");
             _progressFill = _root.Q<VisualElement>("progress-fill");
             _valTrainProgress = _root.Q<Label>("val-train-progress");
@@ -174,12 +175,12 @@ namespace Genesis.RoomScan.UI
                 FlashStatus(_btnLoadScan, ok);
             });
 
-            _btnClearAll?.RegisterCallback<ClickEvent>(async _ =>
+            _btnClearAll?.RegisterCallback<ClickEvent>(_ =>
             {
                 if (RoomScanner.Instance == null) return;
                 SetButtonBusy(_btnClearAll, "Clearing...");
-                await RoomScanner.Instance.ClearAllDataAsync();
-                SetButtonReady(_btnClearAll, "Clear All Data");
+                RoomScanner.Instance.ClearAllDataAsync(() =>
+                    SetButtonReady(_btnClearAll, "Clear All Data"));
             });
 
             _btnExportPc?.RegisterCallback<ClickEvent>(async _ =>
@@ -190,16 +191,23 @@ namespace Genesis.RoomScan.UI
                 SetButtonReady(_btnExportPc, "Export Point Cloud");
             });
 
+            _fieldServerUrl?.RegisterValueChangedCallback(evt =>
+            {
+                if (_cachedClient == null)
+                    _cachedClient = FindAnyObjectByType<GSplatServerClient>();
+                if (_cachedClient != null) _cachedClient.ServerUrl = evt.newValue;
+            });
+
             _btnGsTrain?.RegisterCallback<ClickEvent>(_ =>
                 RoomScanner.Instance?.StartServerTraining());
 
-            _btnCancelTrain?.RegisterCallback<ClickEvent>(async _ =>
+            _btnCancelTrain?.RegisterCallback<ClickEvent>(_ =>
             {
-                var client = FindAnyObjectByType<GSplatServerClient>();
-                if (client == null) return;
+                if (_cachedClient == null)
+                    _cachedClient = FindAnyObjectByType<GSplatServerClient>();
+                if (_cachedClient == null) return;
                 SetButtonBusy(_btnCancelTrain, "Cancelling...");
-                await client.CancelTraining();
-                SetButtonReady(_btnCancelTrain, "Cancel Training");
+                _ = CancelAndResetButton();
             });
         }
 
@@ -249,16 +257,14 @@ namespace Genesis.RoomScan.UI
 
         private void RefreshTrainingStatus()
         {
-            var client = FindAnyObjectByType<GSplatServerClient>();
-            if (client == null)
-            {
-                SetLabel(_valServerUrl, "No client");
-                return;
-            }
+            if (_cachedClient == null)
+                _cachedClient = FindAnyObjectByType<GSplatServerClient>();
+            if (_cachedClient == null) return;
 
-            SetLabel(_valServerUrl, client.ServerUrl);
+            if (_fieldServerUrl != null && _fieldServerUrl.value != _cachedClient.ServerUrl)
+                _fieldServerUrl.SetValueWithoutNotify(_cachedClient.ServerUrl);
 
-            var ts = client.LastStatus;
+            var ts = _cachedClient.LastStatus;
             if (ts == null)
             {
                 SetLabel(_valTrainState, "No data");
@@ -311,6 +317,13 @@ namespace Genesis.RoomScan.UI
         private static void SetLabel(Label label, string text)
         {
             if (label != null) label.text = text;
+        }
+
+        private async System.Threading.Tasks.Task CancelAndResetButton()
+        {
+            if (_cachedClient != null)
+                await _cachedClient.CancelTraining();
+            SetButtonReady(_btnCancelTrain, "Cancel Training");
         }
 
         private static void SetButtonBusy(Button btn, string text)

@@ -195,6 +195,19 @@ namespace Genesis.RoomScan
 
         private void Update()
         {
+            if (_clearDone)
+            {
+                _clearDone = false;
+                _clearInProgress = false;
+                if (_keyframeCollector != null)
+                    _keyframeCollector.ReinitExportDir();
+                Debug.Log("[RoomScan] All scan + export data cleared");
+                if (autoStartOnLoad)
+                    StartScanning();
+                _clearDoneCallback?.Invoke();
+                _clearDoneCallback = null;
+            }
+
             if (!IsScanning || !DepthCapture.DepthAvailable) return;
 
             float t = Time.time;
@@ -290,10 +303,14 @@ namespace Genesis.RoomScan
         /// <summary>
         /// Clears all persisted data: in-memory scan, saved scan files, triplanar
         /// textures, and GSExport (keyframes + point cloud). Safe to call at runtime.
-        /// File I/O runs on a background thread to avoid freezing the app.
+        /// File I/O runs on a background thread via ThreadPool to avoid main-thread
+        /// stalls and potential SynchronizationContext deadlocks on Quest/IL2CPP.
         /// </summary>
-        public async Task ClearAllDataAsync()
+        public void ClearAllDataAsync(Action onComplete = null)
         {
+            if (_clearInProgress) return;
+            _clearInProgress = true;
+
             StopScanning();
             ClearScan();
 
@@ -304,7 +321,7 @@ namespace Genesis.RoomScan
             string triDir = _persistence != null ? _persistence.TriplanarDirectory : null;
             string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
 
-            await Task.Run(() =>
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
                 try
                 {
@@ -319,16 +336,17 @@ namespace Genesis.RoomScan
                 {
                     Debug.LogError($"[RoomScan] ClearAllData I/O error: {e.Message}");
                 }
+                finally
+                {
+                    _clearDoneCallback = onComplete;
+                    _clearDone = true;
+                }
             });
-
-            if (_keyframeCollector != null)
-                _keyframeCollector.ReinitExportDir();
-
-            Debug.Log("[RoomScan] All scan + export data cleared");
-
-            if (autoStartOnLoad)
-                StartScanning();
         }
+
+        private volatile bool _clearInProgress;
+        private volatile bool _clearDone;
+        private Action _clearDoneCallback;
 
         public void SetRenderMode(ScanRenderMode newMode)
         {
