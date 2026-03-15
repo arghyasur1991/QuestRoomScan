@@ -9,20 +9,7 @@ float _SSIMWeight;
 float _InvN;          // 1.0 / (H * W * 3)
 
 Texture2D<float4> _Rendered;    // from rasterize forward — linear space (float16 RT)
-Texture2D<float4> _GroundTruth; // keyframe — sRGB-encoded (ARGB32 RT from camera Blit)
-
-// Camera images are gamma-encoded (sRGB). The rasterizer outputs linear radiance.
-// Convert GT from sRGB to linear so the loss compares values in the same color space.
-float SRGBToLinear(float c)
-{
-    return (c <= 0.04045f) ? c / 12.92f : pow(abs((c + 0.055f) / 1.055f), 2.4f);
-}
-
-float3 ReadGTLinear(uint2 coord)
-{
-    float4 s = _GroundTruth[coord];
-    return float3(SRGBToLinear(s.r), SRGBToLinear(s.g), SRGBToLinear(s.b));
-}
+Texture2D<float4> _GroundTruth; // keyframe — sRGB ARGB32 RT; GPU auto-decodes to linear on read
 
 // Forward intermediates for SSIM backward pass
 RWStructuredBuffer<float> _Intermediates;  // [H*W*15]
@@ -64,7 +51,7 @@ void LossForward(uint3 id : SV_DispatchThreadID)
             {
                 int nx = (int)px + dx;
                 float w = GAUSS_1D[dy + SSIM_HALF_WIN] * GAUSS_1D[dx + SSIM_HALF_WIN];
-                float xVal = ReadGTLinear(uint2(nx, ny))[c];
+                float xVal = _GroundTruth[uint2(nx, ny)][c];
                 float yVal = _Rendered[uint2(nx, ny)][c];
                 muX += w * xVal;
                 muY += w * yVal;
@@ -92,7 +79,7 @@ void LossForward(uint3 id : SV_DispatchThreadID)
 
         ssimSum += (A * B) / (Cd * D);
 
-        float gtVal = ReadGTLinear(uint2(px, py))[c];
+        float gtVal = _GroundTruth[uint2(px, py)][c];
         float rendVal = _Rendered[uint2(px, py)][c];
         l1Sum += abs(gtVal - rendVal);
     }
@@ -117,9 +104,9 @@ void LossBackward(uint3 id : SV_DispatchThreadID)
     int dxMax = min(SSIM_HALF_WIN, (int)px);
 
     float4 rendPx = _Rendered[uint2(px, py)];
-    float3 gtLin = ReadGTLinear(uint2(px, py));
+    float4 gtPx = _GroundTruth[uint2(px, py)];
     float rendArr[3] = { rendPx.r, rendPx.g, rendPx.b };
-    float gtArr[3] = { gtLin.r, gtLin.g, gtLin.b };
+    float gtArr[3] = { gtPx.r, gtPx.g, gtPx.b };
     float vRendArr[3] = { 0, 0, 0 };
 
     [unroll]
