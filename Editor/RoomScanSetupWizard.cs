@@ -578,8 +578,6 @@ namespace Genesis.RoomScan.Editor
             // GSplatServerClient, RoomAnchorManager (GaussianSplatRenderer via GSplatManager)
             if (root.GetComponent<RoomScanner>() == null)
                 Undo.AddComponent<RoomScanner>(root);
-            if (root.GetComponent<RoomAnchorManager>() == null)
-                Undo.AddComponent<RoomAnchorManager>(root);
 
             // Optional components not covered by RequireComponent
             if (root.GetComponent<RoomScanInputHandler>() == null)
