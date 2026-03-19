@@ -15,7 +15,7 @@ namespace Genesis.RoomScan
         private const uint Magic = 0x48534D52; // "RMSH"
         /// <summary>
         /// v2: room-anchor-local volume origin (3 floats) after triplanarRes. No v1 support.
-        /// v3: after origin, 32 floats — room localToWorld at save + volumeToWorld at save (session relocation).
+        /// v3: after origin, 32 floats — MRUK <b>floor anchor</b> localToWorld at save + volumeToWorld at save (session relocation; same frame as <c>SceneMeshManager</c> / <c>FloorAnchors[0]</c>).
         /// </summary>
         private const int FormatVersion = 3;
         private const int MinSupportedVersion = 2;
