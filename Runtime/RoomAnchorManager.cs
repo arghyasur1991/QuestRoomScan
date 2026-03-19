@@ -26,6 +26,13 @@ namespace Genesis.RoomScan
         /// </summary>
         public Vector3 OriginInRoomSpace { get; private set; }
 
+        /// <summary>
+        /// When false, first <see cref="OnSceneLoaded"/> assigns default origin (world origin in room space).
+        /// Set true after any explicit origin (persistence or <see cref="SetOriginInRoomSpace"/>) so we never
+        /// treat Vector3.zero as "unset" — a saved origin of (0,0,0) is valid.
+        /// </summary>
+        private bool _volumeOriginLocked;
+
         private MRUK _mruk;
         private Transform _roomTransform;
         private VolumeIntegrator _volumeIntegrator;
@@ -95,11 +102,13 @@ namespace Genesis.RoomScan
                 return;
             }
 
-            if (OriginInRoomSpace == Vector3.zero)
+            if (!_volumeOriginLocked)
             {
                 OriginInRoomSpace = _roomTransform.InverseTransformPoint(Vector3.zero);
-                Debug.Log($"[RoomAnchor] Volume origin set to world origin in room space: {OriginInRoomSpace}");
+                Debug.Log($"[RoomAnchor] Default volume origin (world origin in room space): {OriginInRoomSpace}");
             }
+
+            _volumeOriginLocked = true;
 
             RefreshVolumeTransform();
 
@@ -117,6 +126,7 @@ namespace Genesis.RoomScan
         public void SetOriginInRoomSpace(Vector3 origin)
         {
             OriginInRoomSpace = origin;
+            _volumeOriginLocked = true;
             Debug.Log($"[RoomAnchor] Volume origin set (persisted or manual): {origin}");
         }
 
