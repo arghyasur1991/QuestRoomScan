@@ -6,11 +6,11 @@ using UnityEngine;
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// Anchors the TSDF volume to the physical room via MRUK (required package).
-    /// Uses the first <see cref="MRUKAnchor"/> on the floor (<see cref="MRUKRoom.FloorAnchors"/>), same as
-    /// <c>SceneMeshManager</c> — not <see cref="MRUKRoom.transform"/>, which is often identity / not the
-    /// stable scene anchor frame. Falls back to room root if no floor anchors exist.
-    /// Recomputes volume/world via <see cref="RefreshVolumeTransform"/> every frame while enabled.
+    /// MRUK floor anchor for <b>session relocation only</b> (saved scans). Depth fusion uses tracking/world
+    /// with <see cref="VolumeIntegrator"/>’s default <c>volumeToWorld = I</c> — we keep that during live scan.
+    /// After load, <c>V = A_now * Inverse(A_save) * V_save</c> maps the stored volume into the current session
+    /// using the delta between anchor poses (T₁ vs T at save). Uses <see cref="MRUKRoom.FloorAnchors"/>[0]
+    /// like <c>SceneMeshManager</c>; falls back to room root if missing.
     /// </summary>
     [DisallowMultipleComponent]
     public class RoomAnchorManager : MonoBehaviour
@@ -22,8 +22,8 @@ namespace Genesis.RoomScan
         public bool IsRoomLoaded { get; private set; }
 
         /// <summary>
-        /// Volume center offset in <see cref="MRUKAnchor"/> (floor) local space — world origin expressed
-        /// in that frame. Set when the room is first ready or restored from a saved scan.
+        /// World origin expressed in floor-anchor local space (metadata for <c>scan.bin</c> / v2 field).
+        /// Live scanning does <b>not</b> use this for <see cref="VolumeIntegrator"/> — fusion stays identity.
         /// </summary>
         public Vector3 OriginInRoomSpace { get; private set; }
 
@@ -35,10 +35,13 @@ namespace Genesis.RoomScan
         private bool _volumeOriginLocked;
 
         /// <summary>
-        /// When true (loaded/saved with scan.bin v3), volume placement uses saved anchor + volume snapshots:
-        /// <c>volumeToWorld = A_now * Inverse(A_save) * V_save</c> (A = floor <see cref="MRUKAnchor"/> L2W).
+        /// When true (after <see cref="ApplySessionRelocationSnapshots"/> / load), volume uses
+        /// <c>A_now * Inverse(A_save) * V_save</c>. Live-only sessions stay false (fusion uses <c>I</c>).
         /// </summary>
         private bool _sessionRelocationActive;
+
+        /// <summary>True when a v3 load (or equivalent) enabled anchor-delta placement.</summary>
+        public bool SessionRelocationActive => _sessionRelocationActive;
 
         private Matrix4x4 _sessionSavedAnchorLocalToWorld = Matrix4x4.identity;
         private Matrix4x4 _sessionSavedVolumeToWorld = Matrix4x4.identity;
@@ -142,8 +145,8 @@ namespace Genesis.RoomScan
             IsRoomLoaded = true;
             var ap = _anchorTransform.position;
             var ar = _anchorTransform.rotation.eulerAngles;
-            Debug.Log($"[RoomAnchor] Room ready — originInFloorAnchorSpace={OriginInRoomSpace}, " +
-                      $"anchorWorldPos={ap}, anchorWorldRot={ar}");
+            Debug.Log($"[RoomAnchor] Room ready — live fusion uses volumeToWorld=I; anchor for relocation only. " +
+                      $"originInAnchorSpace(meta)={OriginInRoomSpace}, anchor pos={ap}, rot={ar}");
             RoomReady?.Invoke();
         }
 
@@ -183,7 +186,20 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Disables v3 relocation (e.g. after clearing scan). Live placement uses anchor + <see cref="OriginInRoomSpace"/>.
+        /// Updates saved A/V matrices after re-saving a loaded scan — keeps relocation correct without
+        /// toggling mode. No-op when <see cref="SessionRelocationActive"/> is false.
+        /// </summary>
+        public void ReplaceSessionRelocationSnapshots(Matrix4x4 anchorLocalToWorldAtSave,
+            Matrix4x4 volumeToWorldAtSave)
+        {
+            if (!_sessionRelocationActive)
+                return;
+            _sessionSavedAnchorLocalToWorld = anchorLocalToWorldAtSave;
+            _sessionSavedVolumeToWorld = volumeToWorldAtSave;
+        }
+
+        /// <summary>
+        /// Disables v3 relocation (e.g. after clearing scan). Live placement uses identity volume/world.
         /// </summary>
         public void ClearSessionRelocation()
         {
@@ -193,8 +209,8 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// After clearing the TSDF volume for a fresh scan, rebind origin to current world zero in anchor space
-        /// and drop relocation so integration uses the same rule as a first-time room load.
+        /// After clearing the TSDF volume for a fresh scan: drop relocation, refresh anchor metadata for saves,
+        /// and set volume transform to identity (same as live scanning).
         /// </summary>
         public void NotifyClearedVolumeForRescan()
         {
@@ -209,11 +225,12 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Recompute volume ↔ world from the current floor MRUK anchor pose. Safe to call every frame.
+        /// Live: <c>volumeToWorld = I</c> (fusion matches headset/tracking world). Loaded scan:
+        /// <c>V = A_now * Inverse(A_save) * V_save</c>. Safe to call every frame.
         /// </summary>
         public void RefreshVolumeTransform()
         {
-            if (!enabled || _anchorTransform == null)
+            if (!enabled)
                 return;
 
             if (_volumeIntegrator == null)
@@ -224,13 +241,15 @@ namespace Genesis.RoomScan
             Matrix4x4 volumeToWorld;
             if (_sessionRelocationActive)
             {
+                if (_anchorTransform == null)
+                    return;
                 Matrix4x4 aNow = _anchorTransform.localToWorldMatrix;
                 volumeToWorld = aNow * _sessionSavedAnchorLocalToWorld.inverse * _sessionSavedVolumeToWorld;
             }
             else
             {
-                volumeToWorld = _anchorTransform.localToWorldMatrix *
-                                Matrix4x4.Translate(OriginInRoomSpace);
+                // Scan-time data is integrated in tracking/world with no anchor premultiply.
+                volumeToWorld = Matrix4x4.identity;
             }
 
             Matrix4x4 worldToVolume = volumeToWorld.inverse;
