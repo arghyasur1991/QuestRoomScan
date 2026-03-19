@@ -71,7 +71,7 @@ namespace Genesis.RoomScan
 
         [Header("Persistence")]
         [SerializeField, Tooltip("Auto-save scan data when the application quits")]
-        private bool saveOnQuit = true;
+        private bool saveOnQuit = false;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
