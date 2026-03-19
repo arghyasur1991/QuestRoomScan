@@ -13,7 +13,8 @@ namespace Genesis.RoomScan
         public static RoomScanPersistence Instance { get; private set; }
 
         private const uint Magic = 0x48534D52; // "RMSH"
-        private const int FormatVersion = 1;
+        /// <summary>v2: adds room-anchor-local volume origin (3 floats) after triplanarRes. No v1 support.</summary>
+        private const int FormatVersion = 2;
 
         private string SaveDirectory => Path.Combine(Application.persistentDataPath, "RoomScans");
         public string SaveFilePath => Path.Combine(SaveDirectory, "scan.bin");
@@ -92,10 +93,15 @@ namespace Genesis.RoomScan
                 if (tc != null && tc.TriXZ != null)
                     triRes = tc.TriXZ.width;
 
+                Vector3 volumeOriginInRoom = Vector3.zero;
+                var anchor = RoomAnchorManager.Instance;
+                if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
+                    volumeOriginInRoom = anchor.OriginInRoomSpace;
+
                 string savePath = SaveFilePath;
                 string triDir = TriplanarDirectory;
                 await Task.Run(() => WriteBinary(savePath, s, vi.VoxelSize,
-                    vi.IntegrationCount, tsdfBytes, colorBytes, triRes));
+                    vi.IntegrationCount, tsdfBytes, colorBytes, triRes, volumeOriginInRoom));
 
                 tsdfBytes = null;
                 colorBytes = null;
@@ -107,7 +113,8 @@ namespace Genesis.RoomScan
                 }
 
                 float sizeMB = new FileInfo(savePath).Length / (1024f * 1024f);
-                Debug.Log($"[RoomScan] Persistence: saved to {savePath} ({sizeMB:F1}MB), triplanar={triRes > 0}");
+                Debug.Log($"[RoomScan] Persistence: saved to {savePath} ({sizeMB:F1}MB), " +
+                          $"triplanar={triRes > 0}, volumeOriginInRoom={volumeOriginInRoom}");
                 SaveCompleted?.Invoke();
                 return true;
             }
@@ -163,11 +170,12 @@ namespace Genesis.RoomScan
                 float savedVoxSize = 0;
                 int savedIntCount = 0;
                 int triRes = 0;
+                Vector3 volumeOriginInRoom = Vector3.zero;
 
                 Debug.Log("[RoomScan] Persistence: load reading file (background)...");
                 await Task.Run(() => ReadBinary(saveFilePath,
                     out savedVoxCount, out savedVoxSize, out savedIntCount,
-                    out tsdfBytes, out colorBytes, out triRes));
+                    out tsdfBytes, out colorBytes, out triRes, out volumeOriginInRoom));
                 Debug.Log($"[RoomScan] Persistence: load read done voxels={savedVoxCount}, tsdf={tsdfBytes?.Length ?? 0}, color={colorBytes?.Length ?? 0}");
 
                 await SwitchToUnityMainThreadAsync(unitySync);
@@ -187,6 +195,14 @@ namespace Genesis.RoomScan
                         $"saved={savedVoxSize} current={vi.VoxelSize}, deleting stale save");
                     DeleteSavedScan();
                     return false;
+                }
+
+                var anchor = RoomAnchorManager.Instance;
+                if (anchor != null && anchor.enabled)
+                {
+                    anchor.SetOriginInRoomSpace(volumeOriginInRoom);
+                    if (anchor.IsRoomLoaded)
+                        anchor.RefreshVolumeTransform();
                 }
 
                 Debug.Log("[RoomScan] Persistence: uploading volumes to GPU...");
@@ -215,7 +231,11 @@ namespace Genesis.RoomScan
                     Debug.Log("[RoomScan] Persistence: mesh extracted from loaded volume");
                 }
 
-                Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount})");
+                if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
+                    anchor.RefreshVolumeTransform();
+
+                Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount}, " +
+                          $"volumeOriginInRoom={volumeOriginInRoom})");
                 LoadCompleted?.Invoke();
                 return true;
             }
@@ -255,7 +275,8 @@ namespace Genesis.RoomScan
         }
 
         private static void WriteBinary(string path, int3 voxCount, float voxSize,
-            int integrationCount, byte[] tsdfBytes, byte[] colorBytes, int triplanarRes)
+            int integrationCount, byte[] tsdfBytes, byte[] colorBytes, int triplanarRes,
+            Vector3 volumeOriginInRoom)
         {
             using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 65536);
             using var w = new BinaryWriter(fs);
@@ -271,6 +292,10 @@ namespace Genesis.RoomScan
             w.Write(integrationCount);
             w.Write(triplanarRes);
 
+            w.Write(volumeOriginInRoom.x);
+            w.Write(volumeOriginInRoom.y);
+            w.Write(volumeOriginInRoom.z);
+
             w.Write(tsdfBytes.Length);
             w.Write(tsdfBytes);
 
@@ -280,7 +305,8 @@ namespace Genesis.RoomScan
 
         private static void ReadBinary(string path,
             out int3 voxCount, out float voxSize, out int integrationCount,
-            out byte[] tsdfBytes, out byte[] colorBytes, out int triplanarRes)
+            out byte[] tsdfBytes, out byte[] colorBytes, out int triplanarRes,
+            out Vector3 volumeOriginInRoom)
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
             using var r = new BinaryReader(fs);
@@ -290,8 +316,9 @@ namespace Genesis.RoomScan
                 throw new InvalidDataException($"Bad magic: 0x{magic:X8}, expected 0x{Magic:X8}");
 
             int version = r.ReadInt32();
-            if (version > FormatVersion)
-                throw new InvalidDataException($"Unsupported version: {version}");
+            if (version != FormatVersion)
+                throw new InvalidDataException(
+                    $"scan.bin format v{version} is not supported (need v{FormatVersion}). Delete RoomScans on device.");
 
             r.ReadInt64(); // timestamp
 
@@ -299,6 +326,8 @@ namespace Genesis.RoomScan
             voxSize = r.ReadSingle();
             integrationCount = r.ReadInt32();
             triplanarRes = r.ReadInt32();
+
+            volumeOriginInRoom = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
 
             int tsdfLen = r.ReadInt32();
             tsdfBytes = r.ReadBytes(tsdfLen);

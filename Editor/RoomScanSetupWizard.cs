@@ -44,6 +44,7 @@ namespace Genesis.RoomScan.Editor
         GSplatServerClient _gsplatServerClient;
         DebugMenuController _debugMenu;
         RoomScanInputHandler _inputHandler;
+        RoomAnchorManager _roomAnchor;
         EventSystem _eventSystem;
         OVRInputModule _ovrInputModule;
         VRDocumentRaycaster _vrRaycaster;
@@ -126,6 +127,7 @@ namespace Genesis.RoomScan.Editor
             _gsplatServerClient = FindAny<GSplatServerClient>();
             _debugMenu = FindAny<DebugMenuController>();
             _inputHandler = FindAny<RoomScanInputHandler>();
+            _roomAnchor = FindAny<RoomAnchorManager>();
             _eventSystem = FindAny<EventSystem>();
             _ovrInputModule = FindAny<OVRInputModule>();
             _vrRaycaster = FindAny<VRDocumentRaycaster>();
@@ -500,6 +502,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("VolumeIntegrator", _volumeIntegrator != null);
             StatusRow("MeshExtractor", _meshExtractor != null);
             StatusRow("RoomScanner", _roomScanner != null);
+            StatusRow("RoomAnchorManager (MRUK volume anchor)", _roomAnchor != null);
             StatusRow("PassthroughCameraProvider", _cameraProvider != null);
             StatusRow("PassthroughCameraAccess", _pcaComponent != null);
             StatusRow("CameraDebugOverlay", _cameraDebug != null);
@@ -520,7 +523,7 @@ namespace Genesis.RoomScan.Editor
 
             bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
                               _meshExtractor == null ||
-                              _roomScanner == null || _cameraProvider == null ||
+                              _roomScanner == null || _roomAnchor == null || _cameraProvider == null ||
                               _pcaComponent == null || _cameraDebug == null ||
                               _triplanarCache == null ||
                               _persistence == null || _keyframeCollector == null ||
@@ -572,9 +575,11 @@ namespace Genesis.RoomScan.Editor
             // DepthCapture, VolumeIntegrator, MeshExtractor,
             // PassthroughCameraProvider, TriplanarCache, RoomScanPersistence,
             // KeyframeCollector, PointCloudExporter, GSplatManager,
-            // GSplatServerClient (which also pulls GaussianSplatRenderer via RequireComponent)
+            // GSplatServerClient, RoomAnchorManager (GaussianSplatRenderer via GSplatManager)
             if (root.GetComponent<RoomScanner>() == null)
                 Undo.AddComponent<RoomScanner>(root);
+            if (root.GetComponent<RoomAnchorManager>() == null)
+                Undo.AddComponent<RoomAnchorManager>(root);
 
             // Optional components not covered by RequireComponent
             if (root.GetComponent<RoomScanInputHandler>() == null)

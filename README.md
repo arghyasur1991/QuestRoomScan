@@ -7,7 +7,8 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **GPU TSDF Integration** — Depth frames fused into a signed distance field via compute shaders
 - **GPU Surface Nets Meshing** — Fully GPU-driven mesh extraction via compute shaders with zero CPU readback, rendered via a single `Graphics.RenderPrimitivesIndirect` draw call
 - **Three-Layer Texturing** — Triplanar world-space cache (persistent ~8mm/texel) → vertex colors (~5cm fallback) — all sourced from passthrough camera RGB. Keyframes captured as motion-gated JPEGs to disk for Gaussian Splat training.
-- **Mesh Persistence** — Save/load full scan state (TSDF + color volumes + triplanar textures) to disk, auto-save on quit
+- **Mesh Persistence** — Save/load full scan state (TSDF + color volumes + triplanar textures + **room-anchor volume origin**) to disk (`scan.bin` format v2), auto-save on quit
+- **MRUK room anchoring** — `RoomAnchorManager` (required on the RoomScan root; disable the component to use identity volume placement) loads the scene mesh from the device, keeps the TSDF volume locked to the room as tracking recenters, and persists the volume origin in room space on save
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering

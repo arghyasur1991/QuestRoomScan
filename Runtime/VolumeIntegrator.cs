@@ -78,8 +78,15 @@ namespace Genesis.RoomScan
         private static readonly int CamSensorResID = Shader.PropertyToID("gsCamSensorRes");
         private static readonly int CamCurrentResID = Shader.PropertyToID("gsCamCurrentRes");
         private static readonly int CamExposureID = Shader.PropertyToID("gsCamExposure");
+        private static readonly int VolumeToWorldID = Shader.PropertyToID("gsVolumeToWorld");
+        private static readonly int WorldToVolumeID = Shader.PropertyToID("gsWorldToVolume");
 
         public float CameraExposure => cameraExposure;
+
+        private Matrix4x4 _volumeToWorld = Matrix4x4.identity;
+        private Matrix4x4 _worldToVolume = Matrix4x4.identity;
+        public Matrix4x4 VolumeToWorld => _volumeToWorld;
+        public Matrix4x4 WorldToVolume => _worldToVolume;
 
         [Header("Warmup")]
         [Tooltip("Clear the volume after this many integrations to discard sensor startup noise. 0 = disabled.")]
@@ -209,6 +216,26 @@ namespace Genesis.RoomScan
 
             Shader.SetGlobalTexture(VolumeID, _volume);
             Shader.SetGlobalTexture(ColorVolumeID, _colorVolume);
+
+            ApplyVolumeTransform();
+        }
+
+        public void SetVolumeTransform(Matrix4x4 volumeToWorld, Matrix4x4 worldToVolume)
+        {
+            _volumeToWorld = volumeToWorld;
+            _worldToVolume = worldToVolume;
+            ApplyVolumeTransform();
+        }
+
+        private void ApplyVolumeTransform()
+        {
+            Shader.SetGlobalMatrix(VolumeToWorldID, _volumeToWorld);
+            Shader.SetGlobalMatrix(WorldToVolumeID, _worldToVolume);
+            if (compute != null)
+            {
+                compute.SetMatrix(VolumeToWorldID, _volumeToWorld);
+                compute.SetMatrix(WorldToVolumeID, _worldToVolume);
+            }
         }
 
         public void Clear()
@@ -469,24 +496,25 @@ namespace Genesis.RoomScan
             IntegrationCount = integrationCount;
             _frustumReady = false;
 
+            ApplyVolumeTransform();
+
             Debug.Log($"[RoomScan] Volumes loaded: {s}, integrationCount={integrationCount}");
             return true;
         }
 
         public float3 VoxelToWorld(uint3 indices)
         {
-            float3 pos = indices;
-            pos += 0.5f;
-            pos -= (float3)VoxelCount / 2.0f;
-            pos *= voxelSize;
-            return pos;
+            float3 local = (float3)indices + 0.5f - (float3)VoxelCount / 2.0f;
+            local *= voxelSize;
+            return (float3)(Vector3)_volumeToWorld.MultiplyPoint3x4((Vector3)local);
         }
 
-        public int3 WorldToVoxel(float3 pos)
+        public int3 WorldToVoxel(float3 worldPos)
         {
-            pos /= voxelSize;
-            pos += (float3)VoxelCount / 2.0f;
-            int3 id = (int3)math.floor(pos);
+            float3 local = (Vector3)_worldToVolume.MultiplyPoint3x4((Vector3)worldPos);
+            local /= voxelSize;
+            local += (float3)VoxelCount / 2.0f;
+            int3 id = (int3)math.floor(local);
             id = math.clamp(id, int3.zero, VoxelCount);
             return id;
         }
