@@ -369,6 +369,8 @@ namespace Genesis.RoomScan
             _volumeIntegrator.Clear();
             _meshExtractor.Reinitialize();
             if (_triplanarCache != null) _triplanarCache.Clear();
+            if (_roomAnchor != null && _roomAnchor.enabled)
+                _roomAnchor.NotifyClearedVolumeForRescan();
         }
 
         /// <summary>

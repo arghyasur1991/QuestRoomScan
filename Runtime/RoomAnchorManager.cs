@@ -33,6 +33,16 @@ namespace Genesis.RoomScan
         /// </summary>
         private bool _volumeOriginLocked;
 
+        /// <summary>
+        /// When true (loaded/saved with scan.bin v3), volume placement uses saved room + volume snapshots:
+        /// <c>volumeToWorld = R_now * Inverse(R_save) * V_save</c> so mesh stays aligned when the MRUK room
+        /// anchor gets a different world pose across sessions.
+        /// </summary>
+        private bool _sessionRelocationActive;
+
+        private Matrix4x4 _sessionSavedRoomLocalToWorld = Matrix4x4.identity;
+        private Matrix4x4 _sessionSavedVolumeToWorld = Matrix4x4.identity;
+
         private MRUK _mruk;
         private Transform _roomTransform;
         private VolumeIntegrator _volumeIntegrator;
@@ -131,6 +141,56 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Room → world matrix for persistence (identity if room not ready). Call on main thread.
+        /// </summary>
+        public Matrix4x4 GetRoomLocalToWorldForPersistence()
+        {
+            if (_roomTransform == null)
+                return Matrix4x4.identity;
+            return _roomTransform.localToWorldMatrix;
+        }
+
+        /// <summary>
+        /// Apply snapshots from scan.bin v3. <paramref name="roomLocalToWorldAtSave"/> and
+        /// <paramref name="volumeToWorldAtSave"/> must be captured on the main thread at save time.
+        /// </summary>
+        public void ApplySessionRelocationSnapshots(Matrix4x4 roomLocalToWorldAtSave,
+            Matrix4x4 volumeToWorldAtSave)
+        {
+            _sessionSavedRoomLocalToWorld = roomLocalToWorldAtSave;
+            _sessionSavedVolumeToWorld = volumeToWorldAtSave;
+            _sessionRelocationActive = true;
+            _volumeOriginLocked = true;
+            Debug.Log("[RoomAnchor] Session relocation active: V = R_now * Inverse(R_save) * V_save");
+        }
+
+        /// <summary>
+        /// Disables v3 relocation (e.g. after clearing scan). Live placement uses room + <see cref="OriginInRoomSpace"/>.
+        /// </summary>
+        public void ClearSessionRelocation()
+        {
+            _sessionRelocationActive = false;
+            _sessionSavedRoomLocalToWorld = Matrix4x4.identity;
+            _sessionSavedVolumeToWorld = Matrix4x4.identity;
+        }
+
+        /// <summary>
+        /// After clearing the TSDF volume for a fresh scan, rebind origin to current world zero in room space
+        /// and drop relocation so integration uses the same rule as a first-time room load.
+        /// </summary>
+        public void NotifyClearedVolumeForRescan()
+        {
+            ClearSessionRelocation();
+            if (_roomTransform != null)
+            {
+                OriginInRoomSpace = _roomTransform.InverseTransformPoint(Vector3.zero);
+                _volumeOriginLocked = true;
+            }
+
+            RefreshVolumeTransform();
+        }
+
+        /// <summary>
         /// Recompute volume ↔ world from the current room anchor pose. Safe to call every frame.
         /// </summary>
         public void RefreshVolumeTransform()
@@ -143,10 +203,19 @@ namespace Genesis.RoomScan
             if (_volumeIntegrator == null)
                 return;
 
-            Matrix4x4 volumeToWorld = _roomTransform.localToWorldMatrix *
-                                       Matrix4x4.Translate(OriginInRoomSpace);
-            Matrix4x4 worldToVolume = volumeToWorld.inverse;
+            Matrix4x4 volumeToWorld;
+            if (_sessionRelocationActive)
+            {
+                Matrix4x4 rNow = _roomTransform.localToWorldMatrix;
+                volumeToWorld = rNow * _sessionSavedRoomLocalToWorld.inverse * _sessionSavedVolumeToWorld;
+            }
+            else
+            {
+                volumeToWorld = _roomTransform.localToWorldMatrix *
+                                Matrix4x4.Translate(OriginInRoomSpace);
+            }
 
+            Matrix4x4 worldToVolume = volumeToWorld.inverse;
             _volumeIntegrator.SetVolumeTransform(volumeToWorld, worldToVolume);
         }
     }
