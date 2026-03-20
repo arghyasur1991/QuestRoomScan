@@ -249,6 +249,7 @@ namespace Genesis.RoomScan
                         else
                         {
                             tc.Load(triplanarDir);
+                            tc.LoadDepth(triplanarDir);
                         }
                     }
                     catch (Exception e)
