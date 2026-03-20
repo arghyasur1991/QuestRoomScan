@@ -241,7 +241,9 @@ namespace Genesis.RoomScan
             if (_depthYZ) Destroy(_depthYZ);
 
             _triXZ = dsts[0]; _triXY = dsts[1]; _triYZ = dsts[2];
-            _depthXZ = null; _depthXY = null; _depthYZ = null;
+            _depthXZ = CreateDepthRT("DepthXZ");
+            _depthXY = CreateDepthRT("DepthXY");
+            _depthYZ = CreateDepthRT("DepthYZ");
 
             Shader.SetGlobalTexture(TriXZID, _triXZ);
             Shader.SetGlobalTexture(TriXYID, _triXY);
