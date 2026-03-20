@@ -227,10 +227,6 @@ namespace Genesis.RoomScan
         private float _lastScannerLog;
         private int _integrateCount;
 
-        private void LateUpdate()
-        {
-        }
-
         private void Update()
         {
             if (_clearDone)

@@ -78,6 +78,7 @@ namespace Genesis.RoomScan
         private static readonly int CamSensorResID = Shader.PropertyToID("gsCamSensorRes");
         private static readonly int CamCurrentResID = Shader.PropertyToID("gsCamCurrentRes");
         private static readonly int CamExposureID = Shader.PropertyToID("gsCamExposure");
+
         public float CameraExposure => cameraExposure;
 
         [Header("Warmup")]

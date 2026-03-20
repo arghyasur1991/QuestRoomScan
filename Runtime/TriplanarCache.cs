@@ -33,6 +33,7 @@ namespace Genesis.RoomScan
         static readonly int TriXYID = Shader.PropertyToID("_RSTriXY");
         static readonly int TriYZID = Shader.PropertyToID("_RSTriYZ");
         static readonly int TriAvailableID = Shader.PropertyToID("_RSTriAvailable");
+
         static readonly int TriXZRWID = Shader.PropertyToID("gsTriXZ_RW");
         static readonly int TriXYRWID = Shader.PropertyToID("gsTriXY_RW");
         static readonly int TriYZRWID = Shader.PropertyToID("gsTriYZ_RW");
