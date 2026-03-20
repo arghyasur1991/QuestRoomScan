@@ -42,6 +42,9 @@ namespace Genesis.RoomScan
         private Transform _anchorTransform;
         private VolumeIntegrator _volumeIntegrator;
 
+        private Vector3 _lastLoggedAnchorPos;
+        private float _lastAnchorDriftLog;
+
         private void Awake()
         {
             Instance = this;
@@ -252,6 +255,19 @@ namespace Genesis.RoomScan
             Matrix4x4 volumeToWorld = aNow * _sessionSavedAnchorLocalToWorld.inverse * _sessionSavedVolumeToWorld;
             Matrix4x4 worldToVolume = volumeToWorld.inverse;
             _volumeIntegrator.SetVolumeTransform(volumeToWorld, worldToVolume);
+
+            Vector3 aPos = _anchorTransform.position;
+            float drift = Vector3.Distance(aPos, _lastLoggedAnchorPos);
+            float t = Time.time;
+            if (drift > 0.001f || t - _lastAnchorDriftLog > 10f)
+            {
+                if (drift > 0.001f)
+                    Debug.LogWarning($"[RoomAnchor] ANCHOR DRIFT {drift:F4}m — pos={aPos}, prev={_lastLoggedAnchorPos}");
+                else
+                    Debug.Log($"[RoomAnchor] volumeToWorld row0={volumeToWorld.GetRow(0)}, anchorPos={aPos}");
+                _lastLoggedAnchorPos = aPos;
+                _lastAnchorDriftLog = t;
+            }
         }
     }
 }

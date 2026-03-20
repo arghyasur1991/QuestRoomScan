@@ -327,6 +327,10 @@ namespace Genesis.RoomScan
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StartCapture();
 
+            var vi = _volumeIntegrator;
+            Debug.Log($"[RoomScan] StartScanning — volumeToWorld row0={vi.VolumeToWorld.GetRow(0)}, " +
+                      $"row1={vi.VolumeToWorld.GetRow(1)}, row2={vi.VolumeToWorld.GetRow(2)}, row3={vi.VolumeToWorld.GetRow(3)}, " +
+                      $"integrationCount={vi.IntegrationCount}");
             ScanStarted?.Invoke();
         }
 
