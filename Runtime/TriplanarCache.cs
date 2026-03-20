@@ -152,31 +152,33 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Resample triplanar textures from old coordinate frame into new frame using
-        /// forward-splat: each old texel has its exact 3D position (from stored depth),
-        /// gets relocated by R, and written at the correct new triplanar UV.
-        /// Followed by dilation passes to fill coverage gaps.
+        /// forward-splat compute dispatch: each old texel has its exact 3D position
+        /// (from stored depth), gets relocated by R, and scatter-written at the correct
+        /// new triplanar UV. 3 compute dispatches (one per src face), each writing to
+        /// all 3 dst faces simultaneously. Followed by dilation blits for coverage gaps.
         /// </summary>
         public void BakeRelocation(Matrix4x4 relocationMatrix, string triplanarDir)
         {
             var vi = VolumeIntegrator.Instance;
-            if (vi == null) return;
+            if (vi == null || bakeCompute == null) return;
 
-            Load(triplanarDir);
-            LoadDepth(triplanarDir);
-
-            var shader = relocShader != null ? relocShader : Shader.Find("Hidden/Genesis/TriplanarReloc");
-            if (shader == null)
-            {
-                Debug.LogError("[RoomScan] TriplanarReloc shader not found — triplanar relocation skipped");
-                return;
-            }
+            var dilShader = relocShader != null ? relocShader : Shader.Find("Hidden/Genesis/TriplanarReloc");
 
             var vc = vi.VoxelCount;
             int res = textureResolution;
-            int totalVerts = res * res;
 
-            var oldTris = new[] { _triXZ, _triXY, _triYZ };
-            var oldDepths = new[] { _depthXZ, _depthXY, _depthYZ };
+            // Load old textures as Texture2D (SRV-safe, no Blit→RT Vulkan issue).
+            var srcTriFiles = new[] { "tri_xz.raw", "tri_xy.raw", "tri_yz.raw" };
+            var srcDepthFiles = new[] { "depth_xz.raw", "depth_xy.raw", "depth_yz.raw" };
+            var srcTris = new Texture2D[3];
+            var srcDepths = new Texture2D[3];
+            for (int i = 0; i < 3; i++)
+            {
+                srcTris[i] = LoadTex2D(Path.Combine(triplanarDir, srcTriFiles[i]),
+                                       res, res, TextureFormat.RGBA32);
+                srcDepths[i] = LoadTex2D(Path.Combine(triplanarDir, srcDepthFiles[i]),
+                                         res, res, TextureFormat.R8);
+            }
 
             var dsts = new RenderTexture[] {
                 CreateTriplanarRT("RelocXZ"),
@@ -184,44 +186,56 @@ namespace Genesis.RoomScan
                 CreateTriplanarRT("RelocYZ")
             };
 
-            // Pass 0: Forward splat — 9 draw calls (3 src × 3 dst).
-            var splatMat = new Material(shader);
-            splatMat.SetMatrix("_Reloc", relocationMatrix);
-            splatMat.SetVector("_VoxCount", new Vector4(vc.x, vc.y, vc.z, 0));
-            splatMat.SetFloat("_VoxSize", vi.VoxelSize);
-            splatMat.SetVector("_TexSize", new Vector2(res, res));
+            // Forward-splat compute: 3 dispatches (one per src face).
+            var relocKernel = new ComputeKernelHelper(bakeCompute, "ForwardSplatRelocation");
+            int srcTriID = Shader.PropertyToID("gsRelocSrcTri");
+            int srcDepthID = Shader.PropertyToID("gsRelocSrcDepth");
+            int dstXZID = Shader.PropertyToID("gsRelocDstXZ");
+            int dstXYID = Shader.PropertyToID("gsRelocDstXY");
+            int dstYZID = Shader.PropertyToID("gsRelocDstYZ");
+
+            bakeCompute.SetMatrix(Shader.PropertyToID("gsRelocMatrix"), relocationMatrix);
+            bakeCompute.SetVector(Shader.PropertyToID("gsRelocVoxCount"),
+                new Vector4(vc.x, vc.y, vc.z, 0));
+            bakeCompute.SetFloat(Shader.PropertyToID("gsRelocVoxSize"), vi.VoxelSize);
+            bakeCompute.SetInts(TriSizeID, res, res);
+
+            relocKernel.Set(dstXZID, dsts[0]);
+            relocKernel.Set(dstXYID, dsts[1]);
+            relocKernel.Set(dstYZID, dsts[2]);
 
             for (int srcFace = 0; srcFace < 3; srcFace++)
             {
-                splatMat.SetTexture("_OldTri", oldTris[srcFace]);
-                splatMat.SetTexture("_OldDepth", oldDepths[srcFace]);
-                splatMat.SetInt("_SrcFace", srcFace);
-
-                for (int dstFace = 0; dstFace < 3; dstFace++)
-                {
-                    splatMat.SetInt("_DstFace", dstFace);
-                    Graphics.SetRenderTarget(dsts[dstFace]);
-                    splatMat.SetPass(0);
-                    Graphics.DrawProceduralNow(MeshTopology.Points, totalVerts);
-                }
+                bakeCompute.SetTexture(relocKernel.KernelIndex, srcTriID, srcTris[srcFace]);
+                bakeCompute.SetTexture(relocKernel.KernelIndex, srcDepthID, srcDepths[srcFace]);
+                bakeCompute.SetInt(Shader.PropertyToID("gsRelocSrcFace"), srcFace);
+                relocKernel.DispatchFit(res, res);
             }
-            Graphics.SetRenderTarget(null);
-            Destroy(splatMat);
 
-            // Pass 1: Dilation — fill coverage gaps from point-splat sparsity.
-            var dilMat = new Material(shader);
-            const int dilationPasses = 8;
-            for (int d = 0; d < dilationPasses; d++)
+            // Clean up source Texture2Ds
+            for (int i = 0; i < 3; i++)
             {
-                for (int face = 0; face < 3; face++)
-                {
-                    var tmp = CreateTriplanarRT($"Dilate{face}_{d}");
-                    Graphics.Blit(dsts[face], tmp, dilMat, 1);
-                    Destroy(dsts[face]);
-                    dsts[face] = tmp;
-                }
+                Destroy(srcTris[i]);
+                Destroy(srcDepths[i]);
             }
-            Destroy(dilMat);
+
+            // Dilation blits to fill coverage gaps.
+            if (dilShader != null)
+            {
+                var dilMat = new Material(dilShader);
+                const int dilationPasses = 4;
+                for (int d = 0; d < dilationPasses; d++)
+                {
+                    for (int face = 0; face < 3; face++)
+                    {
+                        var tmp = CreateTriplanarRT($"Dilate{face}_{d}");
+                        Graphics.Blit(dsts[face], tmp, dilMat, 1);
+                        Destroy(dsts[face]);
+                        dsts[face] = tmp;
+                    }
+                }
+                Destroy(dilMat);
+            }
 
             // Swap old → new
             Destroy(_triXZ); Destroy(_triXY); Destroy(_triYZ);
@@ -244,8 +258,20 @@ namespace Genesis.RoomScan
                 _clearKernel.Set(TriYZRWID, _triYZ);
             }
 
-            Debug.Log($"[RoomScan] Triplanar forward-splat relocation complete — " +
-                      $"3x {res}x{res}, 9 splat passes + {dilationPasses} dilation passes");
+            Debug.Log($"[RoomScan] Triplanar compute forward-splat relocation complete — " +
+                      $"3x {res}x{res}, 3 dispatches + 4 dilation passes");
+        }
+
+        private static Texture2D LoadTex2D(string path, int w, int h, TextureFormat format)
+        {
+            var tex = new Texture2D(w, h, format, false, true);
+            if (File.Exists(path))
+            {
+                byte[] data = File.ReadAllBytes(path);
+                tex.LoadRawTextureData(data);
+            }
+            tex.Apply(false, false);
+            return tex;
         }
 
         private int _bakeCount;
