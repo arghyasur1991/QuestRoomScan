@@ -85,14 +85,15 @@ Shader "Genesis/ScanMeshVertexColor"
 
             half3 SampleTriplanar(float3 worldPos, float3 normal)
             {
-                float3 absN = abs(normal);
-                float3 blend = absN / (absN.x + absN.y + absN.z + 0.001);
                 float3 triPos = mul(_RSTriReloc, float4(worldPos, 1)).xyz;
-                float3 uvw = WorldToVoxelUVW(triPos);
+                float3 triN   = normalize(mul((float3x3)_RSTriReloc, normal));
+                float3 absN   = abs(triN);
+                float3 blend  = absN / (absN.x + absN.y + absN.z + 0.001);
+                float3 uvw    = WorldToVoxelUVW(triPos);
 
-                float2 uvXZ = SignedTriUV(uvw.xz, normal.y);
-                float2 uvXY = SignedTriUV(uvw.xy, normal.z);
-                float2 uvYZ = SignedTriUV(uvw.yz, normal.x);
+                float2 uvXZ = SignedTriUV(uvw.xz, triN.y);
+                float2 uvXY = SignedTriUV(uvw.xy, triN.z);
+                float2 uvYZ = SignedTriUV(uvw.yz, triN.x);
 
                 half4 colXZ = SAMPLE_TEXTURE2D(_RSTriXZ, sampler_RSTriXZ, uvXZ);
                 half4 colXY = SAMPLE_TEXTURE2D(_RSTriXY, sampler_RSTriXY, uvXY);

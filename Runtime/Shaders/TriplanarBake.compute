@@ -129,18 +129,19 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
     if (quality < MIN_QUALITY) return;
 
     float3 triPos = mul(_RSTriReloc, float4(worldPos, 1)).xyz;
+    float3 triN   = normalize(mul((float3x3)_RSTriReloc, normal));
     float3 uvw = gsWorldToVoxelUVW(triPos);
     if (any(uvw < 0.001) || any(uvw > 0.999)) return;
 
-    float3 absN = abs(normal);
+    float3 absN = abs(triN);
 
     float2 triUV;
     if (absN.y >= absN.x && absN.y >= absN.z)
-        triUV = SignedTriUV(uvw.xz, normal.y);
+        triUV = SignedTriUV(uvw.xz, triN.y);
     else if (absN.z >= absN.x)
-        triUV = SignedTriUV(uvw.xy, normal.z);
+        triUV = SignedTriUV(uvw.xy, triN.z);
     else
-        triUV = SignedTriUV(uvw.yz, normal.x);
+        triUV = SignedTriUV(uvw.yz, triN.x);
 
     int2 center = (int2)(triUV * gsTriSize);
     if (center.x < 0 || center.y < 0 || (uint)center.x >= gsTriSize.x || (uint)center.y >= gsTriSize.y)
@@ -163,9 +164,7 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
         else
             old = gsTriYZ_RW[tc];
 
-        // Neighbors only fill empty texels; center gets full blend
         if (!isCenter && old.a > 0.05) continue;
-        // Hard freeze: fully converged texels are locked
         if (old.a > HARD_FREEZE_ALPHA) continue;
 
         float freeze = 1.0 - old.a * 0.8;
