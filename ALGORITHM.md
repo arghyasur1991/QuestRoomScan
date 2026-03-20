@@ -5,15 +5,18 @@
 Real-time 3D room reconstruction on Quest 3 using a TSDF (Truncated Signed Distance Field) volume and fully GPU-driven Surface Nets mesh extraction.
 
 ```
-DepthCapture (AR depth frames → normals → dilation)
+RoomAnchorManager (MRUK floor anchor → relocation matrix on load)
        │
-VolumeIntegrator (TSDF integrate → warmup clear → prune)
+DepthCapture (AR depth frames → normals → dilation, tracking→world conversion)
+       │
+VolumeIntegrator (TSDF integrate → warmup clear → prune → bake relocation on load)
        │
 MeshExtractor → GPUSurfaceNets (compute shader: classify → compact → smooth → snap → temporal → index)
        │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
        │
        ├── PlaneDetector (periodic RANSAC on background thread → persistent plane list)
-       ├── TriplanarCache (bake camera → 3 world-space textures, persistent)
+       ├── TriplanarCache (bake camera → 3 world-space textures + depth maps,
+       │                    forward-splat relocation on load)
        └── KeyframeStore (ring buffer of camera frames, live quality)
                 │
 ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → keyframes → triplanar → vertex color)
@@ -39,9 +42,11 @@ ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → keyframes → tri
 - **Memory:** ~13 MB
 
 ### Coordinate System
+- The volume is always axis-aligned at the world origin — there is no `volumeToWorld` matrix.
 - Voxel `(0,0,0)` maps to world `(-VoxelCount/2 * voxelSize)`.
-- `WorldToVoxel(pos)`: `floor(pos / voxelSize + VoxelCount / 2)`, clamped.
-- `VoxelToWorld(idx)`: `(idx + 0.5 - VoxelCount / 2) * voxelSize`.
+- `gsWorldToVoxelFloat(pos)`: `pos / voxelSize + VoxelCount / 2` (shader helper in `VolumeHelpers.hlsl`).
+- `gsVoxelToWorld(idx)`: `(idx + 0.5 - VoxelCount / 2) * voxelSize`.
+- On load, if the room anchor has moved, a one-shot `BakeRelocation` resamples the volume into the current frame rather than maintaining a persistent transform offset.
 
 ## 2. Integration Pipeline
 
@@ -227,12 +232,13 @@ Three layers of texturing, in priority order:
 - **NOT persisted**: Keyframes are lost on save/load
 
 ### Layer 2: Triplanar World-Space Textures (persistent, ~8mm/texel, saveable)
-`TriplanarCache` maintains 3 axis-aligned 2D textures (1024×1024 RGBA8 each):
+`TriplanarCache` maintains 3 axis-aligned 2D color textures (1024×1024 RGBA8 each) plus 3 auxiliary depth textures (1024×1024 R8 each):
 - **XZ texture**: For Y-dominant normals (floors, ceilings)
 - **XY texture**: For Z-dominant normals (front/back walls)
 - **YZ texture**: For X-dominant normals (side walls)
+- **Depth textures**: Store the "missing axis" value per texel (XZ→Y, XY→Z, YZ→X). Required for exact 3D reconstruction during relocation (see §9c).
 - **Sign-aware UV**: Each texture split in half by normal sign (upper = positive, lower = negative) to prevent opposite walls sharing texels
-- **Memory**: 3 × 1024 × 1024 × 4 bytes ≈ 12MB
+- **Memory**: Color 3 × 1024 × 1024 × 4 bytes ≈ 12MB, Depth 3 × 1024 × 1024 × 1 byte ≈ 3MB
 - **Baking**: `TriplanarBake.compute` runs at integration rate, iterating over depth pixels:
   1. Unproject depth pixel to world position
   2. Sample surface normal from depth normals
@@ -240,8 +246,9 @@ Three layers of texturing, in priority order:
   4. Determine dominant triplanar axis from `abs(normal)`
   5. Map to triplanar UV via `SignedTriUV(gsWorldToVoxelUVW(worldPos), normalComponent)`
   6. **Alpha-decaying blend**: `quality * 0.4 * (1 - alpha * 0.8)` — high-confidence texels become nearly immutable (auto-freeze)
+  7. Write missing-axis depth alongside color (e.g., `gsTriDepthXZ_RW[tc] = uvw.y` for the XZ face)
 - **Shader**: Fragment shader samples all 3 textures using triplanar blending, weighted by `abs(normal)`
-- **Persisted**: Save/load as raw RGBA8 data files
+- **Persisted**: Save/load as raw RGBA8 color files + R8 depth files
 
 ### Layer 3: Vertex Colors (fallback, ~5cm/voxel)
 Camera colors accumulated into the 3D color volume during TSDF integration. Sampled per-vertex during mesh extraction.
@@ -272,28 +279,112 @@ Temporal blending on the GPU provides implicit convergence-based stability (see 
 
 ### Binary Format (`RMSH` v1)
 ```
-Header: magic (RMSH) | version | timestamp
-Params: voxelCount (int3) | voxelSize (float) | integrationCount (int) | triplanarRes (int)
-TSDF:   length (int) | raw bytes (RG8_SNorm, ~6.2MB)
-Color:  length (int) | raw bytes (RGBA8_UNorm, ~12.5MB)
+Header:  magic (RMSH) | version (1) | timestamp (int64)
+Params:  voxelCount (int3) | voxelSize (float) | integrationCount (int) | triplanarRes (int)
+Anchor:  anchorAtSave (Matrix4x4, 16 floats — MRUK floor anchor localToWorld at save time)
+TSDF:    length (int) | raw bytes (RG8_SNorm)
+Color:   length (int) | raw bytes (RGBA8_UNorm)
 ```
-Triplanar textures saved separately as 3 raw RGBA8 files.
+Triplanar data saved separately as 6 raw files: `tri_xz.raw`, `tri_xy.raw`, `tri_yz.raw` (RGBA8 color) + `depth_xz.raw`, `depth_xy.raw`, `depth_yz.raw` (R8 depth).
 
 ### Save Pipeline
 1. `AsyncGPUReadback` full TSDF volume (slice-by-slice copy)
 2. `AsyncGPUReadback` full color volume
-3. `TriplanarCache.Save()` writes 3 raw texture files
-4. `BinaryWriter` writes header + volume bytes to `persistentDataPath/RoomScans/scan.bin`
-5. Triggered by: periodic autosave (every 60s), `OnApplicationPause`, `OnApplicationQuit`, or manual call
+3. `TriplanarCache` saves 3 color textures + 3 depth textures as raw files
+4. `RoomAnchorManager.GetRoomLocalToWorldForPersistence()` captures the current MRUK floor anchor pose
+5. `BinaryWriter` writes header + anchor matrix + volume bytes to `persistentDataPath/RoomScans/scan.bin`
+6. Triggered by: `OnApplicationPause`, `OnApplicationQuit`, or manual call
 
 ### Load Pipeline
-1. Read binary, validate magic/version/voxel dimensions
+1. Read binary, validate magic/version (must be exactly v1)/voxel dimensions
 2. Create `Texture3D`, `SetPixelData`, `Graphics.CopyTexture` to upload TSDF and color to GPU
-3. `TriplanarCache.Load()` restores triplanar textures
-4. `MeshExtractor.Reinitialize()` reinitializes GPU buffers and triggers full re-extraction
-5. Resume scanning (new observations refine the loaded mesh)
+3. Wait for MRUK room to load (polling loop, ~5s timeout) — required before computing relocation
+4. Compute relocation matrix `R = A_now × Inv(A_save)` via `RoomAnchorManager`
+5. If `R ≠ I` (room anchor moved):
+   - `VolumeIntegrator.BakeRelocation(R)` — compute shader resamples TSDF + color into the current frame (see §9b)
+   - `TriplanarCache.BakeRelocation(R, dir)` — forward-splat compute relocation of triplanar textures (see §9c)
+6. If `R = I` (same anchor pose): load triplanar color + depth textures directly from raw files
+7. `MeshExtractor.Reinitialize()` + `Extract()` — rebuild GPU mesh from relocated volume
+8. Resume scanning (new observations refine the loaded mesh)
 
-## 10. Exclusion Zones
+### 9b. TSDF Volume Bake Relocation (`BakeRelocation` kernel)
+
+Resamples the entire TSDF + color volume from the old coordinate frame into the current identity frame using trilinear interpolation:
+
+```
+BakeRelocation(uint3 id):
+  dstLocal = (id + 0.5 - VoxelCount/2) × voxelSize
+  srcLocal = invRelocation × dstLocal
+  uvw = srcLocal / voxelSize + VoxelCount/2 → normalized [0,1]
+  if out-of-bounds: write empty voxel
+  else: SampleLevel(srcTsdf, uvw, 0), SampleLevel(srcColor, uvw, 0)
+```
+
+- **Dispatch**: `[numthreads(4,4,4)]` over full volume grid
+- **Swap strategy**: Writes to fresh `RenderTexture` pair, then swaps and destroys originals — avoids `Graphics.CopyTexture` on 3D RTs which can silently fail on Vulkan/Quest
+- **Rebinds**: After swap, all compute kernel UAVs and global shader textures are rebound to the new volumes
+
+### 9c. Triplanar Forward-Splat Relocation
+
+Triplanar textures encode a 2D projection of 3D surface data — the axis aligned with the dominant normal is discarded. Inverting this projection requires the "missing axis" value, which is stored per texel during scanning as an auxiliary R8 depth texture (one per face: XZ→Y, XY→Z, YZ→X).
+
+#### Depth Storage (scan-time)
+The `BakeTriplanar` compute kernel writes the missing axis value alongside color:
+```
+if face == XZ: gsTriDepthXZ_RW[tc] = uvw.y
+if face == XY: gsTriDepthXY_RW[tc] = uvw.z
+if face == YZ: gsTriDepthYZ_RW[tc] = uvw.x
+```
+
+#### Forward Splat (load-time, `ForwardSplatRelocation` kernel)
+For each old texel with stored depth, reconstructs the exact 3D position, applies the relocation matrix, and scatter-writes to the correct new triplanar face:
+
+```
+ForwardSplatRelocation(uint2 id):
+  oldColor = srcTri[id]           // skip if alpha < 0.01
+  depth = srcDepth[id]            // stored missing axis [0,1]
+  uv = (id + 0.5) / triSize      // decode sign-split half
+
+  // Reconstruct 3D from (2D UV + stored depth)
+  if srcFace == XZ: oldUVW = (u, depth, v),  faceN = (0, sign, 0)
+  if srcFace == XY: oldUVW = (u, v, depth),  faceN = (0, 0, sign)
+  if srcFace == YZ: oldUVW = (depth, u, v),  faceN = (sign, 0, 0)
+
+  oldWorldPos = (oldUVW × voxCount - voxCount/2) × voxSize
+  newWorldPos = R × oldWorldPos
+  newN = normalize(R_3x3 × faceN)
+
+  // Determine new triplanar face and UV
+  newUVW = saturate(newWorldPos / voxSize + voxCount/2) / voxCount
+  newFace = dominant axis of |newN|
+  newTriUV = SignedTriUV(newUVW, newN)
+
+  // Scatter-write to destination UAV
+  dstFace[newTriUV] = oldColor
+```
+
+- **Dispatch**: 3 passes (one per source face), each writing to all 3 destination face UAVs simultaneously
+- **Source textures**: Loaded as `Texture2D` from raw bytes (not `Graphics.Blit` → RT), bypassing Vulkan SRV layout transition issues on Quest
+- **Coverage**: Followed by 4 compute dilation passes (`DilateTriplanar` kernel, 3×3 average of non-empty neighbors, ping-pong between two RT sets) to fill sparse gaps from scatter-write quantization
+- **Depth RTs after relocation**: Fresh empty R8 `RenderTexture`s are created for subsequent live scanning
+
+## 10. Room Anchoring
+
+`RoomAnchorManager` uses Meta's MR Utility Kit (MRUK) to anchor the scan to the physical room across sessions and tracking recenters.
+
+### MRUK Floor Anchor
+On startup, `RoomAnchorManager` loads the device's scene model via `MRUK.LoadSceneFromDevice()` and grabs the first floor anchor's `localToWorldMatrix`. This transform is stable across tracking recenters because MRUK world-locks the scene mesh to the room.
+
+### Relocation Matrix
+When loading a saved scan, the relocation matrix `R = A_now × Inv(A_save)` encodes the rigid transform between the anchor's pose at save time and its pose at load time. If the user hasn't moved or the tracking origin is unchanged, `R = I` and no relocation is needed.
+
+### Tracking-Space to World-Space Conversion
+MRUK's world-lock can reposition the `TrackingSpace` transform (parent of the XR cameras) each frame. All camera poses from the depth and passthrough systems are reported in tracking space. `DepthCapture.TrackingToWorld(Pose)` converts these to world space via `TrackingSpace.TransformPoint` / `TrackingSpace.rotation` before passing them to `VolumeIntegrator`, `TriplanarCache`, and `KeyframeCollector`. Without this, depth integration and triplanar baking would use stale coordinates whenever MRUK repositions the tracking origin.
+
+### Startup Sequence
+`RoomScanner.Start()` waits for `RoomAnchorManager.RoomReady` before beginning scanning or loading saved data. This prevents a race where loading a scan before the anchor is resolved would skip relocation.
+
+## 11. Exclusion Zones
 
 Cylindrical exclusion zones around tracked transforms (typically the user's head):
 - **Radius:** 0.6m (XZ plane)
@@ -302,7 +393,7 @@ Cylindrical exclusion zones around tracked transforms (typically the user's head
 
 Voxels inside any exclusion cylinder are skipped during integration, preventing the user's body from being reconstructed.
 
-## 11. Key Parameters
+## 12. Key Parameters
 
 ### Volume
 | Parameter | Default | Description |
@@ -372,11 +463,19 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Texture Persistence
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `textureResolution` | 1024 | Triplanar texture resolution (per plane) |
+| `textureResolution` | 1024 | Triplanar texture resolution (per plane, applies to both color and depth) |
 | `maxKeyframes` | 8 | Ring buffer size (slot 0 = live, rest historical) |
 | `moveThreshold` | 0.3m | Min camera displacement for new keyframe |
 | `rotateThresholdDeg` | 20° | Min camera rotation for new keyframe |
 | `exposure` (KeyframeStore) | 3.0 | Keyframe display exposure boost |
+
+### Room Anchoring & Relocation
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `RoomAnchorManager` | enabled | Disable to skip MRUK anchoring (identity volume placement) |
+| `saveOnQuit` | false | Auto-save scan on application quit |
+| Relocation dilation passes | 4 | Compute dilation passes after forward-splat (fills coverage gaps) |
+| MRUK room load timeout | ~5s | Max wait for MRUK scene before proceeding without relocation |
 
 ### Memory Budget (Quest 3)
 | Component | Memory |
@@ -388,16 +487,17 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | GPU Surface Nets — index buffer (2.9M × 4B) | ~11 MB |
 | GPU Surface Nets — smooth ping-pong (2 × 163K × 12B) | ~4 MB |
 | GPU Surface Nets — temporal state (160³ × 16B, RWTexture3D RGBA32F) | ~50 MB |
-| Triplanar textures (3x 1024x1024 RGBA8) | ~12 MB |
+| Triplanar color textures (3x 1024x1024 RGBA8) | ~12 MB |
+| Triplanar depth textures (3x 1024x1024 R8) | ~3 MB |
 | Keyframe array (8x 1280x960 RGBA8) | ~40 MB |
-| **Total GPU** | **~155 MB** |
-| **Persistence on disk** | **~31 MB** |
+| **Total GPU** | **~158 MB** |
+| **Persistence on disk** | **~34 MB** |
 
-## 12. Gaussian Splat Pipeline
+## 13. Gaussian Splat Pipeline
 
 End-to-end pipeline: on-device keyframe + point cloud capture → server-based COLMAP conversion + GS training → on-device rendering via Unity Gaussian Splatting (UGS).
 
-### 12.1 KeyframeCollector (Quest, automatic)
+### 13.1 KeyframeCollector (Quest, automatic)
 Runs alongside scanning with no user interaction. Saves posed camera frames to `{persistentDataPath}/GSExport/`:
 - **Selection**: Motion-gated — translation > 0.3m OR rotation > 20 deg from any saved keyframe
 - **Rejection**: Frames with angular velocity > 120 deg/s are discarded (motion blur)
@@ -408,7 +508,7 @@ Runs alongside scanning with no user interaction. Saves posed camera frames to `
 - **Deduplication**: Multiple pose entries per image ID may occur; the server keeps only the last pose per image
 - **Typical output**: 100-300 keyframes, 10-30MB total
 
-### 12.2 PointCloudExporter (Quest, periodic)
+### 13.2 PointCloudExporter (Quest, periodic)
 Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
 - Async GPU readback of the `GPUSurfaceNets` vertex buffer
 - Parses `GPUVertex` structs: position (float3), normal (float3), packedColor (uint) → RGB
@@ -416,7 +516,7 @@ Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
 - Runs every 30s automatically
 - Provides dense initialization for GS training (10-100x more points than SfM)
 
-### 12.3 Server Training (RoomScan-GaussianSplatServer)
+### 13.3 Server Training (RoomScan-GaussianSplatServer)
 
 The Quest app's `GSplatServerClient` uploads a ZIP of keyframes + point cloud to a PC-based FastAPI server (`/upload?iterations=N`), then polls for status and downloads the result. Training iterations are configurable via the inspector (`trainingIterations`, default 7000).
 
@@ -445,7 +545,7 @@ The output PLY is in COLMAP world coordinates (right-handed Y-down).
 #### Run Management
 Each upload creates a timestamped directory. A `current_run` symlink points to the active run. Past runs can be browsed, activated, or deleted via the web dashboard API.
 
-### 12.4 On-Device Rendering (UGS)
+### 13.4 On-Device Rendering (UGS)
 
 Trained PLY is rendered using a [fork of Unity Gaussian Splatting](https://github.com/arghyasur1991/UnityGaussianSplatting) with runtime loading support.
 
@@ -485,7 +585,7 @@ The UGS fork includes several Quest 3-specific optimizations:
 #### Visibility Control
 `GaussianSplatRenderer.renderVisible` boolean — checked in `GatherSplatsForCamera()` — allows toggling rendering without disabling the component or releasing GPU resources. Used by `GSplatManager.RenderVisible` → `RoomScanner.ApplyRenderMode()` for Mesh/Splat/Both switching.
 
-### 12.5 Coordinate Conversion Detail
+### 13.5 Coordinate Conversion Detail
 Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-trip:
 
 **Quest → Server (export)**:

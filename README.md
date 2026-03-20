@@ -7,8 +7,8 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **GPU TSDF Integration** — Depth frames fused into a signed distance field via compute shaders
 - **GPU Surface Nets Meshing** — Fully GPU-driven mesh extraction via compute shaders with zero CPU readback, rendered via a single `Graphics.RenderPrimitivesIndirect` draw call
 - **Three-Layer Texturing** — Triplanar world-space cache (persistent ~8mm/texel) → vertex colors (~5cm fallback) — all sourced from passthrough camera RGB. Keyframes captured as motion-gated JPEGs to disk for Gaussian Splat training.
-- **Mesh Persistence** — Save/load full scan state (TSDF + color volumes + triplanar textures + **room-anchor volume origin**) to disk (`scan.bin` format v2), auto-save on quit
-- **MRUK room anchoring** — `RoomAnchorManager` (required on the RoomScan root; disable the component to use identity volume placement) loads the scene mesh from the device, keeps the TSDF volume locked to the room as tracking recenters, and persists the volume origin in room space on save
+- **Mesh Persistence** — Save/load full scan state (TSDF + color volumes + triplanar textures + depth maps + room-anchor pose) to disk (`scan.bin` format v1), auto-save on quit
+- **MRUK Room Anchoring** — `RoomAnchorManager` uses Meta's MRUK floor anchor to compute a relocation matrix across sessions. On load, TSDF volume and triplanar textures are baked into the current coordinate frame via compute-shader relocation, keeping the scan aligned with the physical room
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
@@ -118,24 +118,27 @@ Scanning continues during training — you can keep refining the mesh while wait
 
 ### Saving and Loading
 
-- **Save Scan**: Persists the full TSDF + color volumes and triplanar textures to disk (`RoomScans/scan.bin` + `RoomScans/triplanar/`)
-- **Load Scan**: Restores a previously saved scan, rebuilds the mesh. Validates that volume dimensions match.
-- **Auto-save on quit**: If enabled (default), the scan is automatically saved when the app exits
+- **Save Scan**: Persists the full TSDF + color volumes, triplanar color textures, triplanar depth maps, and MRUK anchor pose to disk (`RoomScans/scan.bin` + `RoomScans/triplanar/`)
+- **Load Scan**: Restores a previously saved scan. If the room anchor has moved since save, bakes the relocation into both the TSDF volume (compute resample) and triplanar textures (forward-splat compute) so the scan aligns with the physical room. Rebuilds the mesh. Validates that volume dimensions match.
+- **Auto-save on quit**: If enabled, the scan is automatically saved when the app exits (default off)
 - **Clear All Data**: Stops scanning, clears volumes/mesh/triplanar/keyframes, deletes saved scan and GSExport from disk
 
 ### Architecture
 
 ```
+RoomAnchorManager (MRUK floor anchor → relocation matrix on load)
+       │
 PassthroughCameraProvider (RGB frames from headset cameras)
        │
-DepthCapture (AROcclusionManager → depth → normals → dilation)
+DepthCapture (AROcclusionManager → depth → normals → dilation, tracking→world)
        │
-VolumeIntegrator (TSDF + color integration, exclusion zones, prune, freeze)
+VolumeIntegrator (TSDF + color integration, exclusion zones, prune, freeze, bake relocation)
        │
 MeshExtractor → GPUSurfaceNets (compute: classify → smooth → snap → temporal → index)
        │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
        │
-       ├── TriplanarCache (bake camera RGB → 3 world-space textures)
+       ├── TriplanarCache (bake camera RGB → 3 world-space textures + depth maps,
+       │                    forward-splat relocation on load)
        │
        ├── KeyframeCollector (motion-gated JPEG + poses → GSExport/ on disk)
        │
@@ -232,8 +235,8 @@ The panel lazy-follows your gaze — it floats at 0.75m and re-centers when your
 |--------|-------------|
 | **Stop/Start Scanning** | Toggles depth integration, keyframe capture, and triplanar baking. Label updates to reflect current state. |
 | **Render: Mesh** | Cycles render mode: Mesh → Splat → Both → Mesh. If a trained PLY has been downloaded but not yet loaded, switching to Splat auto-loads it. Label shows current mode. |
-| **Save Scan** | Persists TSDF + color volumes and triplanar textures to disk. Button shows "Saving..." then "Done!" or "Failed". |
-| **Load Scan** | Restores a previously saved scan and rebuilds the mesh. Validates volume dimensions match. |
+| **Save Scan** | Persists TSDF + color volumes, triplanar textures + depth maps, and room-anchor pose to disk. Button shows "Saving..." then "Done!" or "Failed". |
+| **Load Scan** | Restores a previously saved scan, bakes room-anchor relocation if needed, and rebuilds the mesh. Validates volume dimensions match. |
 | **Export Point Cloud** | Manually exports GPU mesh vertices as `points3d.ply` via async readback (also auto-exports every 30s during scanning). |
 | **Start GS Training** | Triggers the full training pipeline: export point cloud → ZIP keyframes → upload → train → download. Disabled while training is in progress. |
 | **Cancel Training** | Sends cancel request to the server. Only enabled while training is in progress. |
@@ -262,8 +265,9 @@ Default values — all configurable per-component in the Inspector.
 | TSDF volume (RG8_SNorm) | 256 x 256 x 256 | ~32 MB |
 | Color volume (RGBA8) | 256 x 256 x 256 | ~64 MB |
 | GPU Surface Nets (coord map, vertices, indices, smoothing, temporal 3D texture) | 256³ derived | ~83 MB |
-| Triplanar textures (3x RGBA8) | 3 x 4096 x 4096 | ~192 MB |
-| **Total GPU** | | **~371 MB** |
+| Triplanar color textures (3x RGBA8) | 3 x 4096 x 4096 | ~192 MB |
+| Triplanar depth textures (3x R8) | 3 x 4096 x 4096 | ~48 MB |
+| **Total GPU** | | **~419 MB** |
 
 Keyframes are written as JPEGs to disk (not held in GPU memory). To reduce GPU memory on constrained devices, lower `VolumeIntegrator.voxelCount` and `TriplanarCache.textureResolution` in the Inspector.
 
@@ -295,7 +299,7 @@ QuestRoomScan builds on that foundation with significant extensions:
 |-|----------|---------------|
 | **Mesh extraction** | CPU marching cubes from GPU volume | Fully GPU-driven Surface Nets via compute shaders — zero CPU readback, single indirect draw call |
 | **Texturing** | Geometry only — no camera RGB texturing | Camera-based texturing: triplanar world-space cache (~8mm/texel) and vertex colors (~5cm) — sourced from passthrough camera RGB |
-| **Persistence** | None — mesh lost on restart | Save/load of TSDF + color volumes + triplanar textures to disk, auto-save on quit |
+| **Persistence** | None — mesh lost on restart | Save/load of TSDF + color volumes + triplanar textures + depth maps to disk, MRUK room-anchor relocation on load |
 | **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, GPU temporal stabilization, RANSAC plane detection & snapping |
 | **Gaussian Splatting** | — | Full pipeline: on-device capture → PC server training → on-device UGS rendering with render mode switching |
 | **VR UI** | — | World-space debug menu with controller ray interaction, live status, and training controls |
