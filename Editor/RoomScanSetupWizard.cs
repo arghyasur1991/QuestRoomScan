@@ -141,7 +141,7 @@ namespace Genesis.RoomScan.Editor
             _meshMatWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "scanMeshMaterial");
             _triplanarWired = _triplanarCache != null && AreFieldsAssigned(_triplanarCache,
-                "bakeCompute", "relocShader");
+                "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
             _ugsRendererWired = _ugsRenderer != null && AreFieldsAssigned(_ugsRenderer,
@@ -730,7 +730,6 @@ namespace Genesis.RoomScan.Editor
             {
                 var so = new SerializedObject(_triplanarCache);
                 AssignCompute(so, "bakeCompute", PKG + "TriplanarBake.compute");
-                AssignAsset<Shader>(so, "relocShader", PKG + "TriplanarReloc.shader");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_triplanarCache);
             }

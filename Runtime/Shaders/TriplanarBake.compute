@@ -262,3 +262,54 @@ void ForwardSplatRelocation(uint3 id : SV_DispatchThreadID)
     else if (newFace == 1) gsRelocDstXY[dstCoord] = oldColor;
     else                   gsRelocDstYZ[dstCoord] = oldColor;
 }
+
+// ──────────────────────────────────────────────────────────────────
+//  DilateTriplanar: fill empty texels by averaging non-empty 3x3
+//  neighbors. Uses RWTexture2D for both read and write to avoid
+//  any Vulkan SRV layout transitions. Ping-pong between src/dst.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel DilateTriplanar
+
+RWTexture2D<float4> gsDilateSrc;
+RWTexture2D<float4> gsDilateDst;
+
+[numthreads(8, 8, 1)]
+void DilateTriplanar(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= gsTriSize)) return;
+
+    float4 center = gsDilateSrc[id.xy];
+    if (center.a > 0.01)
+    {
+        gsDilateDst[id.xy] = center;
+        return;
+    }
+
+    float3 sum = 0;
+    float count = 0;
+
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        if (dx == 0 && dy == 0) continue;
+        int2 nc = (int2)id.xy + int2(dx, dy);
+        if (nc.x < 0 || nc.y < 0 || (uint)nc.x >= gsTriSize.x || (uint)nc.y >= gsTriSize.y)
+            continue;
+
+        float4 s = gsDilateSrc[nc];
+        if (s.a > 0.01)
+        {
+            sum += s.rgb;
+            count += 1.0;
+        }
+    }
+
+    if (count < 0.5)
+    {
+        gsDilateDst[id.xy] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    gsDilateDst[id.xy] = float4(sum / count, 0.5);
+}
