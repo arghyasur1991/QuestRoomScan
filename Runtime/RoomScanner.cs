@@ -527,6 +527,8 @@ namespace Genesis.RoomScan
                 return false;
 
             pose = pcp.CameraPose;
+            if (_depthCapture != null)
+                pose = _depthCapture.TrackingToWorld(pose);
             focal = pcp.FocalLength;
             principal = pcp.PrincipalPoint;
             sensor = pcp.SensorResolution;
@@ -566,6 +568,8 @@ namespace Genesis.RoomScan
                 if (frame != null)
                 {
                     Pose pose = pcp.CameraPose;
+                    if (_depthCapture != null)
+                        pose = _depthCapture.TrackingToWorld(pose);
                     Vector2 focal = pcp.FocalLength;
                     Vector2 principal = pcp.PrincipalPoint;
                     Vector2 sensor = pcp.SensorResolution;

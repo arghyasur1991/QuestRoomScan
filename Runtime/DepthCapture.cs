@@ -90,6 +90,18 @@ namespace Genesis.RoomScan
 
         private static readonly Vector3 ScaleFlipZ = new(1, 1, -1);
 
+        /// <summary>
+        /// Convert a pose from XR tracking space to Unity world space.
+        /// Required because MRUK's world-lock may offset TrackingSpace from the XROrigin root.
+        /// </summary>
+        public Pose TrackingToWorld(Pose trackingPose)
+        {
+            if (_trackingSpaceTransform == null) return trackingPose;
+            return new Pose(
+                _trackingSpaceTransform.TransformPoint(trackingPose.position),
+                _trackingSpaceTransform.rotation * trackingPose.rotation);
+        }
+
         private void Awake()
         {
             Instance = this;
