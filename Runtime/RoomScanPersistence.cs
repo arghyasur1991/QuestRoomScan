@@ -125,13 +125,7 @@ namespace Genesis.RoomScan
                 float sizeMB = new FileInfo(savePath).Length / (1024f * 1024f);
                 Debug.Log($"[RoomScan] Persistence: saved to {savePath} ({sizeMB:F1}MB), " +
                           $"triplanar={triRes > 0}, volumeOriginInRoom={volumeOriginInRoom}, " +
-                          $"format=v{FormatVersion} (room+volume snapshots) " +
-                          $"Room anchor={roomL2WAtSave}, volume={volumeToWorldAtSave}");
-                // Do not call ApplySessionRelocationSnapshots here — that would turn relocation on after a
-                // fresh save and break live fusion (must stay identity until load). Only refresh snapshots
-                // if we were already in post-load relocation (re-save while viewing loaded scan).
-                if (anchor != null && anchor.enabled)
-                    anchor.ReplaceSessionRelocationSnapshots(roomL2WAtSave, volumeToWorldAtSave);
+                          $"format=v{FormatVersion}, anchor={roomL2WAtSave.GetRow(3)}, vol={volumeToWorldAtSave.GetRow(0)}");
                 SaveCompleted?.Invoke();
                 return true;
             }
@@ -220,33 +214,30 @@ namespace Genesis.RoomScan
 
                 var anchor = RoomAnchorManager.Instance;
                 if (anchor != null && anchor.enabled)
-                {
-                    if (hasSessionSnapshots)
-                        anchor.ApplySessionRelocationSnapshots(sessionRoomL2W, sessionVolumeToWorld);
-                    else
-                        anchor.ClearSessionRelocation();
                     anchor.SetOriginInRoomSpace(volumeOriginInRoom);
-                    if (anchor.IsRoomLoaded)
-                        anchor.RefreshVolumeTransform();
-                }
+
+                // Ensure volumeToWorld = I before uploading (RefreshVolumeTransform is always identity now)
+                if (anchor != null && anchor.enabled)
+                    anchor.RefreshVolumeTransform();
 
                 Debug.Log("[RoomScan] Persistence: uploading volumes to GPU...");
                 if (!vi.LoadVolumes(tsdfBytes, colorBytes, savedIntCount))
                     return false;
 
+                // Compute relocation R and bake it into the voxels so everything lives in identity space.
                 Matrix4x4 triReloc = Matrix4x4.identity;
                 if (hasSessionSnapshots && anchor != null && anchor.enabled && anchor.IsRoomLoaded)
                 {
-                    Matrix4x4 reloc = vi.VolumeToWorld;
-                    bool isIdentity = reloc == Matrix4x4.identity;
-                    if (!isIdentity)
+                    Matrix4x4 reloc = anchor.ComputeRelocationMatrix(sessionRoomL2W, sessionVolumeToWorld);
+                    if (reloc != Matrix4x4.identity)
                     {
+                        // Temporarily set R on VI so BakeRelocation can read src via SRV
+                        vi.SetVolumeTransform(reloc, reloc.inverse);
                         vi.BakeRelocation(reloc);
                         triReloc = reloc.inverse;
-                        anchor.ClearSessionRelocation();
-                        anchor.RefreshVolumeTransform();
-                        Debug.Log($"[RoomScan] Persistence: baked relocation into voxels → volumeToWorld=I, " +
-                                  $"triReloc row3={triReloc.GetRow(3)}");
+                        // Restore identity
+                        vi.SetVolumeTransform(Matrix4x4.identity, Matrix4x4.identity);
+                        Debug.Log($"[RoomScan] Persistence: baked relocation → identity, triReloc row3={triReloc.GetRow(3)}");
                     }
                 }
 
@@ -272,9 +263,6 @@ namespace Genesis.RoomScan
                     Debug.Log("[RoomScan] Persistence: mesh extracted from loaded volume");
                 }
 
-                if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
-                    anchor.RefreshVolumeTransform();
-
                 Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount}, " +
                           $"volumeOriginInRoom={volumeOriginInRoom}, sessionRelocation={hasSessionSnapshots})");
                 LoadCompleted?.Invoke();
@@ -297,7 +285,6 @@ namespace Genesis.RoomScan
             if (Directory.Exists(TriplanarDirectory))
                 Directory.Delete(TriplanarDirectory, true);
             var anchor = RoomAnchorManager.Instance;
-            anchor?.ClearSessionRelocation();
             Debug.Log("[RoomScan] Persistence: saved scan deleted");
         }
 

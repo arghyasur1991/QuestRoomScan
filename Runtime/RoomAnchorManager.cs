@@ -6,11 +6,11 @@ using UnityEngine;
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// MRUK floor anchor for <b>session relocation only</b> (saved scans). Depth fusion uses tracking/world
-    /// with <see cref="VolumeIntegrator"/>’s default <c>volumeToWorld = I</c> — we keep that during live scan.
-    /// After load, <c>V = A_now * Inverse(A_save) * V_save</c> maps the stored volume into the current session
-    /// using the delta between anchor poses (T₁ vs T at save). Uses <see cref="MRUKRoom.FloorAnchors"/>[0]
-    /// like <c>SceneMeshManager</c>; falls back to room root if missing.
+    /// MRUK floor anchor manager. Provides the anchor's current world pose for persistence
+    /// (save/load relocation) and unconditionally keeps <c>volumeToWorld = I</c> for live fusion.
+    /// The relocation formula <c>R = A_now * Inv(A_save) * V_save</c> is computed transiently
+    /// inside <see cref="RoomScanPersistence.LoadAsync"/> to feed the bake pass — it never runs
+    /// per-frame, so anchor drift cannot poison the volume transform.
     /// </summary>
     [DisallowMultipleComponent]
     public class RoomAnchorManager : MonoBehaviour
@@ -23,27 +23,14 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// World origin expressed in floor-anchor local space (metadata for <c>scan.bin</c> / v2 field).
-        /// Live scanning does <b>not</b> use this for <see cref="VolumeIntegrator"/> — fusion stays identity.
         /// </summary>
         public Vector3 OriginInRoomSpace { get; private set; }
 
-        /// <summary>
-        /// When false, first <see cref="OnSceneLoaded"/> assigns default origin (world origin in floor-anchor space).
-        /// Set true after any explicit origin (persistence or <see cref="SetOriginInRoomSpace"/>) so we never
-        /// treat Vector3.zero as "unset" — a saved origin of (0,0,0) is valid.
-        /// </summary>
         private bool _volumeOriginLocked;
 
-        private Matrix4x4 _sessionSavedAnchorLocalToWorld = Matrix4x4.identity;
-        private Matrix4x4 _sessionSavedVolumeToWorld = Matrix4x4.identity;
-
         private MRUK _mruk;
-        /// <summary>Floor <see cref="MRUKAnchor"/> transform when available; else room root.</summary>
         private Transform _anchorTransform;
         private VolumeIntegrator _volumeIntegrator;
-
-        private Vector3 _lastLoggedAnchorPos;
-        private float _lastAnchorDriftLog;
 
         private void Awake()
         {
@@ -74,7 +61,6 @@ namespace Genesis.RoomScan
                 _mruk.SceneLoadedEvent.AddListener(OnSceneLoaded);
 
             yield return null;
-            // MRUK API is async Task; fire-and-forget — SceneLoadedEvent runs when complete.
             _ = _mruk.LoadSceneFromDevice();
             Debug.Log("[RoomAnchor] MRUK LoadSceneFromDevice started (awaiting SceneLoadedEvent)...");
         }
@@ -121,153 +107,81 @@ namespace Genesis.RoomScan
                 Debug.Log($"[RoomAnchor] Default volume origin (world origin in floor-anchor space): {OriginInRoomSpace}");
 
                 if (floorAnchor != null)
-                {
                     Debug.Log($"[RoomAnchor] Using floor MRUKAnchor '{floorAnchor.name}' " +
                               $"(label={floorAnchor.Label}) pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
-                }
                 else
-                {
-                    Debug.LogWarning("[RoomAnchor] No FloorAnchors — falling back to MRUKRoom.transform " +
-                                     $"(pos={_anchorTransform.position})");
-                }
+                    Debug.LogWarning($"[RoomAnchor] No FloorAnchors — falling back to MRUKRoom.transform (pos={_anchorTransform.position})");
             }
-            _sessionSavedAnchorLocalToWorld = _anchorTransform.localToWorldMatrix;
-            _sessionSavedVolumeToWorld = Matrix4x4.identity;
 
             _volumeOriginLocked = true;
-
             RefreshVolumeTransform();
 
             IsRoomLoaded = true;
-            var ap = _anchorTransform.position;
-            var ar = _anchorTransform.rotation.eulerAngles;
-            Debug.Log($"[RoomAnchor] Room ready — live fusion uses volumeToWorld=I; anchor for relocation only. " +
-                      $"originInAnchorSpace(meta)={OriginInRoomSpace}, anchor pos={ap}, rot={ar}");
+            Debug.Log($"[RoomAnchor] Room ready — volumeToWorld=I always. " +
+                      $"anchor pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
             RoomReady?.Invoke();
         }
 
-        /// <summary>
-        /// Restore persisted volume origin (floor-anchor–local). Call before applying loaded volume data.
-        /// </summary>
+        // ─────────────────────────────────────────────────────────────
+        //  Public API
+        // ─────────────────────────────────────────────────────────────
+
         public void SetOriginInRoomSpace(Vector3 origin)
         {
             OriginInRoomSpace = origin;
             _volumeOriginLocked = true;
-            Debug.Log($"[RoomAnchor] Volume origin set (persisted or manual): {origin}");
         }
 
         /// <summary>
-        /// Floor MRUK anchor → world matrix for persistence (identity if anchor not ready). Main thread only.
+        /// Floor MRUK anchor → world matrix for persistence. Main thread only.
         /// </summary>
         public Matrix4x4 GetRoomLocalToWorldForPersistence()
         {
-            if (_anchorTransform == null)
-                return Matrix4x4.identity;
-            return _anchorTransform.localToWorldMatrix;
+            return _anchorTransform != null ? _anchorTransform.localToWorldMatrix : Matrix4x4.identity;
         }
 
         /// <summary>
-        /// Apply snapshots from scan.bin v3. <paramref name="roomLocalToWorldAtSave"/> is the saved
-        /// floor-anchor <c>localToWorld</c> (field name kept for format); <paramref name="volumeToWorldAtSave"/>
-        /// is <see cref="VolumeIntegrator.VolumeToWorld"/> at save.
+        /// One-shot relocation: <c>R = A_now * Inv(A_save) * V_save</c>.
+        /// Called once during <see cref="RoomScanPersistence.LoadAsync"/> to compute
+        /// the matrix for <see cref="VolumeIntegrator.BakeRelocation"/>.
         /// </summary>
-        public void ApplySessionRelocationSnapshots(Matrix4x4 roomLocalToWorldAtSave,
-            Matrix4x4 volumeToWorldAtSave)
+        public Matrix4x4 ComputeRelocationMatrix(Matrix4x4 anchorAtSave, Matrix4x4 volumeToWorldAtSave)
         {
-            _sessionSavedAnchorLocalToWorld = roomLocalToWorldAtSave;
-            _sessionSavedVolumeToWorld = volumeToWorldAtSave;
-            _volumeOriginLocked = true;
-
             Matrix4x4 aNow = _anchorTransform != null ? _anchorTransform.localToWorldMatrix : Matrix4x4.identity;
-            Matrix4x4 result = aNow * roomLocalToWorldAtSave.inverse * volumeToWorldAtSave;
-            Debug.Log($"[RoomAnchor] Session relocation applied — V = A_now * Inv(A_save) * V_save\n" +
-                      $"  A_save row0: {roomLocalToWorldAtSave.GetRow(0)}\n" +
-                      $"  A_save row1: {roomLocalToWorldAtSave.GetRow(1)}\n" +
-                      $"  A_save row2: {roomLocalToWorldAtSave.GetRow(2)}\n" +
-                      $"  A_save row3: {roomLocalToWorldAtSave.GetRow(3)}\n" +
-                      $"  V_save row0: {volumeToWorldAtSave.GetRow(0)}\n" +
-                      $"  A_now  row0: {aNow.GetRow(0)}\n" +
-                      $"  result row0: {result.GetRow(0)}\n" +
-                      $"  result row1: {result.GetRow(1)}\n" +
-                      $"  result row2: {result.GetRow(2)}\n" +
-                      $"  result row3: {result.GetRow(3)}");
+            Matrix4x4 reloc = aNow * anchorAtSave.inverse * volumeToWorldAtSave;
+            Debug.Log($"[RoomAnchor] ComputeRelocation: R = A_now * Inv(A_save) * V_save\n" +
+                      $"  A_save row3: {anchorAtSave.GetRow(3)}\n" +
+                      $"  A_now  row3: {aNow.GetRow(3)}\n" +
+                      $"  R      row3: {reloc.GetRow(3)}");
+            return reloc;
         }
 
         /// <summary>
-        /// Updates saved A/V matrices after re-saving a loaded scan — keeps relocation correct without
-        /// toggling mode. No-op when <see cref="SessionRelocationActive"/> is false.
-        /// </summary>
-        public void ReplaceSessionRelocationSnapshots(Matrix4x4 anchorLocalToWorldAtSave,
-            Matrix4x4 volumeToWorldAtSave)
-        {
-            _sessionSavedAnchorLocalToWorld = anchorLocalToWorldAtSave;
-            _sessionSavedVolumeToWorld = volumeToWorldAtSave;
-            Debug.Log($"[RoomAnchor] Session snapshots replaced (re-save) — A_save row0: {anchorLocalToWorldAtSave.GetRow(0)}, V_save row0: {volumeToWorldAtSave.GetRow(0)}");
-        }
-
-        /// <summary>
-        /// Disables v3 relocation (e.g. after clearing scan). Resets saved anchor to the current
-        /// anchor pose so <see cref="RefreshVolumeTransform"/> produces <c>volumeToWorld = I</c>.
-        /// </summary>
-        public void ClearSessionRelocation()
-        {
-            _sessionSavedAnchorLocalToWorld = _anchorTransform != null
-                ? _anchorTransform.localToWorldMatrix
-                : Matrix4x4.identity;
-            _sessionSavedVolumeToWorld = Matrix4x4.identity;
-            Debug.Log("[RoomAnchor] Session relocation cleared → volumeToWorld will be identity");
-        }
-
-        /// <summary>
-        /// After clearing the TSDF volume for a fresh scan: drop relocation, refresh anchor metadata for saves,
-        /// and set volume transform to identity (same as live scanning).
+        /// After clearing the TSDF volume for a fresh/re-scan: refresh anchor metadata for saves,
+        /// and ensure volume transform is identity.
         /// </summary>
         public void NotifyClearedVolumeForRescan()
         {
-            ClearSessionRelocation();
             if (_anchorTransform != null)
             {
                 OriginInRoomSpace = _anchorTransform.InverseTransformPoint(Vector3.zero);
                 _volumeOriginLocked = true;
             }
-
             RefreshVolumeTransform();
         }
 
         /// <summary>
-        /// Live: <c>volumeToWorld = I</c> (fusion matches headset/tracking world). Loaded scan:
-        /// <c>V = A_now * Inverse(A_save) * V_save</c>. Safe to call every frame.
+        /// Unconditionally sets <c>volumeToWorld = I</c>. Anchor drift cannot affect fusion.
         /// </summary>
         public void RefreshVolumeTransform()
         {
             if (!enabled)
                 return;
-
             if (_volumeIntegrator == null)
                 _volumeIntegrator = VolumeIntegrator.Instance;
             if (_volumeIntegrator == null)
                 return;
-
-            if (_anchorTransform == null)
-                return;
-
-            Matrix4x4 aNow = _anchorTransform.localToWorldMatrix;
-            Matrix4x4 volumeToWorld = aNow * _sessionSavedAnchorLocalToWorld.inverse * _sessionSavedVolumeToWorld;
-            Matrix4x4 worldToVolume = volumeToWorld.inverse;
-            _volumeIntegrator.SetVolumeTransform(volumeToWorld, worldToVolume);
-
-            Vector3 aPos = _anchorTransform.position;
-            float drift = Vector3.Distance(aPos, _lastLoggedAnchorPos);
-            float t = Time.time;
-            if (drift > 0.001f || t - _lastAnchorDriftLog > 10f)
-            {
-                if (drift > 0.001f)
-                    Debug.LogWarning($"[RoomAnchor] ANCHOR DRIFT {drift:F4}m — pos={aPos}, prev={_lastLoggedAnchorPos}");
-                else
-                    Debug.Log($"[RoomAnchor] volumeToWorld row0={volumeToWorld.GetRow(0)}, anchorPos={aPos}");
-                _lastLoggedAnchorPos = aPos;
-                _lastAnchorDriftLog = t;
-            }
+            _volumeIntegrator.SetVolumeTransform(Matrix4x4.identity, Matrix4x4.identity);
         }
     }
 }
