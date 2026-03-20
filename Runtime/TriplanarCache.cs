@@ -32,8 +32,11 @@ namespace Genesis.RoomScan
         static readonly int OldTriXZID = Shader.PropertyToID("gsOldTriXZ");
         static readonly int OldTriXYID = Shader.PropertyToID("gsOldTriXY");
         static readonly int OldTriYZID = Shader.PropertyToID("gsOldTriYZ");
+        static readonly int DstTriRWID = Shader.PropertyToID("gsDstTri_RW");
         static readonly int BakeTriInvRelocID = Shader.PropertyToID("gsBakeTriInvReloc");
         static readonly int BakeTriFaceID = Shader.PropertyToID("gsBakeTriFace");
+        static readonly int BakeVoxCountFID = Shader.PropertyToID("gsBakeVoxCountF");
+        static readonly int BakeVoxSizeID = Shader.PropertyToID("gsBakeVoxSize");
 
         static readonly int TriXZRWID = Shader.PropertyToID("gsTriXZ_RW");
         static readonly int TriXYRWID = Shader.PropertyToID("gsTriXY_RW");
@@ -135,29 +138,27 @@ namespace Genesis.RoomScan
             var dstXZ = CreateTriplanarRT("DstXZ");
             var dstXY = CreateTriplanarRT("DstXY");
             var dstYZ = CreateTriplanarRT("DstYZ");
+            var dstArr = new[] { dstXZ, dstXY, dstYZ };
 
             int kernel = bakeCompute.FindKernel("BakeTriplanarRelocation");
 
-            bakeCompute.SetInts(Shader.PropertyToID("gsVoxCount"),
-                vi.VoxelCount.x, vi.VoxelCount.y, vi.VoxelCount.z);
-            bakeCompute.SetFloat(Shader.PropertyToID("gsVoxSize"), vi.VoxelSize);
+            var vc = vi.VoxelCount;
+            bakeCompute.SetVector(BakeVoxCountFID, new Vector4(vc.x, vc.y, vc.z, 0));
+            bakeCompute.SetFloat(BakeVoxSizeID, vi.VoxelSize);
             bakeCompute.SetInts(TriSizeID, res, res);
             bakeCompute.SetMatrix(BakeTriInvRelocID, invReloc);
 
             bakeCompute.SetTexture(kernel, OldTriXZID, _triXZ);
             bakeCompute.SetTexture(kernel, OldTriXYID, _triXY);
             bakeCompute.SetTexture(kernel, OldTriYZID, _triYZ);
-            bakeCompute.SetTexture(kernel, TriXZRWID, dstXZ);
-            bakeCompute.SetTexture(kernel, TriXYRWID, dstXY);
-            bakeCompute.SetTexture(kernel, TriYZRWID, dstYZ);
 
             int groupsX = Mathf.CeilToInt(res / 8f);
             int groupsY = Mathf.CeilToInt(res / 8f);
 
-            // Dispatch once per face: 0=XZ, 1=XY, 2=YZ
             for (int face = 0; face < 3; face++)
             {
                 bakeCompute.SetInt(BakeTriFaceID, face);
+                bakeCompute.SetTexture(kernel, DstTriRWID, dstArr[face]);
                 bakeCompute.Dispatch(kernel, groupsX, groupsY, 1);
             }
 
