@@ -30,7 +30,6 @@ namespace Genesis.RoomScan
 
         private MRUK _mruk;
         private Transform _anchorTransform;
-        private VolumeIntegrator _volumeIntegrator;
 
         private void Awake()
         {
@@ -41,9 +40,6 @@ namespace Genesis.RoomScan
         {
             if (!enabled)
                 yield break;
-
-            _volumeIntegrator = VolumeIntegrator.Instance
-                ?? FindFirstObjectByType<VolumeIntegrator>();
 
             _mruk = FindFirstObjectByType<MRUK>();
             if (_mruk == null)
@@ -114,8 +110,6 @@ namespace Genesis.RoomScan
             }
 
             _volumeOriginLocked = true;
-            RefreshVolumeTransform();
-
             IsRoomLoaded = true;
             Debug.Log($"[RoomAnchor] Room ready — volumeToWorld=I always. " +
                       $"anchor pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
@@ -167,21 +161,6 @@ namespace Genesis.RoomScan
                 OriginInRoomSpace = _anchorTransform.InverseTransformPoint(Vector3.zero);
                 _volumeOriginLocked = true;
             }
-            RefreshVolumeTransform();
-        }
-
-        /// <summary>
-        /// Unconditionally sets <c>volumeToWorld = I</c>. Anchor drift cannot affect fusion.
-        /// </summary>
-        public void RefreshVolumeTransform()
-        {
-            if (!enabled)
-                return;
-            if (_volumeIntegrator == null)
-                _volumeIntegrator = VolumeIntegrator.Instance;
-            if (_volumeIntegrator == null)
-                return;
-            _volumeIntegrator.SetVolumeTransform(Matrix4x4.identity, Matrix4x4.identity);
         }
     }
 }

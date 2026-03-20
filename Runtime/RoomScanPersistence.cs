@@ -216,10 +216,6 @@ namespace Genesis.RoomScan
                 if (anchor != null && anchor.enabled)
                     anchor.SetOriginInRoomSpace(volumeOriginInRoom);
 
-                // Ensure volumeToWorld = I before uploading (RefreshVolumeTransform is always identity now)
-                if (anchor != null && anchor.enabled)
-                    anchor.RefreshVolumeTransform();
-
                 Debug.Log("[RoomScan] Persistence: uploading volumes to GPU...");
                 if (!vi.LoadVolumes(tsdfBytes, colorBytes, savedIntCount))
                     return false;

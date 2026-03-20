@@ -229,8 +229,6 @@ namespace Genesis.RoomScan
 
         private void LateUpdate()
         {
-            if (_roomAnchor != null && _roomAnchor.enabled && _roomAnchor.IsRoomLoaded)
-                _roomAnchor.RefreshVolumeTransform();
         }
 
         private void Update()
