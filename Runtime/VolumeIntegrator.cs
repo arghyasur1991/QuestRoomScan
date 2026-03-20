@@ -259,36 +259,37 @@ namespace Genesis.RoomScan
             Matrix4x4 invRelocation = relocationMatrix.inverse;
             int3 vc = voxelCount;
 
-            var srcTsdf = new RenderTexture(vc.x, vc.y, 0, _volume.graphicsFormat, 0)
+            // Destination RW textures — bake writes here, then we copy back.
+            // Both src (_volume) and dst must be RW to guarantee CopyTexture works on Vulkan.
+            var dstTsdf = new RenderTexture(vc.x, vc.y, 0, _volume.graphicsFormat, 0)
             {
                 dimension = TextureDimension.Tex3D,
                 volumeDepth = vc.z,
-                enableRandomWrite = false,
+                enableRandomWrite = true,
                 filterMode = FilterMode.Bilinear,
                 wrapMode = TextureWrapMode.Clamp
             };
-            srcTsdf.Create();
+            dstTsdf.Create();
 
-            var srcColor = new RenderTexture(vc.x, vc.y, 0, _colorVolume.graphicsFormat, 0)
+            var dstColor = new RenderTexture(vc.x, vc.y, 0, _colorVolume.graphicsFormat, 0)
             {
                 dimension = TextureDimension.Tex3D,
                 volumeDepth = vc.z,
-                enableRandomWrite = false,
+                enableRandomWrite = true,
                 filterMode = FilterMode.Bilinear,
                 wrapMode = TextureWrapMode.Clamp
             };
-            srcColor.Create();
-
-            Graphics.CopyTexture(_volume, srcTsdf);
-            Graphics.CopyTexture(_colorVolume, srcColor);
+            dstColor.Create();
 
             int kernel = compute.FindKernel("BakeRelocation");
             compute.SetInts(Shader.PropertyToID("gsVoxCount"), vc.x, vc.y, vc.z);
             compute.SetFloat(Shader.PropertyToID("gsVoxSize"), voxelSize);
-            compute.SetTexture(kernel, Shader.PropertyToID("gsBakeSrcTsdf"), srcTsdf);
-            compute.SetTexture(kernel, Shader.PropertyToID("gsBakeSrcColor"), srcColor);
-            compute.SetTexture(kernel, VolumeRWID, _volume);
-            compute.SetTexture(kernel, ColorVolumeRWID, _colorVolume);
+            // _volume/_colorVolume bound as SRV (Texture3D) for reading
+            compute.SetTexture(kernel, Shader.PropertyToID("gsBakeSrcTsdf"), _volume);
+            compute.SetTexture(kernel, Shader.PropertyToID("gsBakeSrcColor"), _colorVolume);
+            // dst bound as UAV (RWTexture3D) for writing
+            compute.SetTexture(kernel, VolumeRWID, dstTsdf);
+            compute.SetTexture(kernel, ColorVolumeRWID, dstColor);
             compute.SetMatrix(Shader.PropertyToID("gsBakeInvRelocation"), invRelocation);
 
             int tx = Mathf.CeilToInt(vc.x / 4f);
@@ -296,10 +297,15 @@ namespace Genesis.RoomScan
             int tz = Mathf.CeilToInt(vc.z / 4f);
             compute.Dispatch(kernel, tx, ty, tz);
 
-            Destroy(srcTsdf);
-            Destroy(srcColor);
+            // Copy baked results back to main volumes (both RW → guaranteed compatible)
+            Graphics.CopyTexture(dstTsdf, _volume);
+            Graphics.CopyTexture(dstColor, _colorVolume);
 
-            Debug.Log($"[RoomScan] BakeRelocation complete — resampled {vc} voxels, reloc row0={relocationMatrix.GetRow(0)}");
+            Destroy(dstTsdf);
+            Destroy(dstColor);
+
+            Debug.Log($"[RoomScan] BakeRelocation complete — resampled {vc} voxels, " +
+                      $"reloc row0={relocationMatrix.GetRow(0)}, inv row0={invRelocation.GetRow(0)}");
         }
 
         /// <summary>
