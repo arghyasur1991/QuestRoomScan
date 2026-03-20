@@ -120,9 +120,12 @@ namespace Genesis.RoomScan
             Matrix4x4 aNow = _anchorTransform != null ? _anchorTransform.localToWorldMatrix : Matrix4x4.identity;
             Matrix4x4 reloc = aNow * anchorAtSave.inverse;
             Debug.Log($"[RoomAnchor] ComputeRelocation: R = A_now * Inv(A_save)\n" +
-                      $"  A_save row3: {anchorAtSave.GetRow(3)}\n" +
-                      $"  A_now  row3: {aNow.GetRow(3)}\n" +
-                      $"  R      row3: {reloc.GetRow(3)}");
+                      $"  A_save col3(pos): {anchorAtSave.GetColumn(3)}\n" +
+                      $"  A_save row0: {anchorAtSave.GetRow(0)}\n" +
+                      $"  A_now  col3(pos): {aNow.GetColumn(3)}\n" +
+                      $"  A_now  row0: {aNow.GetRow(0)}\n" +
+                      $"  R      col3(pos): {reloc.GetColumn(3)}\n" +
+                      $"  R      row0: {reloc.GetRow(0)}");
             return reloc;
         }
     }

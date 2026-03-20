@@ -161,15 +161,23 @@ namespace Genesis.RoomScan
                 bakeCompute.SetTexture(kernel, DstTriRWID, dstArr[face]);
                 bakeCompute.Dispatch(kernel, groupsX, groupsY, 1);
             }
+            GL.Flush();
 
-            Graphics.CopyTexture(dstXZ, _triXZ);
-            Graphics.CopyTexture(dstXY, _triXY);
-            Graphics.CopyTexture(dstYZ, _triYZ);
+            // Swap: adopt baked textures, destroy old ones.
+            // Avoids Graphics.CopyTexture which can silently fail on Vulkan/Quest.
+            Destroy(_triXZ);
+            Destroy(_triXY);
+            Destroy(_triYZ);
+            _triXZ = dstXZ;
+            _triXY = dstXY;
+            _triYZ = dstYZ;
 
-            Destroy(dstXZ);
-            Destroy(dstXY);
-            Destroy(dstYZ);
+            // Rebind global shader references
+            Shader.SetGlobalTexture(TriXZID, _triXZ);
+            Shader.SetGlobalTexture(TriXYID, _triXY);
+            Shader.SetGlobalTexture(TriYZID, _triYZ);
 
+            // Rebind kernel UAV references for future bakes/clears
             _clearKernel.Set(TriXZRWID, _triXZ);
             _clearKernel.Set(TriXYRWID, _triXY);
             _clearKernel.Set(TriYZRWID, _triYZ);

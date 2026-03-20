@@ -230,8 +230,6 @@ namespace Genesis.RoomScan
             Matrix4x4 invRelocation = relocationMatrix.inverse;
             int3 vc = voxelCount;
 
-            // Destination RW textures — bake writes here, then we copy back.
-            // Both src (_volume) and dst must be RW to guarantee CopyTexture works on Vulkan.
             var dstTsdf = new RenderTexture(vc.x, vc.y, 0, _volume.graphicsFormat, 0)
             {
                 dimension = TextureDimension.Tex3D,
@@ -255,10 +253,8 @@ namespace Genesis.RoomScan
             int kernel = compute.FindKernel("BakeRelocation");
             compute.SetInts(Shader.PropertyToID("gsVoxCount"), vc.x, vc.y, vc.z);
             compute.SetFloat(Shader.PropertyToID("gsVoxSize"), voxelSize);
-            // _volume/_colorVolume bound as SRV (Texture3D) for reading
             compute.SetTexture(kernel, Shader.PropertyToID("gsBakeSrcTsdf"), _volume);
             compute.SetTexture(kernel, Shader.PropertyToID("gsBakeSrcColor"), _colorVolume);
-            // dst bound as UAV (RWTexture3D) for writing
             compute.SetTexture(kernel, VolumeRWID, dstTsdf);
             compute.SetTexture(kernel, ColorVolumeRWID, dstColor);
             compute.SetMatrix(Shader.PropertyToID("gsBakeInvRelocation"), invRelocation);
@@ -267,16 +263,37 @@ namespace Genesis.RoomScan
             int ty = Mathf.CeilToInt(vc.y / 4f);
             int tz = Mathf.CeilToInt(vc.z / 4f);
             compute.Dispatch(kernel, tx, ty, tz);
+            GL.Flush();
 
-            // Copy baked results back to main volumes (both RW → guaranteed compatible)
-            Graphics.CopyTexture(dstTsdf, _volume);
-            Graphics.CopyTexture(dstColor, _colorVolume);
+            // Swap volumes: destroy old, adopt baked textures.
+            // Avoids Graphics.CopyTexture on 3D RTs which can silently fail on Vulkan/Quest.
+            Destroy(_volume);
+            Destroy(_colorVolume);
+            _volume = dstTsdf;
+            _colorVolume = dstColor;
 
-            Destroy(dstTsdf);
-            Destroy(dstColor);
+            // Rebind global texture references (used by render shader for freeze tint etc.)
+            Shader.SetGlobalTexture(VolumeID, _volume);
+            Shader.SetGlobalTexture(ColorVolumeID, _colorVolume);
+
+            // Rebind per-kernel UAV references so subsequent integrations/clears use new textures
+            RebindVolumeTextures();
 
             Debug.Log($"[RoomScan] BakeRelocation complete — resampled {vc} voxels, " +
                       $"reloc row0={relocationMatrix.GetRow(0)}, inv row0={invRelocation.GetRow(0)}");
+        }
+
+        private void RebindVolumeTextures()
+        {
+            if (_clearKernel.Shader == null) return;
+            _clearKernel.Set(VolumeRWID, _volume);
+            _clearKernel.Set(ColorVolumeRWID, _colorVolume);
+            _integrateKernel.Set(VolumeRWID, _volume);
+            _integrateKernel.Set(ColorVolumeRWID, _colorVolume);
+            _pruneKernel.Set(VolumeRWID, _volume);
+            _pruneKernel.Set(ColorVolumeRWID, _colorVolume);
+            _freezeKernel.Set(VolumeRWID, _volume);
+            _unfreezeKernel.Set(VolumeRWID, _volume);
         }
 
         /// <summary>
@@ -525,6 +542,8 @@ namespace Genesis.RoomScan
             colorTex.Apply(false, false);
             Graphics.CopyTexture(colorTex, _colorVolume);
             Destroy(colorTex);
+
+            GL.Flush();
 
             IntegrationCount = integrationCount;
             _frustumReady = false;

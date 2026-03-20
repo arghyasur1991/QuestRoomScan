@@ -116,7 +116,8 @@ namespace Genesis.RoomScan
 
                 float sizeMB = new FileInfo(savePath).Length / (1024f * 1024f);
                 Debug.Log($"[RoomScan] Persistence: saved to {savePath} ({sizeMB:F1}MB), " +
-                          $"triplanar={triRes > 0}, format=v{FormatVersion}, anchor={anchorAtSave.GetRow(3)}");
+                          $"triplanar={triRes > 0}, format=v{FormatVersion}, " +
+                          $"anchor col3={anchorAtSave.GetColumn(3)}, row0={anchorAtSave.GetRow(0)}");
                 SaveCompleted?.Invoke();
                 return true;
             }
