@@ -99,7 +99,7 @@ namespace Genesis.RoomScan
 
                 Vector3 volumeOriginInRoom = Vector3.zero;
                 Matrix4x4 roomL2WAtSave = Matrix4x4.identity;
-                Matrix4x4 volumeToWorldAtSave = vi.VolumeToWorld;
+                Matrix4x4 volumeToWorldAtSave = Matrix4x4.identity;
                 var anchor = RoomAnchorManager.Instance;
                 if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
                 {
@@ -227,12 +227,8 @@ namespace Genesis.RoomScan
                     Matrix4x4 reloc = anchor.ComputeRelocationMatrix(sessionRoomL2W, sessionVolumeToWorld);
                     if (reloc != Matrix4x4.identity)
                     {
-                        // Temporarily set R on VI so BakeRelocation can read src via SRV
-                        vi.SetVolumeTransform(reloc, reloc.inverse);
                         vi.BakeRelocation(reloc);
                         triReloc = reloc.inverse;
-                        // Restore identity
-                        vi.SetVolumeTransform(Matrix4x4.identity, Matrix4x4.identity);
                         Debug.Log($"[RoomScan] Persistence: baked relocation → identity, triReloc row3={triReloc.GetRow(3)}");
                     }
                 }

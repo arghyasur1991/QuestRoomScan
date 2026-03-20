@@ -67,15 +67,11 @@ Shader "Genesis/ScanMeshVertexColor"
             // Volume params (set by VolumeIntegrator as globals)
             float4 gsVoxCount;
             float gsVoxSize;
-            float4x4 gsWorldToVolume;
 
             float3 WorldToVoxelUVW(float3 worldPos)
             {
-                float3 local = mul(gsWorldToVolume, float4(worldPos, 1)).xyz;
-                local /= gsVoxSize;
-                local += gsVoxCount.xyz / 2.0;
-                local /= gsVoxCount.xyz;
-                return saturate(local);
+                float3 local = worldPos / gsVoxSize + gsVoxCount.xyz / 2.0;
+                return saturate(local / gsVoxCount.xyz);
             }
 
             float2 SignedTriUV(float2 baseUV, float normalComponent)
