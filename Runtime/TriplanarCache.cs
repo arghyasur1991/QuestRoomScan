@@ -17,6 +17,7 @@ namespace Genesis.RoomScan
         private int splatRadiusOverride = 0;
 
         private RenderTexture _triXZ, _triXY, _triYZ;
+        private RenderTexture _depthXZ, _depthXY, _depthYZ;
         private RenderTexture _camFrameCopy;
         private ComputeKernelHelper _bakeKernel;
         private ComputeKernelHelper _clearKernel;
@@ -25,6 +26,9 @@ namespace Genesis.RoomScan
         public RenderTexture TriXZ => _triXZ;
         public RenderTexture TriXY => _triXY;
         public RenderTexture TriYZ => _triYZ;
+        public RenderTexture DepthXZ => _depthXZ;
+        public RenderTexture DepthXY => _depthXY;
+        public RenderTexture DepthYZ => _depthYZ;
 
         static readonly int TriXZID = Shader.PropertyToID("_RSTriXZ");
         static readonly int TriXYID = Shader.PropertyToID("_RSTriXY");
@@ -42,6 +46,9 @@ namespace Genesis.RoomScan
         static readonly int TriXZRWID = Shader.PropertyToID("gsTriXZ_RW");
         static readonly int TriXYRWID = Shader.PropertyToID("gsTriXY_RW");
         static readonly int TriYZRWID = Shader.PropertyToID("gsTriYZ_RW");
+        static readonly int DepthXZRWID = Shader.PropertyToID("gsTriDepthXZ_RW");
+        static readonly int DepthXYRWID = Shader.PropertyToID("gsTriDepthXY_RW");
+        static readonly int DepthYZRWID = Shader.PropertyToID("gsTriDepthYZ_RW");
         static readonly int TriSizeID = Shader.PropertyToID("gsTriSize");
         static readonly int CamRGBID = Shader.PropertyToID("gsCamRGB");
         static readonly int CamPosID = Shader.PropertyToID("gsCamPos");
@@ -80,6 +87,9 @@ namespace Genesis.RoomScan
             if (_triXZ) Destroy(_triXZ);
             if (_triXY) Destroy(_triXY);
             if (_triYZ) Destroy(_triYZ);
+            if (_depthXZ) Destroy(_depthXZ);
+            if (_depthXY) Destroy(_depthXY);
+            if (_depthYZ) Destroy(_depthYZ);
             if (_camFrameCopy) Destroy(_camFrameCopy);
         }
 
@@ -88,6 +98,9 @@ namespace Genesis.RoomScan
             _triXZ = CreateTriplanarRT("TriXZ");
             _triXY = CreateTriplanarRT("TriXY");
             _triYZ = CreateTriplanarRT("TriYZ");
+            _depthXZ = CreateDepthRT("DepthXZ");
+            _depthXY = CreateDepthRT("DepthXY");
+            _depthYZ = CreateDepthRT("DepthYZ");
         }
 
         private RenderTexture CreateTriplanarRT(string rtName)
@@ -103,12 +116,28 @@ namespace Genesis.RoomScan
             return rt;
         }
 
+        private RenderTexture CreateDepthRT(string rtName)
+        {
+            var rt = new RenderTexture(textureResolution, textureResolution, 0, GraphicsFormat.R8_UNorm)
+            {
+                enableRandomWrite = true,
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp,
+                name = rtName
+            };
+            rt.Create();
+            return rt;
+        }
+
         public void Clear()
         {
             if (!_kernelsReady) return;
             _clearKernel.Set(TriXZRWID, _triXZ);
             _clearKernel.Set(TriXYRWID, _triXY);
             _clearKernel.Set(TriYZRWID, _triYZ);
+            _clearKernel.Set(DepthXZRWID, _depthXZ);
+            _clearKernel.Set(DepthXYRWID, _depthXY);
+            _clearKernel.Set(DepthYZRWID, _depthYZ);
             bakeCompute.SetInts(TriSizeID, textureResolution, textureResolution);
             _clearKernel.DispatchFit(textureResolution, textureResolution);
         }
@@ -122,10 +151,10 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Resample triplanar textures from old coordinate frame into new (identity) frame.
-        /// Uses a fragment-shader blit (not compute) to avoid Vulkan Blit→compute SRV
-        /// layout transition issues on Quest. The old RTs loaded via Graphics.Blit are
-        /// always readable by fragment shaders in the normal rendering pipeline.
+        /// Resample triplanar textures from old coordinate frame into new frame using
+        /// forward-splat: each old texel has its exact 3D position (from stored depth),
+        /// gets relocated by R, and written at the correct new triplanar UV.
+        /// Followed by dilation passes to fill coverage gaps.
         /// </summary>
         public void BakeRelocation(Matrix4x4 relocationMatrix, string triplanarDir)
         {
@@ -133,6 +162,7 @@ namespace Genesis.RoomScan
             if (vi == null) return;
 
             Load(triplanarDir);
+            LoadDepth(triplanarDir);
 
             var shader = relocShader != null ? relocShader : Shader.Find("Hidden/Genesis/TriplanarReloc");
             if (shader == null)
@@ -141,37 +171,66 @@ namespace Genesis.RoomScan
                 return;
             }
 
-            Matrix4x4 invReloc = relocationMatrix.inverse;
             var vc = vi.VoxelCount;
             int res = textureResolution;
+            int totalVerts = res * res;
 
-            var mat = new Material(shader);
-            mat.SetMatrix("_InvReloc", invReloc);
-            mat.SetVector("_VoxCount", new Vector4(vc.x, vc.y, vc.z, 0));
-            mat.SetFloat("_VoxSize", vi.VoxelSize);
-            mat.SetTexture("_OldTriXZ", _triXZ);
-            mat.SetTexture("_OldTriXY", _triXY);
-            mat.SetTexture("_OldTriYZ", _triYZ);
+            var oldTris = new[] { _triXZ, _triXY, _triYZ };
+            var oldDepths = new[] { _depthXZ, _depthXY, _depthYZ };
 
-            var dstXZ = CreateTriplanarRT("RelocXZ");
-            var dstXY = CreateTriplanarRT("RelocXY");
-            var dstYZ = CreateTriplanarRT("RelocYZ");
+            var dsts = new RenderTexture[] {
+                CreateTriplanarRT("RelocXZ"),
+                CreateTriplanarRT("RelocXY"),
+                CreateTriplanarRT("RelocYZ")
+            };
 
-            mat.SetInt("_Face", 0);
-            Graphics.Blit(null, dstXZ, mat);
-            mat.SetInt("_Face", 1);
-            Graphics.Blit(null, dstXY, mat);
-            mat.SetInt("_Face", 2);
-            Graphics.Blit(null, dstYZ, mat);
+            // Pass 0: Forward splat — 9 draw calls (3 src × 3 dst).
+            var splatMat = new Material(shader);
+            splatMat.SetMatrix("_Reloc", relocationMatrix);
+            splatMat.SetVector("_VoxCount", new Vector4(vc.x, vc.y, vc.z, 0));
+            splatMat.SetFloat("_VoxSize", vi.VoxelSize);
+            splatMat.SetVector("_TexSize", new Vector2(res, res));
 
-            Destroy(mat);
+            for (int srcFace = 0; srcFace < 3; srcFace++)
+            {
+                splatMat.SetTexture("_OldTri", oldTris[srcFace]);
+                splatMat.SetTexture("_OldDepth", oldDepths[srcFace]);
+                splatMat.SetInt("_SrcFace", srcFace);
 
-            Destroy(_triXZ);
-            Destroy(_triXY);
-            Destroy(_triYZ);
-            _triXZ = dstXZ;
-            _triXY = dstXY;
-            _triYZ = dstYZ;
+                for (int dstFace = 0; dstFace < 3; dstFace++)
+                {
+                    splatMat.SetInt("_DstFace", dstFace);
+                    Graphics.SetRenderTarget(dsts[dstFace]);
+                    splatMat.SetPass(0);
+                    Graphics.DrawProceduralNow(MeshTopology.Points, totalVerts);
+                }
+            }
+            Graphics.SetRenderTarget(null);
+            Destroy(splatMat);
+
+            // Pass 1: Dilation — fill coverage gaps from point-splat sparsity.
+            var dilMat = new Material(shader);
+            const int dilationPasses = 8;
+            for (int d = 0; d < dilationPasses; d++)
+            {
+                for (int face = 0; face < 3; face++)
+                {
+                    var tmp = CreateTriplanarRT($"Dilate{face}_{d}");
+                    Graphics.Blit(dsts[face], tmp, dilMat, 1);
+                    Destroy(dsts[face]);
+                    dsts[face] = tmp;
+                }
+            }
+            Destroy(dilMat);
+
+            // Swap old → new
+            Destroy(_triXZ); Destroy(_triXY); Destroy(_triYZ);
+            if (_depthXZ) Destroy(_depthXZ);
+            if (_depthXY) Destroy(_depthXY);
+            if (_depthYZ) Destroy(_depthYZ);
+
+            _triXZ = dsts[0]; _triXY = dsts[1]; _triYZ = dsts[2];
+            _depthXZ = null; _depthXY = null; _depthYZ = null;
 
             Shader.SetGlobalTexture(TriXZID, _triXZ);
             Shader.SetGlobalTexture(TriXYID, _triXY);
@@ -185,8 +244,8 @@ namespace Genesis.RoomScan
                 _clearKernel.Set(TriYZRWID, _triYZ);
             }
 
-            Debug.Log($"[RoomScan] Triplanar blit relocation complete — " +
-                      $"3x {res}x{res}, invReloc col3={invReloc.GetColumn(3)}");
+            Debug.Log($"[RoomScan] Triplanar forward-splat relocation complete — " +
+                      $"3x {res}x{res}, 9 splat passes + {dilationPasses} dilation passes");
         }
 
         private int _bakeCount;
@@ -249,6 +308,9 @@ namespace Genesis.RoomScan
             _bakeKernel.Set(TriXZRWID, _triXZ);
             _bakeKernel.Set(TriXYRWID, _triXY);
             _bakeKernel.Set(TriYZRWID, _triYZ);
+            _bakeKernel.Set(DepthXZRWID, _depthXZ);
+            _bakeKernel.Set(DepthXYRWID, _depthXY);
+            _bakeKernel.Set(DepthYZRWID, _depthYZ);
 
             _bakeKernel.Set(DepthCapture.DepthTexID, dc.DepthTex);
             _bakeKernel.Set(DepthCapture.NormTexID, dc.NormTex);
@@ -281,22 +343,39 @@ namespace Genesis.RoomScan
             SaveRT(_triXZ, Path.Combine(directory, "tri_xz.raw"));
             SaveRT(_triXY, Path.Combine(directory, "tri_xy.raw"));
             SaveRT(_triYZ, Path.Combine(directory, "tri_yz.raw"));
-            Debug.Log($"[RoomScan] Triplanar textures saved to {directory}");
+            SaveDepthRT(_depthXZ, Path.Combine(directory, "depth_xz.raw"));
+            SaveDepthRT(_depthXY, Path.Combine(directory, "depth_xy.raw"));
+            SaveDepthRT(_depthYZ, Path.Combine(directory, "depth_yz.raw"));
+            Debug.Log($"[RoomScan] Triplanar textures + depth saved to {directory}");
         }
 
         /// <summary>
         /// Reads triplanar pixel data on main thread (required for ReadPixels),
         /// returns raw bytes for background file I/O.
         /// </summary>
-        public (byte[] xz, byte[] xy, byte[] yz) ReadRawBytes()
+        public (byte[] xz, byte[] xy, byte[] yz,
+                byte[] dxz, byte[] dxy, byte[] dyz) ReadRawBytes()
         {
-            return (ReadRTBytes(_triXZ), ReadRTBytes(_triXY), ReadRTBytes(_triYZ));
+            return (ReadRTBytes(_triXZ), ReadRTBytes(_triXY), ReadRTBytes(_triYZ),
+                    ReadDepthRTBytes(_depthXZ), ReadDepthRTBytes(_depthXY), ReadDepthRTBytes(_depthYZ));
         }
 
         public static byte[] ReadRTBytes(RenderTexture rt)
         {
-            // linear=true: bytes match UNorm RT / LoadRaw round-trip (sRGB Texture2D darkens on Blit).
             var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false, true);
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+            tex.Apply();
+            RenderTexture.active = prev;
+            byte[] data = tex.GetRawTextureData();
+            Destroy(tex);
+            return data;
+        }
+
+        public static byte[] ReadDepthRTBytes(RenderTexture rt)
+        {
+            var tex = new Texture2D(rt.width, rt.height, TextureFormat.R8, false, true);
             var prev = RenderTexture.active;
             RenderTexture.active = rt;
             tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
@@ -316,9 +395,31 @@ namespace Genesis.RoomScan
             Debug.Log($"[RoomScan] Triplanar textures loaded from {directory}");
         }
 
+        public void LoadDepth(string directory)
+        {
+            LoadDepthRT(_depthXZ, Path.Combine(directory, "depth_xz.raw"));
+            LoadDepthRT(_depthXY, Path.Combine(directory, "depth_xy.raw"));
+            LoadDepthRT(_depthYZ, Path.Combine(directory, "depth_yz.raw"));
+            Debug.Log($"[RoomScan] Triplanar depth textures loaded from {directory}");
+        }
+
         private static void SaveRT(RenderTexture rt, string path)
         {
             var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false);
+            var prev = RenderTexture.active;
+            RenderTexture.active = rt;
+            tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
+            tex.Apply();
+            RenderTexture.active = prev;
+
+            byte[] data = tex.GetRawTextureData();
+            File.WriteAllBytes(path, data);
+            Destroy(tex);
+        }
+
+        private static void SaveDepthRT(RenderTexture rt, string path)
+        {
+            var tex = new Texture2D(rt.width, rt.height, TextureFormat.R8, false, true);
             var prev = RenderTexture.active;
             RenderTexture.active = rt;
             tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
@@ -343,6 +444,28 @@ namespace Genesis.RoomScan
             }
 
             var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false, true);
+            tex.LoadRawTextureData(data);
+            tex.Apply(false, false);
+            Graphics.Blit(tex, rt);
+            Destroy(tex);
+        }
+
+        private static void LoadDepthRT(RenderTexture rt, string path)
+        {
+            if (!File.Exists(path))
+            {
+                Debug.LogWarning($"[RoomScan] Depth texture not found: {path}");
+                return;
+            }
+            byte[] data = File.ReadAllBytes(path);
+            int expected = rt.width * rt.height * 1;
+            if (data.Length != expected)
+            {
+                Debug.LogWarning($"[RoomScan] Depth {path}: size {data.Length} != expected {expected}. Skipping.");
+                return;
+            }
+
+            var tex = new Texture2D(rt.width, rt.height, TextureFormat.R8, false, true);
             tex.LoadRawTextureData(data);
             tex.Apply(false, false);
             Graphics.Blit(tex, rt);

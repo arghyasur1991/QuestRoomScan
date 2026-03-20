@@ -12,6 +12,9 @@
 RWTexture2D<float4> gsTriXZ_RW;
 RWTexture2D<float4> gsTriXY_RW;
 RWTexture2D<float4> gsTriYZ_RW;
+RWTexture2D<float> gsTriDepthXZ_RW;
+RWTexture2D<float> gsTriDepthXY_RW;
+RWTexture2D<float> gsTriDepthYZ_RW;
 uint2 gsTriSize;
 int gsSplatRadius;
 
@@ -63,6 +66,9 @@ void ClearTriplanar(uint3 id : SV_DispatchThreadID)
     gsTriXZ_RW[id.xy] = float4(0, 0, 0, 0);
     gsTriXY_RW[id.xy] = float4(0, 0, 0, 0);
     gsTriYZ_RW[id.xy] = float4(0, 0, 0, 0);
+    gsTriDepthXZ_RW[id.xy] = 0;
+    gsTriDepthXY_RW[id.xy] = 0;
+    gsTriDepthYZ_RW[id.xy] = 0;
 }
 
 #pragma kernel BakeTriplanar
@@ -169,11 +175,20 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
         float a = min(old.a + quality * 0.1 * (1.0 - old.a * 0.5), 1.0);
 
         if (absN.y >= absN.x && absN.y >= absN.z)
+        {
             gsTriXZ_RW[tc] = float4(rgb, a);
+            gsTriDepthXZ_RW[tc] = uvw.y;
+        }
         else if (absN.z >= absN.x)
+        {
             gsTriXY_RW[tc] = float4(rgb, a);
+            gsTriDepthXY_RW[tc] = uvw.z;
+        }
         else
+        {
             gsTriYZ_RW[tc] = float4(rgb, a);
+            gsTriDepthYZ_RW[tc] = uvw.x;
+        }
     }
 }
 

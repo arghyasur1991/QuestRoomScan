@@ -289,7 +289,7 @@ namespace Genesis.RoomScan
 
         private static async Task SaveTriplanarOneAtATime(TriplanarCache tc, string dir)
         {
-            var planes = new[] {
+            var planes = new (RenderTexture rt, string filename)[] {
                 (tc.TriXZ, "tri_xz.raw"),
                 (tc.TriXY, "tri_xy.raw"),
                 (tc.TriYZ, "tri_yz.raw")
@@ -297,6 +297,19 @@ namespace Genesis.RoomScan
             foreach (var (rt, filename) in planes)
             {
                 byte[] data = TriplanarCache.ReadRTBytes(rt);
+                string path = Path.Combine(dir, filename);
+                await Task.Run(() => File.WriteAllBytes(path, data));
+                data = null;
+            }
+
+            var depthPlanes = new (RenderTexture rt, string filename)[] {
+                (tc.DepthXZ, "depth_xz.raw"),
+                (tc.DepthXY, "depth_xy.raw"),
+                (tc.DepthYZ, "depth_yz.raw")
+            };
+            foreach (var (rt, filename) in depthPlanes)
+            {
+                byte[] data = TriplanarCache.ReadDepthRTBytes(rt);
                 string path = Path.Combine(dir, filename);
                 await Task.Run(() => File.WriteAllBytes(path, data));
                 data = null;
