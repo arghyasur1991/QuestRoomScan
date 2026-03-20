@@ -15,6 +15,8 @@ RWTexture2D<float4> gsTriYZ_RW;
 uint2 gsTriSize;
 int gsSplatRadius;
 
+float4x4 _RSTriReloc; // current-world → triplanar-space (identity normally, R⁻¹ after bake relocation)
+
 Texture2D<float4> gsCamRGB;
 float3 gsCamPos;
 float4x4 gsCamInvRot;
@@ -126,7 +128,8 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
     float quality = distFactor * angleFactor;
     if (quality < MIN_QUALITY) return;
 
-    float3 uvw = gsWorldToVoxelUVW(worldPos);
+    float3 triPos = mul(_RSTriReloc, float4(worldPos, 1)).xyz;
+    float3 uvw = gsWorldToVoxelUVW(triPos);
     if (any(uvw < 0.001) || any(uvw > 0.999)) return;
 
     float3 absN = abs(normal);

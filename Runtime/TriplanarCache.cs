@@ -29,6 +29,7 @@ namespace Genesis.RoomScan
         static readonly int TriXYID = Shader.PropertyToID("_RSTriXY");
         static readonly int TriYZID = Shader.PropertyToID("_RSTriYZ");
         static readonly int TriAvailableID = Shader.PropertyToID("_RSTriAvailable");
+        static readonly int TriRelocID = Shader.PropertyToID("_RSTriReloc");
 
         static readonly int TriXZRWID = Shader.PropertyToID("gsTriXZ_RW");
         static readonly int TriXYRWID = Shader.PropertyToID("gsTriXY_RW");
@@ -56,6 +57,7 @@ namespace Genesis.RoomScan
                 _kernelsReady = true;
             }
             Clear();
+            SetRelocation(Matrix4x4.identity);
             UpdateShaderGlobals();
 
             long bytes = (long)textureResolution * textureResolution * 4 * 3;
@@ -110,6 +112,17 @@ namespace Genesis.RoomScan
             if (_triXY) Shader.SetGlobalTexture(TriXYID, _triXY);
             if (_triYZ) Shader.SetGlobalTexture(TriYZID, _triYZ);
             Shader.SetGlobalFloat(TriAvailableID, _triXZ != null ? 1f : 0f);
+        }
+
+        /// <summary>
+        /// Set the triplanar relocation matrix (current-world → triplanar coordinate space).
+        /// Identity for fresh scans; R⁻¹ after bake relocation so loaded textures align.
+        /// </summary>
+        public void SetRelocation(Matrix4x4 currentWorldToTriplanarSpace)
+        {
+            Shader.SetGlobalMatrix(TriRelocID, currentWorldToTriplanarSpace);
+            if (bakeCompute != null)
+                bakeCompute.SetMatrix(TriRelocID, currentWorldToTriplanarSpace);
         }
 
         private int _bakeCount;

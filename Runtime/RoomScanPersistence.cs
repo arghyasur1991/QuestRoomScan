@@ -234,6 +234,7 @@ namespace Genesis.RoomScan
                 if (!vi.LoadVolumes(tsdfBytes, colorBytes, savedIntCount))
                     return false;
 
+                Matrix4x4 triReloc = Matrix4x4.identity;
                 if (hasSessionSnapshots && anchor != null && anchor.enabled && anchor.IsRoomLoaded)
                 {
                     Matrix4x4 reloc = vi.VolumeToWorld;
@@ -241,13 +242,17 @@ namespace Genesis.RoomScan
                     if (!isIdentity)
                     {
                         vi.BakeRelocation(reloc);
+                        triReloc = reloc.inverse;
                         anchor.ClearSessionRelocation();
                         anchor.RefreshVolumeTransform();
-                        Debug.Log("[RoomScan] Persistence: baked relocation into voxels → volumeToWorld=I");
+                        Debug.Log($"[RoomScan] Persistence: baked relocation into voxels → volumeToWorld=I, " +
+                                  $"triReloc row3={triReloc.GetRow(3)}");
                     }
                 }
 
                 var tc = TriplanarCache.Instance;
+                if (tc != null)
+                    tc.SetRelocation(triReloc);
                 if (tc != null && triRes > 0 && Directory.Exists(triplanarDir))
                 {
                     try

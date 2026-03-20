@@ -58,6 +58,7 @@ Shader "Genesis/ScanMeshVertexColor"
             TEXTURE2D(_RSTriXY);  SAMPLER(sampler_RSTriXY);
             TEXTURE2D(_RSTriYZ);  SAMPLER(sampler_RSTriYZ);
             float _RSTriAvailable;
+            float4x4 _RSTriReloc; // current-world → triplanar-space (old-world after bake relocation)
 
             // TSDF volume (for freeze tint feedback)
             TEXTURE3D(gsVolume);
@@ -86,7 +87,8 @@ Shader "Genesis/ScanMeshVertexColor"
             {
                 float3 absN = abs(normal);
                 float3 blend = absN / (absN.x + absN.y + absN.z + 0.001);
-                float3 uvw = WorldToVoxelUVW(worldPos);
+                float3 triPos = mul(_RSTriReloc, float4(worldPos, 1)).xyz;
+                float3 uvw = WorldToVoxelUVW(triPos);
 
                 float2 uvXZ = SignedTriUV(uvw.xz, normal.y);
                 float2 uvXY = SignedTriUV(uvw.xy, normal.z);
