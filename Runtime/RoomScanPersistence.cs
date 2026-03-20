@@ -204,27 +204,28 @@ namespace Genesis.RoomScan
                     return false;
 
                 // Bake anchor-drift relocation: R = A_now * Inv(A_save).
-                Matrix4x4 triReloc = Matrix4x4.identity;
                 var anchor = RoomAnchorManager.Instance;
+                Matrix4x4 reloc = Matrix4x4.identity;
                 if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
+                    reloc = anchor.ComputeRelocationMatrix(anchorAtSave);
+
+                if (reloc != Matrix4x4.identity)
                 {
-                    Matrix4x4 reloc = anchor.ComputeRelocationMatrix(anchorAtSave);
-                    if (reloc != Matrix4x4.identity)
-                    {
-                        vi.BakeRelocation(reloc);
-                        triReloc = reloc.inverse;
-                        Debug.Log($"[RoomScan] Persistence: baked relocation → identity, triReloc row3={triReloc.GetRow(3)}");
-                    }
+                    vi.BakeRelocation(reloc);
+                    Debug.Log("[RoomScan] Persistence: TSDF baked to identity");
                 }
 
                 var tc = TriplanarCache.Instance;
-                if (tc != null)
-                    tc.SetRelocation(triReloc);
                 if (tc != null && triRes > 0 && Directory.Exists(triplanarDir))
                 {
                     try
                     {
                         tc.Load(triplanarDir);
+                        if (reloc != Matrix4x4.identity)
+                        {
+                            tc.BakeRelocation(reloc);
+                            Debug.Log("[RoomScan] Persistence: triplanar baked to identity");
+                        }
                     }
                     catch (Exception e)
                     {

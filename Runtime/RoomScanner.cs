@@ -368,10 +368,7 @@ namespace Genesis.RoomScan
             _volumeIntegrator.Clear();
             _meshExtractor.Reinitialize();
             if (_triplanarCache != null)
-            {
                 _triplanarCache.Clear();
-                _triplanarCache.SetRelocation(Matrix4x4.identity);
-            }
         }
 
         /// <summary>

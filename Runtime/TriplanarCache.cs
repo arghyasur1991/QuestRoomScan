@@ -29,7 +29,11 @@ namespace Genesis.RoomScan
         static readonly int TriXYID = Shader.PropertyToID("_RSTriXY");
         static readonly int TriYZID = Shader.PropertyToID("_RSTriYZ");
         static readonly int TriAvailableID = Shader.PropertyToID("_RSTriAvailable");
-        static readonly int TriRelocID = Shader.PropertyToID("_RSTriReloc");
+        static readonly int BakeTriSrcTsdfID = Shader.PropertyToID("gsBakeTriSrcTsdf");
+        static readonly int OldTriXZID = Shader.PropertyToID("gsOldTriXZ");
+        static readonly int OldTriXYID = Shader.PropertyToID("gsOldTriXY");
+        static readonly int OldTriYZID = Shader.PropertyToID("gsOldTriYZ");
+        static readonly int BakeTriInvRelocID = Shader.PropertyToID("gsBakeTriInvReloc");
 
         static readonly int TriXZRWID = Shader.PropertyToID("gsTriXZ_RW");
         static readonly int TriXYRWID = Shader.PropertyToID("gsTriXY_RW");
@@ -57,7 +61,6 @@ namespace Genesis.RoomScan
                 _kernelsReady = true;
             }
             Clear();
-            SetRelocation(Matrix4x4.identity);
             UpdateShaderGlobals();
 
             long bytes = (long)textureResolution * textureResolution * 4 * 3;
@@ -115,14 +118,69 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Set the triplanar relocation matrix (current-world → triplanar coordinate space).
-        /// Identity for fresh scans; R⁻¹ after bake relocation so loaded textures align.
+        /// Resample triplanar textures from old coordinate frame into new (identity) frame
+        /// by iterating surface voxels in the already-baked TSDF. After this call, triplanar
+        /// textures are in identity space and no per-frame relocation uniform is needed.
         /// </summary>
-        public void SetRelocation(Matrix4x4 currentWorldToTriplanarSpace)
+        public void BakeRelocation(Matrix4x4 relocationMatrix)
         {
-            Shader.SetGlobalMatrix(TriRelocID, currentWorldToTriplanarSpace);
-            if (bakeCompute != null)
-                bakeCompute.SetMatrix(TriRelocID, currentWorldToTriplanarSpace);
+            if (!_kernelsReady || bakeCompute == null) return;
+
+            var vi = VolumeIntegrator.Instance;
+            if (vi == null || vi.Volume == null) return;
+
+            Matrix4x4 invReloc = relocationMatrix.inverse;
+            int res = textureResolution;
+
+            var dstXZ = CreateTriplanarRT("DstXZ");
+            var dstXY = CreateTriplanarRT("DstXY");
+            var dstYZ = CreateTriplanarRT("DstYZ");
+
+            // Clear destination textures
+            bakeCompute.SetInts(TriSizeID, res, res);
+            _clearKernel.Set(TriXZRWID, dstXZ);
+            _clearKernel.Set(TriXYRWID, dstXY);
+            _clearKernel.Set(TriYZRWID, dstYZ);
+            _clearKernel.DispatchFit(res, res);
+
+            // Dispatch relocation bake: read old textures + TSDF, write to dst
+            int kernel = bakeCompute.FindKernel("BakeTriplanarRelocation");
+            var vc = vi.VoxelCount;
+
+            bakeCompute.SetInts(Shader.PropertyToID("gsVoxCount"), vc.x, vc.y, vc.z);
+            bakeCompute.SetFloat(Shader.PropertyToID("gsVoxSize"), vi.VoxelSize);
+            bakeCompute.SetInts(TriSizeID, res, res);
+            bakeCompute.SetMatrix(BakeTriInvRelocID, invReloc);
+
+            bakeCompute.SetTexture(kernel, BakeTriSrcTsdfID, vi.Volume);
+            bakeCompute.SetTexture(kernel, OldTriXZID, _triXZ);
+            bakeCompute.SetTexture(kernel, OldTriXYID, _triXY);
+            bakeCompute.SetTexture(kernel, OldTriYZID, _triYZ);
+            bakeCompute.SetTexture(kernel, TriXZRWID, dstXZ);
+            bakeCompute.SetTexture(kernel, TriXYRWID, dstXY);
+            bakeCompute.SetTexture(kernel, TriYZRWID, dstYZ);
+
+            int tx = Mathf.CeilToInt(vc.x / 4f);
+            int ty = Mathf.CeilToInt(vc.y / 4f);
+            int tz = Mathf.CeilToInt(vc.z / 4f);
+            bakeCompute.Dispatch(kernel, tx, ty, tz);
+
+            // Copy baked results back (RW → RW, Vulkan-safe)
+            Graphics.CopyTexture(dstXZ, _triXZ);
+            Graphics.CopyTexture(dstXY, _triXY);
+            Graphics.CopyTexture(dstYZ, _triYZ);
+
+            Destroy(dstXZ);
+            Destroy(dstXY);
+            Destroy(dstYZ);
+
+            // Restore clear kernel bindings to main textures
+            _clearKernel.Set(TriXZRWID, _triXZ);
+            _clearKernel.Set(TriXYRWID, _triXY);
+            _clearKernel.Set(TriYZRWID, _triYZ);
+
+            Debug.Log($"[RoomScan] Triplanar bake relocation complete — " +
+                      $"resampled via {vc} voxels, invReloc row3={invReloc.GetRow(3)}");
         }
 
         private int _bakeCount;

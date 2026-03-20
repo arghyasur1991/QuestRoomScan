@@ -15,8 +15,6 @@ RWTexture2D<float4> gsTriYZ_RW;
 uint2 gsTriSize;
 int gsSplatRadius;
 
-float4x4 _RSTriReloc; // current-world → triplanar-space (identity normally, R⁻¹ after bake relocation)
-
 Texture2D<float4> gsCamRGB;
 float3 gsCamPos;
 float4x4 gsCamInvRot;
@@ -128,20 +126,18 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
     float quality = distFactor * angleFactor;
     if (quality < MIN_QUALITY) return;
 
-    float3 triPos = mul(_RSTriReloc, float4(worldPos, 1)).xyz;
-    float3 triN   = normalize(mul((float3x3)_RSTriReloc, normal));
-    float3 uvw = gsWorldToVoxelUVW(triPos);
+    float3 uvw = gsWorldToVoxelUVW(worldPos);
     if (any(uvw < 0.001) || any(uvw > 0.999)) return;
 
-    float3 absN = abs(triN);
+    float3 absN = abs(normal);
 
     float2 triUV;
     if (absN.y >= absN.x && absN.y >= absN.z)
-        triUV = SignedTriUV(uvw.xz, triN.y);
+        triUV = SignedTriUV(uvw.xz, normal.y);
     else if (absN.z >= absN.x)
-        triUV = SignedTriUV(uvw.xy, triN.z);
+        triUV = SignedTriUV(uvw.xy, normal.z);
     else
-        triUV = SignedTriUV(uvw.yz, triN.x);
+        triUV = SignedTriUV(uvw.yz, normal.x);
 
     int2 center = (int2)(triUV * gsTriSize);
     if (center.x < 0 || center.y < 0 || (uint)center.x >= gsTriSize.x || (uint)center.y >= gsTriSize.y)
@@ -179,4 +175,79 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
         else
             gsTriYZ_RW[tc] = float4(rgb, a);
     }
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  BakeTriplanarRelocation: resample triplanar textures from old
+//  coordinate frame into new (identity) frame using TSDF surface.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel BakeTriplanarRelocation
+
+Texture3D<float2> gsBakeTriSrcTsdf;
+Texture2D<float4> gsOldTriXZ;
+Texture2D<float4> gsOldTriXY;
+Texture2D<float4> gsOldTriYZ;
+float4x4 gsBakeTriInvReloc;
+
+[numthreads(4, 4, 4)]
+void BakeTriplanarRelocation(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id < 1) || any(id >= gsVoxCount - 1)) return;
+
+    float2 tsdf = gsBakeTriSrcTsdf[id];
+    if (abs(tsdf.x) > 0.5 || tsdf.y <= 0) return;
+
+    // New-world position (identity frame, post-TSDF-bake)
+    float3 newPos = gsVoxelToWorld(id);
+
+    // Estimate surface normal from TSDF gradient (central differences)
+    float3 grad;
+    grad.x = gsBakeTriSrcTsdf[id + uint3(1,0,0)].x - gsBakeTriSrcTsdf[id - uint3(1,0,0)].x;
+    grad.y = gsBakeTriSrcTsdf[id + uint3(0,1,0)].x - gsBakeTriSrcTsdf[id - uint3(0,1,0)].x;
+    grad.z = gsBakeTriSrcTsdf[id + uint3(0,0,1)].x - gsBakeTriSrcTsdf[id - uint3(0,0,1)].x;
+    if (dot(grad, grad) < 0.0001) return;
+    float3 newN = normalize(grad);
+
+    // Transform to old-world space for sampling old triplanar textures
+    float3 oldPos = mul(gsBakeTriInvReloc, float4(newPos, 1)).xyz;
+    float3 oldN   = normalize(mul((float3x3)gsBakeTriInvReloc, newN));
+
+    float3 oldUVW = gsWorldToVoxelUVW(oldPos);
+    if (any(oldUVW < 0.001) || any(oldUVW > 0.999)) return;
+
+    // Sample color from old triplanar texture using old-world face selection
+    float3 absOldN = abs(oldN);
+    float4 color;
+    if (absOldN.y >= absOldN.x && absOldN.y >= absOldN.z)
+        color = gsOldTriXZ.SampleLevel(gsBilinearClampSampler, SignedTriUV(oldUVW.xz, oldN.y), 0);
+    else if (absOldN.z >= absOldN.x)
+        color = gsOldTriXY.SampleLevel(gsBilinearClampSampler, SignedTriUV(oldUVW.xy, oldN.z), 0);
+    else
+        color = gsOldTriYZ.SampleLevel(gsBilinearClampSampler, SignedTriUV(oldUVW.yz, oldN.x), 0);
+
+    if (color.a < 0.01) return;
+
+    // Write to new triplanar texture using new-world face selection
+    float3 newUVW = gsWorldToVoxelUVW(newPos);
+    float3 absNewN = abs(newN);
+    float2 newTriUV;
+    if (absNewN.y >= absNewN.x && absNewN.y >= absNewN.z)
+        newTriUV = SignedTriUV(newUVW.xz, newN.y);
+    else if (absNewN.z >= absNewN.x)
+        newTriUV = SignedTriUV(newUVW.xy, newN.z);
+    else
+        newTriUV = SignedTriUV(newUVW.yz, newN.x);
+
+    int2 tc = (int2)(newTriUV * gsTriSize);
+    if (tc.x < 0 || tc.y < 0 || (uint)tc.x >= gsTriSize.x || (uint)tc.y >= gsTriSize.y)
+        return;
+
+    uint2 px = (uint2)tc;
+    if (absNewN.y >= absNewN.x && absNewN.y >= absNewN.z)
+        gsTriXZ_RW[px] = color;
+    else if (absNewN.z >= absNewN.x)
+        gsTriXY_RW[px] = color;
+    else
+        gsTriYZ_RW[px] = color;
 }
