@@ -38,7 +38,7 @@ namespace Genesis.RoomScan
         /// When true (after <see cref="ApplySessionRelocationSnapshots"/> / load), volume uses
         /// <c>A_now * Inverse(A_save) * V_save</c>. Live-only sessions stay false (fusion uses <c>I</c>).
         /// </summary>
-        private bool _sessionRelocationActive;
+        private bool _sessionRelocationActive = false;
 
         /// <summary>True when a v3 load (or equivalent) enabled anchor-delta placement.</summary>
         public bool SessionRelocationActive => _sessionRelocationActive;
@@ -137,6 +137,8 @@ namespace Genesis.RoomScan
                                      $"(pos={_anchorTransform.position})");
                 }
             }
+            _sessionSavedAnchorLocalToWorld = _anchorTransform.localToWorldMatrix;
+            _sessionSavedVolumeToWorld = Matrix4x4.identity;
 
             _volumeOriginLocked = true;
 
@@ -239,11 +241,14 @@ namespace Genesis.RoomScan
                 return;
 
             Matrix4x4 volumeToWorld;
-            if (_sessionRelocationActive)
+            if (true)
             {
                 if (_anchorTransform == null)
                     return;
                 Matrix4x4 aNow = _anchorTransform.localToWorldMatrix;
+                Debug.Log($"[RoomAnchor] RefreshVolumeTransform: aNow: {aNow}");
+                Debug.Log($"[RoomAnchor] RefreshVolumeTransform: _sessionSavedAnchorLocalToWorld: {_sessionSavedAnchorLocalToWorld}");
+                Debug.Log($"[RoomAnchor] RefreshVolumeTransform: _sessionSavedVolumeToWorld: {_sessionSavedVolumeToWorld}");
                 volumeToWorld = aNow * _sessionSavedAnchorLocalToWorld.inverse * _sessionSavedVolumeToWorld;
             }
             else
@@ -251,6 +256,8 @@ namespace Genesis.RoomScan
                 // Scan-time data is integrated in tracking/world with no anchor premultiply.
                 volumeToWorld = Matrix4x4.identity;
             }
+
+            Debug.Log($"[RoomAnchor] RefreshVolumeTransform: volumeToWorld: {volumeToWorld}");
 
             Matrix4x4 worldToVolume = volumeToWorld.inverse;
             _volumeIntegrator.SetVolumeTransform(volumeToWorld, worldToVolume);

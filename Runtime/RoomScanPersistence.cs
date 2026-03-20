@@ -103,7 +103,7 @@ namespace Genesis.RoomScan
                 var anchor = RoomAnchorManager.Instance;
                 if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
                 {
-                    volumeOriginInRoom = anchor.OriginInRoomSpace;
+                    // volumeOriginInRoom = anchor.OriginInRoomSpace;
                     roomL2WAtSave = anchor.GetRoomLocalToWorldForPersistence();
                 }
 
@@ -125,7 +125,8 @@ namespace Genesis.RoomScan
                 float sizeMB = new FileInfo(savePath).Length / (1024f * 1024f);
                 Debug.Log($"[RoomScan] Persistence: saved to {savePath} ({sizeMB:F1}MB), " +
                           $"triplanar={triRes > 0}, volumeOriginInRoom={volumeOriginInRoom}, " +
-                          $"format=v{FormatVersion} (room+volume snapshots)");
+                          $"format=v{FormatVersion} (room+volume snapshots) " +
+                          $"Room anchor={roomL2WAtSave}, volume={volumeToWorldAtSave}");
                 // Do not call ApplySessionRelocationSnapshots here — that would turn relocation on after a
                 // fresh save and break live fusion (must stay identity until load). Only refresh snapshots
                 // if we were already in post-load relocation (re-save while viewing loaded scan).
