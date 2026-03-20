@@ -112,7 +112,6 @@ namespace Genesis.RoomScan
 
             _extractCount++;
             _gpuSurfaceNets.MinMeshWeight = _volume.MinMeshWeight;
-            _gpuSurfaceNets.VolumeToWorld = _volume.VolumeToWorld;
 
             _gpuSurfaceNets.Extract(_volume.Volume, _volume.ColorVolume, _volume.VoxelSize);
 
