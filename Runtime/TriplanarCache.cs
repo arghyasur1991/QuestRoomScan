@@ -11,6 +11,7 @@ namespace Genesis.RoomScan
         public static TriplanarCache Instance { get; private set; }
 
         [SerializeField] private ComputeShader bakeCompute;
+        [SerializeField] private Shader relocShader;
         [SerializeField, Range(512, 8192)] private int textureResolution = 4096;
         [SerializeField, Tooltip("Auto-calculated if 0. Higher = faster fill but more GPU work per pixel")]
         private int splatRadiusOverride = 0;
@@ -122,54 +123,48 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Resample triplanar textures from old coordinate frame into new (identity) frame.
-        /// Loads raw triplanar files from disk as Texture2D (always SRV-readable on Vulkan)
-        /// to avoid the Blit→compute SRV layout transition bug on Quest.
+        /// Uses a fragment-shader blit (not compute) to avoid Vulkan Blit→compute SRV
+        /// layout transition issues on Quest. The old RTs loaded via Graphics.Blit are
+        /// always readable by fragment shaders in the normal rendering pipeline.
         /// </summary>
         public void BakeRelocation(Matrix4x4 relocationMatrix, string triplanarDir)
         {
-            if (!_kernelsReady || bakeCompute == null) return;
-
             var vi = VolumeIntegrator.Instance;
             if (vi == null) return;
 
+            Load(triplanarDir);
+
+            var shader = relocShader != null ? relocShader : Shader.Find("Hidden/Genesis/TriplanarReloc");
+            if (shader == null)
+            {
+                Debug.LogError("[RoomScan] TriplanarReloc shader not found — triplanar relocation skipped");
+                return;
+            }
+
             Matrix4x4 invReloc = relocationMatrix.inverse;
+            var vc = vi.VoxelCount;
             int res = textureResolution;
 
-            var srcXZ = LoadTex2D(Path.Combine(triplanarDir, "tri_xz.raw"), res);
-            var srcXY = LoadTex2D(Path.Combine(triplanarDir, "tri_xy.raw"), res);
-            var srcYZ = LoadTex2D(Path.Combine(triplanarDir, "tri_yz.raw"), res);
+            var mat = new Material(shader);
+            mat.SetMatrix("_InvReloc", invReloc);
+            mat.SetVector("_VoxCount", new Vector4(vc.x, vc.y, vc.z, 0));
+            mat.SetFloat("_VoxSize", vi.VoxelSize);
+            mat.SetTexture("_OldTriXZ", _triXZ);
+            mat.SetTexture("_OldTriXY", _triXY);
+            mat.SetTexture("_OldTriYZ", _triYZ);
 
-            var dstXZ = CreateTriplanarRT("DstXZ");
-            var dstXY = CreateTriplanarRT("DstXY");
-            var dstYZ = CreateTriplanarRT("DstYZ");
-            var dstArr = new[] { dstXZ, dstXY, dstYZ };
+            var dstXZ = CreateTriplanarRT("RelocXZ");
+            var dstXY = CreateTriplanarRT("RelocXY");
+            var dstYZ = CreateTriplanarRT("RelocYZ");
 
-            int kernel = bakeCompute.FindKernel("BakeTriplanarRelocation");
+            mat.SetInt("_Face", 0);
+            Graphics.Blit(null, dstXZ, mat);
+            mat.SetInt("_Face", 1);
+            Graphics.Blit(null, dstXY, mat);
+            mat.SetInt("_Face", 2);
+            Graphics.Blit(null, dstYZ, mat);
 
-            var vc = vi.VoxelCount;
-            bakeCompute.SetVector(BakeVoxCountFID, new Vector4(vc.x, vc.y, vc.z, 0));
-            bakeCompute.SetFloat(BakeVoxSizeID, vi.VoxelSize);
-            bakeCompute.SetInts(TriSizeID, res, res);
-            bakeCompute.SetMatrix(BakeTriInvRelocID, invReloc);
-
-            bakeCompute.SetTexture(kernel, OldTriXZID, srcXZ);
-            bakeCompute.SetTexture(kernel, OldTriXYID, srcXY);
-            bakeCompute.SetTexture(kernel, OldTriYZID, srcYZ);
-
-            int groupsX = Mathf.CeilToInt(res / 8f);
-            int groupsY = Mathf.CeilToInt(res / 8f);
-
-            for (int face = 0; face < 3; face++)
-            {
-                bakeCompute.SetInt(BakeTriFaceID, face);
-                bakeCompute.SetTexture(kernel, DstTriRWID, dstArr[face]);
-                bakeCompute.Dispatch(kernel, groupsX, groupsY, 1);
-            }
-            GL.Flush();
-
-            Destroy(srcXZ);
-            Destroy(srcXY);
-            Destroy(srcYZ);
+            Destroy(mat);
 
             Destroy(_triXZ);
             Destroy(_triXY);
@@ -183,21 +178,15 @@ namespace Genesis.RoomScan
             Shader.SetGlobalTexture(TriYZID, _triYZ);
             Shader.SetGlobalFloat(TriAvailableID, 1f);
 
-            _clearKernel.Set(TriXZRWID, _triXZ);
-            _clearKernel.Set(TriXYRWID, _triXY);
-            _clearKernel.Set(TriYZRWID, _triYZ);
+            if (_clearKernel.Shader != null)
+            {
+                _clearKernel.Set(TriXZRWID, _triXZ);
+                _clearKernel.Set(TriXYRWID, _triXY);
+                _clearKernel.Set(TriYZRWID, _triYZ);
+            }
 
-            Debug.Log($"[RoomScan] Triplanar bake relocation complete (from disk) — " +
-                      $"3x {res}x{res} texels, invReloc col3={invReloc.GetColumn(3)}");
-        }
-
-        private static Texture2D LoadTex2D(string path, int res)
-        {
-            byte[] data = File.ReadAllBytes(path);
-            var tex = new Texture2D(res, res, TextureFormat.RGBA32, false, true);
-            tex.LoadRawTextureData(data);
-            tex.Apply(false, true);
-            return tex;
+            Debug.Log($"[RoomScan] Triplanar blit relocation complete — " +
+                      $"3x {res}x{res}, invReloc col3={invReloc.GetColumn(3)}");
         }
 
         private int _bakeCount;
