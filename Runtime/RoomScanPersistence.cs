@@ -203,8 +203,26 @@ namespace Genesis.RoomScan
                 if (!vi.LoadVolumes(tsdfBytes, colorBytes, savedIntCount))
                     return false;
 
-                // Bake anchor-drift relocation: R = A_now * Inv(A_save).
+                // Wait for MRUK room anchor before computing relocation.
+                // MRUK loads asynchronously from Start(); if the user triggers
+                // "Load Scan" before the room is ready, we'd skip the bake and
+                // the mesh would land at the old-session coordinates.
                 var anchor = RoomAnchorManager.Instance;
+                if (anchor != null && anchor.enabled && !anchor.IsRoomLoaded)
+                {
+                    Debug.Log("[RoomScan] Persistence: waiting for MRUK room to load...");
+                    var tcs = new TaskCompletionSource<bool>();
+                    Action onReady = null;
+                    onReady = () => { anchor.RoomReady -= onReady; tcs.TrySetResult(true); };
+                    anchor.RoomReady += onReady;
+                    if (anchor.IsRoomLoaded) // in case it loaded between the check and subscription
+                        tcs.TrySetResult(true);
+                    await tcs.Task;
+                    await SwitchToUnityMainThreadAsync(unitySync);
+                    Debug.Log("[RoomScan] Persistence: MRUK room loaded, proceeding");
+                }
+
+                // Bake anchor-drift relocation: R = A_now * Inv(A_save).
                 Matrix4x4 reloc = Matrix4x4.identity;
                 if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
                     reloc = anchor.ComputeRelocationMatrix(anchorAtSave);
