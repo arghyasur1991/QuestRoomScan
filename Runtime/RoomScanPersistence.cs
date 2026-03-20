@@ -207,19 +207,21 @@ namespace Genesis.RoomScan
                 // MRUK loads asynchronously from Start(); if the user triggers
                 // "Load Scan" before the room is ready, we'd skip the bake and
                 // the mesh would land at the old-session coordinates.
+                // Uses Task.Delay polling (not TCS event subscription) to avoid
+                // deadlocks with Unity's SynchronizationContext on IL2CPP/Quest.
                 var anchor = RoomAnchorManager.Instance;
                 if (anchor != null && anchor.enabled && !anchor.IsRoomLoaded)
                 {
                     Debug.Log("[RoomScan] Persistence: waiting for MRUK room to load...");
-                    var tcs = new TaskCompletionSource<bool>();
-                    Action onReady = null;
-                    onReady = () => { anchor.RoomReady -= onReady; tcs.TrySetResult(true); };
-                    anchor.RoomReady += onReady;
-                    if (anchor.IsRoomLoaded) // in case it loaded between the check and subscription
-                        tcs.TrySetResult(true);
-                    await tcs.Task;
-                    await SwitchToUnityMainThreadAsync(unitySync);
-                    Debug.Log("[RoomScan] Persistence: MRUK room loaded, proceeding");
+                    for (int i = 0; i < 300 && !anchor.IsRoomLoaded; i++)
+                    {
+                        await Task.Delay(16);
+                        await SwitchToUnityMainThreadAsync(unitySync);
+                    }
+                    if (anchor.IsRoomLoaded)
+                        Debug.Log("[RoomScan] Persistence: MRUK room loaded, proceeding");
+                    else
+                        Debug.LogWarning("[RoomScan] Persistence: MRUK room load timed out after ~5s, proceeding without relocation");
                 }
 
                 // Bake anchor-drift relocation: R = A_now * Inv(A_save).
