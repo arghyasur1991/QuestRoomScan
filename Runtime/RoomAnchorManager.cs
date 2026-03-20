@@ -174,7 +174,20 @@ namespace Genesis.RoomScan
             _sessionSavedAnchorLocalToWorld = roomLocalToWorldAtSave;
             _sessionSavedVolumeToWorld = volumeToWorldAtSave;
             _volumeOriginLocked = true;
-            Debug.Log("[RoomAnchor] Session relocation active: V = A_now * Inverse(A_save) * V_save");
+
+            Matrix4x4 aNow = _anchorTransform != null ? _anchorTransform.localToWorldMatrix : Matrix4x4.identity;
+            Matrix4x4 result = aNow * roomLocalToWorldAtSave.inverse * volumeToWorldAtSave;
+            Debug.Log($"[RoomAnchor] Session relocation applied — V = A_now * Inv(A_save) * V_save\n" +
+                      $"  A_save row0: {roomLocalToWorldAtSave.GetRow(0)}\n" +
+                      $"  A_save row1: {roomLocalToWorldAtSave.GetRow(1)}\n" +
+                      $"  A_save row2: {roomLocalToWorldAtSave.GetRow(2)}\n" +
+                      $"  A_save row3: {roomLocalToWorldAtSave.GetRow(3)}\n" +
+                      $"  V_save row0: {volumeToWorldAtSave.GetRow(0)}\n" +
+                      $"  A_now  row0: {aNow.GetRow(0)}\n" +
+                      $"  result row0: {result.GetRow(0)}\n" +
+                      $"  result row1: {result.GetRow(1)}\n" +
+                      $"  result row2: {result.GetRow(2)}\n" +
+                      $"  result row3: {result.GetRow(3)}");
         }
 
         /// <summary>
@@ -186,15 +199,20 @@ namespace Genesis.RoomScan
         {
             _sessionSavedAnchorLocalToWorld = anchorLocalToWorldAtSave;
             _sessionSavedVolumeToWorld = volumeToWorldAtSave;
+            Debug.Log($"[RoomAnchor] Session snapshots replaced (re-save) — A_save row0: {anchorLocalToWorldAtSave.GetRow(0)}, V_save row0: {volumeToWorldAtSave.GetRow(0)}");
         }
 
         /// <summary>
-        /// Disables v3 relocation (e.g. after clearing scan). Live placement uses identity volume/world.
+        /// Disables v3 relocation (e.g. after clearing scan). Resets saved anchor to the current
+        /// anchor pose so <see cref="RefreshVolumeTransform"/> produces <c>volumeToWorld = I</c>.
         /// </summary>
         public void ClearSessionRelocation()
         {
-            _sessionSavedAnchorLocalToWorld = Matrix4x4.identity;
+            _sessionSavedAnchorLocalToWorld = _anchorTransform != null
+                ? _anchorTransform.localToWorldMatrix
+                : Matrix4x4.identity;
             _sessionSavedVolumeToWorld = Matrix4x4.identity;
+            Debug.Log("[RoomAnchor] Session relocation cleared → volumeToWorld will be identity");
         }
 
         /// <summary>
@@ -229,14 +247,9 @@ namespace Genesis.RoomScan
 
             if (_anchorTransform == null)
                 return;
-            Matrix4x4 aNow = _anchorTransform.localToWorldMatrix;
-            Debug.Log($"[RoomAnchor] RefreshVolumeTransform: aNow: {aNow}");
-            Debug.Log($"[RoomAnchor] RefreshVolumeTransform: _sessionSavedAnchorLocalToWorld: {_sessionSavedAnchorLocalToWorld}");
-            Debug.Log($"[RoomAnchor] RefreshVolumeTransform: _sessionSavedVolumeToWorld: {_sessionSavedVolumeToWorld}");
-            Matrix4x4 volumeToWorld = aNow * _sessionSavedAnchorLocalToWorld.inverse * _sessionSavedVolumeToWorld;
-            
-            Debug.Log($"[RoomAnchor] RefreshVolumeTransform: volumeToWorld: {volumeToWorld}");
 
+            Matrix4x4 aNow = _anchorTransform.localToWorldMatrix;
+            Matrix4x4 volumeToWorld = aNow * _sessionSavedAnchorLocalToWorld.inverse * _sessionSavedVolumeToWorld;
             Matrix4x4 worldToVolume = volumeToWorld.inverse;
             _volumeIntegrator.SetVolumeTransform(volumeToWorld, worldToVolume);
         }
