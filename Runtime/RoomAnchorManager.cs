@@ -34,15 +34,6 @@ namespace Genesis.RoomScan
         /// </summary>
         private bool _volumeOriginLocked;
 
-        /// <summary>
-        /// When true (after <see cref="ApplySessionRelocationSnapshots"/> / load), volume uses
-        /// <c>A_now * Inverse(A_save) * V_save</c>. Live-only sessions stay false (fusion uses <c>I</c>).
-        /// </summary>
-        private bool _sessionRelocationActive = false;
-
-        /// <summary>True when a v3 load (or equivalent) enabled anchor-delta placement.</summary>
-        public bool SessionRelocationActive => _sessionRelocationActive;
-
         private Matrix4x4 _sessionSavedAnchorLocalToWorld = Matrix4x4.identity;
         private Matrix4x4 _sessionSavedVolumeToWorld = Matrix4x4.identity;
 
@@ -182,7 +173,6 @@ namespace Genesis.RoomScan
         {
             _sessionSavedAnchorLocalToWorld = roomLocalToWorldAtSave;
             _sessionSavedVolumeToWorld = volumeToWorldAtSave;
-            _sessionRelocationActive = true;
             _volumeOriginLocked = true;
             Debug.Log("[RoomAnchor] Session relocation active: V = A_now * Inverse(A_save) * V_save");
         }
@@ -194,8 +184,6 @@ namespace Genesis.RoomScan
         public void ReplaceSessionRelocationSnapshots(Matrix4x4 anchorLocalToWorldAtSave,
             Matrix4x4 volumeToWorldAtSave)
         {
-            if (!_sessionRelocationActive)
-                return;
             _sessionSavedAnchorLocalToWorld = anchorLocalToWorldAtSave;
             _sessionSavedVolumeToWorld = volumeToWorldAtSave;
         }
@@ -205,7 +193,6 @@ namespace Genesis.RoomScan
         /// </summary>
         public void ClearSessionRelocation()
         {
-            _sessionRelocationActive = false;
             _sessionSavedAnchorLocalToWorld = Matrix4x4.identity;
             _sessionSavedVolumeToWorld = Matrix4x4.identity;
         }
@@ -240,23 +227,14 @@ namespace Genesis.RoomScan
             if (_volumeIntegrator == null)
                 return;
 
-            Matrix4x4 volumeToWorld;
-            if (true)
-            {
-                if (_anchorTransform == null)
-                    return;
-                Matrix4x4 aNow = _anchorTransform.localToWorldMatrix;
-                Debug.Log($"[RoomAnchor] RefreshVolumeTransform: aNow: {aNow}");
-                Debug.Log($"[RoomAnchor] RefreshVolumeTransform: _sessionSavedAnchorLocalToWorld: {_sessionSavedAnchorLocalToWorld}");
-                Debug.Log($"[RoomAnchor] RefreshVolumeTransform: _sessionSavedVolumeToWorld: {_sessionSavedVolumeToWorld}");
-                volumeToWorld = aNow * _sessionSavedAnchorLocalToWorld.inverse * _sessionSavedVolumeToWorld;
-            }
-            else
-            {
-                // Scan-time data is integrated in tracking/world with no anchor premultiply.
-                volumeToWorld = Matrix4x4.identity;
-            }
-
+            if (_anchorTransform == null)
+                return;
+            Matrix4x4 aNow = _anchorTransform.localToWorldMatrix;
+            Debug.Log($"[RoomAnchor] RefreshVolumeTransform: aNow: {aNow}");
+            Debug.Log($"[RoomAnchor] RefreshVolumeTransform: _sessionSavedAnchorLocalToWorld: {_sessionSavedAnchorLocalToWorld}");
+            Debug.Log($"[RoomAnchor] RefreshVolumeTransform: _sessionSavedVolumeToWorld: {_sessionSavedVolumeToWorld}");
+            Matrix4x4 volumeToWorld = aNow * _sessionSavedAnchorLocalToWorld.inverse * _sessionSavedVolumeToWorld;
+            
             Debug.Log($"[RoomAnchor] RefreshVolumeTransform: volumeToWorld: {volumeToWorld}");
 
             Matrix4x4 worldToVolume = volumeToWorld.inverse;
