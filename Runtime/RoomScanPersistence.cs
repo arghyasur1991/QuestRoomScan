@@ -14,11 +14,9 @@ namespace Genesis.RoomScan
 
         private const uint Magic = 0x48534D52; // "RMSH"
         /// <summary>
-        /// v2: room-anchor-local volume origin (3 floats) after triplanarRes. No v1 support.
-        /// v3: after origin, 32 floats — MRUK <b>floor anchor</b> localToWorld at save + volumeToWorld at save (session relocation; same frame as <c>SceneMeshManager</c> / <c>FloorAnchors[0]</c>).
+        /// v1: header + anchor localToWorld (16 floats) + TSDF + color blobs.
         /// </summary>
-        private const int FormatVersion = 3;
-        private const int MinSupportedVersion = 2;
+        private const int FormatVersion = 1;
 
         private string SaveDirectory => Path.Combine(Application.persistentDataPath, "RoomScans");
         public string SaveFilePath => Path.Combine(SaveDirectory, "scan.bin");
@@ -97,21 +95,15 @@ namespace Genesis.RoomScan
                 if (tc != null && tc.TriXZ != null)
                     triRes = tc.TriXZ.width;
 
-                Vector3 volumeOriginInRoom = Vector3.zero;
-                Matrix4x4 roomL2WAtSave = Matrix4x4.identity;
-                Matrix4x4 volumeToWorldAtSave = Matrix4x4.identity;
+                Matrix4x4 anchorAtSave = Matrix4x4.identity;
                 var anchor = RoomAnchorManager.Instance;
                 if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
-                {
-                    // volumeOriginInRoom = anchor.OriginInRoomSpace;
-                    roomL2WAtSave = anchor.GetRoomLocalToWorldForPersistence();
-                }
+                    anchorAtSave = anchor.GetRoomLocalToWorldForPersistence();
 
                 string savePath = SaveFilePath;
                 string triDir = TriplanarDirectory;
                 await Task.Run(() => WriteBinary(savePath, s, vi.VoxelSize,
-                    vi.IntegrationCount, tsdfBytes, colorBytes, triRes, volumeOriginInRoom,
-                    roomL2WAtSave, volumeToWorldAtSave));
+                    vi.IntegrationCount, tsdfBytes, colorBytes, triRes, anchorAtSave));
 
                 tsdfBytes = null;
                 colorBytes = null;
@@ -124,8 +116,7 @@ namespace Genesis.RoomScan
 
                 float sizeMB = new FileInfo(savePath).Length / (1024f * 1024f);
                 Debug.Log($"[RoomScan] Persistence: saved to {savePath} ({sizeMB:F1}MB), " +
-                          $"triplanar={triRes > 0}, volumeOriginInRoom={volumeOriginInRoom}, " +
-                          $"format=v{FormatVersion}, anchor={roomL2WAtSave.GetRow(3)}, vol={volumeToWorldAtSave.GetRow(0)}");
+                          $"triplanar={triRes > 0}, format=v{FormatVersion}, anchor={anchorAtSave.GetRow(3)}");
                 SaveCompleted?.Invoke();
                 return true;
             }
@@ -181,16 +172,12 @@ namespace Genesis.RoomScan
                 float savedVoxSize = 0;
                 int savedIntCount = 0;
                 int triRes = 0;
-                Vector3 volumeOriginInRoom = Vector3.zero;
-                bool hasSessionSnapshots = false;
-                Matrix4x4 sessionRoomL2W = Matrix4x4.identity;
-                Matrix4x4 sessionVolumeToWorld = Matrix4x4.identity;
+                Matrix4x4 anchorAtSave = Matrix4x4.identity;
 
                 Debug.Log("[RoomScan] Persistence: load reading file (background)...");
                 await Task.Run(() => ReadBinary(saveFilePath,
                     out savedVoxCount, out savedVoxSize, out savedIntCount,
-                    out tsdfBytes, out colorBytes, out triRes, out volumeOriginInRoom,
-                    out hasSessionSnapshots, out sessionRoomL2W, out sessionVolumeToWorld));
+                    out tsdfBytes, out colorBytes, out triRes, out anchorAtSave));
                 Debug.Log($"[RoomScan] Persistence: load read done voxels={savedVoxCount}, tsdf={tsdfBytes?.Length ?? 0}, color={colorBytes?.Length ?? 0}");
 
                 await SwitchToUnityMainThreadAsync(unitySync);
@@ -212,19 +199,16 @@ namespace Genesis.RoomScan
                     return false;
                 }
 
-                var anchor = RoomAnchorManager.Instance;
-                if (anchor != null && anchor.enabled)
-                    anchor.SetOriginInRoomSpace(volumeOriginInRoom);
-
                 Debug.Log("[RoomScan] Persistence: uploading volumes to GPU...");
                 if (!vi.LoadVolumes(tsdfBytes, colorBytes, savedIntCount))
                     return false;
 
-                // Compute relocation R and bake it into the voxels so everything lives in identity space.
+                // Bake anchor-drift relocation: R = A_now * Inv(A_save).
                 Matrix4x4 triReloc = Matrix4x4.identity;
-                if (hasSessionSnapshots && anchor != null && anchor.enabled && anchor.IsRoomLoaded)
+                var anchor = RoomAnchorManager.Instance;
+                if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
                 {
-                    Matrix4x4 reloc = anchor.ComputeRelocationMatrix(sessionRoomL2W, sessionVolumeToWorld);
+                    Matrix4x4 reloc = anchor.ComputeRelocationMatrix(anchorAtSave);
                     if (reloc != Matrix4x4.identity)
                     {
                         vi.BakeRelocation(reloc);
@@ -255,8 +239,7 @@ namespace Genesis.RoomScan
                     Debug.Log("[RoomScan] Persistence: mesh extracted from loaded volume");
                 }
 
-                Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount}, " +
-                          $"volumeOriginInRoom={volumeOriginInRoom}, sessionRelocation={hasSessionSnapshots})");
+                Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount})");
                 LoadCompleted?.Invoke();
                 return true;
             }
@@ -276,7 +259,6 @@ namespace Genesis.RoomScan
             if (File.Exists(SaveFilePath)) File.Delete(SaveFilePath);
             if (Directory.Exists(TriplanarDirectory))
                 Directory.Delete(TriplanarDirectory, true);
-            var anchor = RoomAnchorManager.Instance;
             Debug.Log("[RoomScan] Persistence: saved scan deleted");
         }
 
@@ -298,8 +280,7 @@ namespace Genesis.RoomScan
 
         private static void WriteBinary(string path, int3 voxCount, float voxSize,
             int integrationCount, byte[] tsdfBytes, byte[] colorBytes, int triplanarRes,
-            Vector3 volumeOriginInRoom, Matrix4x4 roomLocalToWorldAtSave,
-            Matrix4x4 volumeToWorldAtSave)
+            Matrix4x4 anchorAtSave)
         {
             using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 65536);
             using var w = new BinaryWriter(fs);
@@ -315,12 +296,7 @@ namespace Genesis.RoomScan
             w.Write(integrationCount);
             w.Write(triplanarRes);
 
-            w.Write(volumeOriginInRoom.x);
-            w.Write(volumeOriginInRoom.y);
-            w.Write(volumeOriginInRoom.z);
-
-            WriteMatrix4(w, roomLocalToWorldAtSave);
-            WriteMatrix4(w, volumeToWorldAtSave);
+            WriteMatrix4(w, anchorAtSave);
 
             w.Write(tsdfBytes.Length);
             w.Write(tsdfBytes);
@@ -354,9 +330,7 @@ namespace Genesis.RoomScan
         private static void ReadBinary(string path,
             out int3 voxCount, out float voxSize, out int integrationCount,
             out byte[] tsdfBytes, out byte[] colorBytes, out int triplanarRes,
-            out Vector3 volumeOriginInRoom,
-            out bool hasSessionSnapshots, out Matrix4x4 sessionRoomL2W,
-            out Matrix4x4 sessionVolumeToWorld)
+            out Matrix4x4 anchorAtSave)
         {
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
             using var r = new BinaryReader(fs);
@@ -366,9 +340,9 @@ namespace Genesis.RoomScan
                 throw new InvalidDataException($"Bad magic: 0x{magic:X8}, expected 0x{Magic:X8}");
 
             int version = r.ReadInt32();
-            if (version < MinSupportedVersion || version > FormatVersion)
+            if (version != FormatVersion)
                 throw new InvalidDataException(
-                    $"scan.bin format v{version} is not supported (need v{MinSupportedVersion}–v{FormatVersion}). Delete RoomScans on device.");
+                    $"scan.bin format v{version} is not supported (need v{FormatVersion}). Delete RoomScans on device.");
 
             r.ReadInt64(); // timestamp
 
@@ -377,17 +351,7 @@ namespace Genesis.RoomScan
             integrationCount = r.ReadInt32();
             triplanarRes = r.ReadInt32();
 
-            volumeOriginInRoom = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-
-            hasSessionSnapshots = false;
-            sessionRoomL2W = Matrix4x4.identity;
-            sessionVolumeToWorld = Matrix4x4.identity;
-            if (version >= 3)
-            {
-                sessionRoomL2W = ReadMatrix4(r);
-                sessionVolumeToWorld = ReadMatrix4(r);
-                hasSessionSnapshots = true;
-            }
+            anchorAtSave = ReadMatrix4(r);
 
             int tsdfLen = r.ReadInt32();
             tsdfBytes = r.ReadBytes(tsdfLen);
