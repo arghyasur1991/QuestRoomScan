@@ -121,11 +121,11 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Resample triplanar textures from old coordinate frame into new (identity) frame
-        /// by iterating every output texel per face. After this call, triplanar textures are
-        /// in identity space and no per-frame relocation uniform is needed.
+        /// Resample triplanar textures from old coordinate frame into new (identity) frame.
+        /// Loads raw triplanar files from disk as Texture2D (always SRV-readable on Vulkan)
+        /// to avoid the Blit→compute SRV layout transition bug on Quest.
         /// </summary>
-        public void BakeRelocation(Matrix4x4 relocationMatrix)
+        public void BakeRelocation(Matrix4x4 relocationMatrix, string triplanarDir)
         {
             if (!_kernelsReady || bakeCompute == null) return;
 
@@ -134,6 +134,10 @@ namespace Genesis.RoomScan
 
             Matrix4x4 invReloc = relocationMatrix.inverse;
             int res = textureResolution;
+
+            var srcXZ = LoadTex2D(Path.Combine(triplanarDir, "tri_xz.raw"), res);
+            var srcXY = LoadTex2D(Path.Combine(triplanarDir, "tri_xy.raw"), res);
+            var srcYZ = LoadTex2D(Path.Combine(triplanarDir, "tri_yz.raw"), res);
 
             var dstXZ = CreateTriplanarRT("DstXZ");
             var dstXY = CreateTriplanarRT("DstXY");
@@ -148,9 +152,9 @@ namespace Genesis.RoomScan
             bakeCompute.SetInts(TriSizeID, res, res);
             bakeCompute.SetMatrix(BakeTriInvRelocID, invReloc);
 
-            bakeCompute.SetTexture(kernel, OldTriXZID, _triXZ);
-            bakeCompute.SetTexture(kernel, OldTriXYID, _triXY);
-            bakeCompute.SetTexture(kernel, OldTriYZID, _triYZ);
+            bakeCompute.SetTexture(kernel, OldTriXZID, srcXZ);
+            bakeCompute.SetTexture(kernel, OldTriXYID, srcXY);
+            bakeCompute.SetTexture(kernel, OldTriYZID, srcYZ);
 
             int groupsX = Mathf.CeilToInt(res / 8f);
             int groupsY = Mathf.CeilToInt(res / 8f);
@@ -163,8 +167,10 @@ namespace Genesis.RoomScan
             }
             GL.Flush();
 
-            // Swap: adopt baked textures, destroy old ones.
-            // Avoids Graphics.CopyTexture which can silently fail on Vulkan/Quest.
+            Destroy(srcXZ);
+            Destroy(srcXY);
+            Destroy(srcYZ);
+
             Destroy(_triXZ);
             Destroy(_triXY);
             Destroy(_triYZ);
@@ -172,18 +178,26 @@ namespace Genesis.RoomScan
             _triXY = dstXY;
             _triYZ = dstYZ;
 
-            // Rebind global shader references
             Shader.SetGlobalTexture(TriXZID, _triXZ);
             Shader.SetGlobalTexture(TriXYID, _triXY);
             Shader.SetGlobalTexture(TriYZID, _triYZ);
+            Shader.SetGlobalFloat(TriAvailableID, 1f);
 
-            // Rebind kernel UAV references for future bakes/clears
             _clearKernel.Set(TriXZRWID, _triXZ);
             _clearKernel.Set(TriXYRWID, _triXY);
             _clearKernel.Set(TriYZRWID, _triYZ);
 
-            Debug.Log($"[RoomScan] Triplanar bake relocation complete — " +
-                      $"3x {res}x{res} texels, invReloc row3={invReloc.GetRow(3)}");
+            Debug.Log($"[RoomScan] Triplanar bake relocation complete (from disk) — " +
+                      $"3x {res}x{res} texels, invReloc col3={invReloc.GetColumn(3)}");
+        }
+
+        private static Texture2D LoadTex2D(string path, int res)
+        {
+            byte[] data = File.ReadAllBytes(path);
+            var tex = new Texture2D(res, res, TextureFormat.RGBA32, false, true);
+            tex.LoadRawTextureData(data);
+            tex.Apply(false, true);
+            return tex;
         }
 
         private int _bakeCount;

@@ -206,23 +206,19 @@ void BakeTriplanarRelocation(uint3 id : SV_DispatchThreadID)
     float sign = uv.y >= 0.5 ? 1.0 : -1.0;
     float baseV = uv.y >= 0.5 ? (uv.y - 0.5) * 2.0 : uv.y * 2.0;
 
-    // Reconstruct UVW from face + pixel UV (unknown axis = 0.5 = volume center)
     float3 uvw;
     float3 faceN;
     if (gsBakeTriFace == 0)      { uvw = float3(uv.x, 0.5, baseV); faceN = float3(0, sign, 0); }
     else if (gsBakeTriFace == 1) { uvw = float3(uv.x, baseV, 0.5); faceN = float3(0, 0, sign); }
     else                         { uvw = float3(0.5, uv.x, baseV); faceN = float3(sign, 0, 0); }
 
-    // UVW → world position (identity volumeToWorld)
     float3 vc = gsBakeVoxCountF;
     float vs = gsBakeVoxSize;
     float3 worldPos = (uvw * vc - vc / 2.0) * vs;
 
-    // Transform to old-world
     float3 oldPos = mul(gsBakeTriInvReloc, float4(worldPos, 1)).xyz;
     float3 oldN   = normalize(mul((float3x3)gsBakeTriInvReloc, faceN));
 
-    // Old UVW (using same identity-volume formula)
     float3 oldLocal = oldPos / vs + vc / 2.0;
     float3 oldUVW = saturate(oldLocal / vc);
     if (any(oldLocal < 0.5) || any(oldLocal > vc - 0.5))
@@ -231,15 +227,25 @@ void BakeTriplanarRelocation(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // Sample old triplanar texture — face selected by old-world normal direction
     float3 absOldN = abs(oldN);
+    float2 oldTriUV;
     float4 color;
+
     if (absOldN.y >= absOldN.x && absOldN.y >= absOldN.z)
-        color = gsOldTriXZ.SampleLevel(gsBilinearClampSampler, SignedTriUV(oldUVW.xz, oldN.y), 0);
+    {
+        oldTriUV = float2(oldUVW.x, oldN.y > 0 ? oldUVW.z * 0.5 + 0.5 : oldUVW.z * 0.5);
+        color = gsOldTriXZ.SampleLevel(gsBilinearClampSampler, oldTriUV, 0);
+    }
     else if (absOldN.z >= absOldN.x)
-        color = gsOldTriXY.SampleLevel(gsBilinearClampSampler, SignedTriUV(oldUVW.xy, oldN.z), 0);
+    {
+        oldTriUV = float2(oldUVW.x, oldN.z > 0 ? oldUVW.y * 0.5 + 0.5 : oldUVW.y * 0.5);
+        color = gsOldTriXY.SampleLevel(gsBilinearClampSampler, oldTriUV, 0);
+    }
     else
-        color = gsOldTriYZ.SampleLevel(gsBilinearClampSampler, SignedTriUV(oldUVW.yz, oldN.x), 0);
+    {
+        oldTriUV = float2(oldUVW.y, oldN.x > 0 ? oldUVW.z * 0.5 + 0.5 : oldUVW.z * 0.5);
+        color = gsOldTriYZ.SampleLevel(gsBilinearClampSampler, oldTriUV, 0);
+    }
 
     gsDstTri_RW[id.xy] = color;
 }

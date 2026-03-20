@@ -241,11 +241,14 @@ namespace Genesis.RoomScan
                 {
                     try
                     {
-                        tc.Load(triplanarDir);
                         if (reloc != Matrix4x4.identity)
                         {
-                            tc.BakeRelocation(reloc);
-                            Debug.Log("[RoomScan] Persistence: triplanar baked to identity");
+                            tc.BakeRelocation(reloc, triplanarDir);
+                            Debug.Log("[RoomScan] Persistence: triplanar baked to identity (from disk)");
+                        }
+                        else
+                        {
+                            tc.Load(triplanarDir);
                         }
                     }
                     catch (Exception e)
