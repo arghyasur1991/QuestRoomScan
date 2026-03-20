@@ -196,6 +196,7 @@ void Integrate(uint id : SV_DispatchThreadID)
     }
 }
 
+#pragma kernel BakeRelocation
 #pragma kernel FreezeInFrustum
 #pragma kernel UnfreezeInFrustum
 
@@ -227,4 +228,29 @@ void UnfreezeInFrustum(uint3 id : SV_DispatchThreadID)
         return;
 
     gsVolumeRW[id] = float2(vol.x, -vol.y);
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  BakeRelocation: resample TSDF+color from old grid into current
+//  identity grid so volumeToWorld can be reset to I after loading.
+// ──────────────────────────────────────────────────────────────────
+
+Texture3D<float2> gsBakeSrcTsdf;
+Texture3D<float4> gsBakeSrcColor;
+float4x4 gsBakeInvRelocation;
+
+[numthreads(4, 4, 4)]
+void BakeRelocation(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= gsVoxCount)) return;
+
+    float3 dstLocal = ((float3)id + 0.5 - (float3)gsVoxCount / 2.0) * gsVoxSize;
+    float3 srcLocal = mul(gsBakeInvRelocation, float4(dstLocal, 1)).xyz;
+
+    float3 srcGrid = srcLocal / gsVoxSize + (float3)gsVoxCount / 2.0;
+    float3 uvw = srcGrid / (float3)gsVoxCount;
+
+    bool oob = any(uvw < 0.0) || any(uvw > 1.0);
+    gsVolumeRW[id]      = oob ? float2(GS_EMPTY_VOXEL, 0) : gsBakeSrcTsdf.SampleLevel(gsVolLinearClampSampler, uvw, 0);
+    gsColorVolumeRW[id] = oob ? float4(0, 0, 0, 0)        : gsBakeSrcColor.SampleLevel(gsVolLinearClampSampler, uvw, 0);
 }

@@ -247,6 +247,62 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Resample TSDF + color from the current (relocated) grid into a new identity grid.
+        /// After this call the volume data lives in the current tracking/world frame and
+        /// <see cref="SetVolumeTransform"/> should be reset to identity.
+        /// </summary>
+        public void BakeRelocation(Matrix4x4 relocationMatrix)
+        {
+            if (_volume == null || _colorVolume == null || compute == null)
+                return;
+
+            Matrix4x4 invRelocation = relocationMatrix.inverse;
+            int3 vc = voxelCount;
+
+            var srcTsdf = new RenderTexture(vc.x, vc.y, 0, _volume.graphicsFormat, 0)
+            {
+                dimension = TextureDimension.Tex3D,
+                volumeDepth = vc.z,
+                enableRandomWrite = false,
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            srcTsdf.Create();
+
+            var srcColor = new RenderTexture(vc.x, vc.y, 0, _colorVolume.graphicsFormat, 0)
+            {
+                dimension = TextureDimension.Tex3D,
+                volumeDepth = vc.z,
+                enableRandomWrite = false,
+                filterMode = FilterMode.Bilinear,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            srcColor.Create();
+
+            Graphics.CopyTexture(_volume, srcTsdf);
+            Graphics.CopyTexture(_colorVolume, srcColor);
+
+            int kernel = compute.FindKernel("BakeRelocation");
+            compute.SetInts(Shader.PropertyToID("gsVoxCount"), vc.x, vc.y, vc.z);
+            compute.SetFloat(Shader.PropertyToID("gsVoxSize"), voxelSize);
+            compute.SetTexture(kernel, Shader.PropertyToID("gsBakeSrcTsdf"), srcTsdf);
+            compute.SetTexture(kernel, Shader.PropertyToID("gsBakeSrcColor"), srcColor);
+            compute.SetTexture(kernel, VolumeRWID, _volume);
+            compute.SetTexture(kernel, ColorVolumeRWID, _colorVolume);
+            compute.SetMatrix(Shader.PropertyToID("gsBakeInvRelocation"), invRelocation);
+
+            int tx = Mathf.CeilToInt(vc.x / 4f);
+            int ty = Mathf.CeilToInt(vc.y / 4f);
+            int tz = Mathf.CeilToInt(vc.z / 4f);
+            compute.Dispatch(kernel, tx, ty, tz);
+
+            Destroy(srcTsdf);
+            Destroy(srcColor);
+
+            Debug.Log($"[RoomScan] BakeRelocation complete — resampled {vc} voxels, reloc row0={relocationMatrix.GetRow(0)}");
+        }
+
+        /// <summary>
         /// Freeze all voxels currently visible in the camera frustum.
         /// Frozen voxels are encoded as negative weight and skip integration.
         /// Requires camera data to have been provided via SetCameraData.

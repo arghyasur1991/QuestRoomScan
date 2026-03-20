@@ -234,6 +234,19 @@ namespace Genesis.RoomScan
                 if (!vi.LoadVolumes(tsdfBytes, colorBytes, savedIntCount))
                     return false;
 
+                if (hasSessionSnapshots && anchor != null && anchor.enabled && anchor.IsRoomLoaded)
+                {
+                    Matrix4x4 reloc = vi.VolumeToWorld;
+                    bool isIdentity = reloc == Matrix4x4.identity;
+                    if (!isIdentity)
+                    {
+                        vi.BakeRelocation(reloc);
+                        anchor.ClearSessionRelocation();
+                        anchor.RefreshVolumeTransform();
+                        Debug.Log("[RoomScan] Persistence: baked relocation into voxels → volumeToWorld=I");
+                    }
+                }
+
                 var tc = TriplanarCache.Instance;
                 if (tc != null && triRes > 0 && Directory.Exists(triplanarDir))
                 {
@@ -250,8 +263,6 @@ namespace Genesis.RoomScan
                 if (cm != null)
                 {
                     cm.Reinitialize();
-                    // Scanner only calls Extract() while IsScanning; after load, volumes are
-                    // restored but GPU mesh buffers stay empty until we extract once here.
                     cm.Extract();
                     Debug.Log("[RoomScan] Persistence: mesh extracted from loaded volume");
                 }
