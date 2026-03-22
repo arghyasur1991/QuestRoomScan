@@ -550,17 +550,18 @@ namespace Genesis.RoomScan
 
 
         /// <summary>
-        /// GPU-accelerated atlas baking: renders UV-space mesh with hardware rasterizer,
-        /// projects keyframe textures via shader, uses ZTest Greater for best-score selection.
-        /// Falls back to CPU path if the shader is unavailable.
+        /// GPU-accelerated atlas baking via compute shader.
+        /// Mirrors the CPU rasterization logic 1:1 using integer pixel indexing
+        /// on StructuredBuffers — no texture UV ambiguity, no framebuffer orientation issues.
+        /// Falls back to CPU path if the compute shader is unavailable.
         /// </summary>
         public static async Task<byte[]> BakeAtlasAsync(
-            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation)
+            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation,
+            ComputeShader compute = null)
         {
-            var bakeShader = Shader.Find("Hidden/Genesis/AtlasBake");
-            if (bakeShader == null)
+            if (compute == null)
             {
-                Debug.LogWarning("[TextureRefine] AtlasBake shader not found, falling back to CPU bake");
+                Debug.LogWarning("[TextureRefine] No compute shader, falling back to CPU bake");
                 return await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation);
             }
 
@@ -570,114 +571,147 @@ namespace Genesis.RoomScan
                 throw new InvalidOperationException("No keyframes available for baking");
 
             int total = metaList.Count;
-            Debug.Log($"[TextureRefine] GPU bake: {total} keyframes" +
+            Debug.Log($"[TextureRefine] GPU compute bake: {total} keyframes" +
                 (keyframeRelocation != Matrix4x4.identity ? " (relocated)" : ""));
 
             int atlasW = mesh.AtlasWidth;
             int atlasH = mesh.AtlasHeight;
+            int texelCount = atlasW * atlasH;
+            int origTriCount = mesh.OrigIndices.Length / 3;
+            int outTriCount = mesh.Indices.Length / 3;
 
-            // Create atlas RT: ARGB32 color + 32-bit depth for score accumulation
-            var atlasRT = new RenderTexture(atlasW, atlasH, 32, RenderTextureFormat.ARGB32);
-            atlasRT.filterMode = FilterMode.Point;
-            atlasRT.Create();
+            // Find kernels
+            int kClear = compute.FindKernel("ClearDepth");
+            int kDepth = compute.FindKernel("BuildDepth");
+            int kBake  = compute.FindKernel("BakeAtlas");
 
-            // Clear atlas: color=black, depth=0 (lowest score; ZTest Greater keeps highest)
-            var prevRT = RenderTexture.active;
-            RenderTexture.active = atlasRT;
-            GL.Clear(true, true, Color.clear, 0f);
-            RenderTexture.active = prevRT;
+            // ── Create persistent GPU buffers (mesh data + atlas) ──
+            var origPosBuf = new ComputeBuffer(mesh.OrigPositions.Length, 12);
+            origPosBuf.SetData(mesh.OrigPositions);
+            var origIdxBuf = new ComputeBuffer(mesh.OrigIndices.Length, 4);
+            origIdxBuf.SetData(mesh.OrigIndices);
 
-            // Build UV-space mesh (vertex positions = UV coords mapped to [-1,1])
-            var uvMesh = BuildUVSpaceMesh(mesh);
-            var occMesh = BuildOcclusionMesh(mesh);
+            var outPosBuf = new ComputeBuffer(mesh.Positions.Length, 12);
+            outPosBuf.SetData(mesh.Positions);
+            var outNormBuf = new ComputeBuffer(mesh.Normals.Length, 12);
+            outNormBuf.SetData(mesh.Normals);
+            var outIdxBuf = new ComputeBuffer(mesh.Indices.Length, 4);
+            outIdxBuf.SetData(mesh.Indices);
 
-            var bakeMat = new Material(bakeShader);
-            bakeMat.SetPass(1); // warm up
+            var rawUV2 = new Vector2[mesh.Positions.Length];
+            for (int i = 0; i < rawUV2.Length; i++)
+                rawUV2[i] = new Vector2(mesh.RawUVs[i * 2], mesh.RawUVs[i * 2 + 1]);
+            var rawUVBuf = new ComputeBuffer(rawUV2.Length, 8);
+            rawUVBuf.SetData(rawUV2);
 
-            // Occlusion RT — reused for each keyframe, sized to max keyframe resolution
-            // We'll create it on first keyframe when we know the size
-            RenderTexture occRT = null;
+            var scoreBuf = new ComputeBuffer(texelCount, 4);
+            scoreBuf.SetData(new uint[texelCount]);
+            var atlasBuf = new ComputeBuffer(texelCount, 4);
+            atlasBuf.SetData(new uint[texelCount]);
 
-            // Producer-consumer: decode JPEGs ahead of GPU bake
-            const int MAX_BUFFERED = 3;
-            var decodeQueue = new Queue<DecodedKeyframe>();
-            int decodeIdx = 0;
+            // Bind static buffers to kernels
+            compute.SetBuffer(kDepth, "_OrigPos", origPosBuf);
+            compute.SetBuffer(kDepth, "_OrigIdx", origIdxBuf);
+            compute.SetBuffer(kBake, "_OutPos", outPosBuf);
+            compute.SetBuffer(kBake, "_OutNorm", outNormBuf);
+            compute.SetBuffer(kBake, "_OutIdx", outIdxBuf);
+            compute.SetBuffer(kBake, "_RawUV", rawUVBuf);
+            compute.SetBuffer(kBake, "_ScoreBuf", scoreBuf);
+            compute.SetBuffer(kBake, "_AtlasBuf", atlasBuf);
+            compute.SetInt("_AtlasW", atlasW);
+            compute.SetInt("_AtlasH", atlasH);
+            compute.SetInt("_OrigTriCount", origTriCount);
+            compute.SetInt("_OutTriCount", outTriCount);
+
+            // Per-keyframe buffers (created on first use, resized as needed)
+            ComputeBuffer depthBuf = null;
+            ComputeBuffer kfPixelBuf = null;
+
+            ReportStatus("Baking textures (GPU compute)...");
             int bakeCount = 0;
 
-            ReportStatus("Baking textures (GPU)...");
-
-            while (decodeIdx < total || decodeQueue.Count > 0)
+            for (int ki = 0; ki < total; ki++)
             {
-                // --- Producer: decode up to MAX_BUFFERED ahead ---
-                while (decodeIdx < total && decodeQueue.Count < MAX_BUFFERED)
+                var kf = metaList[ki];
+                if (string.IsNullOrEmpty(kf.JpgPath)) continue;
+
+                byte[] jpgBytes;
+                try { jpgBytes = await ReadFileAsync(kf.JpgPath); }
+                catch { continue; }
+
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (!ImageConversion.LoadImage(tex, jpgBytes))
                 {
-                    var kf = metaList[decodeIdx];
-                    if (string.IsNullOrEmpty(kf.JpgPath))
-                    {
-                        decodeIdx++;
-                        continue;
-                    }
+                    UnityEngine.Object.Destroy(tex);
+                    continue;
+                }
+                kf.Width = tex.width;
+                kf.Height = tex.height;
 
-                    byte[] jpgBytes;
-                    try { jpgBytes = await ReadFileAsync(kf.JpgPath); }
-                    catch { decodeIdx++; continue; }
+                // GetPixels32: same byte layout as CPU kf.Pixels — no Y ambiguity
+                Color32[] colors = tex.GetPixels32();
+                UnityEngine.Object.Destroy(tex);
 
-                    var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    if (ImageConversion.LoadImage(tex, jpgBytes))
-                    {
-                        kf.Width = tex.width;
-                        kf.Height = tex.height;
-                        metaList[decodeIdx] = kf;
-                        decodeQueue.Enqueue(new DecodedKeyframe { Texture = tex, Metadata = kf });
-                    }
-                    else
-                    {
-                        UnityEngine.Object.Destroy(tex);
-                    }
+                int imgW = kf.Width, imgH = kf.Height;
+                int imgPixels = imgW * imgH;
 
-                    decodeIdx++;
-                    await Task.Yield();
+                // Create/resize per-keyframe buffers
+                if (depthBuf == null || depthBuf.count != imgPixels)
+                {
+                    depthBuf?.Release();
+                    depthBuf = new ComputeBuffer(imgPixels, 4);
+                    kfPixelBuf?.Release();
+                    kfPixelBuf = new ComputeBuffer(imgPixels, 4);
+                }
+                kfPixelBuf.SetData(colors);
+
+                // Per-keyframe uniforms
+                int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
+                int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
+                float cropX = (sw - kf.Width) * 0.5f;
+                float cropY = (sh - kf.Height) * 0.5f;
+                Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+
+                compute.SetMatrix("_ViewMat", viewMat);
+                compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
+                compute.SetFloat("_Fx", kf.Fx);
+                compute.SetFloat("_Fy", kf.Fy);
+                compute.SetFloat("_Cx", kf.Cx);
+                compute.SetFloat("_Cy", kf.Cy);
+                compute.SetFloat("_CropX", cropX);
+                compute.SetFloat("_CropY", cropY);
+                compute.SetInt("_ImgW", imgW);
+                compute.SetInt("_ImgH", imgH);
+
+                // Bind per-keyframe buffers
+                compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
+                compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
+                compute.SetBuffer(kBake, "_DepthBuf", depthBuf);
+                compute.SetBuffer(kBake, "_KfPixels", kfPixelBuf);
+
+                // Dispatch: clear depth → build depth → bake atlas
+                compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
+                compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
+                compute.Dispatch(kBake, (outTriCount + 63) / 64, 1, 1);
+
+                bakeCount++;
+                if (bakeCount % 20 == 0 || bakeCount < 3)
+                {
+                    ReportStatus($"Baking (GPU)... {bakeCount}/{total}");
+                    Debug.Log($"[TextureRefine] GPU baked keyframe {bakeCount}/{total}");
                 }
 
-                // --- Consumer: bake one keyframe from the queue ---
-                if (decodeQueue.Count > 0)
-                {
-                    var item = decodeQueue.Dequeue();
-
-                    // Create/resize occlusion RT if needed
-                    if (occRT == null || occRT.width != item.Metadata.Width || occRT.height != item.Metadata.Height)
-                    {
-                        if (occRT != null) occRT.Release();
-                        occRT = new RenderTexture(item.Metadata.Width, item.Metadata.Height, 24, RenderTextureFormat.RFloat);
-                        occRT.filterMode = FilterMode.Point;
-                        occRT.Create();
-                    }
-
-                    BakeOneKeyframeGPU(item, uvMesh, occMesh, atlasRT, occRT, bakeMat);
-                    UnityEngine.Object.Destroy(item.Texture);
-                    bakeCount++;
-
-                    if (bakeCount % 20 == 0 || bakeCount < 3)
-                    {
-                        ReportStatus($"Baking (GPU)... {bakeCount}/{total}");
-                        Debug.Log($"[TextureRefine] GPU baked keyframe {bakeCount}/{total}");
-                    }
-                }
-                else
-                {
-                    break; // producer finished and queue empty
-                }
+                await Task.Yield();
             }
 
             Debug.Log($"[TextureRefine] GPU baked {bakeCount} keyframes total");
 
-            // Readback atlas RT to CPU byte[]
+            // Readback atlas buffer
             ReportStatus("Reading back atlas...");
-            byte[] atlasPixels = await ReadbackRTAsync(atlasRT);
+            byte[] atlasPixels = await ReadbackComputeBufferAsync(atlasBuf, texelCount);
 
             // Log fill stats
             {
-                int texelCount = atlasW * atlasH;
                 int filled = 0;
                 for (int i = 0; i < texelCount; i++)
                     if (atlasPixels[i * 4 + 3] != 0) filled++;
@@ -709,28 +743,21 @@ namespace Genesis.RoomScan
             ReportStatus("Filling gaps...");
             await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
 
-            // Cleanup GPU resources
-            atlasRT.Release();
-            if (occRT != null) occRT.Release();
-            UnityEngine.Object.Destroy(uvMesh);
-            UnityEngine.Object.Destroy(occMesh);
-            UnityEngine.Object.Destroy(bakeMat);
+            // Cleanup
+            origPosBuf.Release(); origIdxBuf.Release();
+            outPosBuf.Release(); outNormBuf.Release(); outIdxBuf.Release();
+            rawUVBuf.Release(); scoreBuf.Release(); atlasBuf.Release();
+            depthBuf?.Release(); kfPixelBuf?.Release();
 
             ReportStatus("Done");
-            Debug.Log($"[TextureRefine] GPU bake complete: {atlasW}x{atlasH} atlas");
+            Debug.Log($"[TextureRefine] GPU compute bake complete: {atlasW}x{atlasH} atlas");
 
             return atlasPixels;
         }
 
         // ═══════════════════════════════════════════════════════════════
-        //  GPU BAKE HELPERS
+        //  GPU COMPUTE HELPERS
         // ═══════════════════════════════════════════════════════════════
-
-        struct DecodedKeyframe
-        {
-            public Texture2D Texture;
-            public Keyframe Metadata;
-        }
 
         static async Task<byte[]> ReadFileAsync(string path)
         {
@@ -741,107 +768,15 @@ namespace Genesis.RoomScan
 #endif
         }
 
-        static Mesh BuildUVSpaceMesh(UnwrappedMeshResult mesh)
-        {
-            var m = new Mesh { indexFormat = IndexFormat.UInt32 };
-
-            int vertCount = mesh.Positions.Length;
-            var clipVerts = new Vector3[vertCount];
-            for (int i = 0; i < vertCount; i++)
-                clipVerts[i] = new Vector3(mesh.UVs[i].x * 2f - 1f, mesh.UVs[i].y * 2f - 1f, 0.5f);
-
-            m.SetVertices(clipVerts);
-            m.SetNormals(mesh.Normals);
-
-            // Pack world positions into TEXCOORD1 (float3)
-            var worldPosAsList = new List<Vector3>(mesh.Positions);
-            m.SetUVs(1, worldPosAsList);
-
-            m.SetTriangles(mesh.Indices, 0);
-            m.UploadMeshData(false);
-            return m;
-        }
-
-        static Mesh BuildOcclusionMesh(UnwrappedMeshResult mesh)
-        {
-            // Uses original (pre-xatlas) mesh for occlusion depth rendering
-            var m = new Mesh { indexFormat = IndexFormat.UInt32 };
-            m.SetVertices(mesh.OrigPositions);
-            m.SetTriangles(mesh.OrigIndices, 0);
-            m.UploadMeshData(false);
-            return m;
-        }
-
-        static Matrix4x4 BuildProjectionFromIntrinsics(
-            float fx, float fy, float cx, float cy, int w, int h,
-            float near = 0.01f, float far = 20f)
-        {
-            var m = Matrix4x4.zero;
-            m[0, 0] = 2f * fx / w;
-            m[1, 1] = 2f * fy / h;
-            m[0, 2] = 1f - 2f * cx / w;
-            m[1, 2] = -(1f - 2f * cy / h);
-            m[2, 2] = -(far + near) / (far - near);
-            m[2, 3] = -2f * far * near / (far - near);
-            m[3, 2] = -1f;
-            return m;
-        }
-
-        static void BakeOneKeyframeGPU(DecodedKeyframe item, Mesh uvMesh, Mesh occMesh,
-            RenderTexture atlasRT, RenderTexture occRT, Material bakeMat)
-        {
-            var kf = item.Metadata;
-            Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
-
-            int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
-            int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
-            float cropX = (sw - kf.Width) * 0.5f;
-            float cropY = (sh - kf.Height) * 0.5f;
-
-            // Build projection matrix from sensor intrinsics (full sensor dimensions)
-            Matrix4x4 projMat = BuildProjectionFromIntrinsics(kf.Fx, kf.Fy, kf.Cx, kf.Cy, sw, sh);
-            Matrix4x4 viewProjMat = projMat * viewMat;
-
-            // --- Pass 0: Occlusion depth (linear Z into color RT) ---
-            var prevRT = RenderTexture.active;
-            RenderTexture.active = occRT;
-            GL.Clear(true, true, new Color(999f, 0, 0, 1), 1f);
-
-            bakeMat.SetMatrix("_OccViewProjMat", viewProjMat);
-            bakeMat.SetMatrix("_OccViewMat", viewMat);
-            bakeMat.SetPass(0);
-            Graphics.DrawMeshNow(occMesh, Matrix4x4.identity);
-
-            // --- Pass 1: UV-space bake → atlas ---
-            RenderTexture.active = atlasRT;
-
-            bakeMat.SetMatrix("_ViewMat", viewMat);
-            bakeMat.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
-            bakeMat.SetFloat("_Fx", kf.Fx);
-            bakeMat.SetFloat("_Fy", kf.Fy);
-            bakeMat.SetFloat("_Cx", kf.Cx);
-            bakeMat.SetFloat("_Cy", kf.Cy);
-            bakeMat.SetFloat("_ImgW", kf.Width);
-            bakeMat.SetFloat("_ImgH", kf.Height);
-            bakeMat.SetFloat("_CropX", cropX);
-            bakeMat.SetFloat("_CropY", cropY);
-            bakeMat.SetTexture("_KeyframeTex", item.Texture);
-            bakeMat.SetTexture("_OcclusionTex", occRT);
-            bakeMat.SetPass(1);
-            Graphics.DrawMeshNow(uvMesh, Matrix4x4.identity);
-
-            RenderTexture.active = prevRT;
-        }
-
-        static Task<byte[]> ReadbackRTAsync(RenderTexture rt)
+        static Task<byte[]> ReadbackComputeBufferAsync(ComputeBuffer buffer, int elementCount)
         {
             var tcs = new TaskCompletionSource<byte[]>();
-            AsyncGPUReadback.Request(rt, 0, TextureFormat.RGBA32, request =>
+            AsyncGPUReadback.Request(buffer, elementCount * 4, 0, request =>
             {
                 if (request.hasError)
                 {
-                    Debug.LogError("[TextureRefine] Atlas readback failed");
-                    tcs.SetResult(new byte[rt.width * rt.height * 4]);
+                    Debug.LogError("[TextureRefine] Compute buffer readback failed");
+                    tcs.SetResult(new byte[elementCount * 4]);
                     return;
                 }
                 var native = request.GetData<byte>();

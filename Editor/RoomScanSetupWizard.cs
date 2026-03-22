@@ -52,7 +52,7 @@ namespace Genesis.RoomScan.Editor
         PanelInputConfiguration _panelInputConfig;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
-        bool _refinedShaderWired, _atlasBakeShaderWired;
+        bool _refinedShaderWired, _atlasBakeComputeWired;
         bool _ugsRendererWired;
         bool _ugsRenderFeatureAdded;
         bool _deferredRendering;
@@ -147,8 +147,8 @@ namespace Genesis.RoomScan.Editor
                 "surfaceNetsCompute");
             _refinedShaderWired = _roomScanner != null && AreFieldsAssigned(_roomScanner,
                 "refinedMeshShader");
-            _atlasBakeShaderWired = _roomScanner != null && AreFieldsAssigned(_roomScanner,
-                "atlasBakeShader");
+            _atlasBakeComputeWired = _roomScanner != null && AreFieldsAssigned(_roomScanner,
+                "atlasBakeCompute");
             _ugsRendererWired = _ugsRenderer != null && AreFieldsAssigned(_ugsRenderer,
                 "m_ShaderSplats", "m_ShaderComposite", "m_ShaderDebugPoints", "m_ShaderDebugBoxes", "m_CSSplatUtilities");
             _ugsRenderFeatureAdded = HasUGSRenderFeature();
@@ -703,7 +703,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
             StatusRow("RefinedMesh shader (texture refine)", _refinedShaderWired);
-            StatusRow("AtlasBake shader (GPU bake)", _atlasBakeShaderWired);
+            StatusRow("AtlasBakeCompute (GPU bake)", _atlasBakeComputeWired);
             StatusRow("UGS renderer shaders + compute", _ugsRendererWired);
             StatusRow("UGS RenderFeature on URP Renderer", _ugsRenderFeatureAdded);
             StatusRow("URP Deferred Rendering (req. by UGS)", _deferredRendering);
@@ -711,7 +711,7 @@ namespace Genesis.RoomScan.Editor
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
                             !_meshMatWired || !_triplanarWired ||
                             !_computeShaderWired || !_refinedShaderWired ||
-                            !_atlasBakeShaderWired ||
+                            !_atlasBakeComputeWired ||
                             !_ugsRendererWired || !_ugsRenderFeatureAdded ||
                             !_deferredRendering;
             if (needsFix)
@@ -787,7 +787,7 @@ namespace Genesis.RoomScan.Editor
             {
                 var so = new SerializedObject(_roomScanner);
                 AssignAsset<Shader>(so, "refinedMeshShader", PKG + "RefinedMesh.shader");
-                AssignAsset<Shader>(so, "atlasBakeShader", PKG + "AtlasBake.shader");
+                AssignAsset<ComputeShader>(so, "atlasBakeCompute", PKG + "AtlasBakeCompute.compute");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_roomScanner);
             }

@@ -1,0 +1,208 @@
+#pragma kernel ClearDepth
+#pragma kernel BuildDepth
+#pragma kernel BakeAtlas
+
+// ── Shared uniforms ──────────────────────────────────────────
+float4x4 _ViewMat;
+float4   _CamPos;
+float    _Fx, _Fy, _Cx, _Cy;
+float    _CropX, _CropY;
+int      _ImgW, _ImgH;
+int      _AtlasW, _AtlasH;
+int      _OrigTriCount, _OutTriCount;
+
+// ── Original mesh (occlusion depth) ─────────────────────────
+StructuredBuffer<float3> _OrigPos;
+StructuredBuffer<int>    _OrigIdx;
+
+// ── xatlas output mesh (atlas bake) ─────────────────────────
+StructuredBuffer<float3> _OutPos;
+StructuredBuffer<float3> _OutNorm;
+StructuredBuffer<float2> _RawUV;     // pixel-space UVs from xatlas
+StructuredBuffer<int>    _OutIdx;
+
+// ── Per-keyframe pixel data (Color32 packed as uint) ────────
+StructuredBuffer<uint>   _KfPixels;
+
+// ── Persistent GPU buffers ──────────────────────────────────
+RWStructuredBuffer<uint> _DepthBuf;  // asuint(linearZ), per-keyframe
+RWStructuredBuffer<uint> _ScoreBuf;  // asuint(score), persists across KFs
+RWStructuredBuffer<uint> _AtlasBuf;  // packed RGBA32, persists across KFs
+
+// ═════════════════════════════════════════════════════════════
+//  Kernel 0: Clear depth buffer to large value before each KF
+// ═════════════════════════════════════════════════════════════
+
+[numthreads(256, 1, 1)]
+void ClearDepth(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _ImgW * _ImgH) return;
+    _DepthBuf[id.x] = asuint(999.0);
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Kernel 1: Build occlusion depth buffer from original mesh
+//  One thread per original-mesh triangle.
+// ═════════════════════════════════════════════════════════════
+
+[numthreads(64, 1, 1)]
+void BuildDepth(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _OrigTriCount) return;
+
+    int t = (int)id.x;
+    int i0 = _OrigIdx[t * 3];
+    int i1 = _OrigIdx[t * 3 + 1];
+    
+    int i2 = _OrigIdx[t * 3 + 2];
+
+    float3 c0 = mul(_ViewMat, float4(_OrigPos[i0], 1)).xyz;
+    float3 c1 = mul(_ViewMat, float4(_OrigPos[i1], 1)).xyz;
+    float3 c2 = mul(_ViewMat, float4(_OrigPos[i2], 1)).xyz;
+
+    if (c0.z <= 0 && c1.z <= 0 && c2.z <= 0) return;
+
+    float2 s0 = float2(_Fx * c0.x / max(c0.z, 0.001) + _Cx - _CropX,
+                        _Fy * c0.y / max(c0.z, 0.001) + _Cy - _CropY);
+    float2 s1 = float2(_Fx * c1.x / max(c1.z, 0.001) + _Cx - _CropX,
+                        _Fy * c1.y / max(c1.z, 0.001) + _Cy - _CropY);
+    float2 s2 = float2(_Fx * c2.x / max(c2.z, 0.001) + _Cx - _CropX,
+                        _Fy * c2.y / max(c2.z, 0.001) + _Cy - _CropY);
+
+    int minX = max(0, (int)floor(min(s0.x, min(s1.x, s2.x))));
+    int maxX = min(_ImgW - 1, (int)ceil(max(s0.x, max(s1.x, s2.x))));
+    int minY = max(0, (int)floor(min(s0.y, min(s1.y, s2.y))));
+    int maxY = min(_ImgH - 1, (int)ceil(max(s0.y, max(s1.y, s2.y))));
+
+    float denom = (s1.y - s2.y) * (s0.x - s2.x) + (s2.x - s1.x) * (s0.y - s2.y);
+    if (abs(denom) < 1e-8) return;
+    float invD = 1.0 / denom;
+
+    float a0x = s1.y - s2.y, a0y = s2.x - s1.x;
+    float a1x = s2.y - s0.y, a1y = s0.x - s2.x;
+
+    for (int y = minY; y <= maxY; y++)
+    {
+        float dy = (float)y - s2.y;
+        for (int x = minX; x <= maxX; x++)
+        {
+            float dx = (float)x - s2.x;
+            float bw0 = (a0x * dx + a0y * dy) * invD;
+            float bw1 = (a1x * dx + a1y * dy) * invD;
+            float bw2 = 1.0 - bw0 - bw1;
+            if (bw0 < -0.001 || bw1 < -0.001 || bw2 < -0.001) continue;
+
+            float z = bw0 * c0.z + bw1 * c1.z + bw2 * c2.z;
+            if (z <= 0) continue;
+            InterlockedMin(_DepthBuf[y * _ImgW + x], asuint(z));
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Kernel 2: Bake atlas — one thread per xatlas output triangle
+//  Mirrors CPU RasterizeTriangle + BakeSingleKeyframe exactly.
+// ═════════════════════════════════════════════════════════════
+
+[numthreads(64, 1, 1)]
+void BakeAtlas(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _OutTriCount) return;
+
+    int t = (int)id.x;
+    int i0 = _OutIdx[t * 3];
+    int i1 = _OutIdx[t * 3 + 1];
+    int i2 = _OutIdx[t * 3 + 2];
+
+    float3 p0 = _OutPos[i0], p1 = _OutPos[i1], p2 = _OutPos[i2];
+    float3 n0 = _OutNorm[i0];
+
+    float3 fn = cross(p1 - p0, p2 - p0);
+    float fnLen = length(fn);
+    fn = fnLen > 0.001 ? fn / fnLen : n0;
+
+    float3 centroid = (p0 + p1 + p2) / 3.0;
+    float3 vd = _CamPos.xyz - centroid;
+    float vdLen = length(vd);
+    if (vdLen < 0.001) return;
+    vd /= vdLen;
+
+    float dotNV = dot(fn, vd);
+    if (dotNV <= 0.05) return;
+
+    float score = dotNV / max(vdLen, 0.1);
+    uint scoreU = asuint(score);
+
+    // Project triangle vertices to keyframe screen space
+    float3 c0 = mul(_ViewMat, float4(p0, 1)).xyz;
+    float3 c1 = mul(_ViewMat, float4(p1, 1)).xyz;
+    float3 c2 = mul(_ViewMat, float4(p2, 1)).xyz;
+
+    float2 sp0 = float2(_Fx * c0.x / max(c0.z, 0.001) + _Cx - _CropX,
+                         _Fy * c0.y / max(c0.z, 0.001) + _Cy - _CropY);
+    float2 sp1 = float2(_Fx * c1.x / max(c1.z, 0.001) + _Cx - _CropX,
+                         _Fy * c1.y / max(c1.z, 0.001) + _Cy - _CropY);
+    float2 sp2 = float2(_Fx * c2.x / max(c2.z, 0.001) + _Cx - _CropX,
+                         _Fy * c2.y / max(c2.z, 0.001) + _Cy - _CropY);
+
+    // Frustum check (with 10% margin)
+    float mw = (float)_ImgW * 0.1, mh = (float)_ImgH * 0.1;
+    bool in0 = sp0.x >= -mw && sp0.x < _ImgW + mw && sp0.y >= -mh && sp0.y < _ImgH + mh;
+    bool in1 = sp1.x >= -mw && sp1.x < _ImgW + mw && sp1.y >= -mh && sp1.y < _ImgH + mh;
+    bool in2 = sp2.x >= -mw && sp2.x < _ImgW + mw && sp2.y >= -mh && sp2.y < _ImgH + mh;
+    if (!in0 && !in1 && !in2) return;
+
+    // UV pixel-space coordinates (raw xatlas output)
+    float2 uv0 = _RawUV[i0], uv1 = _RawUV[i1], uv2 = _RawUV[i2];
+
+    int minX = max(0, (int)floor(min(uv0.x, min(uv1.x, uv2.x))));
+    int maxX = min(_AtlasW - 1, (int)ceil(max(uv0.x, max(uv1.x, uv2.x))));
+    int minY = max(0, (int)floor(min(uv0.y, min(uv1.y, uv2.y))));
+    int maxY = min(_AtlasH - 1, (int)ceil(max(uv0.y, max(uv1.y, uv2.y))));
+
+    float denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
+    if (abs(denom) < 1e-8) return;
+    float invD = 1.0 / denom;
+
+    float a0x = uv1.y - uv2.y, a0y = uv2.x - uv1.x;
+    float a1x = uv2.y - uv0.y, a1y = uv0.x - uv2.x;
+
+    for (int y = minY; y <= maxY; y++)
+    {
+        float dy = (float)y - uv2.y;
+        for (int x = minX; x <= maxX; x++)
+        {
+            float dx = (float)x - uv2.x;
+            float bw0 = (a0x * dx + a0y * dy) * invD;
+            float bw1 = (a1x * dx + a1y * dy) * invD;
+            float bw2 = 1.0 - bw0 - bw1;
+            if (bw0 < -0.001 || bw1 < -0.001 || bw2 < -0.001) continue;
+
+            int texelIdx = y * _AtlasW + x;
+
+            // Atomic score comparison
+            uint oldS;
+            InterlockedMax(_ScoreBuf[texelIdx], scoreU, oldS);
+            if (oldS >= scoreU) continue;
+
+            // Interpolate screen position via barycentrics
+            float sx = bw0 * sp0.x + bw1 * sp1.x + bw2 * sp2.x;
+            float sy = bw0 * sp0.y + bw1 * sp1.y + bw2 * sp2.y;
+            int px = (int)(sx + 0.5);
+            int py = (int)(sy + 0.5);
+            if (px < 0 || px >= _ImgW || py < 0 || py >= _ImgH) continue;
+
+            // Occlusion: direct integer index, same as CPU path
+            float3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
+            float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
+            float closestZ = asfloat(_DepthBuf[py * _ImgW + px]);
+            if (camPt.z > closestZ + 0.05) continue;
+
+            // Read keyframe pixel: same layout as GetPixels32() byte array
+            uint kfColor = _KfPixels[py * _ImgW + px];
+
+            // Force alpha to 255 and write
+            _AtlasBuf[texelIdx] = kfColor | (255u << 24);
+        }
+    }
+}
