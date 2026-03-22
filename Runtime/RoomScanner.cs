@@ -80,6 +80,7 @@ namespace Genesis.RoomScan
 
         [Header("Texture Refinement")]
         [SerializeField] internal Shader refinedMeshShader;
+        [SerializeField] internal Shader atlasBakeShader;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)

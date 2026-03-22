@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Unity.Collections;
@@ -549,10 +550,317 @@ namespace Genesis.RoomScan
 
 
         /// <summary>
-        /// Bakes a texture atlas from keyframe images onto a pre-unwrapped mesh.
-        /// Decodes one JPEG at a time on the main thread to avoid OOM, bakes on BG thread.
+        /// GPU-accelerated atlas baking: renders UV-space mesh with hardware rasterizer,
+        /// projects keyframe textures via shader, uses ZTest Greater for best-score selection.
+        /// Falls back to CPU path if the shader is unavailable.
         /// </summary>
         public static async Task<byte[]> BakeAtlasAsync(
+            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation)
+        {
+            var bakeShader = Shader.Find("Hidden/Genesis/AtlasBake");
+            if (bakeShader == null)
+            {
+                Debug.LogWarning("[TextureRefine] AtlasBake shader not found, falling back to CPU bake");
+                return await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation);
+            }
+
+            ReportStatus("Loading keyframe metadata...");
+            var metaList = ParseKeyframeManifest(keyframeDir, keyframeRelocation);
+            if (metaList.Count == 0)
+                throw new InvalidOperationException("No keyframes available for baking");
+
+            int total = metaList.Count;
+            Debug.Log($"[TextureRefine] GPU bake: {total} keyframes" +
+                (keyframeRelocation != Matrix4x4.identity ? " (relocated)" : ""));
+
+            int atlasW = mesh.AtlasWidth;
+            int atlasH = mesh.AtlasHeight;
+
+            // Create atlas RT: ARGB32 color + 32-bit depth for score accumulation
+            var atlasRT = new RenderTexture(atlasW, atlasH, 32, RenderTextureFormat.ARGB32);
+            atlasRT.filterMode = FilterMode.Point;
+            atlasRT.Create();
+
+            // Clear atlas: color=black, depth=0 (lowest score; ZTest Greater keeps highest)
+            var prevRT = RenderTexture.active;
+            RenderTexture.active = atlasRT;
+            GL.Clear(true, true, Color.clear, 0f);
+            RenderTexture.active = prevRT;
+
+            // Build UV-space mesh (vertex positions = UV coords mapped to [-1,1])
+            var uvMesh = BuildUVSpaceMesh(mesh);
+            var occMesh = BuildOcclusionMesh(mesh);
+
+            var bakeMat = new Material(bakeShader);
+            bakeMat.SetPass(1); // warm up
+
+            // Occlusion RT — reused for each keyframe, sized to max keyframe resolution
+            // We'll create it on first keyframe when we know the size
+            RenderTexture occRT = null;
+
+            // Producer-consumer: decode JPEGs ahead of GPU bake
+            const int MAX_BUFFERED = 3;
+            var decodeQueue = new Queue<DecodedKeyframe>();
+            int decodeIdx = 0;
+            int bakeCount = 0;
+
+            ReportStatus("Baking textures (GPU)...");
+
+            while (decodeIdx < total || decodeQueue.Count > 0)
+            {
+                // --- Producer: decode up to MAX_BUFFERED ahead ---
+                while (decodeIdx < total && decodeQueue.Count < MAX_BUFFERED)
+                {
+                    var kf = metaList[decodeIdx];
+                    if (string.IsNullOrEmpty(kf.JpgPath))
+                    {
+                        decodeIdx++;
+                        continue;
+                    }
+
+                    byte[] jpgBytes;
+                    try { jpgBytes = await ReadFileAsync(kf.JpgPath); }
+                    catch { decodeIdx++; continue; }
+
+                    var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    if (ImageConversion.LoadImage(tex, jpgBytes))
+                    {
+                        kf.Width = tex.width;
+                        kf.Height = tex.height;
+                        metaList[decodeIdx] = kf;
+                        decodeQueue.Enqueue(new DecodedKeyframe { Texture = tex, Metadata = kf });
+                    }
+                    else
+                    {
+                        UnityEngine.Object.Destroy(tex);
+                    }
+
+                    decodeIdx++;
+                    await Task.Yield();
+                }
+
+                // --- Consumer: bake one keyframe from the queue ---
+                if (decodeQueue.Count > 0)
+                {
+                    var item = decodeQueue.Dequeue();
+
+                    // Create/resize occlusion RT if needed
+                    if (occRT == null || occRT.width != item.Metadata.Width || occRT.height != item.Metadata.Height)
+                    {
+                        if (occRT != null) occRT.Release();
+                        occRT = new RenderTexture(item.Metadata.Width, item.Metadata.Height, 24, RenderTextureFormat.RFloat);
+                        occRT.filterMode = FilterMode.Point;
+                        occRT.Create();
+                    }
+
+                    BakeOneKeyframeGPU(item, uvMesh, occMesh, atlasRT, occRT, bakeMat);
+                    UnityEngine.Object.Destroy(item.Texture);
+                    bakeCount++;
+
+                    if (bakeCount % 20 == 0 || bakeCount < 3)
+                    {
+                        ReportStatus($"Baking (GPU)... {bakeCount}/{total}");
+                        Debug.Log($"[TextureRefine] GPU baked keyframe {bakeCount}/{total}");
+                    }
+                }
+                else
+                {
+                    break; // producer finished and queue empty
+                }
+            }
+
+            Debug.Log($"[TextureRefine] GPU baked {bakeCount} keyframes total");
+
+            // Readback atlas RT to CPU byte[]
+            ReportStatus("Reading back atlas...");
+            byte[] atlasPixels = await ReadbackRTAsync(atlasRT);
+
+            // Log fill stats
+            {
+                int texelCount = atlasW * atlasH;
+                int filled = 0;
+                for (int i = 0; i < texelCount; i++)
+                    if (atlasPixels[i * 4 + 3] != 0) filled++;
+                Debug.Log($"[TextureRefine] GPU bake pre-dilation: {filled}/{texelCount} texels filled " +
+                    $"({100f * filled / texelCount:F1}%)");
+            }
+
+            // Debug atlas dump
+            try
+            {
+                var debugTex = new Texture2D(atlasW, atlasH, TextureFormat.RGBA32, false);
+                debugTex.SetPixelData(atlasPixels, 0);
+                debugTex.Apply();
+                byte[] png = ImageConversion.EncodeToPNG(debugTex);
+                UnityEngine.Object.Destroy(debugTex);
+                string debugPath = Path.Combine(Application.persistentDataPath, "debug_atlas_gpu.png");
+                File.WriteAllBytes(debugPath, png);
+                Debug.Log($"[TextureRefine] GPU debug atlas saved: {debugPath} ({png.Length / 1024}KB)");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[TextureRefine] Failed to save debug atlas: {e.Message}");
+            }
+
+            // Post-process on background thread
+            ReportStatus("Denoising...");
+            await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
+
+            ReportStatus("Filling gaps...");
+            await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
+
+            // Cleanup GPU resources
+            atlasRT.Release();
+            if (occRT != null) occRT.Release();
+            UnityEngine.Object.Destroy(uvMesh);
+            UnityEngine.Object.Destroy(occMesh);
+            UnityEngine.Object.Destroy(bakeMat);
+
+            ReportStatus("Done");
+            Debug.Log($"[TextureRefine] GPU bake complete: {atlasW}x{atlasH} atlas");
+
+            return atlasPixels;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  GPU BAKE HELPERS
+        // ═══════════════════════════════════════════════════════════════
+
+        struct DecodedKeyframe
+        {
+            public Texture2D Texture;
+            public Keyframe Metadata;
+        }
+
+        static async Task<byte[]> ReadFileAsync(string path)
+        {
+#if UNITY_2021_3_OR_NEWER
+            return await File.ReadAllBytesAsync(path);
+#else
+            return await Task.Run(() => File.ReadAllBytes(path));
+#endif
+        }
+
+        static Mesh BuildUVSpaceMesh(UnwrappedMeshResult mesh)
+        {
+            var m = new Mesh { indexFormat = IndexFormat.UInt32 };
+
+            int vertCount = mesh.Positions.Length;
+            var clipVerts = new Vector3[vertCount];
+            for (int i = 0; i < vertCount; i++)
+                clipVerts[i] = new Vector3(mesh.UVs[i].x * 2f - 1f, -(mesh.UVs[i].y * 2f - 1f), 0.5f);
+
+            m.SetVertices(clipVerts);
+            m.SetNormals(mesh.Normals);
+
+            // Pack world positions into TEXCOORD1 (float3)
+            var worldPosAsList = new List<Vector3>(mesh.Positions);
+            m.SetUVs(1, worldPosAsList);
+
+            m.SetTriangles(mesh.Indices, 0);
+            m.UploadMeshData(false);
+            return m;
+        }
+
+        static Mesh BuildOcclusionMesh(UnwrappedMeshResult mesh)
+        {
+            // Uses original (pre-xatlas) mesh for occlusion depth rendering
+            var m = new Mesh { indexFormat = IndexFormat.UInt32 };
+            m.SetVertices(mesh.OrigPositions);
+            m.SetTriangles(mesh.OrigIndices, 0);
+            m.UploadMeshData(false);
+            return m;
+        }
+
+        static Matrix4x4 BuildProjectionFromIntrinsics(
+            float fx, float fy, float cx, float cy, int w, int h,
+            float near = 0.01f, float far = 20f)
+        {
+            var m = Matrix4x4.zero;
+            m[0, 0] = 2f * fx / w;
+            m[1, 1] = 2f * fy / h;
+            m[0, 2] = 1f - 2f * cx / w;
+            m[1, 2] = -(1f - 2f * cy / h);
+            m[2, 2] = -(far + near) / (far - near);
+            m[2, 3] = -2f * far * near / (far - near);
+            m[3, 2] = -1f;
+            return m;
+        }
+
+        static void BakeOneKeyframeGPU(DecodedKeyframe item, Mesh uvMesh, Mesh occMesh,
+            RenderTexture atlasRT, RenderTexture occRT, Material bakeMat)
+        {
+            var kf = item.Metadata;
+            Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+
+            int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
+            int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
+            float cropX = (sw - kf.Width) * 0.5f;
+            float cropY = (sh - kf.Height) * 0.5f;
+
+            // Build projection matrix from sensor intrinsics (full sensor dimensions)
+            Matrix4x4 projMat = BuildProjectionFromIntrinsics(kf.Fx, kf.Fy, kf.Cx, kf.Cy, sw, sh);
+            Matrix4x4 viewProjMat = projMat * viewMat;
+
+            // --- Pass 0: Occlusion depth (linear Z into color RT) ---
+            var prevRT = RenderTexture.active;
+            RenderTexture.active = occRT;
+            GL.Clear(true, true, new Color(999f, 0, 0, 1), 1f);
+
+            bakeMat.SetMatrix("_OccViewProjMat", viewProjMat);
+            bakeMat.SetMatrix("_OccViewMat", viewMat);
+            bakeMat.SetPass(0);
+            Graphics.DrawMeshNow(occMesh, Matrix4x4.identity);
+
+            // --- Pass 1: UV-space bake → atlas ---
+            RenderTexture.active = atlasRT;
+
+            bakeMat.SetMatrix("_ViewMat", viewMat);
+            bakeMat.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
+            bakeMat.SetFloat("_Fx", kf.Fx);
+            bakeMat.SetFloat("_Fy", kf.Fy);
+            bakeMat.SetFloat("_Cx", kf.Cx);
+            bakeMat.SetFloat("_Cy", kf.Cy);
+            bakeMat.SetFloat("_ImgW", kf.Width);
+            bakeMat.SetFloat("_ImgH", kf.Height);
+            bakeMat.SetFloat("_CropX", cropX);
+            bakeMat.SetFloat("_CropY", cropY);
+            bakeMat.SetTexture("_KeyframeTex", item.Texture);
+            bakeMat.SetTexture("_OcclusionTex", occRT);
+            bakeMat.SetPass(1);
+            Graphics.DrawMeshNow(uvMesh, Matrix4x4.identity);
+
+            RenderTexture.active = prevRT;
+        }
+
+        static Task<byte[]> ReadbackRTAsync(RenderTexture rt)
+        {
+            var tcs = new TaskCompletionSource<byte[]>();
+            AsyncGPUReadback.Request(rt, 0, TextureFormat.RGBA32, request =>
+            {
+                if (request.hasError)
+                {
+                    Debug.LogError("[TextureRefine] Atlas readback failed");
+                    tcs.SetResult(new byte[rt.width * rt.height * 4]);
+                    return;
+                }
+                var native = request.GetData<byte>();
+                byte[] managed = new byte[native.Length];
+                NativeArray<byte>.Copy(native, managed, native.Length);
+                tcs.SetResult(managed);
+            });
+            return tcs.Task;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  CPU BAKE FALLBACK
+        // ═══════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// CPU-based atlas baking fallback.
+        /// Decodes one JPEG at a time on the main thread to avoid OOM, bakes on BG thread.
+        /// </summary>
+        static async Task<byte[]> BakeAtlasCPUAsync(
             UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation)
         {
             ReportStatus("Loading keyframe metadata...");
