@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Unity.Collections;
 using UnityEngine;
@@ -242,6 +243,42 @@ namespace Genesis.RoomScan
             public Quaternion Rotation;
             public float Fx, Fy, Cx, Cy;
             public string JpgPath; // deferred: path to JPEG, read on demand to avoid OOM
+        }
+
+        struct TriData
+        {
+            public int I0, I1, I2;
+            public Vector3 FaceNormal;
+            public Vector3 Centroid;
+            public float U0, V0, U1, V1, U2, V2;
+        }
+
+        static TriData[] PrecomputeTriData(
+            Vector3[] outPos, Vector3[] outNorm, float[] rawUVs, int[] indices, int outVertCount)
+        {
+            int triCount = indices.Length / 3;
+            var data = new TriData[triCount];
+            for (int t = 0; t < triCount; t++)
+            {
+                int i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2];
+                if (i0 >= outVertCount || i1 >= outVertCount || i2 >= outVertCount)
+                {
+                    data[t].I0 = -1;
+                    continue;
+                }
+
+                Vector3 p0 = outPos[i0], p1 = outPos[i1], p2 = outPos[i2];
+                Vector3 fn = Vector3.Cross(p1 - p0, p2 - p0).normalized;
+                if (fn.sqrMagnitude < 0.001f) fn = outNorm[i0];
+
+                data[t].I0 = i0; data[t].I1 = i1; data[t].I2 = i2;
+                data[t].FaceNormal = fn;
+                data[t].Centroid = (p0 + p1 + p2) / 3f;
+                data[t].U0 = rawUVs[i0 * 2]; data[t].V0 = rawUVs[i0 * 2 + 1];
+                data[t].U1 = rawUVs[i1 * 2]; data[t].V1 = rawUVs[i1 * 2 + 1];
+                data[t].U2 = rawUVs[i2 * 2]; data[t].V2 = rawUVs[i2 * 2 + 1];
+            }
+            return data;
         }
 
         static byte[] BakeAtlas(
@@ -566,6 +603,10 @@ namespace Genesis.RoomScan
             byte[] atlasPixels = new byte[texelCount * 4];
             float[] bestScore = new float[texelCount];
 
+            // Pre-compute per-triangle data once (invariant across keyframes)
+            TriData[] triData = null;
+            await Task.Run(() => triData = PrecomputeTriData(outPos, outNorm, rawUVs, outIndices, outVertCount));
+
             for (int ki = 0; ki < metaList.Count; ki++)
             {
                 var kf = metaList[ki];
@@ -628,7 +669,7 @@ namespace Genesis.RoomScan
                 {
                     BakeSingleKeyframe(atlasPixels, bestScore, atlasW, atlasH,
                         inPos, inNorm, inIdx, outPos, outNorm,
-                        rawUVs, outIndices, outVertCount, capturedKf);
+                        rawUVs, outIndices, outVertCount, capturedKf, triData);
                 });
 
                 if (ki % 20 == 0 || ki < 3 || ki == metaList.Count - 1)
@@ -703,7 +744,7 @@ namespace Genesis.RoomScan
             Vector3[] inPos, Vector3[] inNorm, int[] origIndices,
             Vector3[] outPos, Vector3[] outNorm,
             float[] rawUVs, int[] indices, int outVertCount,
-            Keyframe kf)
+            Keyframe kf, TriData[] triData = null)
         {
             if (kf.Pixels == null || kf.Width == 0) return;
 
@@ -712,23 +753,43 @@ namespace Genesis.RoomScan
             Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
             Vector3 camPos = kf.Position;
 
-            int triCount = indices.Length / 3;
-            for (int t = 0; t < triCount; t++)
+            int triCount = triData != null ? triData.Length : indices.Length / 3;
+
+            Parallel.For(0, triCount, t =>
             {
-                int i0 = indices[t * 3];
-                int i1 = indices[t * 3 + 1];
-                int i2 = indices[t * 3 + 2];
-                if (i0 >= outVertCount || i1 >= outVertCount || i2 >= outVertCount) continue;
+                int i0, i1, i2;
+                Vector3 faceNormal, centroid;
+                float u0, v0, u1, v1, u2, v2;
 
-                Vector3 p0 = outPos[i0], p1 = outPos[i1], p2 = outPos[i2];
-                Vector3 faceNormal = Vector3.Cross(p1 - p0, p2 - p0).normalized;
-                if (faceNormal.sqrMagnitude < 0.001f) faceNormal = outNorm[i0];
+                if (triData != null)
+                {
+                    ref readonly TriData td = ref triData[t];
+                    if (td.I0 < 0) return;
+                    i0 = td.I0; i1 = td.I1; i2 = td.I2;
+                    faceNormal = td.FaceNormal;
+                    centroid = td.Centroid;
+                    u0 = td.U0; v0 = td.V0;
+                    u1 = td.U1; v1 = td.V1;
+                    u2 = td.U2; v2 = td.V2;
+                }
+                else
+                {
+                    i0 = indices[t * 3]; i1 = indices[t * 3 + 1]; i2 = indices[t * 3 + 2];
+                    if (i0 >= outVertCount || i1 >= outVertCount || i2 >= outVertCount) return;
+                    Vector3 p = outPos[i0], q = outPos[i1], r = outPos[i2];
+                    faceNormal = Vector3.Cross(q - p, r - p).normalized;
+                    if (faceNormal.sqrMagnitude < 0.001f) faceNormal = outNorm[i0];
+                    centroid = (p + q + r) / 3f;
+                    u0 = rawUVs[i0 * 2]; v0 = rawUVs[i0 * 2 + 1];
+                    u1 = rawUVs[i1 * 2]; v1 = rawUVs[i1 * 2 + 1];
+                    u2 = rawUVs[i2 * 2]; v2 = rawUVs[i2 * 2 + 1];
+                }
 
-                Vector3 centroid = (p0 + p1 + p2) / 3f;
                 Vector3 viewDir = (camPos - centroid).normalized;
                 float dot = Vector3.Dot(faceNormal, viewDir);
-                if (dot <= 0.05f) continue;
+                if (dot <= 0.05f) return;
 
+                Vector3 p0 = outPos[i0], p1 = outPos[i1], p2 = outPos[i2];
                 Vector2 s0 = ProjectToScreen(p0, viewMat, kf);
                 Vector2 s1 = ProjectToScreen(p1, viewMat, kf);
                 Vector2 s2 = ProjectToScreen(p2, viewMat, kf);
@@ -736,20 +797,16 @@ namespace Genesis.RoomScan
                 if (!IsInFrustum(s0, kf.Width, kf.Height) &&
                     !IsInFrustum(s1, kf.Width, kf.Height) &&
                     !IsInFrustum(s2, kf.Width, kf.Height))
-                    continue;
+                    return;
 
                 float dist = Vector3.Distance(camPos, centroid);
                 float score = dot / Mathf.Max(dist, 0.1f);
-
-                float u0 = rawUVs[i0 * 2], v0 = rawUVs[i0 * 2 + 1];
-                float u1 = rawUVs[i1 * 2], v1 = rawUVs[i1 * 2 + 1];
-                float u2 = rawUVs[i2 * 2], v2 = rawUVs[i2 * 2 + 1];
 
                 RasterizeTriangle(atlas, bestScore, atlasW, atlasH,
                     u0, v0, u1, v1, u2, v2,
                     s0, s1, s2,
                     score, kf, depthBuf, p0, p1, p2, viewMat);
-            }
+            });
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -812,7 +869,7 @@ namespace Genesis.RoomScan
             return depth;
         }
 
-        static void RasterizeDepthTriangle(float[] depth, int w, int h,
+        static unsafe void RasterizeDepthTriangle(float[] depth, int w, int h,
             Vector2 s0, Vector2 s1, Vector2 s2,
             float z0, float z1, float z2)
         {
@@ -825,18 +882,29 @@ namespace Genesis.RoomScan
             if (Mathf.Abs(denom) < 1e-8f) return;
             float invDenom = 1f / denom;
 
-            for (int y = minY; y <= maxY; y++)
-            for (int x = minX; x <= maxX; x++)
+            float a0x = s1.y - s2.y, a0y = s2.x - s1.x;
+            float a1x = s2.y - s0.y, a1y = s0.x - s2.x;
+            float ox = -s2.x, oy = -s2.y;
+
+            fixed (float* pDepth = depth)
             {
-                float w0 = ((s1.y - s2.y) * (x - s2.x) + (s2.x - s1.x) * (y - s2.y)) * invDenom;
-                float w1 = ((s2.y - s0.y) * (x - s2.x) + (s0.x - s2.x) * (y - s2.y)) * invDenom;
-                float w2 = 1f - w0 - w1;
+                for (int y = minY; y <= maxY; y++)
+                {
+                    float dy = y + oy;
+                    float* row = pDepth + y * w;
+                    for (int x = minX; x <= maxX; x++)
+                    {
+                        float dx = x + ox;
+                        float bw0 = (a0x * dx + a0y * dy) * invDenom;
+                        float bw1 = (a1x * dx + a1y * dy) * invDenom;
+                        float bw2 = 1f - bw0 - bw1;
 
-                if (w0 < -0.001f || w1 < -0.001f || w2 < -0.001f) continue;
+                        if (bw0 < -0.001f || bw1 < -0.001f || bw2 < -0.001f) continue;
 
-                float z = w0 * z0 + w1 * z1 + w2 * z2;
-                int idx = y * w + x;
-                if (z < depth[idx]) depth[idx] = z;
+                        float z = bw0 * z0 + bw1 * z1 + bw2 * z2;
+                        if (z < row[x]) row[x] = z;
+                    }
+                }
             }
         }
 
@@ -844,7 +912,7 @@ namespace Genesis.RoomScan
         //  UV-SPACE TRIANGLE RASTERIZATION
         // ═══════════════════════════════════════════════════════════════
 
-        static void RasterizeTriangle(
+        static unsafe void RasterizeTriangle(
             byte[] atlas, float[] bestScore, int atlasW, int atlasH,
             float u0, float v0, float u1, float v1, float u2, float v2,
             Vector2 s0, Vector2 s1, Vector2 s2,
@@ -860,41 +928,55 @@ namespace Genesis.RoomScan
             if (Mathf.Abs(denom) < 1e-8f) return;
             float invDenom = 1f / denom;
 
-            for (int y = minY; y <= maxY; y++)
-            for (int x = minX; x <= maxX; x++)
+            float a0x = v1 - v2, a0y = u2 - u1;
+            float a1x = v2 - v0, a1y = u0 - u2;
+            float ox = -u2, oy = -v2;
+
+            int kfW = kf.Width, kfH = kf.Height;
+            int pixelLen = kf.Pixels.Length;
+
+            fixed (byte* pAtlas = atlas, pPixels = kf.Pixels)
+            fixed (float* pScore = bestScore, pDepth = depthBuf)
             {
-                float bw0 = ((v1 - v2) * (x - u2) + (u2 - u1) * (y - v2)) * invDenom;
-                float bw1 = ((v2 - v0) * (x - u2) + (u0 - u2) * (y - v2)) * invDenom;
-                float bw2 = 1f - bw0 - bw1;
+                for (int y = minY; y <= maxY; y++)
+                {
+                    float dy = y + oy;
+                    int atlasRowOff = y * atlasW;
+                    for (int x = minX; x <= maxX; x++)
+                    {
+                        float dx = x + ox;
+                        float bw0 = (a0x * dx + a0y * dy) * invDenom;
+                        float bw1 = (a1x * dx + a1y * dy) * invDenom;
+                        float bw2 = 1f - bw0 - bw1;
 
-                if (bw0 < -0.001f || bw1 < -0.001f || bw2 < -0.001f) continue;
+                        if (bw0 < -0.001f || bw1 < -0.001f || bw2 < -0.001f) continue;
 
-                int texelIdx = y * atlasW + x;
-                if (score <= bestScore[texelIdx]) continue;
+                        int texelIdx = atlasRowOff + x;
+                        if (score <= pScore[texelIdx]) continue;
 
-                // Interpolate screen position to sample keyframe
-                float sx = bw0 * s0.x + bw1 * s1.x + bw2 * s2.x;
-                float sy = bw0 * s0.y + bw1 * s1.y + bw2 * s2.y;
+                        float sx = bw0 * s0.x + bw1 * s1.x + bw2 * s2.x;
+                        float sy = bw0 * s0.y + bw1 * s1.y + bw2 * s2.y;
 
-                int px = Mathf.RoundToInt(sx);
-                int screenY = Mathf.RoundToInt(sy);
-                if (px < 0 || px >= kf.Width || screenY < 0 || screenY >= kf.Height) continue;
+                        int px = (int)(sx + 0.5f);
+                        int screenY = (int)(sy + 0.5f);
+                        if ((uint)px >= (uint)kfW || (uint)screenY >= (uint)kfH) continue;
 
-                // Occlusion test uses screen-space Y (matches how depth buffer was built)
-                Vector3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
-                Vector3 camPt = viewMat.MultiplyPoint3x4(worldPt);
-                int depthIdx = screenY * kf.Width + px;
-                if (camPt.z > depthBuf[depthIdx] + 0.05f) continue;
+                        Vector3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
+                        Vector3 camPt = viewMat.MultiplyPoint3x4(worldPt);
+                        int depthIdx = screenY * kfW + px;
+                        if (camPt.z > pDepth[depthIdx] + 0.05f) continue;
 
-                int pixelIdx = (screenY * kf.Width + px) * 4;
-                if (pixelIdx + 3 >= kf.Pixels.Length) continue;
+                        int pixelIdx = depthIdx * 4;
+                        if (pixelIdx + 3 >= pixelLen) continue;
 
-                int atlasOff = texelIdx * 4;
-                atlas[atlasOff] = kf.Pixels[pixelIdx];
-                atlas[atlasOff + 1] = kf.Pixels[pixelIdx + 1];
-                atlas[atlasOff + 2] = kf.Pixels[pixelIdx + 2];
-                atlas[atlasOff + 3] = 255;
-                bestScore[texelIdx] = score;
+                        int atlasOff = texelIdx * 4;
+                        pAtlas[atlasOff] = pPixels[pixelIdx];
+                        pAtlas[atlasOff + 1] = pPixels[pixelIdx + 1];
+                        pAtlas[atlasOff + 2] = pPixels[pixelIdx + 2];
+                        pAtlas[atlasOff + 3] = 255;
+                        pScore[texelIdx] = score;
+                    }
+                }
             }
         }
 
