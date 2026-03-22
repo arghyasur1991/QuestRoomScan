@@ -53,7 +53,6 @@ void BuildDepth(uint3 id : SV_DispatchThreadID)
     int t = (int)id.x;
     int i0 = _OrigIdx[t * 3];
     int i1 = _OrigIdx[t * 3 + 1];
-    
     int i2 = _OrigIdx[t * 3 + 2];
 
     float3 c0 = mul(_ViewMat, float4(_OrigPos[i0], 1)).xyz;
@@ -121,8 +120,8 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
     float fnLen = length(fn);
     fn = fnLen > 0.001 ? fn / fnLen : n0;
 
-    float3 centroid = (p0 + p1 + p2) / 3.0;
-    float3 vd = _CamPos.xyz - centroid;
+    float3 triCenter = (p0 + p1 + p2) / 3.0;
+    float3 vd = _CamPos.xyz - triCenter;
     float vdLen = length(vd);
     if (vdLen < 0.001) return;
     vd /= vdLen;
