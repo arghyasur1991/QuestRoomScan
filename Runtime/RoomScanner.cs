@@ -664,14 +664,12 @@ namespace Genesis.RoomScan
                 }
                 else
                 {
-                    // Run UV unwrap (GPU readback + xatlas) — no baking needed
                     HQRefineStatus = "UV unwrapping...";
                     TextureRefinement.StatusChanged += s => HQRefineStatus = s;
                     try
                     {
                         string kfDir = Path.Combine(Application.persistentDataPath, "GSExport");
                         unwrapped = await TextureRefinement.UnwrapMeshAsync(kfDir, KeyframeRelocation);
-                        // Store the unwrapped mesh for future use / rendering
                         LastRefinedResult = new RefinedTextureResult
                         {
                             Positions = unwrapped.Value.Positions,
@@ -682,6 +680,7 @@ namespace Genesis.RoomScan
                             AtlasHeight = unwrapped.Value.AtlasHeight,
                             AtlasPixels = null,
                         };
+                        EnsureRefinedMesh(LastRefinedResult.Value);
                     }
                     finally
                     {
@@ -842,6 +841,18 @@ namespace Genesis.RoomScan
             _hqAtlasTexture = atlas;
             EnsureRefinedRenderer();
             HasHQRefinedTexture = true;
+        }
+
+        private void EnsureRefinedMesh(RefinedTextureResult result)
+        {
+            if (_refinedMesh != null) return;
+            _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
+            _refinedMesh.SetVertices(result.Positions);
+            _refinedMesh.SetNormals(result.Normals);
+            _refinedMesh.SetUVs(0, result.UVs);
+            _refinedMesh.SetTriangles(result.Indices, 0);
+            EnsureRefinedRenderer();
+            _refinedMeshFilter.mesh = _refinedMesh;
         }
 
         private void EnsureRefinedRenderer()
