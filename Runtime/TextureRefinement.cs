@@ -231,11 +231,12 @@ namespace Genesis.RoomScan
 
         struct Keyframe
         {
-            public byte[] Pixels; // RGBA32, row-major
+            public byte[] Pixels; // RGBA32, row-major (or compressed JPEG before decode)
             public int Width, Height;
             public Vector3 Position;
             public Quaternion Rotation;
             public float Fx, Fy, Cx, Cy;
+            public string JpgPath; // deferred: path to JPEG, read on demand to avoid OOM
         }
 
         static byte[] BakeAtlas(
@@ -275,7 +276,7 @@ namespace Genesis.RoomScan
                     continue;
                 }
 
-                if (kf.Pixels == null) continue;
+                if (string.IsNullOrEmpty(kf.JpgPath)) continue;
 
                 // Build per-keyframe depth buffer for occlusion
                 float[] depthBuf = BuildDepthBuffer(inPos, indices, kf, kf.Width, kf.Height);
@@ -375,32 +376,9 @@ namespace Genesis.RoomScan
             string imgPath = Path.Combine(imagesDir, $"{id:D6}.jpg");
             if (!File.Exists(imgPath)) return kf;
 
-            byte[] jpgBytes = File.ReadAllBytes(imgPath);
-
-            // Decode JPEG on background thread via Unity's ImageConversion is NOT thread-safe,
-            // so we use a simple approach: pre-decode all JPEGs using a managed decoder is too complex.
-            // Instead, use Texture2D approach but we're on BG thread — store raw jpg for later.
-            // Actually for background thread, we need a pure C# JPEG decoder or we store the data.
-            // Simplest: use stb-style approach — Unity's Texture2D requires main thread.
-            // Pragmatic solution: decode via System.Drawing-like or simply go with raw bytes.
-            // For Quest/IL2CPP, the simplest reliable approach is to use the raw RGB data.
-            // We'll use a two-pass approach: first pass collects file paths, main thread decodes,
-            // second pass bakes. But this complicates the pipeline.
-            //
-            // Practical compromise: pre-decode all keyframes to raw RGBA on the main thread
-            // before starting the background bake. For now, we use a managed JPEG decoder.
-            // Unity provides ImageConversion.LoadImage which works on Texture2D (main thread only).
-            //
-            // Workaround: we'll decode by creating temp Texture2D. This method is called from
-            // background thread though, so we need to pre-decode. Let's store jpg bytes and
-            // have the caller pre-decode them. For now, use a simple built-in decode approach.
-            //
-            // Best approach for BG thread: load raw RGBA from a cache file, or accept the
-            // limitation and do this part on main thread. The bake loop itself is BG-safe.
-            //
-            // FINAL APPROACH: Store jpg bytes. The main RefineAsync will pre-decode on main thread
-            // and pass decoded pixel arrays to the background bake step.
-            kf.Pixels = jpgBytes; // Store compressed — decoded in PreDecodeKeyframes
+            // Store path only — JPEG bytes read on-demand during bake to avoid OOM with many keyframes
+            kf.JpgPath = imgPath;
+            kf.Pixels = new byte[0]; // non-null signals "has image"
             return kf;
         }
 
@@ -428,10 +406,11 @@ namespace Genesis.RoomScan
                 try
                 {
                     var kf = ParseKeyframe(line, imagesDir);
-                    if (kf.Pixels == null) continue;
+                    if (string.IsNullOrEmpty(kf.JpgPath)) continue;
 
+                    byte[] jpgBytes = File.ReadAllBytes(kf.JpgPath);
                     var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    if (!ImageConversion.LoadImage(tex, kf.Pixels))
+                    if (!ImageConversion.LoadImage(tex, jpgBytes))
                     {
                         UnityEngine.Object.Destroy(tex);
                         continue;
@@ -477,26 +456,40 @@ namespace Genesis.RoomScan
 
             Debug.Log($"[TextureRefine] Readback: {positions.Length} verts, {indices.Length / 3} tris");
 
-            // Step 2: Pre-decode keyframes on main thread
-            ReportStatus("Decoding keyframes...");
-            var (kfPixels, kfWidths, kfHeights, keyframes) = PreDecodeKeyframes(keyframeDir);
-            if (keyframes == null || keyframes.Length == 0)
+            // Step 2: Parse keyframe metadata (poses + intrinsics) without decoding images
+            ReportStatus("Loading keyframe metadata...");
+            string manifestPath = Path.Combine(keyframeDir, "frames.jsonl");
+            string imagesDir = Path.Combine(keyframeDir, "images");
+            if (!File.Exists(manifestPath))
+                throw new InvalidOperationException("No frames.jsonl found");
+
+            string[] lines = File.ReadAllLines(manifestPath);
+            var metaList = new System.Collections.Generic.List<Keyframe>();
+            foreach (string line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var kf = ParseKeyframe(line, imagesDir);
+                    if (string.IsNullOrEmpty(kf.JpgPath)) continue; // no image file
+                    // Apply relocation to keyframe poses if scan was reloaded
+                    if (keyframeRelocation != Matrix4x4.identity)
+                    {
+                        kf.Position = keyframeRelocation.MultiplyPoint3x4(kf.Position);
+                        kf.Rotation = keyframeRelocation.rotation * kf.Rotation;
+                    }
+                    metaList.Add(kf);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[TextureRefine] Skip keyframe: {e.Message}");
+                }
+            }
+            if (metaList.Count == 0)
                 throw new InvalidOperationException("No keyframes available for baking");
 
-            Debug.Log($"[TextureRefine] Decoded {keyframes.Length} keyframes");
-
-            // Apply relocation to keyframe poses if scan was reloaded
-            if (keyframeRelocation != Matrix4x4.identity)
-            {
-                for (int i = 0; i < keyframes.Length; i++)
-                {
-                    var kf = keyframes[i];
-                    kf.Position = keyframeRelocation.MultiplyPoint3x4(kf.Position);
-                    kf.Rotation = keyframeRelocation.rotation * kf.Rotation;
-                    keyframes[i] = kf;
-                }
-                Debug.Log("[TextureRefine] Applied relocation to keyframe poses");
-            }
+            Debug.Log($"[TextureRefine] Found {metaList.Count} keyframes" +
+                (keyframeRelocation != Matrix4x4.identity ? " (relocated)" : ""));
 
             // Step 3: xatlas UV unwrap on background thread
             ReportStatus("UV unwrapping...");
@@ -544,20 +537,54 @@ namespace Genesis.RoomScan
                     uvResult.UVs[i * 2 + 1] / atlasH);
             }
 
-            // Step 4: Bake atlas from pre-decoded keyframes on BG thread
+            // Step 4: Bake atlas — decode one keyframe at a time to avoid OOM.
+            // JPEG decode requires main thread (ImageConversion.LoadImage), so we
+            // interleave: decode on main thread, bake that frame on BG thread.
             ReportStatus("Baking textures...");
             float[] rawUVs = uvResult.UVs;
             int[] outIndices = uvResult.Indices;
             int outVertCount = uvResult.VertexCount;
-            Keyframe[] kfs = keyframes;
-            byte[] atlasPixels = null;
+            int texelCount = atlasW * atlasH;
+            byte[] atlasPixels = new byte[texelCount * 4];
+            float[] bestScore = new float[texelCount];
 
-            await Task.Run(() =>
+            for (int ki = 0; ki < metaList.Count; ki++)
             {
-                atlasPixels = BakeAtlasFromDecoded(inPos, inNorm, outPos, outNorm,
-                    rawUVs, outIndices, outVertCount,
-                    atlasW, atlasH, kfs);
-            });
+                var kf = metaList[ki];
+                if (string.IsNullOrEmpty(kf.JpgPath)) continue;
+
+                // Read JPEG from disk on demand, decode on main thread (one at a time)
+                byte[] jpgBytes;
+                try { jpgBytes = File.ReadAllBytes(kf.JpgPath); }
+                catch { continue; }
+
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (!ImageConversion.LoadImage(tex, jpgBytes))
+                {
+                    UnityEngine.Object.Destroy(tex);
+                    continue;
+                }
+                kf.Pixels = tex.GetRawTextureData();
+                kf.Width = tex.width;
+                kf.Height = tex.height;
+                UnityEngine.Object.Destroy(tex);
+                jpgBytes = null;
+
+                // Bake this single keyframe on BG thread
+                Keyframe capturedKf = kf;
+                await Task.Run(() =>
+                {
+                    BakeSingleKeyframe(atlasPixels, bestScore, atlasW, atlasH,
+                        inPos, inNorm, inIdx, outPos, outNorm,
+                        rawUVs, outIndices, outVertCount, capturedKf);
+                });
+
+                if (ki % 20 == 0 || ki < 3 || ki == metaList.Count - 1)
+                {
+                    ReportStatus($"Baking... {ki + 1}/{metaList.Count}");
+                    Debug.Log($"[TextureRefine] Baked keyframe {ki + 1}/{metaList.Count}");
+                }
+            }
 
             // Step 5: Dilation
             ReportStatus("Filling gaps...");
@@ -578,70 +605,58 @@ namespace Genesis.RoomScan
             };
         }
 
-        static byte[] BakeAtlasFromDecoded(
-            Vector3[] inPos, Vector3[] inNorm,
+        static void BakeSingleKeyframe(
+            byte[] atlas, float[] bestScore, int atlasW, int atlasH,
+            Vector3[] inPos, Vector3[] inNorm, int[] origIndices,
             Vector3[] outPos, Vector3[] outNorm,
             float[] rawUVs, int[] indices, int outVertCount,
-            int atlasW, int atlasH, Keyframe[] keyframes)
+            Keyframe kf)
         {
-            int texelCount = atlasW * atlasH;
-            byte[] atlas = new byte[texelCount * 4];
-            float[] bestScore = new float[texelCount];
+            if (kf.Pixels == null || kf.Width == 0) return;
 
-            for (int k = 0; k < keyframes.Length; k++)
+            float[] depthBuf = BuildDepthBuffer(inPos, origIndices, kf, kf.Width, kf.Height);
+
+            Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+            Vector3 camPos = kf.Position;
+
+            int triCount = indices.Length / 3;
+            for (int t = 0; t < triCount; t++)
             {
-                var kf = keyframes[k];
-                if (kf.Pixels == null || kf.Width == 0) continue;
+                int i0 = indices[t * 3];
+                int i1 = indices[t * 3 + 1];
+                int i2 = indices[t * 3 + 2];
+                if (i0 >= outVertCount || i1 >= outVertCount || i2 >= outVertCount) continue;
 
-                float[] depthBuf = BuildDepthBuffer(inPos, indices, kf, kf.Width, kf.Height);
+                Vector3 p0 = outPos[i0], p1 = outPos[i1], p2 = outPos[i2];
+                Vector3 faceNormal = Vector3.Cross(p1 - p0, p2 - p0).normalized;
+                if (faceNormal.sqrMagnitude < 0.001f) faceNormal = outNorm[i0];
 
-                Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
-                Vector3 camPos = kf.Position;
+                Vector3 centroid = (p0 + p1 + p2) / 3f;
+                Vector3 viewDir = (camPos - centroid).normalized;
+                float dot = Vector3.Dot(faceNormal, viewDir);
+                if (dot <= 0.05f) continue;
 
-                int triCount = indices.Length / 3;
-                for (int t = 0; t < triCount; t++)
-                {
-                    int i0 = indices[t * 3];
-                    int i1 = indices[t * 3 + 1];
-                    int i2 = indices[t * 3 + 2];
-                    if (i0 >= outVertCount || i1 >= outVertCount || i2 >= outVertCount) continue;
+                Vector2 s0 = ProjectToScreen(p0, viewMat, kf);
+                Vector2 s1 = ProjectToScreen(p1, viewMat, kf);
+                Vector2 s2 = ProjectToScreen(p2, viewMat, kf);
 
-                    Vector3 p0 = outPos[i0], p1 = outPos[i1], p2 = outPos[i2];
-                    Vector3 faceNormal = Vector3.Cross(p1 - p0, p2 - p0).normalized;
-                    if (faceNormal.sqrMagnitude < 0.001f) faceNormal = outNorm[i0];
+                if (!IsInFrustum(s0, kf.Width, kf.Height) &&
+                    !IsInFrustum(s1, kf.Width, kf.Height) &&
+                    !IsInFrustum(s2, kf.Width, kf.Height))
+                    continue;
 
-                    Vector3 centroid = (p0 + p1 + p2) / 3f;
-                    Vector3 viewDir = (camPos - centroid).normalized;
-                    float dot = Vector3.Dot(faceNormal, viewDir);
-                    if (dot <= 0.05f) continue;
+                float dist = Vector3.Distance(camPos, centroid);
+                float score = dot / Mathf.Max(dist, 0.1f);
 
-                    Vector2 s0 = ProjectToScreen(p0, viewMat, kf);
-                    Vector2 s1 = ProjectToScreen(p1, viewMat, kf);
-                    Vector2 s2 = ProjectToScreen(p2, viewMat, kf);
+                float u0 = rawUVs[i0 * 2], v0 = rawUVs[i0 * 2 + 1];
+                float u1 = rawUVs[i1 * 2], v1 = rawUVs[i1 * 2 + 1];
+                float u2 = rawUVs[i2 * 2], v2 = rawUVs[i2 * 2 + 1];
 
-                    if (!IsInFrustum(s0, kf.Width, kf.Height) &&
-                        !IsInFrustum(s1, kf.Width, kf.Height) &&
-                        !IsInFrustum(s2, kf.Width, kf.Height))
-                        continue;
-
-                    float dist = Vector3.Distance(camPos, centroid);
-                    float score = dot / Mathf.Max(dist, 0.1f);
-
-                    float u0 = rawUVs[i0 * 2], v0 = rawUVs[i0 * 2 + 1];
-                    float u1 = rawUVs[i1 * 2], v1 = rawUVs[i1 * 2 + 1];
-                    float u2 = rawUVs[i2 * 2], v2 = rawUVs[i2 * 2 + 1];
-
-                    RasterizeTriangle(atlas, bestScore, atlasW, atlasH,
-                        u0, v0, u1, v1, u2, v2,
-                        s0, s1, s2,
-                        score, kf, depthBuf, p0, p1, p2, viewMat);
-                }
-
-                if (k % 20 == 0 || k < 3)
-                    ReportStatus($"Baking... {k + 1}/{keyframes.Length}");
+                RasterizeTriangle(atlas, bestScore, atlasW, atlasH,
+                    u0, v0, u1, v1, u2, v2,
+                    s0, s1, s2,
+                    score, kf, depthBuf, p0, p1, p2, viewMat);
             }
-
-            return atlas;
         }
 
         // ═══════════════════════════════════════════════════════════════
