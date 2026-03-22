@@ -104,7 +104,11 @@ namespace Genesis.RoomScan
                     atlasW, atlasH, keyframeDir);
             });
 
-            // Step 4: Dilation
+            // Step 4: Denoise
+            ReportStatus("Denoising...");
+            await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
+
+            // Step 5: Dilation
             ReportStatus("Filling gaps...");
             await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
 
@@ -671,7 +675,11 @@ namespace Genesis.RoomScan
                 Debug.LogWarning($"[TextureRefine] Failed to save debug atlas: {e.Message}");
             }
 
-            // Step 5: Dilation
+            // Step 5: Denoise — remove speckle outliers from baked atlas
+            ReportStatus("Denoising...");
+            await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
+
+            // Step 6: Dilation
             ReportStatus("Filling gaps...");
             await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
 
@@ -888,6 +896,56 @@ namespace Genesis.RoomScan
                 atlas[atlasOff + 3] = 255;
                 bestScore[texelIdx] = score;
             }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  DENOISE (SPECKLE REMOVAL)
+        // ═══════════════════════════════════════════════════════════════
+
+        static void DenoiseAtlas(byte[] atlas, int w, int h)
+        {
+            const int threshold = 60;
+            byte[] clean = new byte[atlas.Length];
+            Buffer.BlockCopy(atlas, 0, clean, 0, atlas.Length);
+
+            int replaced = 0;
+            for (int y = 1; y < h - 1; y++)
+            for (int x = 1; x < w - 1; x++)
+            {
+                int idx = (y * w + x) * 4;
+                if (atlas[idx + 3] == 0) continue;
+
+                int cr = atlas[idx], cg = atlas[idx + 1], cb = atlas[idx + 2];
+
+                int sumR = 0, sumG = 0, sumB = 0, count = 0;
+                for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    if (dx == 0 && dy == 0) continue;
+                    int nIdx = ((y + dy) * w + (x + dx)) * 4;
+                    if (atlas[nIdx + 3] == 0) continue;
+                    sumR += atlas[nIdx];
+                    sumG += atlas[nIdx + 1];
+                    sumB += atlas[nIdx + 2];
+                    count++;
+                }
+
+                if (count < 3) continue;
+
+                int avgR = sumR / count, avgG = sumG / count, avgB = sumB / count;
+                int diff = Mathf.Abs(cr - avgR) + Mathf.Abs(cg - avgG) + Mathf.Abs(cb - avgB);
+
+                if (diff > threshold)
+                {
+                    clean[idx] = (byte)avgR;
+                    clean[idx + 1] = (byte)avgG;
+                    clean[idx + 2] = (byte)avgB;
+                    replaced++;
+                }
+            }
+
+            Buffer.BlockCopy(clean, 0, atlas, 0, atlas.Length);
+            Debug.Log($"[TextureRefine] Denoise: replaced {replaced} outlier texels (threshold={threshold})");
         }
 
         // ═══════════════════════════════════════════════════════════════
