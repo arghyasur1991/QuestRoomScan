@@ -132,7 +132,7 @@ namespace Genesis.RoomScan
                 }
 
                 // Save refined texture data
-                bool refinedSaved = false, hqSaved = false;
+                bool refinedSaved = false;
                 var scanner = RoomScanner.Instance;
                 if (scanner != null)
                 {

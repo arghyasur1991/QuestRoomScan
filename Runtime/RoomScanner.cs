@@ -154,7 +154,7 @@ namespace Genesis.RoomScan
         /// <summary>
         /// Shared UV mesh data used by persistence to save/restore refinement results.
         /// </summary>
-        internal RefinedTextureResult? LastRefinedResult { get; private set; }
+        internal RefinedTextureResult? LastRefinedResult { get; set; }
 
         private float IntegrationInterval => 1f / (mode == ScanMode.Guided ? guidedIntegrationHz : passiveIntegrationHz);
         private float MeshInterval => 1f / (mode == ScanMode.Guided ? guidedMeshExtractionHz : passiveMeshExtractionHz);
