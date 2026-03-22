@@ -128,23 +128,44 @@ namespace Genesis.RoomScan
         //  MESH READBACK
         // ═══════════════════════════════════════════════════════════════
 
+        static Task<byte[]> ReadbackBytesAsync(GraphicsBuffer buffer)
+        {
+            var tcs = new System.Threading.Tasks.TaskCompletionSource<byte[]>();
+            AsyncGPUReadback.Request(buffer, request =>
+            {
+                if (request.hasError) { tcs.SetResult(null); return; }
+                var native = request.GetData<byte>();
+                byte[] managed = new byte[native.Length];
+                NativeArray<byte>.Copy(native, managed, native.Length);
+                tcs.SetResult(managed);
+            });
+            return tcs.Task;
+        }
+
         static async Task<(Vector3[], Vector3[], Color32[], int[])> ReadbackMeshAsync()
         {
             var gpuSN = MeshExtractor.Instance?.GpuSurfaceNets;
             if (gpuSN == null || gpuSN.VertexBuffer == null || gpuSN.IndexBuffer == null)
+            {
+                Debug.LogError("[TextureRefine] GpuSurfaceNets or its buffers are null");
                 return (null, null, null, null);
+            }
 
-            // Read counters: [0]=vertCount, [1]=indexCount
-            var counterReq = await AsyncGPUReadback.RequestAsync(gpuSN.CountersBuffer);
-            if (counterReq.hasError)
+            Debug.Log("[TextureRefine] Starting GPU readback...");
+
+            // Read all three buffers using callback-based readback
+            // (copies NativeArray to managed array immediately in callback frame)
+            byte[] counterBytes = await ReadbackBytesAsync(gpuSN.CountersBuffer);
+            if (counterBytes == null)
             {
                 Debug.LogError("[TextureRefine] Counter readback failed");
                 return (null, null, null, null);
             }
 
-            var counterData = counterReq.GetData<int>();
-            int vertCount = counterData[0];
-            int idxCount = counterData.Length > 1 ? counterData[1] : 0;
+            int vertCount = BitConverter.ToInt32(counterBytes, 0);
+            int idxCount = counterBytes.Length >= 8 ? BitConverter.ToInt32(counterBytes, 4) : 0;
+
+            Debug.Log($"[TextureRefine] Counters: verts={vertCount}, idx={idxCount}");
 
             if (vertCount <= 0 || idxCount <= 0)
             {
@@ -152,34 +173,29 @@ namespace Genesis.RoomScan
                 return (null, null, null, null);
             }
 
-            // Read vertex buffer
-            var vertReq = await AsyncGPUReadback.RequestAsync(gpuSN.VertexBuffer);
-            if (vertReq.hasError)
+            byte[] vertData = await ReadbackBytesAsync(gpuSN.VertexBuffer);
+            if (vertData == null)
             {
                 Debug.LogError("[TextureRefine] Vertex readback failed");
                 return (null, null, null, null);
             }
 
-            // Read index buffer
-            var idxReq = await AsyncGPUReadback.RequestAsync(gpuSN.IndexBuffer);
-            if (idxReq.hasError)
+            byte[] idxData = await ReadbackBytesAsync(gpuSN.IndexBuffer);
+            if (idxData == null)
             {
                 Debug.LogError("[TextureRefine] Index readback failed");
                 return (null, null, null, null);
             }
 
-            var rawVerts = vertReq.GetData<byte>();
-            var rawIndices = idxReq.GetData<int>();
-
-            int bufferCap = rawVerts.Length / GpuVertexStride;
+            int bufferCap = vertData.Length / GpuVertexStride;
             if (vertCount > bufferCap) vertCount = bufferCap;
 
-            // Copy to managed arrays (NativeArray only valid this frame)
-            byte[] vertData = new byte[vertCount * GpuVertexStride];
-            NativeArray<byte>.Copy(rawVerts, vertData, vertData.Length);
+            int idxCap = idxData.Length / 4;
+            if (idxCount > idxCap) idxCount = idxCap;
 
+            // Parse indices
             int[] indices = new int[idxCount];
-            NativeArray<int>.Copy(rawIndices, indices, idxCount);
+            Buffer.BlockCopy(idxData, 0, indices, 0, idxCount * 4);
 
             // Parse GPU vertices
             var positions = new Vector3[vertCount];
@@ -205,6 +221,7 @@ namespace Genesis.RoomScan
                     255);
             }
 
+            Debug.Log($"[TextureRefine] Readback complete: {vertCount} verts, {idxCount / 3} tris");
             return (positions, normals, colors, indices);
         }
 
