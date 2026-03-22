@@ -462,8 +462,12 @@ namespace Genesis.RoomScan
         /// <summary>
         /// Full pipeline with pre-decoded keyframes (main thread decodes, BG thread bakes).
         /// </summary>
+        /// <param name="keyframeDir">Path to GSExport directory containing frames.jsonl + images/</param>
+        /// <param name="keyframeRelocation">Matrix to transform keyframe poses from old session to current world space.
+        /// Pass Matrix4x4.identity for live (non-reloaded) scans.</param>
+        /// <param name="atlasResolution">Max atlas dimension for xatlas</param>
         public static async Task<RefinedTextureResult> RefineWithPreDecodedAsync(
-            string keyframeDir, int atlasResolution = 2048)
+            string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048)
         {
             // Step 1: Readback mesh from GPU (must be on main thread for AsyncGPUReadback)
             ReportStatus("Reading mesh from GPU...");
@@ -480,6 +484,19 @@ namespace Genesis.RoomScan
                 throw new InvalidOperationException("No keyframes available for baking");
 
             Debug.Log($"[TextureRefine] Decoded {keyframes.Length} keyframes");
+
+            // Apply relocation to keyframe poses if scan was reloaded
+            if (keyframeRelocation != Matrix4x4.identity)
+            {
+                for (int i = 0; i < keyframes.Length; i++)
+                {
+                    var kf = keyframes[i];
+                    kf.Position = keyframeRelocation.MultiplyPoint3x4(kf.Position);
+                    kf.Rotation = keyframeRelocation.rotation * kf.Rotation;
+                    keyframes[i] = kf;
+                }
+                Debug.Log("[TextureRefine] Applied relocation to keyframe poses");
+            }
 
             // Step 3: xatlas UV unwrap on background thread
             ReportStatus("UV unwrapping...");

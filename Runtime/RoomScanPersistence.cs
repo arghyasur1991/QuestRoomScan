@@ -294,6 +294,11 @@ namespace Genesis.RoomScan
                 if (anchor != null && anchor.enabled && anchor.IsRoomLoaded)
                     reloc = anchor.ComputeRelocationMatrix(anchorAtSave);
 
+                // Store relocation for keyframe pose correction in texture refinement / GS training
+                var scanner = RoomScanner.Instance;
+                if (scanner != null)
+                    scanner.KeyframeRelocation = reloc;
+
                 if (reloc != Matrix4x4.identity)
                 {
                     vi.BakeRelocation(reloc);

@@ -159,6 +159,13 @@ namespace Genesis.RoomScan
         /// </summary>
         internal RefinedTextureResult? LastRefinedResult { get; set; }
 
+        /// <summary>
+        /// Relocation matrix from the last scan load. Transforms old-session world-space
+        /// poses to current world-space. Identity when no relocation occurred or when
+        /// running a live (non-reloaded) scan.
+        /// </summary>
+        internal Matrix4x4 KeyframeRelocation { get; set; } = Matrix4x4.identity;
+
         private float IntegrationInterval => 1f / (mode == ScanMode.Guided ? guidedIntegrationHz : passiveIntegrationHz);
         private float MeshInterval => 1f / (mode == ScanMode.Guided ? guidedMeshExtractionHz : passiveMeshExtractionHz);
 
@@ -323,6 +330,7 @@ namespace Genesis.RoomScan
         {
             if (IsScanning) return;
             IsScanning = true;
+            KeyframeRelocation = Matrix4x4.identity;
 
             if (_keyframeCollector != null)
             {
@@ -599,7 +607,8 @@ namespace Genesis.RoomScan
             try
             {
                 string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
-                var result = await TextureRefinement.RefineWithPreDecodedAsync(keyframeDir);
+                var result = await TextureRefinement.RefineWithPreDecodedAsync(
+                    keyframeDir, KeyframeRelocation);
 
                 // Create renderable assets on main thread
                 ApplyRefinedResult(result);
