@@ -233,6 +233,7 @@ namespace Genesis.RoomScan
         {
             public byte[] Pixels; // RGBA32, row-major (or compressed JPEG before decode)
             public int Width, Height;
+            public int SensorWidth, SensorHeight;
             public Vector3 Position;
             public Quaternion Rotation;
             public float Fx, Fy, Cx, Cy;
@@ -344,6 +345,7 @@ namespace Genesis.RoomScan
             float px = 0, py = 0, pz = 0, qx = 0, qy = 0, qz = 0, qw = 1;
             int id = 0;
             float fx = 0, fy = 0, cx = 0, cy = 0;
+            int sw = 0, sh = 0;
 
             foreach (string token in jsonLine.Trim('{', '}', ' ').Split(','))
             {
@@ -365,6 +367,8 @@ namespace Genesis.RoomScan
                     case "fy": fy = float.Parse(val, System.Globalization.CultureInfo.InvariantCulture); break;
                     case "cx": cx = float.Parse(val, System.Globalization.CultureInfo.InvariantCulture); break;
                     case "cy": cy = float.Parse(val, System.Globalization.CultureInfo.InvariantCulture); break;
+                    case "sw": sw = int.Parse(val); break;
+                    case "sh": sh = int.Parse(val); break;
                 }
             }
 
@@ -372,6 +376,8 @@ namespace Genesis.RoomScan
             kf.Rotation = new Quaternion(qx, qy, qz, qw);
             kf.Fx = fx; kf.Fy = fy;
             kf.Cx = cx; kf.Cy = cy;
+            kf.SensorWidth = sw;
+            kf.SensorHeight = sh;
 
             string imgPath = Path.Combine(imagesDir, $"{id:D6}.jpg");
             if (!File.Exists(imgPath)) return kf;
@@ -746,9 +752,13 @@ namespace Genesis.RoomScan
         {
             Vector3 cam = viewMat.MultiplyPoint3x4(worldPos);
             if (cam.z <= 0.001f) return new Vector2(-1, -1);
-            float x = kf.Fx * (cam.x / cam.z) + kf.Cx;
-            float y = kf.Fy * (cam.y / cam.z) + kf.Cy;
-            return new Vector2(x, y);
+            float sensorX = kf.Fx * (cam.x / cam.z) + kf.Cx;
+            float sensorY = kf.Fy * (cam.y / cam.z) + kf.Cy;
+            int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
+            int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
+            float cropX = (sw - kf.Width) * 0.5f;
+            float cropY = (sh - kf.Height) * 0.5f;
+            return new Vector2(sensorX - cropX, sensorY - cropY);
         }
 
         static bool IsInFrustum(Vector2 screen, int w, int h)
@@ -764,6 +774,10 @@ namespace Genesis.RoomScan
             for (int i = 0; i < depth.Length; i++) depth[i] = float.MaxValue;
 
             Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+            int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
+            int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
+            float cropX = (sw - kf.Width) * 0.5f;
+            float cropY = (sh - kf.Height) * 0.5f;
             int triCount = indices.Length / 3;
 
             for (int t = 0; t < triCount; t++)
@@ -777,12 +791,12 @@ namespace Genesis.RoomScan
 
                 if (c0.z <= 0 && c1.z <= 0 && c2.z <= 0) continue;
 
-                Vector2 s0 = new Vector2(kf.Fx * c0.x / Mathf.Max(c0.z, 0.001f) + kf.Cx,
-                                         kf.Fy * c0.y / Mathf.Max(c0.z, 0.001f) + kf.Cy);
-                Vector2 s1 = new Vector2(kf.Fx * c1.x / Mathf.Max(c1.z, 0.001f) + kf.Cx,
-                                         kf.Fy * c1.y / Mathf.Max(c1.z, 0.001f) + kf.Cy);
-                Vector2 s2 = new Vector2(kf.Fx * c2.x / Mathf.Max(c2.z, 0.001f) + kf.Cx,
-                                         kf.Fy * c2.y / Mathf.Max(c2.z, 0.001f) + kf.Cy);
+                Vector2 s0 = new Vector2(kf.Fx * c0.x / Mathf.Max(c0.z, 0.001f) + kf.Cx - cropX,
+                                         kf.Fy * c0.y / Mathf.Max(c0.z, 0.001f) + kf.Cy - cropY);
+                Vector2 s1 = new Vector2(kf.Fx * c1.x / Mathf.Max(c1.z, 0.001f) + kf.Cx - cropX,
+                                         kf.Fy * c1.y / Mathf.Max(c1.z, 0.001f) + kf.Cy - cropY);
+                Vector2 s2 = new Vector2(kf.Fx * c2.x / Mathf.Max(c2.z, 0.001f) + kf.Cx - cropX,
+                                         kf.Fy * c2.y / Mathf.Max(c2.z, 0.001f) + kf.Cy - cropY);
 
                 RasterizeDepthTriangle(depth, w, h, s0, s1, s2, c0.z, c1.z, c2.z);
             }
@@ -864,10 +878,7 @@ namespace Genesis.RoomScan
                 int depthIdx = screenY * kf.Width + px;
                 if (camPt.z > depthBuf[depthIdx] + 0.05f) continue;
 
-                // Sample keyframe pixel — flip Y because GetRawTextureData() has Y=0 at
-                // bottom while camera projection has Y=0 at top
-                int texY = kf.Height - 1 - screenY;
-                int pixelIdx = (texY * kf.Width + px) * 4;
+                int pixelIdx = (screenY * kf.Width + px) * 4;
                 if (pixelIdx + 3 >= kf.Pixels.Length) continue;
 
                 int atlasOff = texelIdx * 4;
