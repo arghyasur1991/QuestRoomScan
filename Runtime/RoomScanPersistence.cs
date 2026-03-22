@@ -22,6 +22,12 @@ namespace Genesis.RoomScan
         public string SaveFilePath => Path.Combine(SaveDirectory, "scan.bin");
         public string TriplanarDirectory => Path.Combine(SaveDirectory, "triplanar");
         public string SplatFilePath => Path.Combine(SaveDirectory, "splat.ply");
+        public string RefinedMeshPath => Path.Combine(SaveDirectory, "refined_mesh.bin");
+        public string RefinedAtlasPath => Path.Combine(SaveDirectory, "refined_atlas.raw");
+        public string HQAtlasPath => Path.Combine(SaveDirectory, "hq_atlas.raw");
+
+        private const uint RefinedMeshMagic = 0x46524D52; // "RMRF"
+        private const int RefinedMeshVersion = 1;
 
         public bool IsSaving { get; private set; }
         public bool IsLoading { get; private set; }
@@ -125,9 +131,29 @@ namespace Genesis.RoomScan
                     Debug.Log($"[RoomScan] Persistence: splat.ply saved ({plyData.Length / (1024f * 1024f):F1}MB)");
                 }
 
+                // Save refined texture data
+                bool refinedSaved = false, hqSaved = false;
+                var scanner = RoomScanner.Instance;
+                if (scanner != null)
+                {
+                    if (scanner.HasRefinedTexture && scanner.LastRefinedResult != null)
+                    {
+                        var r = scanner.LastRefinedResult.Value;
+                        string meshPath = RefinedMeshPath;
+                        string atlasPath = RefinedAtlasPath;
+                        await Task.Run(() =>
+                        {
+                            WriteRefinedMesh(meshPath, r);
+                            File.WriteAllBytes(atlasPath, r.AtlasPixels);
+                        });
+                        refinedSaved = true;
+                        Debug.Log($"[RoomScan] Persistence: refined atlas saved ({r.AtlasWidth}x{r.AtlasHeight})");
+                    }
+                }
+
                 float sizeMB = new FileInfo(savePath).Length / (1024f * 1024f);
                 Debug.Log($"[RoomScan] Persistence: saved to {savePath} ({sizeMB:F1}MB), " +
-                          $"triplanar={triRes > 0}, splat={splatSaved}, format=v{FormatVersion}, " +
+                          $"triplanar={triRes > 0}, splat={splatSaved}, refined={refinedSaved}, format=v{FormatVersion}, " +
                           $"anchor col3={anchorAtSave.GetColumn(3)}, row0={anchorAtSave.GetRow(0)}");
                 SaveCompleted?.Invoke();
                 return true;
@@ -345,7 +371,84 @@ namespace Genesis.RoomScan
                     }
                 }
 
-                Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount}, splat={splatExists})");
+                // Load refined texture data
+                string refinedMeshPath = RefinedMeshPath;
+                string refinedAtlasPath = RefinedAtlasPath;
+                string hqAtlasPath = HQAtlasPath;
+                bool hasRefined = File.Exists(refinedMeshPath) && File.Exists(refinedAtlasPath);
+                bool hasHQ = File.Exists(hqAtlasPath);
+
+                if (hasRefined)
+                {
+                    try
+                    {
+                        RefinedTextureResult meshData = default;
+                        byte[] atlasBytes = null;
+                        await Task.Run(() =>
+                        {
+                            meshData = ReadRefinedMesh(refinedMeshPath);
+                            atlasBytes = File.ReadAllBytes(refinedAtlasPath);
+                        });
+                        await SwitchToUnityMainThreadAsync(unitySync);
+
+                        var atlasTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
+                            TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                        atlasTex.SetPixelData(atlasBytes, 0);
+                        atlasTex.Apply();
+
+                        var mesh = new Mesh { name = "RefinedScanMesh" };
+                        mesh.SetVertices(meshData.Positions);
+                        mesh.SetNormals(meshData.Normals);
+                        mesh.SetUVs(0, meshData.UVs);
+                        mesh.SetTriangles(meshData.Indices, 0);
+
+                        var rs = RoomScanner.Instance;
+                        if (rs != null)
+                        {
+                            rs.ApplyRefinedTexture(atlasTex, mesh);
+                            rs.LastRefinedResult = meshData;
+                        }
+                        Debug.Log($"[RoomScan] Persistence: refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})");
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"[RoomScan] Persistence: refined load skipped ({e.Message})");
+                    }
+                }
+
+                if (hasHQ)
+                {
+                    try
+                    {
+                        byte[] hqBytes = null;
+                        await Task.Run(() => hqBytes = File.ReadAllBytes(hqAtlasPath));
+                        await SwitchToUnityMainThreadAsync(unitySync);
+
+                        // Determine atlas dimensions from refined mesh data or default
+                        int hqW = 2048, hqH = 2048;
+                        var rs2 = RoomScanner.Instance;
+                        if (rs2 != null && rs2.LastRefinedResult != null)
+                        {
+                            hqW = rs2.LastRefinedResult.Value.AtlasWidth;
+                            hqH = rs2.LastRefinedResult.Value.AtlasHeight;
+                        }
+
+                        var hqTex = new Texture2D(hqW, hqH, TextureFormat.RGBA32, false)
+                            { filterMode = FilterMode.Bilinear };
+                        hqTex.SetPixelData(hqBytes, 0);
+                        hqTex.Apply();
+
+                        if (rs2 != null)
+                            rs2.ApplyHQTexture(hqTex);
+                        Debug.Log("[RoomScan] Persistence: HQ atlas loaded");
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"[RoomScan] Persistence: HQ atlas load skipped ({e.Message})");
+                    }
+                }
+
+                Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount}, splat={splatExists}, refined={hasRefined}, hq={hasHQ})");
                 LoadCompleted?.Invoke();
                 return true;
             }
@@ -365,6 +468,9 @@ namespace Genesis.RoomScan
             if (File.Exists(SaveFilePath)) File.Delete(SaveFilePath);
             if (Directory.Exists(TriplanarDirectory))
                 Directory.Delete(TriplanarDirectory, true);
+            if (File.Exists(RefinedMeshPath)) File.Delete(RefinedMeshPath);
+            if (File.Exists(RefinedAtlasPath)) File.Delete(RefinedAtlasPath);
+            if (File.Exists(HQAtlasPath)) File.Delete(HQAtlasPath);
             Debug.Log("[RoomScan] Persistence: saved scan deleted");
         }
 
@@ -503,6 +609,77 @@ namespace Genesis.RoomScan
         private static async Task MainThreadAsyncAsTask()
         {
             await Awaitable.MainThreadAsync();
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Refined mesh binary I/O
+        // ─────────────────────────────────────────────────────────────
+
+        private static void WriteRefinedMesh(string path, RefinedTextureResult r)
+        {
+            using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 65536);
+            using var w = new BinaryWriter(fs);
+
+            w.Write(RefinedMeshMagic);
+            w.Write(RefinedMeshVersion);
+            w.Write(r.Positions.Length);
+            w.Write(r.Indices.Length);
+            w.Write(r.AtlasWidth);
+            w.Write(r.AtlasHeight);
+
+            for (int i = 0; i < r.Positions.Length; i++)
+            {
+                w.Write(r.Positions[i].x); w.Write(r.Positions[i].y); w.Write(r.Positions[i].z);
+                w.Write(r.Normals[i].x); w.Write(r.Normals[i].y); w.Write(r.Normals[i].z);
+                w.Write(r.UVs[i].x); w.Write(r.UVs[i].y);
+            }
+
+            foreach (int idx in r.Indices)
+                w.Write(idx);
+        }
+
+        private static RefinedTextureResult ReadRefinedMesh(string path)
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536);
+            using var r = new BinaryReader(fs);
+
+            uint magic = r.ReadUInt32();
+            if (magic != RefinedMeshMagic)
+                throw new InvalidDataException($"Bad refined mesh magic: 0x{magic:X8}");
+
+            int version = r.ReadInt32();
+            if (version != RefinedMeshVersion)
+                throw new InvalidDataException($"Unsupported refined mesh version: {version}");
+
+            int vertCount = r.ReadInt32();
+            int idxCount = r.ReadInt32();
+            int atlasW = r.ReadInt32();
+            int atlasH = r.ReadInt32();
+
+            var positions = new UnityEngine.Vector3[vertCount];
+            var normals = new UnityEngine.Vector3[vertCount];
+            var uvs = new UnityEngine.Vector2[vertCount];
+
+            for (int i = 0; i < vertCount; i++)
+            {
+                positions[i] = new UnityEngine.Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                normals[i] = new UnityEngine.Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                uvs[i] = new UnityEngine.Vector2(r.ReadSingle(), r.ReadSingle());
+            }
+
+            int[] indices = new int[idxCount];
+            for (int i = 0; i < idxCount; i++)
+                indices[i] = r.ReadInt32();
+
+            return new RefinedTextureResult
+            {
+                Positions = positions,
+                Normals = normals,
+                UVs = uvs,
+                Indices = indices,
+                AtlasWidth = atlasW,
+                AtlasHeight = atlasH
+            };
         }
     }
 }

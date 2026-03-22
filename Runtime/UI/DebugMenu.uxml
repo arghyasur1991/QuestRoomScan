@@ -100,6 +100,8 @@
             <ui:Button name="btn-save-scan" text="Save Scan" class="action-btn" />
             <ui:Button name="btn-load-scan" text="Load Scan" class="action-btn" />
             <ui:Button name="btn-export-pc" text="Export Point Cloud" class="action-btn" />
+            <ui:Button name="btn-refine-tex" text="Refine Textures" class="action-btn action-btn--primary" />
+            <ui:Button name="btn-hq-refine" text="HQ Refine (Server)" class="action-btn action-btn--primary" />
             <ui:Button name="btn-gs-train" text="Start GS Training" class="action-btn action-btn--primary" />
             <ui:Button name="btn-cancel-train" text="Cancel Training" class="action-btn action-btn--danger" />
             <ui:Button name="btn-clear-all" text="Clear All Data" class="action-btn action-btn--danger" />

@@ -168,6 +168,7 @@ namespace Genesis.RoomScan.Editor
             DrawProjectSettings();
             DrawComponents();
             DrawShaderWiring();
+            DrawNativePlugins();
 
             GUILayout.Space(12);
             DrawMasterButton();
@@ -967,6 +968,170 @@ namespace Genesis.RoomScan.Editor
             Debug.Log("[RoomScan Setup] Added GaussianSplatURPFeature to URP Renderer");
         }
 
+        // -- Native Plugins -----------------------------------------------
+
+        bool _xatlasAndroid, _xatlasMacOS;
+
+        void RefreshNativePlugins()
+        {
+            string pkgRoot = "Packages/com.genesis.roomscan/Runtime";
+            _xatlasAndroid = System.IO.File.Exists(
+                Path.GetFullPath(Path.Combine(pkgRoot, "Plugins/Android/libxatlas.so")));
+            _xatlasMacOS = System.IO.File.Exists(
+                Path.GetFullPath(Path.Combine(pkgRoot, "Plugins/macOS/libxatlas.bundle")));
+        }
+
+        void DrawNativePlugins()
+        {
+            RefreshNativePlugins();
+            BeginSection("NATIVE PLUGINS");
+            StatusRow("xatlas (Android ARM64)", _xatlasAndroid);
+            StatusRow("xatlas (macOS Editor)", _xatlasMacOS);
+
+            if (!_xatlasAndroid || !_xatlasMacOS)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Build xatlas Plugin", GUILayout.Width(200)))
+                    BuildXAtlasPlugin();
+                EditorGUILayout.EndHorizontal();
+            }
+            EndSection();
+        }
+
+        static void BuildXAtlasPlugin()
+        {
+            string pkgRoot = Path.GetFullPath("Packages/com.genesis.roomscan/Runtime");
+            string srcDir = Path.Combine(pkgRoot, "Native/xatlas");
+            string srcApi = Path.Combine(srcDir, "xatlas_c_api.cpp");
+            string srcImpl = Path.Combine(srcDir, "xatlas.cpp");
+
+            if (!System.IO.File.Exists(srcApi) || !System.IO.File.Exists(srcImpl))
+            {
+                EditorUtility.DisplayDialog("Build xatlas",
+                    $"Source files not found in:\n{srcDir}\n\nExpected xatlas.cpp and xatlas_c_api.cpp",
+                    "OK");
+                return;
+            }
+
+            bool macOk = BuildXAtlasMacOS(pkgRoot, srcApi, srcImpl);
+            bool androidOk = BuildXAtlasAndroid(pkgRoot, srcApi, srcImpl);
+
+            AssetDatabase.Refresh();
+
+            string msg = $"macOS: {(macOk ? "OK" : "FAILED")}\nAndroid: {(androidOk ? "OK" : "FAILED")}";
+            if (macOk || androidOk)
+                Debug.Log($"[RoomScan Setup] xatlas build complete — {msg}");
+            else
+                Debug.LogError($"[RoomScan Setup] xatlas build failed — {msg}");
+        }
+
+        static bool BuildXAtlasMacOS(string pkgRoot, string srcApi, string srcImpl)
+        {
+            string outDir = Path.Combine(pkgRoot, "Plugins/macOS");
+            Directory.CreateDirectory(outDir);
+            string outPath = Path.Combine(outDir, "libxatlas.bundle");
+
+            string args = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden " +
+                          $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"";
+
+            return RunProcess("clang++", args, "macOS xatlas");
+        }
+
+        static bool BuildXAtlasAndroid(string pkgRoot, string srcApi, string srcImpl)
+        {
+#if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX || UNITY_EDITOR_WIN
+            string ndkPath = null;
+            try
+            {
+                ndkPath = UnityEditor.Android.AndroidExternalToolsSettings.ndkRootPath;
+            }
+            catch
+            {
+                Debug.LogWarning("[RoomScan Setup] Android NDK path not configured in Unity. " +
+                    "Skipping Android xatlas build.");
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(ndkPath) || !Directory.Exists(ndkPath))
+            {
+                Debug.LogWarning($"[RoomScan Setup] NDK not found at: {ndkPath}");
+                return false;
+            }
+
+            string prebuilt = Path.Combine(ndkPath, "toolchains/llvm/prebuilt");
+            if (!Directory.Exists(prebuilt))
+            {
+                Debug.LogWarning($"[RoomScan Setup] NDK prebuilt dir not found: {prebuilt}");
+                return false;
+            }
+
+            string[] hosts = Directory.GetDirectories(prebuilt);
+            if (hosts.Length == 0)
+            {
+                Debug.LogWarning("[RoomScan Setup] No host toolchain found in NDK prebuilt/");
+                return false;
+            }
+
+            string clangpp = Path.Combine(hosts[0], "bin/aarch64-linux-android31-clang++");
+            if (!System.IO.File.Exists(clangpp))
+            {
+                Debug.LogWarning($"[RoomScan Setup] clang++ not found: {clangpp}");
+                return false;
+            }
+
+            string outDir = Path.Combine(pkgRoot, "Plugins/Android");
+            Directory.CreateDirectory(outDir);
+            string outPath = Path.Combine(outDir, "libxatlas.so");
+
+            string args = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden " +
+                          $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"";
+
+            return RunProcess(clangpp, args, "Android xatlas");
+#else
+            return false;
+#endif
+        }
+
+        static bool RunProcess(string exe, string args, string label)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = exe,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using var proc = System.Diagnostics.Process.Start(psi);
+                string stdout = proc.StandardOutput.ReadToEnd();
+                string stderr = proc.StandardError.ReadToEnd();
+                proc.WaitForExit();
+
+                if (proc.ExitCode != 0)
+                {
+                    Debug.LogError($"[RoomScan Setup] {label} build failed (exit {proc.ExitCode}):\n{stderr}");
+                    return false;
+                }
+
+                if (!string.IsNullOrEmpty(stderr))
+                    Debug.LogWarning($"[RoomScan Setup] {label} warnings:\n{stderr}");
+
+                Debug.Log($"[RoomScan Setup] {label} build succeeded");
+                return true;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"[RoomScan Setup] {label} build exception: {e.Message}");
+                return false;
+            }
+        }
+
         // -- Master Button ------------------------------------------------
 
         void DrawMasterButton()
@@ -1005,6 +1170,10 @@ namespace Genesis.RoomScan.Editor
             }
             FixComponents();
             FixShaderWiring();
+
+            RefreshNativePlugins();
+            if (!_xatlasAndroid || !_xatlasMacOS)
+                BuildXAtlasPlugin();
 
             // RoomScanner and GSplatManager resolve siblings via GetComponent —
             // no serialized wiring needed.

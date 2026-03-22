@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.IO.Compression;
 using System.Threading.Tasks;
 using Genesis.RoomScan.GSplat;
 using Genesis.RoomScan.UI;
@@ -26,6 +27,8 @@ namespace Genesis.RoomScan
     {
         Mesh,
         Textured,
+        Refined,
+        HQRefined,
         Splat
     }
 
@@ -130,6 +133,28 @@ namespace Genesis.RoomScan
         private float _guidedStartTime;
         private bool _started;
         private bool _serverTrainingInProgress;
+
+        // ─────────────────────────────────────────────────────────────
+        //  Texture refinement state
+        // ─────────────────────────────────────────────────────────────
+
+        private MeshFilter _refinedMeshFilter;
+        private MeshRenderer _refinedRenderer;
+        private Texture2D _refinedAtlasTexture;
+        private Texture2D _hqAtlasTexture;
+        private Mesh _refinedMesh;
+
+        public bool HasRefinedTexture { get; private set; }
+        public bool HasHQRefinedTexture { get; private set; }
+        public bool IsRefining { get; private set; }
+        public bool IsHQRefining { get; private set; }
+        public string RefineStatus { get; private set; }
+        public string HQRefineStatus { get; private set; }
+
+        /// <summary>
+        /// Shared UV mesh data used by persistence to save/restore refinement results.
+        /// </summary>
+        internal RefinedTextureResult? LastRefinedResult { get; private set; }
 
         private float IntegrationInterval => 1f / (mode == ScanMode.Guided ? guidedIntegrationHz : passiveIntegrationHz);
         private float MeshInterval => 1f / (mode == ScanMode.Guided ? guidedMeshExtractionHz : passiveMeshExtractionHz);
@@ -462,17 +487,30 @@ namespace Genesis.RoomScan
 
         public void CycleRenderMode()
         {
-            var next = renderMode switch
+            // Ordered cycle; skip modes whose data isn't available yet
+            ScanRenderMode[] order =
             {
-                ScanRenderMode.Mesh => ScanRenderMode.Textured,
-                ScanRenderMode.Textured => ScanRenderMode.Splat,
-                _ => ScanRenderMode.Mesh,
+                ScanRenderMode.Mesh, ScanRenderMode.Textured,
+                ScanRenderMode.Refined, ScanRenderMode.HQRefined,
+                ScanRenderMode.Splat
             };
 
-            if (next == ScanRenderMode.Splat && HasDownloadedSplat && !_gsplatManager.HasServerTrainedSplats)
-                LoadDownloadedSplat();
-            else
-                SetRenderMode(next);
+            int cur = Array.IndexOf(order, renderMode);
+            for (int i = 1; i < order.Length; i++)
+            {
+                var candidate = order[(cur + i) % order.Length];
+                if (candidate == ScanRenderMode.Refined && !HasRefinedTexture) continue;
+                if (candidate == ScanRenderMode.HQRefined && !HasHQRefinedTexture) continue;
+
+                if (candidate == ScanRenderMode.Splat && HasDownloadedSplat && !_gsplatManager.HasServerTrainedSplats)
+                {
+                    LoadDownloadedSplat();
+                    return;
+                }
+
+                SetRenderMode(candidate);
+                return;
+            }
         }
 
         public void FreezeInView()
@@ -542,6 +580,230 @@ namespace Genesis.RoomScan
         {
             if (_volumeIntegrator != null)
                 _volumeIntegrator.ExclusionZones.Remove(t);
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Texture Refinement
+        // ─────────────────────────────────────────────────────────────
+
+        public async void StartTextureRefinement()
+        {
+            if (IsRefining) return;
+            IsRefining = true;
+            RefineStatus = "Starting...";
+
+            TextureRefinement.StatusChanged += s => RefineStatus = s;
+            try
+            {
+                string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
+                var result = await TextureRefinement.RefineWithPreDecodedAsync(keyframeDir);
+
+                // Create renderable assets on main thread
+                ApplyRefinedResult(result);
+                LastRefinedResult = result;
+                HasRefinedTexture = true;
+                SetRenderMode(ScanRenderMode.Refined);
+                Debug.Log("[RoomScan] On-device texture refinement complete");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[RoomScan] Texture refinement failed: {e.Message}\n{e.StackTrace}");
+                RefineStatus = "Failed";
+            }
+            finally
+            {
+                TextureRefinement.StatusChanged -= s => RefineStatus = s;
+                IsRefining = false;
+            }
+        }
+
+        public async void StartHQRefinement()
+        {
+            if (IsHQRefining) return;
+            IsHQRefining = true;
+            HQRefineStatus = "Uploading...";
+
+            try
+            {
+                if (_gsplatServerClient == null)
+                {
+                    HQRefineStatus = "No server configured";
+                    return;
+                }
+
+                // Package and upload mesh + keyframes for server-side refinement
+                HQRefineStatus = "Uploading to server...";
+                string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
+                byte[] zipData = await Task.Run(() => PackRefinementZip(keyframeDir));
+
+                if (zipData == null || zipData.Length == 0)
+                {
+                    HQRefineStatus = "No data to upload";
+                    return;
+                }
+
+                string serverUrl = _gsplatServerClient.ServerUrl;
+                HQRefineStatus = "Server processing...";
+
+                using var client = new System.Net.Http.HttpClient();
+                client.Timeout = TimeSpan.FromMinutes(10);
+                var content = new System.Net.Http.ByteArrayContent(zipData);
+                content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+                var response = await client.PostAsync($"{serverUrl}/refine-texture", content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    string err = await response.Content.ReadAsStringAsync();
+                    HQRefineStatus = $"Server error: {response.StatusCode}";
+                    Debug.LogError($"[RoomScan] HQ refine server error: {err}");
+                    return;
+                }
+
+                byte[] pngData = await response.Content.ReadAsByteArrayAsync();
+                HQRefineStatus = "Applying atlas...";
+
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (ImageConversion.LoadImage(tex, pngData))
+                {
+                    _hqAtlasTexture = tex;
+                    HasHQRefinedTexture = true;
+
+                    EnsureRefinedRenderer();
+                    SetRenderMode(ScanRenderMode.HQRefined);
+                    HQRefineStatus = "Done";
+                    Debug.Log($"[RoomScan] HQ texture refinement complete: {tex.width}x{tex.height}");
+                }
+                else
+                {
+                    UnityEngine.Object.Destroy(tex);
+                    HQRefineStatus = "Failed to decode atlas";
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[RoomScan] HQ refinement failed: {e.Message}\n{e.StackTrace}");
+                HQRefineStatus = "Failed";
+            }
+            finally
+            {
+                IsHQRefining = false;
+            }
+        }
+
+        private void ApplyRefinedResult(RefinedTextureResult result)
+        {
+            _refinedAtlasTexture = new Texture2D(result.AtlasWidth, result.AtlasHeight,
+                TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+            _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
+            _refinedAtlasTexture.Apply();
+
+            _refinedMesh = new Mesh { name = "RefinedScanMesh" };
+            _refinedMesh.SetVertices(result.Positions);
+            _refinedMesh.SetNormals(result.Normals);
+            _refinedMesh.SetUVs(0, result.UVs);
+            _refinedMesh.SetTriangles(result.Indices, 0);
+
+            EnsureRefinedRenderer();
+            _refinedMeshFilter.mesh = _refinedMesh;
+            _refinedRenderer.material.mainTexture = _refinedAtlasTexture;
+        }
+
+        /// <summary>
+        /// Applies pre-loaded atlas and mesh data (called from persistence load).
+        /// </summary>
+        internal void ApplyRefinedTexture(Texture2D atlas, Mesh mesh)
+        {
+            _refinedAtlasTexture = atlas;
+            _refinedMesh = mesh;
+            EnsureRefinedRenderer();
+            _refinedMeshFilter.mesh = mesh;
+            _refinedRenderer.material.mainTexture = atlas;
+            HasRefinedTexture = true;
+        }
+
+        internal void ApplyHQTexture(Texture2D atlas)
+        {
+            _hqAtlasTexture = atlas;
+            EnsureRefinedRenderer();
+            HasHQRefinedTexture = true;
+        }
+
+        private void EnsureRefinedRenderer()
+        {
+            if (_refinedRenderer != null) return;
+
+            var go = new GameObject("RefinedMeshRenderer");
+            go.transform.SetParent(transform, false);
+            _refinedMeshFilter = go.AddComponent<MeshFilter>();
+            _refinedRenderer = go.AddComponent<MeshRenderer>();
+
+            var shader = Shader.Find("Genesis/RefinedMesh");
+            if (shader == null)
+            {
+                Debug.LogWarning("[RoomScan] Genesis/RefinedMesh shader not found, using URP/Unlit");
+                shader = Shader.Find("Universal Render Pipeline/Unlit");
+            }
+            _refinedRenderer.material = new Material(shader);
+            _refinedRenderer.enabled = false;
+        }
+
+        private static byte[] PackRefinementZip(string keyframeDir)
+        {
+            // Minimal ZIP-like packaging: for simplicity, re-use the existing keyframe
+            // export directory structure. The server expects the same layout as GS training.
+            string framesPath = Path.Combine(keyframeDir, "frames.jsonl");
+            if (!File.Exists(framesPath)) return null;
+
+            using var ms = new MemoryStream();
+            using (var archive = new System.IO.Compression.ZipArchive(ms,
+                System.IO.Compression.ZipArchiveMode.Create, true))
+            {
+                // Add frames.jsonl
+                var entry = archive.CreateEntry("frames.jsonl");
+                using (var es = entry.Open())
+                {
+                    byte[] data = File.ReadAllBytes(framesPath);
+                    es.Write(data, 0, data.Length);
+                }
+
+                // Add images
+                string imagesDir = Path.Combine(keyframeDir, "images");
+                if (Directory.Exists(imagesDir))
+                {
+                    foreach (string img in Directory.GetFiles(imagesDir, "*.jpg"))
+                    {
+                        string name = "images/" + Path.GetFileName(img);
+                        var imgEntry = archive.CreateEntry(name);
+                        using var ies = imgEntry.Open();
+                        byte[] imgData = File.ReadAllBytes(img);
+                        ies.Write(imgData, 0, imgData.Length);
+                    }
+                }
+
+                // Add mesh data if we have a refined result
+                var scanner = Instance;
+                if (scanner?.LastRefinedResult != null)
+                {
+                    var r = scanner.LastRefinedResult.Value;
+                    var meshEntry = archive.CreateEntry("refined_mesh.bin");
+                    using var mes = meshEntry.Open();
+                    using var bw = new BinaryWriter(mes);
+                    bw.Write(r.Positions.Length);
+                    bw.Write(r.Indices.Length);
+                    bw.Write(r.AtlasWidth);
+                    bw.Write(r.AtlasHeight);
+                    for (int i = 0; i < r.Positions.Length; i++)
+                    {
+                        bw.Write(r.Positions[i].x); bw.Write(r.Positions[i].y); bw.Write(r.Positions[i].z);
+                        bw.Write(r.Normals[i].x); bw.Write(r.Normals[i].y); bw.Write(r.Normals[i].z);
+                        bw.Write(r.UVs[i].x); bw.Write(r.UVs[i].y);
+                    }
+                    foreach (int idx in r.Indices)
+                        bw.Write(idx);
+                }
+            }
+
+            return ms.ToArray();
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -649,11 +911,27 @@ namespace Genesis.RoomScan
         {
             var gpuRenderer = _meshExtractor != null ? _meshExtractor.GetComponent<GPUMeshRenderer>() : null;
 
-            bool meshVisible = renderMode == ScanRenderMode.Mesh || renderMode == ScanRenderMode.Textured;
+            bool gpuMeshVisible = renderMode == ScanRenderMode.Mesh || renderMode == ScanRenderMode.Textured;
+            bool refinedVisible = renderMode == ScanRenderMode.Refined || renderMode == ScanRenderMode.HQRefined;
+
             if (gpuRenderer != null)
-                gpuRenderer.RenderVisible = meshVisible;
+                gpuRenderer.RenderVisible = gpuMeshVisible;
             if (_gsplatManager != null)
                 _gsplatManager.RenderVisible = renderMode == ScanRenderMode.Splat;
+
+            // Show/hide the UV-mapped refined mesh renderer
+            if (_refinedRenderer != null)
+            {
+                _refinedRenderer.enabled = refinedVisible;
+                if (refinedVisible)
+                {
+                    var tex = renderMode == ScanRenderMode.HQRefined && _hqAtlasTexture != null
+                        ? _hqAtlasTexture
+                        : _refinedAtlasTexture;
+                    if (tex != null)
+                        _refinedRenderer.material.mainTexture = tex;
+                }
+            }
 
             Shader.SetGlobalFloat(NoFreezeTintID, renderMode == ScanRenderMode.Textured ? 1f : 0f);
         }

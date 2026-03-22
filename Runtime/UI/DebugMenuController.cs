@@ -53,6 +53,8 @@ namespace Genesis.RoomScan.UI
         private Button _btnLoadScan;
         private Button _btnClearAll;
         private Button _btnExportPc;
+        private Button _btnRefineTex;
+        private Button _btnHqRefine;
         private Button _btnGsTrain;
         private Button _btnCancelTrain;
 
@@ -150,6 +152,8 @@ namespace Genesis.RoomScan.UI
             _btnLoadScan = _root.Q<Button>("btn-load-scan");
             _btnClearAll = _root.Q<Button>("btn-clear-all");
             _btnExportPc = _root.Q<Button>("btn-export-pc");
+            _btnRefineTex = _root.Q<Button>("btn-refine-tex");
+            _btnHqRefine = _root.Q<Button>("btn-hq-refine");
             _btnGsTrain = _root.Q<Button>("btn-gs-train");
             _btnCancelTrain = _root.Q<Button>("btn-cancel-train");
         }
@@ -215,6 +219,12 @@ namespace Genesis.RoomScan.UI
                 if (_cachedClient != null) _cachedClient.ServerUrl = evt.newValue;
             });
 
+            _btnRefineTex?.RegisterCallback<ClickEvent>(_ =>
+                RoomScanner.Instance?.StartTextureRefinement());
+
+            _btnHqRefine?.RegisterCallback<ClickEvent>(_ =>
+                RoomScanner.Instance?.StartHQRefinement());
+
             _btnGsTrain?.RegisterCallback<ClickEvent>(_ =>
                 RoomScanner.Instance?.StartServerTraining());
 
@@ -256,6 +266,34 @@ namespace Genesis.RoomScan.UI
             var kf = FindAnyObjectByType<KeyframeCollector>();
             if (kf != null)
                 SetLabel(_valKeyframes, kf.SavedCount.ToString());
+
+            // Texture refinement buttons
+            if (_btnRefineTex != null)
+            {
+                if (scanner.IsRefining)
+                {
+                    _btnRefineTex.text = scanner.RefineStatus ?? "Refining...";
+                    _btnRefineTex.SetEnabled(false);
+                }
+                else
+                {
+                    _btnRefineTex.text = scanner.HasRefinedTexture ? "Refine Textures (Done)" : "Refine Textures";
+                    _btnRefineTex.SetEnabled(true);
+                }
+            }
+            if (_btnHqRefine != null)
+            {
+                if (scanner.IsHQRefining)
+                {
+                    _btnHqRefine.text = scanner.HQRefineStatus ?? "HQ Refining...";
+                    _btnHqRefine.SetEnabled(false);
+                }
+                else
+                {
+                    _btnHqRefine.text = scanner.HasHQRefinedTexture ? "HQ Refine (Done)" : "HQ Refine (Server)";
+                    _btnHqRefine.SetEnabled(true);
+                }
+            }
 
             // Server training status
             RefreshTrainingStatus();
