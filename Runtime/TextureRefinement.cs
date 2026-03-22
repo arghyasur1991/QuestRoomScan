@@ -576,15 +576,15 @@ namespace Genesis.RoomScan
                 kf.Height = tex.height;
                 // LoadImage may decode JPEG as RGB24 (no alpha). Force RGBA32 layout
                 // using GetPixels32 which handles any source format.
-                Color32[] colors = tex.GetPixels32();
+                Color32[] pxColors = tex.GetPixels32();
                 UnityEngine.Object.Destroy(tex);
                 jpgBytes = null;
-                byte[] rgba = new byte[colors.Length * 4];
-                for (int ci = 0; ci < colors.Length; ci++)
+                byte[] rgba = new byte[pxColors.Length * 4];
+                for (int ci = 0; ci < pxColors.Length; ci++)
                 {
-                    rgba[ci * 4] = colors[ci].r;
-                    rgba[ci * 4 + 1] = colors[ci].g;
-                    rgba[ci * 4 + 2] = colors[ci].b;
+                    rgba[ci * 4] = pxColors[ci].r;
+                    rgba[ci * 4 + 1] = pxColors[ci].g;
+                    rgba[ci * 4 + 2] = pxColors[ci].b;
                     rgba[ci * 4 + 3] = 255;
                 }
                 kf.Pixels = rgba;
