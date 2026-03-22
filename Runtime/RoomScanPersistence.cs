@@ -131,23 +131,25 @@ namespace Genesis.RoomScan
                     Debug.Log($"[RoomScan] Persistence: splat.ply saved ({plyData.Length / (1024f * 1024f):F1}MB)");
                 }
 
-                // Save refined texture data
+                // Save refined texture data (mesh + on-device atlas if available)
                 bool refinedSaved = false;
                 var scanner = RoomScanner.Instance;
-                if (scanner != null)
+                if (scanner?.LastRefinedResult != null)
                 {
-                    if (scanner.HasRefinedTexture && scanner.LastRefinedResult != null)
+                    var r = scanner.LastRefinedResult.Value;
+                    string meshPath = RefinedMeshPath;
+                    await Task.Run(() => WriteRefinedMesh(meshPath, r));
+                    refinedSaved = true;
+
+                    if (scanner.HasRefinedTexture && r.AtlasPixels != null)
                     {
-                        var r = scanner.LastRefinedResult.Value;
-                        string meshPath = RefinedMeshPath;
                         string atlasPath = RefinedAtlasPath;
-                        await Task.Run(() =>
-                        {
-                            WriteRefinedMesh(meshPath, r);
-                            File.WriteAllBytes(atlasPath, r.AtlasPixels);
-                        });
-                        refinedSaved = true;
+                        await Task.Run(() => File.WriteAllBytes(atlasPath, r.AtlasPixels));
                         Debug.Log($"[RoomScan] Persistence: refined atlas saved ({r.AtlasWidth}x{r.AtlasHeight})");
+                    }
+                    else
+                    {
+                        Debug.Log($"[RoomScan] Persistence: refined mesh saved (no on-device atlas)");
                     }
                 }
 
@@ -379,10 +381,11 @@ namespace Genesis.RoomScan
                 string refinedMeshPath = RefinedMeshPath;
                 string refinedAtlasPath = RefinedAtlasPath;
                 string hqAtlasPath = HQAtlasPath;
-                bool hasRefined = File.Exists(refinedMeshPath) && File.Exists(refinedAtlasPath);
+                bool hasMesh = File.Exists(refinedMeshPath);
+                bool hasAtlas = File.Exists(refinedAtlasPath);
                 bool hasHQ = File.Exists(hqAtlasPath);
 
-                if (hasRefined)
+                if (hasMesh)
                 {
                     try
                     {
@@ -391,28 +394,36 @@ namespace Genesis.RoomScan
                         await Task.Run(() =>
                         {
                             meshData = ReadRefinedMesh(refinedMeshPath);
-                            atlasBytes = File.ReadAllBytes(refinedAtlasPath);
+                            if (hasAtlas) atlasBytes = File.ReadAllBytes(refinedAtlasPath);
                         });
                         await SwitchToUnityMainThreadAsync(unitySync);
-
-                        var atlasTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
-                            TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-                        atlasTex.SetPixelData(atlasBytes, 0);
-                        atlasTex.Apply();
-
-                        var mesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
-                        mesh.SetVertices(meshData.Positions);
-                        mesh.SetNormals(meshData.Normals);
-                        mesh.SetUVs(0, meshData.UVs);
-                        mesh.SetTriangles(meshData.Indices, 0);
 
                         var rs = RoomScanner.Instance;
                         if (rs != null)
                         {
-                            rs.ApplyRefinedTexture(atlasTex, mesh);
                             rs.LastRefinedResult = meshData;
+
+                            if (atlasBytes != null)
+                            {
+                                var atlasTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
+                                    TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                                atlasTex.SetPixelData(atlasBytes, 0);
+                                atlasTex.Apply();
+
+                                var mesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
+                                mesh.SetVertices(meshData.Positions);
+                                mesh.SetNormals(meshData.Normals);
+                                mesh.SetUVs(0, meshData.UVs);
+                                mesh.SetTriangles(meshData.Indices, 0);
+
+                                rs.ApplyRefinedTexture(atlasTex, mesh);
+                                Debug.Log($"[RoomScan] Persistence: refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})");
+                            }
+                            else
+                            {
+                                Debug.Log("[RoomScan] Persistence: refined mesh loaded (no on-device atlas)");
+                            }
                         }
-                        Debug.Log($"[RoomScan] Persistence: refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})");
                     }
                     catch (Exception e)
                     {

@@ -635,26 +635,66 @@ namespace Genesis.RoomScan
         {
             if (IsHQRefining) return;
             IsHQRefining = true;
-            HQRefineStatus = "Packaging...";
+            HQRefineStatus = "Starting...";
 
             try
             {
-                if (!HasRefinedTexture || LastRefinedResult == null)
-                {
-                    HQRefineStatus = "Run on-device Refine first";
-                    Debug.LogWarning("[RoomScan] HQ refine requires on-device refinement first (need UV-unwrapped mesh)");
-                    return;
-                }
-
                 if (_gsplatServerClient == null)
                 {
                     HQRefineStatus = "No server configured";
                     return;
                 }
 
+                // Run UV unwrap if we don't already have one from on-device refine
+                UnwrappedMeshResult? unwrapped = null;
+                if (LastRefinedResult != null)
+                {
+                    // Reuse mesh from on-device refine
+                    var r = LastRefinedResult.Value;
+                    unwrapped = new UnwrappedMeshResult
+                    {
+                        Positions = r.Positions,
+                        Normals = r.Normals,
+                        UVs = r.UVs,
+                        Indices = r.Indices,
+                        AtlasWidth = r.AtlasWidth,
+                        AtlasHeight = r.AtlasHeight,
+                    };
+                    Debug.Log("[RoomScan] HQ refine: reusing existing UV-unwrapped mesh");
+                }
+                else
+                {
+                    // Run UV unwrap (GPU readback + xatlas) — no baking needed
+                    HQRefineStatus = "UV unwrapping...";
+                    TextureRefinement.StatusChanged += s => HQRefineStatus = s;
+                    try
+                    {
+                        string kfDir = Path.Combine(Application.persistentDataPath, "GSExport");
+                        unwrapped = await TextureRefinement.UnwrapMeshAsync(kfDir, KeyframeRelocation);
+                        // Store the unwrapped mesh for future use / rendering
+                        LastRefinedResult = new RefinedTextureResult
+                        {
+                            Positions = unwrapped.Value.Positions,
+                            Normals = unwrapped.Value.Normals,
+                            UVs = unwrapped.Value.UVs,
+                            Indices = unwrapped.Value.Indices,
+                            AtlasWidth = unwrapped.Value.AtlasWidth,
+                            AtlasHeight = unwrapped.Value.AtlasHeight,
+                            AtlasPixels = null,
+                        };
+                    }
+                    finally
+                    {
+                        TextureRefinement.StatusChanged -= s => HQRefineStatus = s;
+                    }
+                    Debug.Log("[RoomScan] HQ refine: UV unwrap complete");
+                }
+
+                HQRefineStatus = "Packaging...";
                 string serverUrl = _gsplatServerClient.ServerUrl;
                 string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
-                byte[] zipData = await Task.Run(() => PackRefinementZip(keyframeDir));
+                var meshForZip = unwrapped.Value;
+                byte[] zipData = await Task.Run(() => PackRefinementZip(keyframeDir, meshForZip));
 
                 if (zipData == null || zipData.Length == 0)
                 {
@@ -824,10 +864,8 @@ namespace Genesis.RoomScan
             _refinedRenderer.enabled = false;
         }
 
-        private static byte[] PackRefinementZip(string keyframeDir)
+        private static byte[] PackRefinementZip(string keyframeDir, UnwrappedMeshResult mesh)
         {
-            // Minimal ZIP-like packaging: for simplicity, re-use the existing keyframe
-            // export directory structure. The server expects the same layout as GS training.
             string framesPath = Path.Combine(keyframeDir, "frames.jsonl");
             if (!File.Exists(framesPath)) return null;
 
@@ -835,7 +873,6 @@ namespace Genesis.RoomScan
             using (var archive = new System.IO.Compression.ZipArchive(ms,
                 System.IO.Compression.ZipArchiveMode.Create, true))
             {
-                // Add frames.jsonl
                 var entry = archive.CreateEntry("frames.jsonl");
                 using (var es = entry.Open())
                 {
@@ -843,7 +880,6 @@ namespace Genesis.RoomScan
                     es.Write(data, 0, data.Length);
                 }
 
-                // Add images
                 string imagesDir = Path.Combine(keyframeDir, "images");
                 if (Directory.Exists(imagesDir))
                 {
@@ -857,27 +893,21 @@ namespace Genesis.RoomScan
                     }
                 }
 
-                // Add mesh data if we have a refined result
-                var scanner = Instance;
-                if (scanner?.LastRefinedResult != null)
+                var meshEntry = archive.CreateEntry("refined_mesh.bin");
+                using var mes = meshEntry.Open();
+                using var bw = new BinaryWriter(mes);
+                bw.Write(mesh.Positions.Length);
+                bw.Write(mesh.Indices.Length);
+                bw.Write(mesh.AtlasWidth);
+                bw.Write(mesh.AtlasHeight);
+                for (int i = 0; i < mesh.Positions.Length; i++)
                 {
-                    var r = scanner.LastRefinedResult.Value;
-                    var meshEntry = archive.CreateEntry("refined_mesh.bin");
-                    using var mes = meshEntry.Open();
-                    using var bw = new BinaryWriter(mes);
-                    bw.Write(r.Positions.Length);
-                    bw.Write(r.Indices.Length);
-                    bw.Write(r.AtlasWidth);
-                    bw.Write(r.AtlasHeight);
-                    for (int i = 0; i < r.Positions.Length; i++)
-                    {
-                        bw.Write(r.Positions[i].x); bw.Write(r.Positions[i].y); bw.Write(r.Positions[i].z);
-                        bw.Write(r.Normals[i].x); bw.Write(r.Normals[i].y); bw.Write(r.Normals[i].z);
-                        bw.Write(r.UVs[i].x); bw.Write(r.UVs[i].y);
-                    }
-                    foreach (int idx in r.Indices)
-                        bw.Write(idx);
+                    bw.Write(mesh.Positions[i].x); bw.Write(mesh.Positions[i].y); bw.Write(mesh.Positions[i].z);
+                    bw.Write(mesh.Normals[i].x); bw.Write(mesh.Normals[i].y); bw.Write(mesh.Normals[i].z);
+                    bw.Write(mesh.UVs[i].x); bw.Write(mesh.UVs[i].y);
                 }
+                foreach (int idx in mesh.Indices)
+                    bw.Write(idx);
             }
 
             return ms.ToArray();

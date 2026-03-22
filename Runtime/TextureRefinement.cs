@@ -7,6 +7,20 @@ using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
 {
+    public struct UnwrappedMeshResult
+    {
+        public Vector3[] Positions;
+        public Vector3[] Normals;
+        public Vector2[] UVs;
+        public float[] RawUVs;
+        public int[] Indices;
+        public int AtlasWidth;
+        public int AtlasHeight;
+        internal Vector3[] OrigPositions;
+        internal Vector3[] OrigNormals;
+        internal int[] OrigIndices;
+    }
+
     public struct RefinedTextureResult
     {
         public Vector3[] Positions;
@@ -28,6 +42,79 @@ namespace Genesis.RoomScan
         private const int GpuVertexStride = 32; // float3 pos + float3 norm + uint color + uint voxelIdx
 
         public static event Action<string> StatusChanged;
+
+        // ═══════════════════════════════════════════════════════════════
+        //  UV UNWRAP (shared prerequisite for both on-device and HQ refine)
+        // ═══════════════════════════════════════════════════════════════
+
+        public static async Task<UnwrappedMeshResult> UnwrapMeshAsync(
+            string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048)
+        {
+            ReportStatus("Reading mesh from GPU...");
+            var (positions, normals, colors, indices) = await ReadbackMeshAsync();
+            if (positions == null || positions.Length == 0)
+                throw new InvalidOperationException("Mesh readback returned no vertices");
+
+            Debug.Log($"[TextureRefine] Readback: {positions.Length} verts, {indices.Length / 3} tris");
+
+            ReportStatus("UV unwrapping...");
+            XAtlasWrapper.Result uvResult = default;
+            Vector3[] inPos = positions;
+            Vector3[] inNorm = normals;
+            int[] inIdx = indices;
+
+            await Task.Run(() =>
+            {
+                float[] flatPos = new float[inPos.Length * 3];
+                float[] flatNorm = new float[inNorm.Length * 3];
+                for (int i = 0; i < inPos.Length; i++)
+                {
+                    flatPos[i * 3] = inPos[i].x;
+                    flatPos[i * 3 + 1] = inPos[i].y;
+                    flatPos[i * 3 + 2] = inPos[i].z;
+                    flatNorm[i * 3] = inNorm[i].x;
+                    flatNorm[i * 3 + 1] = inNorm[i].y;
+                    flatNorm[i * 3 + 2] = inNorm[i].z;
+                }
+                uvResult = XAtlasWrapper.Unwrap(flatPos, flatNorm, inPos.Length,
+                    inIdx, inIdx.Length, atlasResolution);
+            });
+
+            if (uvResult.VertexCount == 0)
+                throw new InvalidOperationException("xatlas produced no output vertices");
+
+            int atlasW = uvResult.AtlasWidth;
+            int atlasH = uvResult.AtlasHeight;
+            Debug.Log($"[TextureRefine] xatlas: {uvResult.VertexCount} verts, " +
+                      $"{uvResult.IndexCount / 3} tris, atlas {atlasW}x{atlasH}");
+
+            Vector3[] outPos = new Vector3[uvResult.VertexCount];
+            Vector3[] outNorm = new Vector3[uvResult.VertexCount];
+            Vector2[] outUVs = new Vector2[uvResult.VertexCount];
+            for (int i = 0; i < uvResult.VertexCount; i++)
+            {
+                int src = uvResult.Xrefs[i];
+                outPos[i] = inPos[src];
+                outNorm[i] = inNorm[src];
+                outUVs[i] = new Vector2(
+                    uvResult.UVs[i * 2] / atlasW,
+                    uvResult.UVs[i * 2 + 1] / atlasH);
+            }
+
+            return new UnwrappedMeshResult
+            {
+                Positions = outPos,
+                Normals = outNorm,
+                UVs = outUVs,
+                RawUVs = uvResult.UVs,
+                Indices = uvResult.Indices,
+                AtlasWidth = atlasW,
+                AtlasHeight = atlasH,
+                OrigPositions = inPos,
+                OrigNormals = inNorm,
+                OrigIndices = inIdx,
+            };
+        }
 
         // ═══════════════════════════════════════════════════════════════
         //  MAIN PIPELINE
@@ -378,6 +465,38 @@ namespace Genesis.RoomScan
             return atlas;
         }
 
+        internal static System.Collections.Generic.List<Keyframe> ParseKeyframeManifest(
+            string keyframeDir, Matrix4x4 keyframeRelocation)
+        {
+            string manifestPath = Path.Combine(keyframeDir, "frames.jsonl");
+            string imagesDir = Path.Combine(keyframeDir, "images");
+            var metaList = new System.Collections.Generic.List<Keyframe>();
+
+            if (!File.Exists(manifestPath)) return metaList;
+
+            string[] lines = File.ReadAllLines(manifestPath);
+            foreach (string line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var kf = ParseKeyframe(line, imagesDir);
+                    if (string.IsNullOrEmpty(kf.JpgPath)) continue;
+                    if (keyframeRelocation != Matrix4x4.identity)
+                    {
+                        kf.Position = keyframeRelocation.MultiplyPoint3x4(kf.Position);
+                        kf.Rotation = keyframeRelocation.rotation * kf.Rotation;
+                    }
+                    metaList.Add(kf);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[TextureRefine] Skip keyframe: {e.Message}");
+                }
+            }
+            return metaList;
+        }
+
         static Keyframe ParseKeyframe(string jsonLine, string imagesDir)
         {
             var kf = new Keyframe();
@@ -502,102 +621,30 @@ namespace Genesis.RoomScan
         public static async Task<RefinedTextureResult> RefineWithPreDecodedAsync(
             string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048)
         {
-            // Step 1: Readback mesh from GPU (must be on main thread for AsyncGPUReadback)
-            ReportStatus("Reading mesh from GPU...");
-            var (positions, normals, colors, indices) = await ReadbackMeshAsync();
-            if (positions == null || positions.Length == 0)
-                throw new InvalidOperationException("Mesh readback returned no vertices");
+            // Steps 1-3: Readback mesh, UV unwrap
+            var mesh = await UnwrapMeshAsync(keyframeDir, keyframeRelocation, atlasResolution);
 
-            Debug.Log($"[TextureRefine] Readback: {positions.Length} verts, {indices.Length / 3} tris");
-
-            // Step 2: Parse keyframe metadata (poses + intrinsics) without decoding images
+            // Parse keyframe metadata
             ReportStatus("Loading keyframe metadata...");
-            string manifestPath = Path.Combine(keyframeDir, "frames.jsonl");
-            string imagesDir = Path.Combine(keyframeDir, "images");
-            if (!File.Exists(manifestPath))
-                throw new InvalidOperationException("No frames.jsonl found");
-
-            string[] lines = File.ReadAllLines(manifestPath);
-            var metaList = new System.Collections.Generic.List<Keyframe>();
-            foreach (string line in lines)
-            {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                try
-                {
-                    var kf = ParseKeyframe(line, imagesDir);
-                    if (string.IsNullOrEmpty(kf.JpgPath)) continue; // no image file
-                    // Apply relocation to keyframe poses if scan was reloaded
-                    if (keyframeRelocation != Matrix4x4.identity)
-                    {
-                        kf.Position = keyframeRelocation.MultiplyPoint3x4(kf.Position);
-                        kf.Rotation = keyframeRelocation.rotation * kf.Rotation;
-                    }
-                    metaList.Add(kf);
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"[TextureRefine] Skip keyframe: {e.Message}");
-                }
-            }
+            var metaList = ParseKeyframeManifest(keyframeDir, keyframeRelocation);
             if (metaList.Count == 0)
                 throw new InvalidOperationException("No keyframes available for baking");
 
             Debug.Log($"[TextureRefine] Found {metaList.Count} keyframes" +
                 (keyframeRelocation != Matrix4x4.identity ? " (relocated)" : ""));
 
-            // Step 3: xatlas UV unwrap on background thread
-            ReportStatus("UV unwrapping...");
-            XAtlasWrapper.Result uvResult = default;
-            Vector3[] inPos = positions;
-            Vector3[] inNorm = normals;
-            int[] inIdx = indices;
-
-            await Task.Run(() =>
-            {
-                float[] flatPos = new float[inPos.Length * 3];
-                float[] flatNorm = new float[inNorm.Length * 3];
-                for (int i = 0; i < inPos.Length; i++)
-                {
-                    flatPos[i * 3] = inPos[i].x;
-                    flatPos[i * 3 + 1] = inPos[i].y;
-                    flatPos[i * 3 + 2] = inPos[i].z;
-                    flatNorm[i * 3] = inNorm[i].x;
-                    flatNorm[i * 3 + 1] = inNorm[i].y;
-                    flatNorm[i * 3 + 2] = inNorm[i].z;
-                }
-                uvResult = XAtlasWrapper.Unwrap(flatPos, flatNorm, inPos.Length,
-                    inIdx, inIdx.Length, atlasResolution);
-            });
-
-            if (uvResult.VertexCount == 0)
-                throw new InvalidOperationException("xatlas produced no output vertices");
-
-            int atlasW = uvResult.AtlasWidth;
-            int atlasH = uvResult.AtlasHeight;
-            Debug.Log($"[TextureRefine] xatlas: {uvResult.VertexCount} verts, " +
-                      $"{uvResult.IndexCount / 3} tris, atlas {atlasW}x{atlasH}");
-
-            // Remap vertices
-            Vector3[] outPos = new Vector3[uvResult.VertexCount];
-            Vector3[] outNorm = new Vector3[uvResult.VertexCount];
-            Vector2[] outUVs = new Vector2[uvResult.VertexCount];
-            for (int i = 0; i < uvResult.VertexCount; i++)
-            {
-                int src = uvResult.Xrefs[i];
-                outPos[i] = inPos[src];
-                outNorm[i] = inNorm[src];
-                outUVs[i] = new Vector2(
-                    uvResult.UVs[i * 2] / atlasW,
-                    uvResult.UVs[i * 2 + 1] / atlasH);
-            }
-
             // Step 4: Bake atlas — decode one keyframe at a time to avoid OOM.
-            // JPEG decode requires main thread (ImageConversion.LoadImage), so we
-            // interleave: decode on main thread, bake that frame on BG thread.
             ReportStatus("Baking textures...");
-            float[] rawUVs = uvResult.UVs;
-            int[] outIndices = uvResult.Indices;
-            int outVertCount = uvResult.VertexCount;
+            Vector3[] inPos = mesh.OrigPositions;
+            Vector3[] inNorm = mesh.OrigNormals;
+            int[] inIdx = mesh.OrigIndices;
+            Vector3[] outPos = mesh.Positions;
+            Vector3[] outNorm = mesh.Normals;
+            float[] rawUVs = mesh.RawUVs;
+            int[] outIndices = mesh.Indices;
+            int outVertCount = mesh.Positions.Length;
+            int atlasW = mesh.AtlasWidth;
+            int atlasH = mesh.AtlasHeight;
             int texelCount = atlasW * atlasH;
             byte[] atlasPixels = new byte[texelCount * 4];
             float[] bestScore = new float[texelCount];
@@ -728,10 +775,10 @@ namespace Genesis.RoomScan
 
             return new RefinedTextureResult
             {
-                Positions = outPos,
-                Normals = outNorm,
-                UVs = outUVs,
-                Indices = outIndices,
+                Positions = mesh.Positions,
+                Normals = mesh.Normals,
+                UVs = mesh.UVs,
+                Indices = mesh.Indices,
                 AtlasPixels = atlasPixels,
                 AtlasWidth = atlasW,
                 AtlasHeight = atlasH
