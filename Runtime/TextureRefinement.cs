@@ -570,6 +570,29 @@ namespace Genesis.RoomScan
                 UnityEngine.Object.Destroy(tex);
                 jpgBytes = null;
 
+                // Debug: log first keyframe details
+                if (ki == 0)
+                {
+                    Debug.Log($"[TextureRefine] KF0: pos={kf.Position}, rot={kf.Rotation}, " +
+                        $"fx={kf.Fx}, fy={kf.Fy}, cx={kf.Cx}, cy={kf.Cy}, " +
+                        $"imgSize={kf.Width}x{kf.Height}, pixLen={kf.Pixels.Length}");
+                    Debug.Log($"[TextureRefine] V0: pos={outPos[0]}, norm={outNorm[0]}, " +
+                        $"uv=({rawUVs[0]},{rawUVs[1]})");
+                    // Check first pixel values
+                    if (kf.Pixels.Length >= 4)
+                        Debug.Log($"[TextureRefine] KF0 pixel[0]: R={kf.Pixels[0]} G={kf.Pixels[1]} " +
+                            $"B={kf.Pixels[2]} A={kf.Pixels[3]}");
+                    // Project first vertex
+                    var vm = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+                    var s = ProjectToScreen(outPos[0], vm, kf);
+                    Debug.Log($"[TextureRefine] V0 screen={s}");
+                    // Check center pixel
+                    int midIdx = (kf.Height / 2 * kf.Width + kf.Width / 2) * 4;
+                    if (midIdx + 3 < kf.Pixels.Length)
+                        Debug.Log($"[TextureRefine] KF0 center pixel: R={kf.Pixels[midIdx]} " +
+                            $"G={kf.Pixels[midIdx + 1]} B={kf.Pixels[midIdx + 2]} A={kf.Pixels[midIdx + 3]}");
+                }
+
                 // Bake this single keyframe on BG thread
                 Keyframe capturedKf = kf;
                 await Task.Run(() =>
@@ -584,6 +607,43 @@ namespace Genesis.RoomScan
                     ReportStatus($"Baking... {ki + 1}/{metaList.Count}");
                     Debug.Log($"[TextureRefine] Baked keyframe {ki + 1}/{metaList.Count}");
                 }
+            }
+
+            // Debug: count filled texels and sample stats before dilation
+            {
+                int filled = 0, totalR = 0, totalG = 0, totalB = 0;
+                for (int i = 0; i < texelCount; i++)
+                {
+                    if (atlasPixels[i * 4 + 3] != 0)
+                    {
+                        filled++;
+                        totalR += atlasPixels[i * 4];
+                        totalG += atlasPixels[i * 4 + 1];
+                        totalB += atlasPixels[i * 4 + 2];
+                    }
+                }
+                float avgR = filled > 0 ? totalR / (float)filled : 0;
+                float avgG = filled > 0 ? totalG / (float)filled : 0;
+                float avgB = filled > 0 ? totalB / (float)filled : 0;
+                Debug.Log($"[TextureRefine] Pre-dilation: {filled}/{texelCount} texels filled " +
+                    $"({100f * filled / texelCount:F1}%), avgRGB=({avgR:F0},{avgG:F0},{avgB:F0})");
+            }
+
+            // Save debug atlas PNG
+            try
+            {
+                var debugTex = new Texture2D(atlasW, atlasH, TextureFormat.RGBA32, false);
+                debugTex.SetPixelData(atlasPixels, 0);
+                debugTex.Apply();
+                byte[] png = ImageConversion.EncodeToPNG(debugTex);
+                UnityEngine.Object.Destroy(debugTex);
+                string debugPath = Path.Combine(Application.persistentDataPath, "debug_atlas.png");
+                File.WriteAllBytes(debugPath, png);
+                Debug.Log($"[TextureRefine] Debug atlas saved: {debugPath} ({png.Length / 1024}KB)");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[TextureRefine] Failed to save debug atlas: {e.Message}");
             }
 
             // Step 5: Dilation
