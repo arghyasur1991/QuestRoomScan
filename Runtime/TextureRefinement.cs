@@ -409,16 +409,24 @@ namespace Genesis.RoomScan
                     if (string.IsNullOrEmpty(kf.JpgPath)) continue;
 
                     byte[] jpgBytes = File.ReadAllBytes(kf.JpgPath);
-                    var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    var tex = new Texture2D(2, 2);
                     if (!ImageConversion.LoadImage(tex, jpgBytes))
                     {
                         UnityEngine.Object.Destroy(tex);
                         continue;
                     }
 
-                    byte[] rgba = tex.GetRawTextureData();
                     int w = tex.width, h = tex.height;
+                    Color32[] c32 = tex.GetPixels32();
                     UnityEngine.Object.Destroy(tex);
+                    byte[] rgba = new byte[c32.Length * 4];
+                    for (int ci = 0; ci < c32.Length; ci++)
+                    {
+                        rgba[ci * 4] = c32[ci].r;
+                        rgba[ci * 4 + 1] = c32[ci].g;
+                        rgba[ci * 4 + 2] = c32[ci].b;
+                        rgba[ci * 4 + 3] = 255;
+                    }
 
                     kf.Pixels = rgba;
                     kf.Width = w;
@@ -558,17 +566,28 @@ namespace Genesis.RoomScan
                 try { jpgBytes = File.ReadAllBytes(kf.JpgPath); }
                 catch { continue; }
 
-                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                var tex = new Texture2D(2, 2);
                 if (!ImageConversion.LoadImage(tex, jpgBytes))
                 {
                     UnityEngine.Object.Destroy(tex);
                     continue;
                 }
-                kf.Pixels = tex.GetRawTextureData();
                 kf.Width = tex.width;
                 kf.Height = tex.height;
+                // LoadImage may decode JPEG as RGB24 (no alpha). Force RGBA32 layout
+                // using GetPixels32 which handles any source format.
+                Color32[] colors = tex.GetPixels32();
                 UnityEngine.Object.Destroy(tex);
                 jpgBytes = null;
+                byte[] rgba = new byte[colors.Length * 4];
+                for (int ci = 0; ci < colors.Length; ci++)
+                {
+                    rgba[ci * 4] = colors[ci].r;
+                    rgba[ci * 4 + 1] = colors[ci].g;
+                    rgba[ci * 4 + 2] = colors[ci].b;
+                    rgba[ci * 4 + 3] = 255;
+                }
+                kf.Pixels = rgba;
 
                 // Debug: log first keyframe details
                 if (ki == 0)
