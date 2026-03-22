@@ -1015,33 +1015,47 @@ namespace Genesis.RoomScan.Editor
                 return;
             }
 
-            bool macOk = BuildXAtlasMacOS(pkgRoot, srcApi, srcImpl);
-            bool androidOk = BuildXAtlasAndroid(pkgRoot, srcApi, srcImpl);
+            var builds = new System.Collections.Generic.List<(string label, string exe, string args, string outAssetPath)>();
 
-            AssetDatabase.Refresh();
+            // macOS
+            {
+                string outDir = Path.Combine(pkgRoot, "Plugins/macOS");
+                Directory.CreateDirectory(outDir);
+                string outPath = Path.Combine(outDir, "libxatlas.bundle");
+                string bArgs = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden " +
+                               $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"";
+                builds.Add(("macOS xatlas", "clang++", bArgs,
+                    "Packages/com.genesis.roomscan/Runtime/Plugins/macOS/libxatlas.bundle"));
+            }
 
-            string msg = $"macOS: {(macOk ? "OK" : "FAILED")}\nAndroid: {(androidOk ? "OK" : "FAILED")}";
-            if (macOk || androidOk)
-                Debug.Log($"[RoomScan Setup] xatlas build complete — {msg}");
-            else
-                Debug.LogError($"[RoomScan Setup] xatlas build failed — {msg}");
-        }
-
-        static bool BuildXAtlasMacOS(string pkgRoot, string srcApi, string srcImpl)
-        {
-            string outDir = Path.Combine(pkgRoot, "Plugins/macOS");
-            Directory.CreateDirectory(outDir);
-            string outPath = Path.Combine(outDir, "libxatlas.bundle");
-
-            string args = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden " +
-                          $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"";
-
-            return RunProcess("clang++", args, "macOS xatlas");
-        }
-
-        static bool BuildXAtlasAndroid(string pkgRoot, string srcApi, string srcImpl)
-        {
+            // Android ARM64
 #if UNITY_EDITOR_OSX || UNITY_EDITOR_LINUX || UNITY_EDITOR_WIN
+            {
+                string ndkClang = FindNdkClang();
+                if (ndkClang != null)
+                {
+                    string outDir = Path.Combine(pkgRoot, "Plugins/Android");
+                    Directory.CreateDirectory(outDir);
+                    string outPath = Path.Combine(outDir, "libxatlas.so");
+                    string bArgs = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden " +
+                                   $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"";
+                    builds.Add(("Android xatlas", ndkClang, bArgs,
+                        "Packages/com.genesis.roomscan/Runtime/Plugins/Android/libxatlas.so"));
+                }
+            }
+#endif
+
+            if (builds.Count == 0)
+            {
+                Debug.LogError("[RoomScan Setup] No build targets available");
+                return;
+            }
+
+            StartAsyncBuilds(builds);
+        }
+
+        static string FindNdkClang()
+        {
             string ndkPath = null;
             try
             {
@@ -1049,87 +1063,158 @@ namespace Genesis.RoomScan.Editor
             }
             catch
             {
-                Debug.LogWarning("[RoomScan Setup] Android NDK path not configured in Unity. " +
-                    "Skipping Android xatlas build.");
-                return false;
+                Debug.LogWarning("[RoomScan Setup] Android NDK path not configured. Skipping Android build.");
+                return null;
             }
 
             if (string.IsNullOrEmpty(ndkPath) || !Directory.Exists(ndkPath))
             {
                 Debug.LogWarning($"[RoomScan Setup] NDK not found at: {ndkPath}");
-                return false;
+                return null;
             }
 
             string prebuilt = Path.Combine(ndkPath, "toolchains/llvm/prebuilt");
-            if (!Directory.Exists(prebuilt))
-            {
-                Debug.LogWarning($"[RoomScan Setup] NDK prebuilt dir not found: {prebuilt}");
-                return false;
-            }
+            if (!Directory.Exists(prebuilt)) return null;
 
             string[] hosts = Directory.GetDirectories(prebuilt);
-            if (hosts.Length == 0)
-            {
-                Debug.LogWarning("[RoomScan Setup] No host toolchain found in NDK prebuilt/");
-                return false;
-            }
+            if (hosts.Length == 0) return null;
 
             string clangpp = Path.Combine(hosts[0], "bin/aarch64-linux-android31-clang++");
-            if (!System.IO.File.Exists(clangpp))
-            {
-                Debug.LogWarning($"[RoomScan Setup] clang++ not found: {clangpp}");
-                return false;
-            }
-
-            string outDir = Path.Combine(pkgRoot, "Plugins/Android");
-            Directory.CreateDirectory(outDir);
-            string outPath = Path.Combine(outDir, "libxatlas.so");
-
-            string args = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden " +
-                          $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"";
-
-            return RunProcess(clangpp, args, "Android xatlas");
-#else
-            return false;
-#endif
+            return System.IO.File.Exists(clangpp) ? clangpp : null;
         }
 
-        static bool RunProcess(string exe, string args, string label)
+        // Async build state
+        static System.Collections.Generic.List<(string label, System.Diagnostics.Process proc, string outAssetPath,
+            System.Text.StringBuilder stdout, System.Text.StringBuilder stderr)> _activeBuilds;
+        static int _totalBuilds;
+
+        static void StartAsyncBuilds(
+            System.Collections.Generic.List<(string label, string exe, string args, string outAssetPath)> builds)
         {
-            try
+            _activeBuilds = new();
+            _totalBuilds = builds.Count;
+
+            foreach (var (label, exe, args, outAssetPath) in builds)
             {
-                var psi = new System.Diagnostics.ProcessStartInfo
+                try
                 {
-                    FileName = exe,
-                    Arguments = args,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = exe,
+                        Arguments = args,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        CreateNoWindow = true
+                    };
 
-                using var proc = System.Diagnostics.Process.Start(psi);
-                string stdout = proc.StandardOutput.ReadToEnd();
-                string stderr = proc.StandardError.ReadToEnd();
-                proc.WaitForExit();
-
-                if (proc.ExitCode != 0)
-                {
-                    Debug.LogError($"[RoomScan Setup] {label} build failed (exit {proc.ExitCode}):\n{stderr}");
-                    return false;
+                    var proc = System.Diagnostics.Process.Start(psi);
+                    var stdoutBuf = new System.Text.StringBuilder();
+                    var stderrBuf = new System.Text.StringBuilder();
+                    proc.OutputDataReceived += (_, e) => { if (e.Data != null) stdoutBuf.AppendLine(e.Data); };
+                    proc.ErrorDataReceived += (_, e) => { if (e.Data != null) stderrBuf.AppendLine(e.Data); };
+                    proc.BeginOutputReadLine();
+                    proc.BeginErrorReadLine();
+                    _activeBuilds.Add((label, proc, outAssetPath, stdoutBuf, stderrBuf));
                 }
-
-                if (!string.IsNullOrEmpty(stderr))
-                    Debug.LogWarning($"[RoomScan Setup] {label} warnings:\n{stderr}");
-
-                Debug.Log($"[RoomScan Setup] {label} build succeeded");
-                return true;
+                catch (System.Exception e)
+                {
+                    Debug.LogError($"[RoomScan Setup] Failed to start {label}: {e.Message}");
+                }
             }
-            catch (System.Exception e)
+
+            if (_activeBuilds.Count == 0)
             {
-                Debug.LogError($"[RoomScan Setup] {label} build exception: {e.Message}");
-                return false;
+                Debug.LogError("[RoomScan Setup] No builds started");
+                return;
             }
+
+            EditorApplication.update += PollXAtlasBuilds;
+            EditorUtility.DisplayProgressBar("Building xatlas", "Compiling native plugins...", 0f);
+        }
+
+        static void PollXAtlasBuilds()
+        {
+            if (_activeBuilds == null) return;
+
+            int done = 0;
+            foreach (var (label, proc, _, _, _) in _activeBuilds)
+                if (proc.HasExited) done++;
+
+            float progress = (float)done / _totalBuilds;
+            string building = done < _totalBuilds
+                ? $"Compiling... ({done}/{_totalBuilds} done)"
+                : "Finishing...";
+            EditorUtility.DisplayProgressBar("Building xatlas", building, progress);
+
+            if (done < _totalBuilds) return;
+
+            // All done
+            EditorApplication.update -= PollXAtlasBuilds;
+            EditorUtility.ClearProgressBar();
+
+            bool allOk = true;
+            var results = new System.Text.StringBuilder();
+
+            foreach (var (label, proc, outAssetPath, _, stderrBuf) in _activeBuilds)
+            {
+                string stderr = stderrBuf.ToString();
+                bool ok = proc.ExitCode == 0;
+                allOk &= ok;
+                results.AppendLine($"  {label}: {(ok ? "OK" : $"FAILED (exit {proc.ExitCode})")}");
+
+                if (!ok)
+                    Debug.LogError($"[RoomScan Setup] {label} build failed (exit {proc.ExitCode}):\n{stderr}");
+                else if (!string.IsNullOrWhiteSpace(stderr))
+                    Debug.LogWarning($"[RoomScan Setup] {label} warnings:\n{stderr}");
+                else
+                    Debug.Log($"[RoomScan Setup] {label} build succeeded");
+
+                proc.Dispose();
+            }
+
+            AssetDatabase.Refresh();
+
+            // Configure plugin importers after AssetDatabase sees the new files
+            EditorApplication.delayCall += () =>
+            {
+                foreach (var (label, _, outAssetPath, _, _) in _activeBuilds)
+                    ConfigurePluginImporter(outAssetPath);
+                _activeBuilds = null;
+            };
+
+            if (allOk)
+                Debug.Log($"[RoomScan Setup] xatlas build complete:\n{results}");
+        }
+
+        static void ConfigurePluginImporter(string assetPath)
+        {
+            var importer = AssetImporter.GetAtPath(assetPath) as PluginImporter;
+            if (importer == null)
+            {
+                Debug.LogWarning($"[RoomScan Setup] PluginImporter not found for {assetPath}");
+                return;
+            }
+
+            bool isAndroid = assetPath.Contains("/Android/");
+
+            importer.SetCompatibleWithAnyPlatform(false);
+            importer.SetCompatibleWithEditor(!isAndroid);
+            importer.SetCompatibleWithPlatform(BuildTarget.Android, isAndroid);
+            importer.SetCompatibleWithPlatform(BuildTarget.StandaloneOSX, !isAndroid);
+
+            if (isAndroid)
+                importer.SetPlatformData(BuildTarget.Android, "CPU", "ARM64");
+
+            if (!isAndroid)
+            {
+                importer.SetEditorData("CPU", "AnyCPU");
+                importer.SetEditorData("OS", "OSX");
+            }
+
+            importer.SaveAndReimport();
+            Debug.Log($"[RoomScan Setup] Configured plugin importer: {assetPath}" +
+                      (isAndroid ? " (Android ARM64)" : " (macOS Editor)"));
         }
 
         // -- Master Button ------------------------------------------------
@@ -1175,13 +1260,11 @@ namespace Genesis.RoomScan.Editor
             if (!_xatlasAndroid || !_xatlasMacOS)
                 BuildXAtlasPlugin();
 
-            // RoomScanner and GSplatManager resolve siblings via GetComponent —
-            // no serialized wiring needed.
-
             MarkDirty();
             Refresh();
 
-            Debug.Log("[RoomScan Setup] Scene setup complete.");
+            Debug.Log("[RoomScan Setup] Scene setup complete." +
+                (!_xatlasAndroid || !_xatlasMacOS ? " (xatlas build running in background)" : ""));
         }
 
         // =================================================================
