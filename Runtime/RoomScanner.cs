@@ -617,6 +617,14 @@ namespace Genesis.RoomScan
                 HasRefinedTexture = true;
                 SetRenderMode(ScanRenderMode.Refined);
                 Debug.Log("[RoomScan] On-device texture refinement complete");
+
+                // Persist immediately so data survives app kill
+                if (_persistence != null)
+                {
+                    RefineStatus = "Saving...";
+                    await _persistence.SaveAsync();
+                    Debug.Log("[RoomScan] Refined data auto-saved to disk");
+                }
             }
             catch (Exception e)
             {
@@ -659,7 +667,7 @@ namespace Genesis.RoomScan
                 HQRefineStatus = "Server processing...";
 
                 using var client = new System.Net.Http.HttpClient();
-                client.Timeout = TimeSpan.FromMinutes(10);
+                client.Timeout = TimeSpan.FromMinutes(30);
                 var content = new System.Net.Http.ByteArrayContent(zipData);
                 content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
                 var response = await client.PostAsync($"{serverUrl}/refine-texture", content);
@@ -683,6 +691,24 @@ namespace Genesis.RoomScan
 
                     EnsureRefinedRenderer();
                     SetRenderMode(ScanRenderMode.HQRefined);
+
+                    // Persist HQ atlas immediately so it survives app kill
+                    if (_persistence != null)
+                    {
+                        HQRefineStatus = "Saving...";
+                        try
+                        {
+                            string hqPath = _persistence.HQAtlasPath;
+                            byte[] rawAtlas = tex.GetRawTextureData();
+                            await Task.Run(() => File.WriteAllBytes(hqPath, rawAtlas));
+                            Debug.Log($"[RoomScan] HQ atlas saved to {hqPath}");
+                        }
+                        catch (Exception saveEx)
+                        {
+                            Debug.LogWarning($"[RoomScan] Failed to persist HQ atlas: {saveEx.Message}");
+                        }
+                    }
+
                     HQRefineStatus = "Done";
                     Debug.Log($"[RoomScan] HQ texture refinement complete: {tex.width}x{tex.height}");
                 }
