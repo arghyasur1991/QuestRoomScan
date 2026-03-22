@@ -345,7 +345,6 @@ namespace Genesis.RoomScan
                         await Task.Run(() => plyBytes = File.ReadAllBytes(splatPath));
                         await SwitchToUnityMainThreadAsync(unitySync);
 
-                        var scanner = RoomScanner.Instance;
                         var gm = scanner != null ? scanner.GetComponent<GSplat.GSplatManager>() : null;
                         if (gm != null && plyBytes != null && plyBytes.Length > 0)
                         {
