@@ -639,6 +639,13 @@ namespace Genesis.RoomScan
 
             try
             {
+                if (!HasRefinedTexture || LastRefinedResult == null)
+                {
+                    HQRefineStatus = "Run on-device Refine first";
+                    Debug.LogWarning("[RoomScan] HQ refine requires on-device refinement first (need UV-unwrapped mesh)");
+                    return;
+                }
+
                 if (_gsplatServerClient == null)
                 {
                     HQRefineStatus = "No server configured";
