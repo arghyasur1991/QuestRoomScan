@@ -463,7 +463,7 @@ namespace Genesis.RoomScan
                     }
                 }
 
-                Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount}, splat={splatExists}, refined={hasRefined}, hq={hasHQ})");
+                Debug.Log($"[RoomScan] Persistence: loaded scan (integrations={savedIntCount}, splat={splatExists}, mesh={hasMesh}, atlas={hasAtlas}, hq={hasHQ})");
                 LoadCompleted?.Invoke();
                 return true;
             }
