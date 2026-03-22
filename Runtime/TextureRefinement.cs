@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Threading;
 using System.Threading.Tasks;
 using Unity.Collections;
 using UnityEngine;
@@ -755,7 +754,7 @@ namespace Genesis.RoomScan
 
             int triCount = triData != null ? triData.Length : indices.Length / 3;
 
-            Parallel.For(0, triCount, t =>
+            for (int t = 0; t < triCount; t++)
             {
                 int i0, i1, i2;
                 Vector3 faceNormal, centroid;
@@ -764,7 +763,7 @@ namespace Genesis.RoomScan
                 if (triData != null)
                 {
                     ref readonly TriData td = ref triData[t];
-                    if (td.I0 < 0) return;
+                    if (td.I0 < 0) continue;
                     i0 = td.I0; i1 = td.I1; i2 = td.I2;
                     faceNormal = td.FaceNormal;
                     centroid = td.Centroid;
@@ -775,7 +774,7 @@ namespace Genesis.RoomScan
                 else
                 {
                     i0 = indices[t * 3]; i1 = indices[t * 3 + 1]; i2 = indices[t * 3 + 2];
-                    if (i0 >= outVertCount || i1 >= outVertCount || i2 >= outVertCount) return;
+                    if (i0 >= outVertCount || i1 >= outVertCount || i2 >= outVertCount) continue;
                     Vector3 p = outPos[i0], q = outPos[i1], r = outPos[i2];
                     faceNormal = Vector3.Cross(q - p, r - p).normalized;
                     if (faceNormal.sqrMagnitude < 0.001f) faceNormal = outNorm[i0];
@@ -787,7 +786,7 @@ namespace Genesis.RoomScan
 
                 Vector3 viewDir = (camPos - centroid).normalized;
                 float dot = Vector3.Dot(faceNormal, viewDir);
-                if (dot <= 0.05f) return;
+                if (dot <= 0.05f) continue;
 
                 Vector3 p0 = outPos[i0], p1 = outPos[i1], p2 = outPos[i2];
                 Vector2 s0 = ProjectToScreen(p0, viewMat, kf);
@@ -797,7 +796,7 @@ namespace Genesis.RoomScan
                 if (!IsInFrustum(s0, kf.Width, kf.Height) &&
                     !IsInFrustum(s1, kf.Width, kf.Height) &&
                     !IsInFrustum(s2, kf.Width, kf.Height))
-                    return;
+                    continue;
 
                 float dist = Vector3.Distance(camPos, centroid);
                 float score = dot / Mathf.Max(dist, 0.1f);
@@ -806,7 +805,7 @@ namespace Genesis.RoomScan
                     u0, v0, u1, v1, u2, v2,
                     s0, s1, s2,
                     score, kf, depthBuf, p0, p1, p2, viewMat);
-            });
+            }
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -957,8 +956,8 @@ namespace Genesis.RoomScan
                         float sx = bw0 * s0.x + bw1 * s1.x + bw2 * s2.x;
                         float sy = bw0 * s0.y + bw1 * s1.y + bw2 * s2.y;
 
-                        int px = (int)(sx + 0.5f);
-                        int screenY = (int)(sy + 0.5f);
+                        int px = Mathf.RoundToInt(sx);
+                        int screenY = Mathf.RoundToInt(sy);
                         if ((uint)px >= (uint)kfW || (uint)screenY >= (uint)kfH) continue;
 
                         Vector3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
