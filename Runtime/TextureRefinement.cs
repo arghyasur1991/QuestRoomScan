@@ -547,84 +547,14 @@ namespace Genesis.RoomScan
             return kf;
         }
 
-        /// <summary>
-        /// Pre-decodes JPEG keyframes on the main thread into RGBA pixel arrays.
-        /// Must be called before background bake.
-        /// </summary>
-        static (byte[][] pixels, int[] widths, int[] heights, Keyframe[] keyframes)
-            PreDecodeKeyframes(string keyframeDir)
-        {
-            string manifestPath = Path.Combine(keyframeDir, "frames.jsonl");
-            if (!File.Exists(manifestPath))
-                return (null, null, null, null);
-
-            string[] lines = File.ReadAllLines(manifestPath);
-            string imagesDir = Path.Combine(keyframeDir, "images");
-            var pixelsList = new System.Collections.Generic.List<byte[]>();
-            var widthsList = new System.Collections.Generic.List<int>();
-            var heightsList = new System.Collections.Generic.List<int>();
-            var kfList = new System.Collections.Generic.List<Keyframe>();
-
-            foreach (string line in lines)
-            {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                try
-                {
-                    var kf = ParseKeyframe(line, imagesDir);
-                    if (string.IsNullOrEmpty(kf.JpgPath)) continue;
-
-                    byte[] jpgBytes = File.ReadAllBytes(kf.JpgPath);
-                    var tex = new Texture2D(2, 2);
-                    if (!ImageConversion.LoadImage(tex, jpgBytes))
-                    {
-                        UnityEngine.Object.Destroy(tex);
-                        continue;
-                    }
-
-                    int w = tex.width, h = tex.height;
-                    Color32[] c32 = tex.GetPixels32();
-                    UnityEngine.Object.Destroy(tex);
-                    byte[] rgba = new byte[c32.Length * 4];
-                    for (int ci = 0; ci < c32.Length; ci++)
-                    {
-                        rgba[ci * 4] = c32[ci].r;
-                        rgba[ci * 4 + 1] = c32[ci].g;
-                        rgba[ci * 4 + 2] = c32[ci].b;
-                        rgba[ci * 4 + 3] = 255;
-                    }
-
-                    kf.Pixels = rgba;
-                    kf.Width = w;
-                    kf.Height = h;
-
-                    pixelsList.Add(rgba);
-                    widthsList.Add(w);
-                    heightsList.Add(h);
-                    kfList.Add(kf);
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"[TextureRefine] Skip keyframe decode: {e.Message}");
-                }
-            }
-
-            return (pixelsList.ToArray(), widthsList.ToArray(), heightsList.ToArray(), kfList.ToArray());
-        }
 
         /// <summary>
-        /// Full pipeline with pre-decoded keyframes (main thread decodes, BG thread bakes).
+        /// Bakes a texture atlas from keyframe images onto a pre-unwrapped mesh.
+        /// Decodes one JPEG at a time on the main thread to avoid OOM, bakes on BG thread.
         /// </summary>
-        /// <param name="keyframeDir">Path to GSExport directory containing frames.jsonl + images/</param>
-        /// <param name="keyframeRelocation">Matrix to transform keyframe poses from old session to current world space.
-        /// Pass Matrix4x4.identity for live (non-reloaded) scans.</param>
-        /// <param name="atlasResolution">Max atlas dimension for xatlas</param>
-        public static async Task<RefinedTextureResult> RefineWithPreDecodedAsync(
-            string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048)
+        public static async Task<byte[]> BakeAtlasAsync(
+            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation)
         {
-            // Steps 1-3: Readback mesh, UV unwrap
-            var mesh = await UnwrapMeshAsync(keyframeDir, keyframeRelocation, atlasResolution);
-
-            // Parse keyframe metadata
             ReportStatus("Loading keyframe metadata...");
             var metaList = ParseKeyframeManifest(keyframeDir, keyframeRelocation);
             if (metaList.Count == 0)
@@ -633,7 +563,6 @@ namespace Genesis.RoomScan
             Debug.Log($"[TextureRefine] Found {metaList.Count} keyframes" +
                 (keyframeRelocation != Matrix4x4.identity ? " (relocated)" : ""));
 
-            // Step 4: Bake atlas — decode one keyframe at a time to avoid OOM.
             ReportStatus("Baking textures...");
             Vector3[] inPos = mesh.OrigPositions;
             Vector3[] inNorm = mesh.OrigNormals;
@@ -649,7 +578,6 @@ namespace Genesis.RoomScan
             byte[] atlasPixels = new byte[texelCount * 4];
             float[] bestScore = new float[texelCount];
 
-            // Pre-compute per-triangle data once (invariant across keyframes)
             TriData[] triData = null;
             await Task.Run(() => triData = PrecomputeTriData(outPos, outNorm, rawUVs, outIndices, outVertCount));
 
@@ -658,7 +586,6 @@ namespace Genesis.RoomScan
                 var kf = metaList[ki];
                 if (string.IsNullOrEmpty(kf.JpgPath)) continue;
 
-                // Read JPEG from disk on demand, decode on main thread (one at a time)
                 byte[] jpgBytes;
                 try { jpgBytes = File.ReadAllBytes(kf.JpgPath); }
                 catch { continue; }
@@ -671,8 +598,6 @@ namespace Genesis.RoomScan
                 }
                 kf.Width = tex.width;
                 kf.Height = tex.height;
-                // LoadImage may decode JPEG as RGB24 (no alpha). Force RGBA32 layout
-                // using GetPixels32 which handles any source format.
                 Color32[] pxColors = tex.GetPixels32();
                 UnityEngine.Object.Destroy(tex);
                 jpgBytes = null;
@@ -686,30 +611,13 @@ namespace Genesis.RoomScan
                 }
                 kf.Pixels = rgba;
 
-                // Debug: log first keyframe details
                 if (ki == 0)
                 {
                     Debug.Log($"[TextureRefine] KF0: pos={kf.Position}, rot={kf.Rotation}, " +
                         $"fx={kf.Fx}, fy={kf.Fy}, cx={kf.Cx}, cy={kf.Cy}, " +
                         $"imgSize={kf.Width}x{kf.Height}, pixLen={kf.Pixels.Length}");
-                    Debug.Log($"[TextureRefine] V0: pos={outPos[0]}, norm={outNorm[0]}, " +
-                        $"uv=({rawUVs[0]},{rawUVs[1]})");
-                    // Check first pixel values
-                    if (kf.Pixels.Length >= 4)
-                        Debug.Log($"[TextureRefine] KF0 pixel[0]: R={kf.Pixels[0]} G={kf.Pixels[1]} " +
-                            $"B={kf.Pixels[2]} A={kf.Pixels[3]}");
-                    // Project first vertex
-                    var vm = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
-                    var s = ProjectToScreen(outPos[0], vm, kf);
-                    Debug.Log($"[TextureRefine] V0 screen={s}");
-                    // Check center pixel
-                    int midIdx = (kf.Height / 2 * kf.Width + kf.Width / 2) * 4;
-                    if (midIdx + 3 < kf.Pixels.Length)
-                        Debug.Log($"[TextureRefine] KF0 center pixel: R={kf.Pixels[midIdx]} " +
-                            $"G={kf.Pixels[midIdx + 1]} B={kf.Pixels[midIdx + 2]} A={kf.Pixels[midIdx + 3]}");
                 }
 
-                // Bake this single keyframe on BG thread
                 Keyframe capturedKf = kf;
                 await Task.Run(() =>
                 {
@@ -725,27 +633,14 @@ namespace Genesis.RoomScan
                 }
             }
 
-            // Debug: count filled texels and sample stats before dilation
             {
-                int filled = 0, totalR = 0, totalG = 0, totalB = 0;
+                int filled = 0;
                 for (int i = 0; i < texelCount; i++)
-                {
-                    if (atlasPixels[i * 4 + 3] != 0)
-                    {
-                        filled++;
-                        totalR += atlasPixels[i * 4];
-                        totalG += atlasPixels[i * 4 + 1];
-                        totalB += atlasPixels[i * 4 + 2];
-                    }
-                }
-                float avgR = filled > 0 ? totalR / (float)filled : 0;
-                float avgG = filled > 0 ? totalG / (float)filled : 0;
-                float avgB = filled > 0 ? totalB / (float)filled : 0;
+                    if (atlasPixels[i * 4 + 3] != 0) filled++;
                 Debug.Log($"[TextureRefine] Pre-dilation: {filled}/{texelCount} texels filled " +
-                    $"({100f * filled / texelCount:F1}%), avgRGB=({avgR:F0},{avgG:F0},{avgB:F0})");
+                    $"({100f * filled / texelCount:F1}%)");
             }
 
-            // Save debug atlas PNG
             try
             {
                 var debugTex = new Texture2D(atlasW, atlasH, TextureFormat.RGBA32, false);
@@ -762,27 +657,16 @@ namespace Genesis.RoomScan
                 Debug.LogWarning($"[TextureRefine] Failed to save debug atlas: {e.Message}");
             }
 
-            // Step 5: Denoise — remove speckle outliers from baked atlas
             ReportStatus("Denoising...");
             await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
 
-            // Step 6: Dilation
             ReportStatus("Filling gaps...");
             await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
 
             ReportStatus("Done");
             Debug.Log($"[TextureRefine] Complete: {atlasW}x{atlasH} atlas");
 
-            return new RefinedTextureResult
-            {
-                Positions = mesh.Positions,
-                Normals = mesh.Normals,
-                UVs = mesh.UVs,
-                Indices = mesh.Indices,
-                AtlasPixels = atlasPixels,
-                AtlasWidth = atlasW,
-                AtlasHeight = atlasH
-            };
+            return atlasPixels;
         }
 
         static void BakeSingleKeyframe(

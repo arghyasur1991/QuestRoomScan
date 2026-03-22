@@ -148,6 +148,7 @@ namespace Genesis.RoomScan
         private Texture2D _refinedAtlasTexture;
         private Texture2D _hqAtlasTexture;
         private Mesh _refinedMesh;
+        private UnwrappedMeshResult? _cachedUnwrap;
 
         public bool HasRefinedTexture { get; private set; }
         public bool HasHQRefinedTexture { get; private set; }
@@ -333,6 +334,7 @@ namespace Genesis.RoomScan
             if (IsScanning) return;
             IsScanning = true;
             KeyframeRelocation = Matrix4x4.identity;
+            _cachedUnwrap = null;
 
             if (_keyframeCollector != null)
             {
@@ -609,11 +611,22 @@ namespace Genesis.RoomScan
             try
             {
                 string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
-                var result = await TextureRefinement.RefineWithPreDecodedAsync(
-                    keyframeDir, KeyframeRelocation);
+                var unwrap = await EnsureUnwrappedAsync();
+                byte[] atlasPixels = await TextureRefinement.BakeAtlasAsync(
+                    unwrap, keyframeDir, KeyframeRelocation);
 
-                // Create renderable assets on main thread
-                ApplyRefinedResult(result);
+                var result = new RefinedTextureResult
+                {
+                    Positions = unwrap.Positions,
+                    Normals = unwrap.Normals,
+                    UVs = unwrap.UVs,
+                    Indices = unwrap.Indices,
+                    AtlasPixels = atlasPixels,
+                    AtlasWidth = unwrap.AtlasWidth,
+                    AtlasHeight = unwrap.AtlasHeight
+                };
+
+                ApplyRefinedAtlas(result);
                 LastRefinedResult = result;
                 HasRefinedTexture = true;
                 SetRenderMode(ScanRenderMode.Refined);
@@ -645,55 +658,15 @@ namespace Genesis.RoomScan
                     return;
                 }
 
-                // Run UV unwrap if we don't already have one from on-device refine
-                UnwrappedMeshResult? unwrapped = null;
-                if (LastRefinedResult != null)
-                {
-                    // Reuse mesh from on-device refine
-                    var r = LastRefinedResult.Value;
-                    unwrapped = new UnwrappedMeshResult
-                    {
-                        Positions = r.Positions,
-                        Normals = r.Normals,
-                        UVs = r.UVs,
-                        Indices = r.Indices,
-                        AtlasWidth = r.AtlasWidth,
-                        AtlasHeight = r.AtlasHeight,
-                    };
-                    Debug.Log("[RoomScan] HQ refine: reusing existing UV-unwrapped mesh");
-                }
-                else
-                {
-                    HQRefineStatus = "UV unwrapping...";
-                    TextureRefinement.StatusChanged += s => HQRefineStatus = s;
-                    try
-                    {
-                        string kfDir = Path.Combine(Application.persistentDataPath, "GSExport");
-                        unwrapped = await TextureRefinement.UnwrapMeshAsync(kfDir, KeyframeRelocation);
-                        LastRefinedResult = new RefinedTextureResult
-                        {
-                            Positions = unwrapped.Value.Positions,
-                            Normals = unwrapped.Value.Normals,
-                            UVs = unwrapped.Value.UVs,
-                            Indices = unwrapped.Value.Indices,
-                            AtlasWidth = unwrapped.Value.AtlasWidth,
-                            AtlasHeight = unwrapped.Value.AtlasHeight,
-                            AtlasPixels = null,
-                        };
-                        EnsureRefinedMesh(LastRefinedResult.Value);
-                    }
-                    finally
-                    {
-                        TextureRefinement.StatusChanged -= s => HQRefineStatus = s;
-                    }
-                    Debug.Log("[RoomScan] HQ refine: UV unwrap complete");
-                }
+                TextureRefinement.StatusChanged += s => HQRefineStatus = s;
+                UnwrappedMeshResult unwrap;
+                try { unwrap = await EnsureUnwrappedAsync(); }
+                finally { TextureRefinement.StatusChanged -= s => HQRefineStatus = s; }
 
                 HQRefineStatus = "Packaging...";
                 string serverUrl = _gsplatServerClient.ServerUrl;
                 string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
-                var meshForZip = unwrapped.Value;
-                byte[] zipData = await Task.Run(() => PackRefinementZip(keyframeDir, meshForZip));
+                byte[] zipData = await Task.Run(() => PackRefinementZip(keyframeDir, unwrap));
 
                 if (zipData == null || zipData.Length == 0)
                 {
@@ -802,24 +775,18 @@ namespace Genesis.RoomScan
             public string message;
         }
 
-        private void ApplyRefinedResult(RefinedTextureResult result)
+        private void ApplyRefinedAtlas(RefinedTextureResult result)
         {
             _refinedAtlasTexture = new Texture2D(result.AtlasWidth, result.AtlasHeight,
                 TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
             _refinedAtlasTexture.Apply();
 
-            _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
-            _refinedMesh.SetVertices(result.Positions);
-            _refinedMesh.SetNormals(result.Normals);
-            _refinedMesh.SetUVs(0, result.UVs);
-            _refinedMesh.SetTriangles(result.Indices, 0);
-
-            Debug.Log($"[RoomScan] Refined mesh: {result.Positions.Length} verts, " +
-                $"{result.Indices.Length / 3} tris, atlas {result.AtlasWidth}x{result.AtlasHeight}");
+            Debug.Log($"[RoomScan] Refined atlas applied: " +
+                $"{result.Positions.Length} verts, {result.Indices.Length / 3} tris, " +
+                $"atlas {result.AtlasWidth}x{result.AtlasHeight}");
 
             EnsureRefinedRenderer();
-            _refinedMeshFilter.mesh = _refinedMesh;
             _refinedRenderer.material.mainTexture = _refinedAtlasTexture;
         }
 
@@ -843,14 +810,46 @@ namespace Genesis.RoomScan
             HasHQRefinedTexture = true;
         }
 
-        private void EnsureRefinedMesh(RefinedTextureResult result)
+        /// <summary>
+        /// Returns the cached UV-unwrapped mesh, or runs the unwrap if not yet done.
+        /// Shared by both on-device refine and HQ refine paths.
+        /// </summary>
+        private async Task<UnwrappedMeshResult> EnsureUnwrappedAsync()
+        {
+            if (_cachedUnwrap.HasValue)
+            {
+                Debug.Log("[RoomScan] Reusing cached UV-unwrapped mesh");
+                return _cachedUnwrap.Value;
+            }
+
+            string kfDir = Path.Combine(Application.persistentDataPath, "GSExport");
+            var unwrap = await TextureRefinement.UnwrapMeshAsync(kfDir, KeyframeRelocation);
+            _cachedUnwrap = unwrap;
+
+            EnsureRefinedMesh(unwrap);
+
+            LastRefinedResult = new RefinedTextureResult
+            {
+                Positions = unwrap.Positions,
+                Normals = unwrap.Normals,
+                UVs = unwrap.UVs,
+                Indices = unwrap.Indices,
+                AtlasWidth = unwrap.AtlasWidth,
+                AtlasHeight = unwrap.AtlasHeight,
+                AtlasPixels = null,
+            };
+
+            return unwrap;
+        }
+
+        private void EnsureRefinedMesh(UnwrappedMeshResult unwrap)
         {
             if (_refinedMesh != null) return;
             _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
-            _refinedMesh.SetVertices(result.Positions);
-            _refinedMesh.SetNormals(result.Normals);
-            _refinedMesh.SetUVs(0, result.UVs);
-            _refinedMesh.SetTriangles(result.Indices, 0);
+            _refinedMesh.SetVertices(unwrap.Positions);
+            _refinedMesh.SetNormals(unwrap.Normals);
+            _refinedMesh.SetUVs(0, unwrap.UVs);
+            _refinedMesh.SetTriangles(unwrap.Indices, 0);
             EnsureRefinedRenderer();
             _refinedMeshFilter.mesh = _refinedMesh;
         }
