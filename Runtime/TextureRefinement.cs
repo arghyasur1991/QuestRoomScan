@@ -465,7 +465,7 @@ namespace Genesis.RoomScan
             return atlas;
         }
 
-        internal static System.Collections.Generic.List<Keyframe> ParseKeyframeManifest(
+        static System.Collections.Generic.List<Keyframe> ParseKeyframeManifest(
             string keyframeDir, Matrix4x4 keyframeRelocation)
         {
             string manifestPath = Path.Combine(keyframeDir, "frames.jsonl");
