@@ -776,17 +776,19 @@ namespace Genesis.RoomScan
                 float sy = bw0 * s0.y + bw1 * s1.y + bw2 * s2.y;
 
                 int px = Mathf.RoundToInt(sx);
-                int py = Mathf.RoundToInt(sy);
-                if (px < 0 || px >= kf.Width || py < 0 || py >= kf.Height) continue;
+                int screenY = Mathf.RoundToInt(sy);
+                if (px < 0 || px >= kf.Width || screenY < 0 || screenY >= kf.Height) continue;
 
-                // Occlusion test: check if this point is behind something in the depth buffer
+                // Occlusion test uses screen-space Y (matches how depth buffer was built)
                 Vector3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
                 Vector3 camPt = viewMat.MultiplyPoint3x4(worldPt);
-                int depthIdx = py * kf.Width + px;
+                int depthIdx = screenY * kf.Width + px;
                 if (camPt.z > depthBuf[depthIdx] + 0.05f) continue;
 
-                // Sample keyframe pixel
-                int pixelIdx = (py * kf.Width + px) * 4;
+                // Sample keyframe pixel — flip Y because GetRawTextureData() has Y=0 at
+                // bottom while camera projection has Y=0 at top
+                int texY = kf.Height - 1 - screenY;
+                int pixelIdx = (texY * kf.Width + px) * 4;
                 if (pixelIdx + 3 >= kf.Pixels.Length) continue;
 
                 int atlasOff = texelIdx * 4;
