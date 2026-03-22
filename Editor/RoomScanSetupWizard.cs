@@ -52,6 +52,7 @@ namespace Genesis.RoomScan.Editor
         PanelInputConfiguration _panelInputConfig;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
+        bool _refinedShaderWired;
         bool _ugsRendererWired;
         bool _ugsRenderFeatureAdded;
         bool _deferredRendering;
@@ -144,6 +145,8 @@ namespace Genesis.RoomScan.Editor
                 "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
+            _refinedShaderWired = _roomScanner != null && AreFieldsAssigned(_roomScanner,
+                "refinedMeshShader");
             _ugsRendererWired = _ugsRenderer != null && AreFieldsAssigned(_ugsRenderer,
                 "m_ShaderSplats", "m_ShaderComposite", "m_ShaderDebugPoints", "m_ShaderDebugBoxes", "m_CSSplatUtilities");
             _ugsRenderFeatureAdded = HasUGSRenderFeature();
@@ -697,13 +700,14 @@ namespace Genesis.RoomScan.Editor
             StatusRow("MeshExtractor scan material", _meshMatWired);
             StatusRow("TriplanarCache bake compute", _triplanarWired);
             StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
+            StatusRow("RefinedMesh shader (texture refine)", _refinedShaderWired);
             StatusRow("UGS renderer shaders + compute", _ugsRendererWired);
             StatusRow("UGS RenderFeature on URP Renderer", _ugsRenderFeatureAdded);
             StatusRow("URP Deferred Rendering (req. by UGS)", _deferredRendering);
 
             bool needsFix = !_depthCaptureWired || !_volumeWired ||
                             !_meshMatWired || !_triplanarWired ||
-                            !_computeShaderWired ||
+                            !_computeShaderWired || !_refinedShaderWired ||
                             !_ugsRendererWired || !_ugsRenderFeatureAdded ||
                             !_deferredRendering;
             if (needsFix)
@@ -772,6 +776,15 @@ namespace Genesis.RoomScan.Editor
                 AssignCompute(so, "surfaceNetsCompute", PKG + "SurfaceNetsExtract.compute");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_meshExtractor);
+            }
+
+            // RoomScanner — refined mesh shader
+            if (_roomScanner != null)
+            {
+                var so = new SerializedObject(_roomScanner);
+                AssignAsset<Shader>(so, "refinedMeshShader", PKG + "RefinedMesh.shader");
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_roomScanner);
             }
 
             // UGS GaussianSplatRenderer — shaders + compute

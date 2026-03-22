@@ -76,6 +76,9 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Auto-save scan data when the application quits")]
         private bool saveOnQuit = false;
 
+        [Header("Texture Refinement")]
+        [SerializeField] internal Shader refinedMeshShader;
+
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
         // ─────────────────────────────────────────────────────────────
@@ -737,7 +740,8 @@ namespace Genesis.RoomScan
             _refinedMeshFilter = go.AddComponent<MeshFilter>();
             _refinedRenderer = go.AddComponent<MeshRenderer>();
 
-            var shader = Shader.Find("Genesis/RefinedMesh");
+            var shader = refinedMeshShader;
+            if (shader == null) shader = Shader.Find("Genesis/RefinedMesh");
             if (shader == null)
             {
                 Debug.LogWarning("[RoomScan] Genesis/RefinedMesh shader not found, using URP/Unlit");
