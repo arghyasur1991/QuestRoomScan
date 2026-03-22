@@ -391,7 +391,7 @@ namespace Genesis.RoomScan
         /// Pre-decodes JPEG keyframes on the main thread into RGBA pixel arrays.
         /// Must be called before background bake.
         /// </summary>
-        public static (byte[][] pixels, int[] widths, int[] heights, Keyframe[] keyframes)
+        static (byte[][] pixels, int[] widths, int[] heights, Keyframe[] keyframes)
             PreDecodeKeyframes(string keyframeDir)
         {
             string manifestPath = Path.Combine(keyframeDir, "frames.jsonl");
