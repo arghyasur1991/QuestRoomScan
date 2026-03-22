@@ -748,7 +748,7 @@ namespace Genesis.RoomScan
             int vertCount = mesh.Positions.Length;
             var clipVerts = new Vector3[vertCount];
             for (int i = 0; i < vertCount; i++)
-                clipVerts[i] = new Vector3(mesh.UVs[i].x * 2f - 1f, -(mesh.UVs[i].y * 2f - 1f), 0.5f);
+                clipVerts[i] = new Vector3(mesh.UVs[i].x * 2f - 1f, mesh.UVs[i].y * 2f - 1f, 0.5f);
 
             m.SetVertices(clipVerts);
             m.SetNormals(mesh.Normals);

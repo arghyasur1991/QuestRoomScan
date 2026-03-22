@@ -119,8 +119,9 @@ Shader "Hidden/Genesis/AtlasBake"
                 if (screenX < 0 || screenX >= _ImgW || screenY < 0 || screenY >= _ImgH)
                     discard;
 
-                // Occlusion: compare linear Z against the occlusion RT
-                float2 occUV = float2(screenX / _ImgW, screenY / _ImgH);
+                // Occlusion: projection renders screenY=0 at RT top, but
+                // tex2D v=0 samples RT bottom, so flip Y for correct lookup
+                float2 occUV = float2(screenX / _ImgW, 1.0 - screenY / _ImgH);
                 float closestZ = tex2D(_OcclusionTex, occUV).r;
                 if (camPt.z > closestZ + 0.05)
                     discard;
@@ -134,6 +135,7 @@ Shader "Hidden/Genesis/AtlasBake"
                 float score = dotNV / max(dist, 0.1);
                 outDepth = saturate(score * 0.1);
 
+                // Keyframe UV: screenY and tex2D both use bottom-to-top, no flip
                 float2 kfUV = float2(screenX / _ImgW, screenY / _ImgH);
                 outColor = tex2D(_KeyframeTex, kfUV);
             }
