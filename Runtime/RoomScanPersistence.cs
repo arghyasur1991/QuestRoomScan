@@ -400,7 +400,7 @@ namespace Genesis.RoomScan
                         atlasTex.SetPixelData(atlasBytes, 0);
                         atlasTex.Apply();
 
-                        var mesh = new Mesh { name = "RefinedScanMesh" };
+                        var mesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
                         mesh.SetVertices(meshData.Positions);
                         mesh.SetNormals(meshData.Normals);
                         mesh.SetUVs(0, meshData.UVs);

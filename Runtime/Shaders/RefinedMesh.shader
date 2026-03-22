@@ -13,6 +13,7 @@ Shader "Genesis/RefinedMesh"
         {
             Name "Unlit"
             Tags { "LightMode"="UniversalForward" }
+            Cull Off
 
             HLSLPROGRAM
             #pragma vertex vert

@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Genesis.RoomScan.GSplat;
 using Genesis.RoomScan.UI;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEngine.Serialization;
 
 namespace Genesis.RoomScan
@@ -709,11 +710,14 @@ namespace Genesis.RoomScan
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
             _refinedAtlasTexture.Apply();
 
-            _refinedMesh = new Mesh { name = "RefinedScanMesh" };
+            _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
             _refinedMesh.SetVertices(result.Positions);
             _refinedMesh.SetNormals(result.Normals);
             _refinedMesh.SetUVs(0, result.UVs);
             _refinedMesh.SetTriangles(result.Indices, 0);
+
+            Debug.Log($"[RoomScan] Refined mesh: {result.Positions.Length} verts, " +
+                $"{result.Indices.Length / 3} tris, atlas {result.AtlasWidth}x{result.AtlasHeight}");
 
             EnsureRefinedRenderer();
             _refinedMeshFilter.mesh = _refinedMesh;
