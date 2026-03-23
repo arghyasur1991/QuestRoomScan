@@ -157,6 +157,29 @@ namespace Genesis.RoomScan.Editor
             _boundarylessManifest = ManifestHasBoundaryless();
             _cleartextAllowed = ManifestHasCleartextTraffic();
             _insecureHttpAllowed = PlayerSettings.insecureHttpOption != InsecureHttpOption.NotAllowed;
+
+            RefreshServerUrl();
+        }
+
+        bool _serverUrlCurrent;
+        string _detectedLanIp;
+        string _currentServerUrl;
+
+        void RefreshServerUrl()
+        {
+            _serverUrlCurrent = false;
+            _detectedLanIp = GetLanIp();
+            _currentServerUrl = null;
+
+            if (_gsplatServerClient == null || string.IsNullOrEmpty(_detectedLanIp)) return;
+
+            var so = new SerializedObject(_gsplatServerClient);
+            var prop = so.FindProperty("serverUrl");
+            if (prop == null) return;
+
+            _currentServerUrl = prop.stringValue;
+            string expected = $"http://{_detectedLanIp}:8420";
+            _serverUrlCurrent = _currentServerUrl == expected;
         }
 
         // =================================================================
@@ -520,6 +543,23 @@ namespace Genesis.RoomScan.Editor
             StatusRow("GSplatManager (PLY loader)", _gsplatManager != null);
             StatusRow("GaussianSplatRenderer (UGS)", _ugsRenderer != null);
             StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
+            if (_gsplatServerClient != null)
+            {
+                if (_serverUrlCurrent)
+                {
+                    StatusRow($"  Server URL → {_detectedLanIp}:8420", true);
+                }
+                else
+                {
+                    string stale = string.IsNullOrEmpty(_currentServerUrl) ? "(empty)" : _currentServerUrl;
+                    StatusRow($"  Server URL STALE: {stale} (LAN: {_detectedLanIp})", false);
+                    if (GUILayout.Button("Fix Server URL"))
+                    {
+                        ConfigureServerUrl();
+                        Refresh();
+                    }
+                }
+            }
             StatusRow("DebugMenuController (HUD)", _debugMenu != null);
             StatusRow("RoomScanInputHandler (bindings)", _inputHandler != null);
             StatusRow("EventSystem + OVRInputModule", _eventSystem != null && _ovrInputModule != null);
