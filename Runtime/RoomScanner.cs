@@ -81,6 +81,8 @@ namespace Genesis.RoomScan
         [Header("Texture Refinement")]
         [SerializeField] internal Shader refinedMeshShader;
         [SerializeField] internal ComputeShader atlasBakeCompute;
+        [Tooltip("Force CPU bake path instead of GPU compute (for comparison)")]
+        [SerializeField] internal bool forceCpuBake = false;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
@@ -614,7 +616,8 @@ namespace Genesis.RoomScan
                 string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
                 var unwrap = await EnsureUnwrappedAsync();
                 byte[] atlasPixels = await TextureRefinement.BakeAtlasAsync(
-                    unwrap, keyframeDir, KeyframeRelocation, atlasBakeCompute);
+                    unwrap, keyframeDir, KeyframeRelocation,
+                    forceCpuBake ? null : atlasBakeCompute);
 
                 var result = new RefinedTextureResult
                 {
