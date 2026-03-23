@@ -100,6 +100,16 @@ namespace Genesis.RoomScan.UI
             RefreshStatus();
         }
 
+        /// <summary>
+        /// Switches the right panel to the Saved Scans view and refreshes the list.
+        /// </summary>
+        public void ShowSavedScans()
+        {
+            if (!_visible) Show();
+            SelectNav(_navSaved);
+            PopulateScanList();
+        }
+
         public void Hide()
         {
             _visible = false;
