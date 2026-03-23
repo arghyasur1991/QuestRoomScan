@@ -9,6 +9,7 @@
     "Unity.RenderPipelines.Core.Runtime",
     "meta.xr.mrutilitykit",
     "Oculus.VR",
+    "Oculus.VR.Editor",
     "GaussianSplatting",
     "GaussianSplattingEditor"
   ],
