@@ -1,4 +1,5 @@
 #include "xatlas.h"
+#include "../meshoptimizer/meshoptimizer.h"
 #include <cstring>
 
 #if defined(_WIN32)
@@ -85,6 +86,57 @@ XATLAS_EXPORT void xatlas_get_indices(
     int count = (int)mesh.indexCount < maxIndices ? (int)mesh.indexCount : maxIndices;
     for (int i = 0; i < count; i++)
         outIndices[i] = (int)mesh.indexArray[i];
+}
+
+XATLAS_EXPORT void xatlas_generate_opts(
+    xatlas::Atlas* atlas,
+    float maxChartArea, float maxBoundaryLength,
+    float normalDeviationWeight, float roundnessWeight,
+    float straightnessWeight, float normalSeamWeight,
+    float textureSeamWeight, float maxCost,
+    unsigned int maxIterations,
+    unsigned int maxChartSize, unsigned int padding,
+    float texelsPerUnit, unsigned int resolution,
+    int bilinear, int blockAlign, int bruteForce,
+    int rotateChartsToAxis, int rotateCharts)
+{
+    xatlas::ChartOptions co;
+    co.maxChartArea          = maxChartArea;
+    co.maxBoundaryLength     = maxBoundaryLength;
+    co.normalDeviationWeight = normalDeviationWeight;
+    co.roundnessWeight       = roundnessWeight;
+    co.straightnessWeight    = straightnessWeight;
+    co.normalSeamWeight      = normalSeamWeight;
+    co.textureSeamWeight     = textureSeamWeight;
+    co.maxCost               = maxCost;
+    co.maxIterations         = maxIterations;
+
+    xatlas::PackOptions po;
+    po.maxChartSize        = maxChartSize;
+    po.padding             = padding;
+    po.texelsPerUnit       = texelsPerUnit;
+    po.resolution          = resolution;
+    po.bilinear            = bilinear != 0;
+    po.blockAlign          = blockAlign != 0;
+    po.bruteForce          = bruteForce != 0;
+    po.rotateChartsToAxis  = rotateChartsToAxis != 0;
+    po.rotateCharts        = rotateCharts != 0;
+
+    xatlas::Generate(atlas, co, po);
+}
+
+XATLAS_EXPORT int meshopt_simplify_mesh(
+    const float* positions, int vertexCount, int positionStride,
+    const unsigned int* indices, int indexCount,
+    int targetIndexCount, float targetError,
+    unsigned int* outIndices, float* outError)
+{
+    return (int)meshopt_simplify(
+        outIndices,
+        indices, (size_t)indexCount,
+        positions, (size_t)vertexCount, (size_t)positionStride,
+        (size_t)targetIndexCount, targetError,
+        0, outError);
 }
 
 } // extern "C"

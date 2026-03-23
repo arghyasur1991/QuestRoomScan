@@ -85,6 +85,16 @@ namespace Genesis.RoomScan
         [Tooltip("Skip denoise pass after baking (GPU bake has fewer speckles)")]
         [SerializeField] internal bool skipDenoise = true;
 
+        [Header("Unwrap Performance")]
+        [Tooltip("Simplify mesh before UV unwrap (0.1 = 10% of tris, 1.0 = no simplification)")]
+        [Range(0.1f, 1f)]
+        [SerializeField] internal float decimationRatio = 0.5f;
+        [Tooltip("Align charts to 4x4 blocks for faster packing")]
+        [SerializeField] internal bool useBlockAlign = true;
+        [Tooltip("Chart growth cost limit — lower = more charts, faster unwrap")]
+        [Range(0.5f, 4f)]
+        [SerializeField] internal float xatlasMaxCost = 1.5f;
+
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
         // ─────────────────────────────────────────────────────────────
@@ -829,7 +839,11 @@ namespace Genesis.RoomScan
             }
 
             string kfDir = Path.Combine(Application.persistentDataPath, "GSExport");
-            var unwrap = await TextureRefinement.UnwrapMeshAsync(kfDir, KeyframeRelocation);
+            var opts = XAtlasWrapper.UnwrapOptions.Default;
+            opts.MaxCost = xatlasMaxCost;
+            opts.BlockAlign = useBlockAlign;
+            var unwrap = await TextureRefinement.UnwrapMeshAsync(
+                kfDir, KeyframeRelocation, opts, decimationRatio);
             _cachedUnwrap = unwrap;
 
             EnsureRefinedMesh(unwrap);

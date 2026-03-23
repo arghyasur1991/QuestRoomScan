@@ -48,8 +48,17 @@ namespace Genesis.RoomScan
         //  UV UNWRAP (shared prerequisite for both on-device and HQ refine)
         // ═══════════════════════════════════════════════════════════════
 
-        public static async Task<UnwrappedMeshResult> UnwrapMeshAsync(
+        public static Task<UnwrappedMeshResult> UnwrapMeshAsync(
             string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048)
+        {
+            var opts = XAtlasWrapper.UnwrapOptions.Default;
+            opts.Resolution = (uint)atlasResolution;
+            return UnwrapMeshAsync(keyframeDir, keyframeRelocation, opts);
+        }
+
+        public static async Task<UnwrappedMeshResult> UnwrapMeshAsync(
+            string keyframeDir, Matrix4x4 keyframeRelocation,
+            XAtlasWrapper.UnwrapOptions opts, float decimationRatio = 1f)
         {
             ReportStatus("Reading mesh from GPU...");
             var (positions, normals, colors, indices) = await ReadbackMeshAsync();
@@ -58,11 +67,34 @@ namespace Genesis.RoomScan
 
             Debug.Log($"[TextureRefine] Readback: {positions.Length} verts, {indices.Length / 3} tris");
 
-            ReportStatus("UV unwrapping...");
-            XAtlasWrapper.Result uvResult = default;
             Vector3[] inPos = positions;
             Vector3[] inNorm = normals;
             int[] inIdx = indices;
+
+            // Optional mesh decimation before UV unwrap
+            if (decimationRatio < 1f && decimationRatio > 0f)
+            {
+                ReportStatus($"Simplifying mesh ({decimationRatio:P0})...");
+                await Task.Run(() =>
+                {
+                    float[] flatPos = new float[inPos.Length * 3];
+                    for (int i = 0; i < inPos.Length; i++)
+                    {
+                        flatPos[i * 3] = inPos[i].x;
+                        flatPos[i * 3 + 1] = inPos[i].y;
+                        flatPos[i * 3 + 2] = inPos[i].z;
+                    }
+                    var sr = XAtlasWrapper.Simplify(flatPos, inPos.Length,
+                        inIdx, inIdx.Length, decimationRatio);
+                    inIdx = new int[sr.IndexCount];
+                    for (int i = 0; i < sr.IndexCount; i++)
+                        inIdx[i] = (int)sr.Indices[i];
+                });
+                Debug.Log($"[TextureRefine] Simplified: {inIdx.Length / 3} tris (was {indices.Length / 3})");
+            }
+
+            ReportStatus("UV unwrapping...");
+            XAtlasWrapper.Result uvResult = default;
 
             await Task.Run(() =>
             {
@@ -78,7 +110,7 @@ namespace Genesis.RoomScan
                     flatNorm[i * 3 + 2] = inNorm[i].z;
                 }
                 uvResult = XAtlasWrapper.Unwrap(flatPos, flatNorm, inPos.Length,
-                    inIdx, inIdx.Length, atlasResolution);
+                    inIdx, inIdx.Length, opts);
             });
 
             if (uvResult.VertexCount == 0)

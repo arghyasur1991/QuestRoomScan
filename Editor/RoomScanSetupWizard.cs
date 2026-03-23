@@ -1024,6 +1024,8 @@ namespace Genesis.RoomScan.Editor
             string srcDir = Path.Combine(pkgRoot, "Native/xatlas");
             string srcApi = Path.Combine(srcDir, "xatlas_c_api.cpp");
             string srcImpl = Path.Combine(srcDir, "xatlas.cpp");
+            string meshoptDir = Path.Combine(pkgRoot, "Native/meshoptimizer");
+            string srcSimplifier = Path.Combine(meshoptDir, "simplifier.cpp");
 
             if (!System.IO.File.Exists(srcApi) || !System.IO.File.Exists(srcImpl))
             {
@@ -1033,6 +1035,13 @@ namespace Genesis.RoomScan.Editor
                 return;
             }
 
+            bool hasMeshopt = System.IO.File.Exists(srcSimplifier);
+            if (!hasMeshopt)
+                Debug.LogWarning("[RoomScan Setup] meshoptimizer sources not found — building without mesh simplification");
+
+            string meshoptSrc = hasMeshopt ? $" \"{srcSimplifier}\"" : "";
+            string meshoptInc = hasMeshopt ? $" -I\"{meshoptDir}\"" : "";
+
             var builds = new System.Collections.Generic.List<(string label, string exe, string args, string outAssetPath)>();
 
             // macOS
@@ -1040,8 +1049,8 @@ namespace Genesis.RoomScan.Editor
                 string outDir = Path.Combine(pkgRoot, "Plugins/macOS");
                 Directory.CreateDirectory(outDir);
                 string outPath = Path.Combine(outDir, "libxatlas.bundle");
-                string bArgs = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden " +
-                               $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"";
+                string bArgs = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden{meshoptInc} " +
+                               $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"{meshoptSrc}";
                 builds.Add(("macOS xatlas", "clang++", bArgs,
                     "Packages/com.genesis.roomscan/Runtime/Plugins/macOS/libxatlas.bundle"));
             }
@@ -1055,8 +1064,8 @@ namespace Genesis.RoomScan.Editor
                     string outDir = Path.Combine(pkgRoot, "Plugins/Android");
                     Directory.CreateDirectory(outDir);
                     string outPath = Path.Combine(outDir, "libxatlas.so");
-                    string bArgs = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden " +
-                                   $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"";
+                    string bArgs = $"-shared -O2 -fPIC -std=c++11 -fvisibility=hidden{meshoptInc} " +
+                                   $"-o \"{outPath}\" \"{srcApi}\" \"{srcImpl}\"{meshoptSrc}";
                     builds.Add(("Android xatlas", ndkClang, bArgs,
                         "Packages/com.genesis.roomscan/Runtime/Plugins/Android/libxatlas.so"));
                 }
