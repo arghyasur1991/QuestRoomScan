@@ -179,28 +179,29 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
 
             int texelIdx = y * _AtlasW + x;
 
-            // Atomic score comparison
-            uint oldS;
-            InterlockedMax(_ScoreBuf[texelIdx], scoreU, oldS);
-            if (oldS >= scoreU) continue;
-
             // Interpolate screen position via barycentrics
             float sx = bw0 * sp0.x + bw1 * sp1.x + bw2 * sp2.x;
             float sy = bw0 * sp0.y + bw1 * sp1.y + bw2 * sp2.y;
-            int px = (int)(sx + 0.5);
-            int py = (int)(sy + 0.5);
+            int px = (int)round(sx);
+            int py = (int)round(sy);
             if (px < 0 || px >= _ImgW || py < 0 || py >= _ImgH) continue;
 
-            // Occlusion: direct integer index, same as CPU path
+            // Occlusion check (must pass BEFORE we touch the score buffer)
             float3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
             float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
             float closestZ = asfloat(_DepthBuf[py * _ImgW + px]);
             if (camPt.z > closestZ + 0.05) continue;
 
+            // All validity checks passed — now do atomic score comparison.
+            // Score must only be updated when we are certain a pixel will be
+            // written, otherwise we "poison" the texel with a high score but
+            // no color, creating permanent holes.
+            uint oldS;
+            InterlockedMax(_ScoreBuf[texelIdx], scoreU, oldS);
+            if (oldS >= scoreU) continue;
+
             // Read keyframe pixel: same layout as GetPixels32() byte array
             uint kfColor = _KfPixels[py * _ImgW + px];
-
-            // Force alpha to 255 and write
             _AtlasBuf[texelIdx] = kfColor | (255u << 24);
         }
     }
