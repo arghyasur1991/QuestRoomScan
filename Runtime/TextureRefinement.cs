@@ -301,6 +301,54 @@ namespace Genesis.RoomScan
             return data;
         }
 
+        /// <summary>
+        /// Returns the contents of frames.jsonl with poses transformed by the relocation matrix.
+        /// Used by GS training and HQ refine upload to send corrected poses to the server.
+        /// </summary>
+        public static byte[] RelocateFramesJsonl(string keyframeDir, Matrix4x4 relocation)
+        {
+            string manifestPath = Path.Combine(keyframeDir, "frames.jsonl");
+            if (!File.Exists(manifestPath)) return null;
+
+            if (relocation == Matrix4x4.identity)
+                return File.ReadAllBytes(manifestPath);
+
+            var ci = System.Globalization.CultureInfo.InvariantCulture;
+            string[] lines = File.ReadAllLines(manifestPath);
+            var sb = new System.Text.StringBuilder(lines.Length * 256);
+            var rot = relocation.rotation;
+
+            foreach (string line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var kf = ParseKeyframe(line, "");
+                    var pos = relocation.MultiplyPoint3x4(kf.Position);
+                    var q = rot * kf.Rotation;
+
+                    string relocated = System.Text.RegularExpressions.Regex.Replace(line,
+                        "\"px\":[^,}]+", $"\"px\":{pos.x.ToString("F6", ci)}");
+                    relocated = System.Text.RegularExpressions.Regex.Replace(relocated,
+                        "\"py\":[^,}]+", $"\"py\":{pos.y.ToString("F6", ci)}");
+                    relocated = System.Text.RegularExpressions.Regex.Replace(relocated,
+                        "\"pz\":[^,}]+", $"\"pz\":{pos.z.ToString("F6", ci)}");
+                    relocated = System.Text.RegularExpressions.Regex.Replace(relocated,
+                        "\"qx\":[^,}]+", $"\"qx\":{q.x.ToString("F6", ci)}");
+                    relocated = System.Text.RegularExpressions.Regex.Replace(relocated,
+                        "\"qy\":[^,}]+", $"\"qy\":{q.y.ToString("F6", ci)}");
+                    relocated = System.Text.RegularExpressions.Regex.Replace(relocated,
+                        "\"qz\":[^,}]+", $"\"qz\":{q.z.ToString("F6", ci)}");
+                    relocated = System.Text.RegularExpressions.Regex.Replace(relocated,
+                        "\"qw\":[^,}]+", $"\"qw\":{q.w.ToString("F6", ci)}");
+
+                    sb.AppendLine(relocated);
+                }
+                catch { sb.AppendLine(line); }
+            }
+            return System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+        }
+
         static System.Collections.Generic.List<Keyframe> ParseKeyframeManifest(
             string keyframeDir, Matrix4x4 keyframeRelocation)
         {

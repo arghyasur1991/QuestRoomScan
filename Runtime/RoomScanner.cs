@@ -896,7 +896,7 @@ namespace Genesis.RoomScan
             _refinedRenderer.enabled = false;
         }
 
-        private static byte[] PackRefinementZip(string keyframeDir, UnwrappedMeshResult mesh)
+        private byte[] PackRefinementZip(string keyframeDir, UnwrappedMeshResult mesh)
         {
             string framesPath = Path.Combine(keyframeDir, "frames.jsonl");
             if (!File.Exists(framesPath)) return null;
@@ -908,7 +908,8 @@ namespace Genesis.RoomScan
                 var entry = archive.CreateEntry("frames.jsonl");
                 using (var es = entry.Open())
                 {
-                    byte[] data = File.ReadAllBytes(framesPath);
+                    byte[] data = TextureRefinement.RelocateFramesJsonl(keyframeDir, KeyframeRelocation);
+                    if (data == null) return null;
                     es.Write(data, 0, data.Length);
                 }
 
@@ -1121,7 +1122,7 @@ namespace Genesis.RoomScan
                 await _pointCloudExporter.ExportAsync();
 
                 Debug.Log("[RoomScan] Uploading training data to PC server...");
-                bool uploaded = await _gsplatServerClient.UploadTrainingData();
+                bool uploaded = await _gsplatServerClient.UploadTrainingData(KeyframeRelocation);
                 if (!uploaded) { Debug.LogError("[RoomScan] Upload failed"); return; }
 
                 Debug.Log("[RoomScan] Waiting for server training to complete...");

@@ -54,9 +54,13 @@ namespace Genesis.RoomScan.GSplat
 
         /// <summary>
         /// Packages the GSExport directory into a ZIP and uploads to the training server.
+        /// If keyframeRelocation is non-identity, camera poses in frames.jsonl are
+        /// transformed to match the relocated mesh coordinate frame.
         /// </summary>
-        public async Task<bool> UploadTrainingData()
+        public async Task<bool> UploadTrainingData(Matrix4x4 keyframeRelocation = default)
         {
+            if (keyframeRelocation == default) keyframeRelocation = Matrix4x4.identity;
+
             if (IsUploading)
             {
                 Debug.LogWarning("[GSplatServerClient] Upload already in progress");
@@ -82,8 +86,9 @@ namespace Genesis.RoomScan.GSplat
                     return false;
                 }
 
-                Debug.Log("[GSplatServerClient] Creating ZIP from GSExport...");
-                byte[] zipData = await Task.Run(() => CreateZip(exportDir));
+                var reloc = keyframeRelocation;
+                Debug.Log($"[GSplatServerClient] Creating ZIP from GSExport...{(reloc != Matrix4x4.identity ? " (relocating poses)" : "")}");
+                byte[] zipData = await Task.Run(() => CreateZip(exportDir, reloc));
                 Debug.Log($"[GSplatServerClient] ZIP created: {zipData.Length / (1024 * 1024)}MB");
 
                 string url = $"{serverUrl}/upload?iterations={trainingIterations}";
@@ -267,14 +272,18 @@ namespace Genesis.RoomScan.GSplat
             }
         }
 
-        static byte[] CreateZip(string sourceDir)
+        static byte[] CreateZip(string sourceDir, Matrix4x4 relocation)
         {
             using var ms = new MemoryStream();
             using (var archive = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
             {
-                string framesPath = Path.Combine(sourceDir, "frames.jsonl");
-                if (File.Exists(framesPath))
-                    archive.CreateEntryFromFile(framesPath, "frames.jsonl");
+                byte[] framesData = TextureRefinement.RelocateFramesJsonl(sourceDir, relocation);
+                if (framesData != null)
+                {
+                    var entry = archive.CreateEntry("frames.jsonl");
+                    using var es = entry.Open();
+                    es.Write(framesData, 0, framesData.Length);
+                }
 
                 string plyPath = Path.Combine(sourceDir, "points3d.ply");
                 if (File.Exists(plyPath))
