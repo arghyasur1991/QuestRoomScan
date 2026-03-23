@@ -534,14 +534,14 @@ namespace Genesis.RoomScan.Editor
             StatusRow("RoomAnchorManager (MRUK + SpatialAnchor)", _roomAnchor != null);
 
             bool anchorSupportOk = false;
-            var oculusConfig = Resources.Load<OculusProjectConfig>("OculusProjectConfig");
-            if (oculusConfig != null)
-                anchorSupportOk = oculusConfig.anchorSupport != OculusProjectConfig.AnchorSupport.Disabled;
-            StatusRow("OculusProjectConfig anchor support", anchorSupportOk);
+            var ovrConfig = Resources.Load<OVRProjectConfig>("OculusProjectConfig");
+            if (ovrConfig != null)
+                anchorSupportOk = ovrConfig.anchorSupport != OVRProjectConfig.AnchorSupport.Disabled;
+            StatusRow("OVRProjectConfig anchor support", anchorSupportOk);
             if (!anchorSupportOk)
             {
                 EditorGUILayout.HelpBox(
-                    "Spatial Anchors require anchor support enabled in OculusProjectConfig.\n" +
+                    "Spatial Anchors require anchor support enabled in OVRProjectConfig.\n" +
                     "Go to Assets/Resources/OculusProjectConfig and set Anchor Support to Enabled.",
                     MessageType.Warning);
             }
