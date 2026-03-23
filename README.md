@@ -13,7 +13,8 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
 - **VR Debug Menu** — World-space UI Toolkit panel with controller ray interaction, lazy-follow gaze tracking, live status, server training controls, persistence management, and FPS display
-- **Render Mode Switching** — Cycle between Mesh, Splat, and Both views at runtime via debug menu or controller binding (default: A/X button)
+- **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with occlusion-aware depth testing and atomic score selection. Produces significantly sharper textures than the real-time triplanar cache. Optional server-side HQ refinement via differentiable rendering (currently experimental/broken).
+- **Render Mode Switching** — Cycle between Mesh, Textured, Refined, HQRefined, and Splat views at runtime via debug menu or controller binding (default: A/X button)
 
 ## Requirements
 
@@ -116,6 +117,24 @@ Once the room is well-scanned:
 
 Scanning continues during training — you can keep refining the mesh while waiting.
 
+### Texture Refinement
+
+After scanning, you can produce a sharper UV-mapped texture atlas from the captured keyframes:
+
+1. Open the debug menu
+2. Press **Refine Textures** — this runs the full on-device pipeline:
+   - **GPU readback**: Reads the current mesh from the GPU Surface Nets buffers
+   - **UV unwrapping**: xatlas (native C++ via P/Invoke) generates a UV atlas with seam-aware parameterization (~10-15s)
+   - **GPU atlas baking**: A compute shader (`AtlasBakeCompute.compute`) processes each keyframe — builds an occlusion depth buffer, then rasterizes UV-space triangles with per-texel keyframe projection, occlusion testing, and atomic best-score selection (~5-10s for 300 keyframes)
+   - **Dilation**: Fills gaps at UV island edges
+3. Press **Render Mode** to cycle to **Refined** — the UV-mapped mesh with baked atlas texture replaces the triplanar view
+
+The refined texture is significantly sharper than the real-time triplanar cache because it selects the single best keyframe per texel rather than blending multiple noisy projections.
+
+**HQ Refine (Server)** is also available in the debug menu — it uploads the UV-unwrapped mesh and keyframes to the server for differentiable texture optimization. **Note: server-side refinement is currently broken** (produces incorrect atlas output). On-device refinement is the recommended path.
+
+Refined textures persist with **Save Scan** and are restored on **Load Scan**.
+
 ### Saving and Loading
 
 - **Save Scan**: Persists the full TSDF + color volumes, triplanar color textures, triplanar depth maps, and MRUK anchor pose to disk (`RoomScans/scan.bin` + `RoomScans/triplanar/`)
@@ -152,11 +171,15 @@ MeshExtractor → GPUSurfaceNets (compute: classify → smooth → snap → temp
        │
        ├── PointCloudExporter (GPU mesh → points3d.ply via AsyncGPUReadback)
        │
-       └── GSplatServerClient (ZIP upload → poll status → PLY download)
+       ├── GSplatServerClient (ZIP upload → poll status → PLY download)
+       │               │
+       │               GSplatManager + GaussianSplatRenderer (UGS)
+       │               │
+       │               On-device Gaussian Splat rendering
+       │
+       └── TextureRefinement (GPU readback → xatlas UV unwrap → compute shader atlas bake)
                    │
-                   GSplatManager + GaussianSplatRenderer (UGS)
-                   │
-                   On-device Gaussian Splat rendering
+                   RefinedMesh.shader (UV-mapped atlas rendering)
 ```
 
 See [ALGORITHM.md](ALGORITHM.md) for the full technical reference.
@@ -248,6 +271,8 @@ The panel lazy-follows your gaze — it floats at 0.75m and re-centers when your
 | **Export Point Cloud** | Manually exports GPU mesh vertices as `points3d.ply` via async readback (also auto-exports every 30s during scanning). |
 | **Start GS Training** | Triggers the full training pipeline: export point cloud → ZIP keyframes → upload → train → download. Disabled while training is in progress. |
 | **Cancel Training** | Sends cancel request to the server. Only enabled while training is in progress. |
+| **Refine Textures** | Runs the on-device texture refinement pipeline: GPU readback → xatlas UV unwrap → compute shader atlas bake → dilation. Produces a UV-mapped atlas from keyframe projections. |
+| **HQ Refine (Server)** | Uploads UV mesh + keyframes to the server for differentiable texture optimization. **Currently broken** — on-device refinement is recommended. |
 | **Clear All Data** | Stops scanning, clears all volumes/mesh/textures, deletes saved scan and GSExport from disk. |
 
 **Footer**: Live FPS counter.
