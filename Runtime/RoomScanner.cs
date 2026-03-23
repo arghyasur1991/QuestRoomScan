@@ -83,6 +83,8 @@ namespace Genesis.RoomScan
         [SerializeField] internal ComputeShader atlasBakeCompute;
         [Tooltip("Force CPU bake path instead of GPU compute (for comparison)")]
         [SerializeField] internal bool forceCpuBake = false;
+        [Tooltip("Skip denoise pass after baking (GPU bake has fewer speckles)")]
+        [SerializeField] internal bool skipDenoise = false;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
@@ -617,7 +619,8 @@ namespace Genesis.RoomScan
                 var unwrap = await EnsureUnwrappedAsync();
                 byte[] atlasPixels = await TextureRefinement.BakeAtlasAsync(
                     unwrap, keyframeDir, KeyframeRelocation,
-                    forceCpuBake ? null : atlasBakeCompute);
+                    forceCpuBake ? null : atlasBakeCompute,
+                    skipDenoise);
 
                 var result = new RefinedTextureResult
                 {

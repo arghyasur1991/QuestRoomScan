@@ -557,12 +557,12 @@ namespace Genesis.RoomScan
         /// </summary>
         public static async Task<byte[]> BakeAtlasAsync(
             UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation,
-            ComputeShader compute = null)
+            ComputeShader compute = null, bool skipDenoise = false)
         {
             if (compute == null)
             {
                 Debug.LogWarning("[TextureRefine] No compute shader, falling back to CPU bake");
-                return await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation);
+                return await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation, skipDenoise);
             }
 
             ReportStatus("Loading keyframe metadata...");
@@ -737,8 +737,11 @@ namespace Genesis.RoomScan
             }
 
             // Post-process on background thread
-            ReportStatus("Denoising...");
-            await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
+            if (!skipDenoise)
+            {
+                ReportStatus("Denoising...");
+                await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
+            }
 
             ReportStatus("Filling gaps...");
             await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
@@ -796,7 +799,8 @@ namespace Genesis.RoomScan
         /// Decodes one JPEG at a time on the main thread to avoid OOM, bakes on BG thread.
         /// </summary>
         static async Task<byte[]> BakeAtlasCPUAsync(
-            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation)
+            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation,
+            bool skipDenoise = false)
         {
             ReportStatus("Loading keyframe metadata...");
             var metaList = ParseKeyframeManifest(keyframeDir, keyframeRelocation);
@@ -900,8 +904,11 @@ namespace Genesis.RoomScan
                 Debug.LogWarning($"[TextureRefine] Failed to save debug atlas: {e.Message}");
             }
 
-            ReportStatus("Denoising...");
-            await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
+            if (!skipDenoise)
+            {
+                ReportStatus("Denoising...");
+                await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
+            }
 
             ReportStatus("Filling gaps...");
             await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
