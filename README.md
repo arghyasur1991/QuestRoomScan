@@ -124,7 +124,8 @@ After scanning, you can produce a sharper UV-mapped texture atlas from the captu
 1. Open the debug menu
 2. Press **Refine Textures** — this runs the full on-device pipeline:
    - **GPU readback**: Reads the current mesh from the GPU Surface Nets buffers
-   - **UV unwrapping**: xatlas (native C++ via P/Invoke) generates a UV atlas with seam-aware parameterization (~10-15s)
+   - **Mesh simplification** (optional): meshoptimizer reduces triangle count (default 50%) to speed up unwrapping
+   - **UV unwrapping**: xatlas (native C++ via P/Invoke) generates a UV atlas with seam-aware parameterization, with tunable chart/pack options for speed vs quality
    - **GPU atlas baking**: A compute shader (`AtlasBakeCompute.compute`) processes each keyframe — builds an occlusion depth buffer, then rasterizes UV-space triangles with per-texel keyframe projection, occlusion testing, and atomic best-score selection (~5-10s for 300 keyframes)
    - **Dilation**: Fills gaps at UV island edges
 3. Press **Render Mode** to cycle to **Refined** — the UV-mapped mesh with baked atlas texture replaces the triplanar view
@@ -325,6 +326,13 @@ QuestRoomScan is best suited for developers who need to integrate room scanning 
 ## Credits & Prior Art
 
 The TSDF volume integration and Surface Nets meshing approach draws inspiration from [anaglyphs/lasertag](https://github.com/anaglyphs/lasertag) by Julian Triveri & Hazel Roeder (MIT), which demonstrated real-time room reconstruction on Quest 3 inside a mixed reality game.
+
+The texture refinement pipeline uses two open-source native C++ libraries:
+
+- **[xatlas](https://github.com/jpcy/xatlas)** by Jonathan Young (MIT) — automatic UV atlas generation with seam-aware chart parameterization and efficient packing. Used for UV unwrapping the GPU Surface Nets mesh prior to atlas baking.
+- **[meshoptimizer](https://github.com/zeux/meshoptimizer)** v1.0 by Arseny Kapoulkine (MIT) — mesh optimization toolkit. The `meshopt_simplify` function is used for optional mesh decimation before UV unwrapping, reducing triangle count while preserving topology to speed up the xatlas charting and packing phases.
+
+Both libraries are compiled into a single native shared library (`libxatlas.so` / `libxatlas.bundle`) and invoked via P/Invoke from C#.
 
 QuestRoomScan builds on that foundation with significant extensions:
 
