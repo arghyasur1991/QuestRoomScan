@@ -236,14 +236,8 @@ namespace Genesis.RoomScan
 
             var unbound = _unboundAnchors[0];
 
-            var localizeResult = await unbound.LocalizeAsync();
-            if (!localizeResult.Success)
-            {
-                Debug.LogWarning($"[RoomAnchor] Spatial anchor localize failed. Falling back to MRUK.");
-                return null;
-            }
-
-            if (!unbound.Localized)
+            bool localized = await unbound.LocalizeAsync();
+            if (!localized && !unbound.Localized)
             {
                 // Poll for localization (up to 10s)
                 float timeout = 10f;

@@ -146,7 +146,9 @@ namespace Genesis.RoomScan
                     _ = scanner.SaveScanAsync();
                     break;
                 case ScanAction.LoadScan:
-                    _ = scanner.LoadScanAsync();
+                    var pkgs = RoomScanPersistence.Instance?.ListPackages();
+                    if (pkgs != null && pkgs.Count > 0)
+                        _ = scanner.LoadPackageAsync(pkgs[0].id);
                     break;
             }
         }
