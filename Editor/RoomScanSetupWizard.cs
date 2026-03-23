@@ -533,17 +533,17 @@ namespace Genesis.RoomScan.Editor
             StatusRow("RoomScanner", _roomScanner != null);
             StatusRow("RoomAnchorManager (MRUK + SpatialAnchor)", _roomAnchor != null);
 
-            bool anchorSupportOk = false;
-            var ovrConfig = Resources.Load<OVRProjectConfig>("OculusProjectConfig");
-            if (ovrConfig != null)
-                anchorSupportOk = ovrConfig.anchorSupport != OVRProjectConfig.AnchorSupport.Disabled;
+            var ovrConfig = OVRProjectConfig.CachedProjectConfig;
+            bool anchorSupportOk = ovrConfig != null
+                && ovrConfig.anchorSupport != OVRProjectConfig.AnchorSupport.Disabled;
             StatusRow("OVRProjectConfig anchor support", anchorSupportOk);
-            if (!anchorSupportOk)
+            if (!anchorSupportOk && ovrConfig != null)
             {
-                EditorGUILayout.HelpBox(
-                    "Spatial Anchors require anchor support enabled in OVRProjectConfig.\n" +
-                    "Go to Assets/Resources/OculusProjectConfig and set Anchor Support to Enabled.",
-                    MessageType.Warning);
+                if (GUILayout.Button("Fix: Enable Spatial Anchor Support"))
+                {
+                    ovrConfig.anchorSupport = OVRProjectConfig.AnchorSupport.Enabled;
+                    OVRProjectConfig.CommitProjectConfig(ovrConfig);
+                }
             }
             StatusRow("PassthroughCameraProvider", _cameraProvider != null);
             StatusRow("PassthroughCameraAccess", _pcaComponent != null);
