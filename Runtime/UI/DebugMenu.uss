@@ -1,97 +1,135 @@
 /* ============================================
-   QUESTROOMSCAN DEBUG MENU
+   QUESTROOMSCAN DEBUG MENU — Two-Panel Layout
    Dark technical HUD — world-space VR panel
    ============================================ */
 
 .debug-root {
-    width: 480px;
-    height: 1300px;
+    width: 720px;
+    height: 700px;
     background-color: rgba(10, 12, 16, 0.92);
-    padding: 24px 32px;
-    flex-direction: column;
+    flex-direction: row;
     border-radius: 12px;
     border-width: 1px;
     border-color: rgba(0, 180, 255, 0.25);
 }
 
-/* === Header === */
-.debug-header {
-    flex-direction: row;
-    align-items: flex-end;
-    margin-bottom: 20px;
-    padding-bottom: 12px;
-    border-bottom-width: 2px;
-    border-bottom-color: rgba(0, 180, 255, 0.4);
+/* ===== LEFT NAV PANEL ===== */
+.nav-panel {
+    width: 160px;
+    flex-shrink: 0;
+    flex-direction: column;
+    padding: 16px 12px;
+    border-right-width: 1px;
+    border-right-color: rgba(0, 180, 255, 0.2);
+    background-color: rgba(8, 10, 14, 0.6);
+    border-top-left-radius: 12px;
+    border-bottom-left-radius: 12px;
 }
 
-.header-title {
-    font-size: 28px;
+.nav-header {
+    margin-bottom: 16px;
+    padding-bottom: 10px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(0, 180, 255, 0.3);
+}
+
+.nav-header-title {
+    font-size: 13px;
     -unity-font-style: bold;
     color: rgb(0, 200, 255);
-    letter-spacing: 6px;
+    letter-spacing: 3px;
 }
 
-.header-subtitle {
-    font-size: 14px;
-    color: rgba(0, 200, 255, 0.5);
-    letter-spacing: 4px;
-    margin-left: 12px;
-    margin-bottom: 2px;
+.nav-header-sub {
+    font-size: 10px;
+    color: rgba(0, 200, 255, 0.4);
+    letter-spacing: 2px;
+    margin-top: 2px;
 }
 
-/* === Sections === */
-.section {
-    margin-bottom: 16px;
+.nav-btn {
+    height: 36px;
+    margin-bottom: 4px;
+    background-color: rgba(25, 30, 45, 0.8);
+    border-width: 1px;
+    border-color: rgba(60, 70, 90, 0.4);
+    border-radius: 6px;
+    color: rgb(140, 150, 170);
+    font-size: 13px;
+    -unity-font-style: bold;
+    -unity-text-align: middle-left;
+    padding-left: 12px;
 }
 
-.section-label {
+.nav-btn:hover {
+    background-color: rgba(35, 45, 65, 0.9);
+    border-color: rgba(0, 160, 220, 0.5);
+    color: rgb(200, 215, 235);
+}
+
+.nav-btn--active {
+    background-color: rgba(0, 80, 130, 0.6);
+    border-color: rgba(0, 200, 255, 0.7);
+    border-left-width: 3px;
+    border-left-color: rgb(0, 200, 255);
+    color: rgb(220, 240, 255);
+}
+
+.nav-spacer {
+    flex-grow: 1;
+}
+
+.nav-fps {
     font-size: 11px;
+    color: rgba(140, 150, 170, 0.5);
+    -unity-text-align: middle-center;
+    margin-top: 8px;
+}
+
+/* ===== RIGHT DETAIL PANEL ===== */
+.detail-panel {
+    flex-grow: 1;
+    padding: 20px 24px;
+    overflow: hidden;
+}
+
+.detail-view {
+    flex-grow: 1;
+    flex-direction: column;
+}
+
+.view-title {
+    font-size: 12px;
     -unity-font-style: bold;
     color: rgba(0, 180, 255, 0.6);
     letter-spacing: 3px;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(0, 180, 255, 0.2);
 }
 
-/* === Status Rows === */
+/* ===== STATUS ROWS ===== */
 .status-row {
     flex-direction: row;
     justify-content: space-between;
     align-items: center;
-    padding: 4px 0;
+    padding: 3px 0;
 }
 
 .status-key {
-    font-size: 14px;
+    font-size: 13px;
     color: rgb(140, 150, 170);
 }
 
 .status-val {
-    font-size: 14px;
+    font-size: 13px;
     -unity-font-style: bold;
     color: rgb(220, 230, 245);
     -unity-text-align: middle-right;
     min-width: 120px;
 }
 
-/* === Progress Bar === */
-.progress-bar {
-    height: 6px;
-    background-color: rgba(40, 50, 70, 0.8);
-    border-radius: 3px;
-    margin: 6px 0 4px 0;
-    overflow: hidden;
-}
-
-.progress-fill {
-    height: 100%;
-    width: 0%;
-    background-color: rgb(0, 200, 255);
-    border-radius: 3px;
-    transition-property: width;
-    transition-duration: 0.5s;
-}
-
-/* === Small status value variant === */
 .status-val--small {
     font-size: 11px;
     -unity-font-style: normal;
@@ -100,37 +138,21 @@
     text-overflow: ellipsis;
 }
 
-/* === Server URL field === */
-.server-url-field {
-    margin: 2px 0 4px 0;
+/* ===== BUTTON GROUP ===== */
+.btn-group {
+    margin-top: 12px;
 }
 
-.server-url-field > Label {
-    font-size: 14px;
-    color: rgb(140, 150, 170);
-    min-width: 80px;
-}
-
-.server-url-field > .unity-base-field__input {
-    font-size: 12px;
-    background-color: rgba(20, 25, 35, 0.9);
-    border-width: 1px;
-    border-color: rgba(0, 160, 220, 0.3);
-    border-radius: 4px;
-    color: rgb(220, 230, 245);
-    padding: 4px 8px;
-}
-
-/* === Action Buttons === */
+/* ===== ACTION BUTTONS ===== */
 .action-btn {
-    height: 40px;
-    margin-top: 6px;
+    height: 38px;
+    margin-top: 5px;
     background-color: rgba(40, 50, 70, 0.9);
     border-width: 1px;
     border-color: rgba(0, 160, 220, 0.4);
     border-radius: 6px;
     color: rgb(200, 215, 235);
-    font-size: 14px;
+    font-size: 13px;
     -unity-font-style: bold;
     letter-spacing: 1px;
 }
@@ -143,6 +165,10 @@
 .action-btn:active {
     background-color: rgba(30, 40, 60, 0.95);
     scale: 0.98;
+}
+
+.action-btn:disabled {
+    opacity: 0.35;
 }
 
 .action-btn--primary {
@@ -167,14 +193,129 @@
     border-color: rgba(255, 100, 80, 0.8);
 }
 
-/* === Footer === */
-.debug-footer {
-    flex-grow: 1;
-    justify-content: flex-end;
-    align-items: flex-end;
+/* ===== PROGRESS BAR ===== */
+.progress-bar {
+    height: 6px;
+    background-color: rgba(40, 50, 70, 0.8);
+    border-radius: 3px;
+    margin: 6px 0 4px 0;
+    overflow: hidden;
 }
 
-.footer-text {
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    background-color: rgb(0, 200, 255);
+    border-radius: 3px;
+    transition-property: width;
+    transition-duration: 0.5s;
+}
+
+/* ===== SERVER URL FIELD ===== */
+.server-url-field {
+    margin: 2px 0 6px 0;
+}
+
+.server-url-field > Label {
+    font-size: 13px;
+    color: rgb(140, 150, 170);
+    min-width: 60px;
+}
+
+.server-url-field > .unity-base-field__input {
     font-size: 12px;
-    color: rgba(140, 150, 170, 0.6);
+    background-color: rgba(20, 25, 35, 0.9);
+    border-width: 1px;
+    border-color: rgba(0, 160, 220, 0.3);
+    border-radius: 4px;
+    color: rgb(220, 230, 245);
+    padding: 4px 8px;
+}
+
+/* ===== SCAN LIST (Saved Scans View) ===== */
+.scan-list {
+    flex-grow: 1;
+    margin-top: 4px;
+}
+
+.scan-entry {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    margin-bottom: 4px;
+    background-color: rgba(25, 30, 45, 0.7);
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: rgba(60, 70, 90, 0.3);
+}
+
+.scan-entry:hover {
+    background-color: rgba(35, 45, 65, 0.8);
+    border-color: rgba(0, 160, 220, 0.4);
+}
+
+.scan-entry-info {
+    flex-direction: column;
+    flex-grow: 1;
+    margin-right: 8px;
+}
+
+.scan-entry-name {
+    font-size: 13px;
+    -unity-font-style: bold;
+    color: rgb(220, 230, 245);
+}
+
+.scan-entry-meta {
+    font-size: 10px;
+    color: rgba(140, 150, 170, 0.7);
+    margin-top: 2px;
+}
+
+.scan-entry-badges {
+    flex-direction: row;
+    margin-top: 3px;
+}
+
+.badge {
+    font-size: 9px;
+    color: rgba(0, 200, 255, 0.8);
+    background-color: rgba(0, 100, 160, 0.3);
+    border-radius: 3px;
+    padding: 1px 5px;
+    margin-right: 4px;
+}
+
+.scan-entry-btns {
+    flex-direction: row;
+}
+
+.scan-entry-btn {
+    height: 30px;
+    width: 60px;
+    margin-left: 4px;
+    font-size: 11px;
+    -unity-font-style: bold;
+    border-radius: 4px;
+    border-width: 1px;
+}
+
+.scan-entry-btn--load {
+    background-color: rgba(0, 100, 160, 0.5);
+    border-color: rgba(0, 200, 255, 0.5);
+    color: rgb(180, 230, 255);
+}
+
+.scan-entry-btn--delete {
+    background-color: rgba(120, 30, 30, 0.4);
+    border-color: rgba(255, 80, 60, 0.4);
+    color: rgb(255, 180, 170);
+}
+
+.empty-label {
+    font-size: 14px;
+    color: rgba(140, 150, 170, 0.5);
+    -unity-text-align: middle-center;
+    margin-top: 40px;
 }

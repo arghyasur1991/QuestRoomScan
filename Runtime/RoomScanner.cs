@@ -275,7 +275,7 @@ namespace Genesis.RoomScan
             if (_persistence.IsSaving) return;
 
             Debug.Log("[RoomScan] App quitting, saving scan...");
-            await _persistence.SaveAsync();
+            await _persistence.SaveToNewPackageAsync();
         }
 
         private float _lastScannerLog;
@@ -351,6 +351,7 @@ namespace Genesis.RoomScan
             IsScanning = true;
             KeyframeRelocation = Matrix4x4.identity;
             _cachedUnwrap = null;
+            if (_persistence != null) _persistence.ClearActivePackage();
 
             if (_keyframeCollector != null)
             {
@@ -443,22 +444,19 @@ namespace Genesis.RoomScan
             if (_clearInProgress) return;
             _clearInProgress = true;
 
-            string scanFile = null;
-            string triDir = null;
-            string splatFile = null;
             string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
 
             try
             {
                 StopScanning();
 
-                // Disable rendering before disposing GPU resources to prevent
-                // LateUpdate draw calls that reference the buffers being freed.
                 _gsplatManager?.ClearSplat();
                 _gsplatManager?.ResetSplatTransform();
                 _downloadedPlyData = null;
+                HasRefinedTexture = false;
+                HasHQRefinedTexture = false;
+                LastRefinedResult = null;
 
-                // Dispose mesh GPU resources without re-allocating (avoids Vulkan stall).
                 _meshExtractor.DisposeOnly();
                 _volumeIntegrator.Clear();
                 if (_triplanarCache != null)
@@ -467,9 +465,7 @@ namespace Genesis.RoomScan
                 if (_keyframeCollector != null)
                     _keyframeCollector.ClearInMemory();
 
-                scanFile = _persistence != null ? _persistence.SaveFilePath : null;
-                triDir = _persistence != null ? _persistence.TriplanarDirectory : null;
-                splatFile = _persistence != null ? _persistence.SplatFilePath : null;
+                if (_persistence != null) _persistence.ClearActivePackage();
             }
             catch (Exception e)
             {
@@ -482,12 +478,6 @@ namespace Genesis.RoomScan
             {
                 try
                 {
-                    if (scanFile != null && File.Exists(scanFile))
-                        File.Delete(scanFile);
-                    if (triDir != null && Directory.Exists(triDir))
-                        Directory.Delete(triDir, true);
-                    if (splatFile != null && File.Exists(splatFile))
-                        File.Delete(splatFile);
                     if (Directory.Exists(gsExportDir))
                         Directory.Delete(gsExportDir, true);
                 }
@@ -567,13 +557,13 @@ namespace Genesis.RoomScan
         public async Task<bool> SaveScanAsync()
         {
             if (_persistence == null) return false;
-            return await _persistence.SaveAsync();
+            return await _persistence.SaveToNewPackageAsync();
         }
 
-        public async Task<bool> LoadScanAsync()
+        public async Task<bool> LoadPackageAsync(string pkgId)
         {
             if (_persistence == null) return false;
-            return await _persistence.LoadAsync();
+            return await _persistence.LoadPackageAsync(pkgId);
         }
 
         public async Task ExportPointCloudAsync()
@@ -626,7 +616,7 @@ namespace Genesis.RoomScan
             TextureRefinement.StatusChanged += s => RefineStatus = s;
             try
             {
-                string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
+                string keyframeDir = KeyframeDirectory;
                 var unwrap = await EnsureUnwrappedAsync();
                 byte[] atlasPixels = await TextureRefinement.BakeAtlasAsync(
                     unwrap, keyframeDir, KeyframeRelocation,
@@ -648,6 +638,10 @@ namespace Genesis.RoomScan
                 LastRefinedResult = result;
                 HasRefinedTexture = true;
                 SetRenderMode(ScanRenderMode.Refined);
+
+                if (_persistence != null && _persistence.HasActivePackage)
+                    await _persistence.SaveArtifactAsync(ArtifactType.Refined, null, result);
+
                 Debug.Log("[RoomScan] On-device texture refinement complete");
             }
             catch (Exception e)
@@ -683,7 +677,7 @@ namespace Genesis.RoomScan
 
                 HQRefineStatus = "Packaging...";
                 string serverUrl = _gsplatServerClient.ServerUrl;
-                string keyframeDir = Path.Combine(Application.persistentDataPath, "GSExport");
+                string keyframeDir = KeyframeDirectory;
                 byte[] zipData = await Task.Run(() => PackRefinementZip(keyframeDir, unwrap));
 
                 if (zipData == null || zipData.Length == 0)
@@ -765,6 +759,13 @@ namespace Genesis.RoomScan
                     HasHQRefinedTexture = true;
                     EnsureRefinedRenderer();
                     SetRenderMode(ScanRenderMode.HQRefined);
+
+                    if (_persistence != null && _persistence.HasActivePackage)
+                    {
+                        byte[] rawPixels = tex.GetRawTextureData();
+                        await _persistence.SaveArtifactAsync(ArtifactType.HQRefined, rawPixels);
+                    }
+
                     HQRefineStatus = "Done";
                     Debug.Log($"[RoomScan] HQ texture refinement complete: {tex.width}x{tex.height}");
                 }
@@ -840,7 +841,7 @@ namespace Genesis.RoomScan
                 return _cachedUnwrap.Value;
             }
 
-            string kfDir = Path.Combine(Application.persistentDataPath, "GSExport");
+            string kfDir = KeyframeDirectory;
             var opts = XAtlasWrapper.UnwrapOptions.Default;
             opts.MaxCost = xatlasMaxCost;
             opts.BlockAlign = useBlockAlign;
@@ -1094,6 +1095,55 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Keyframe directory. Uses active package's keyframes/ if loaded, else GSExport/.
+        /// </summary>
+        public string KeyframeDirectory
+        {
+            get
+            {
+                if (_persistence != null && _persistence.HasActivePackage)
+                {
+                    string pkgKf = Path.Combine(_persistence.ActivePackageDirectory, "keyframes");
+                    if (Directory.Exists(pkgKf)) return pkgKf;
+                }
+                return Path.Combine(Application.persistentDataPath, "GSExport");
+            }
+        }
+
+        /// <summary>
+        /// Deletes the artifact matching the current render mode from the active package.
+        /// </summary>
+        public void DeleteActiveArtifact()
+        {
+            if (_persistence == null || !_persistence.HasActivePackage) return;
+
+            switch (renderMode)
+            {
+                case ScanRenderMode.Splat:
+                    _persistence.DeleteArtifactFromPackage(ArtifactType.Splat);
+                    _gsplatManager?.ClearSplat();
+                    _downloadedPlyData = null;
+                    SetRenderMode(ScanRenderMode.Mesh);
+                    break;
+
+                case ScanRenderMode.Refined:
+                    _persistence.DeleteArtifactFromPackage(ArtifactType.Refined);
+                    HasRefinedTexture = false;
+                    LastRefinedResult = null;
+                    _cachedUnwrap = null;
+                    SetRenderMode(ScanRenderMode.Textured);
+                    break;
+
+                case ScanRenderMode.HQRefined:
+                    _persistence.DeleteArtifactFromPackage(ArtifactType.HQRefined);
+                    HasHQRefinedTexture = false;
+                    _hqAtlasTexture = null;
+                    SetRenderMode(HasRefinedTexture ? ScanRenderMode.Refined : ScanRenderMode.Textured);
+                    break;
+            }
+        }
+
+        /// <summary>
         /// Loads the downloaded splat into GPU buffers and switches to splat render mode.
         /// Call after training + download completes.
         /// </summary>
@@ -1136,15 +1186,8 @@ namespace Genesis.RoomScan
                 _downloadedPlyData = plyData;
                 Debug.Log($"[RoomScan] Trained splat downloaded ({plyData.Length / (1024 * 1024f):F1}MB)");
 
-                // Persist to disk so it survives app restarts
-                if (_persistence != null)
-                {
-                    string splatPath = _persistence.SplatFilePath;
-                    string splatDir = Path.GetDirectoryName(splatPath);
-                    if (!Directory.Exists(splatDir)) Directory.CreateDirectory(splatDir);
-                    await Task.Run(() => File.WriteAllBytes(splatPath, plyData));
-                    Debug.Log($"[RoomScan] splat.ply saved to disk ({plyData.Length / (1024f * 1024f):F1}MB)");
-                }
+                if (_persistence != null && _persistence.HasActivePackage)
+                    await _persistence.SaveArtifactAsync(ArtifactType.Splat, plyData);
 
                 LoadDownloadedSplat();
             }

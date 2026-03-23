@@ -7,12 +7,12 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **GPU TSDF Integration** — Depth frames fused into a signed distance field via compute shaders
 - **GPU Surface Nets Meshing** — Fully GPU-driven mesh extraction via compute shaders with zero CPU readback, rendered via a single `Graphics.RenderPrimitivesIndirect` draw call
 - **Three-Layer Texturing** — Triplanar world-space cache (persistent ~8mm/texel) → vertex colors (~5cm fallback) — all sourced from passthrough camera RGB. Keyframes captured as motion-gated JPEGs to disk for Gaussian Splat training.
-- **Mesh Persistence** — Save/load full scan state (TSDF + color volumes + triplanar textures + depth maps + room-anchor pose) to disk (`scan.bin` format v1), auto-save on quit
-- **MRUK Room Anchoring** — `RoomAnchorManager` uses Meta's MRUK floor anchor to compute a relocation matrix across sessions. On load, TSDF volume and triplanar textures are baked into the current coordinate frame via compute-shader relocation, keeping the scan aligned with the physical room
+- **Package-Based Persistence** — Multi-scan persistence system where each scan is a self-contained package (`pkg_YYYYMMDD_HHMMSS/`) with its own TSDF, triplanar textures, keyframes, splat, and refined textures. Scan browser in the debug menu lists all saved packages. Artifacts (splat, refined, HQ) auto-save to the active package on creation.
+- **OVRSpatialAnchor Relocation** — `RoomAnchorManager` creates a persisted `OVRSpatialAnchor` per scan package for reliable cross-session relocation. Per-artifact creation matrices in `anchor.json` track when each artifact was created relative to the spatial anchor, enabling accurate relocation even for artifacts created across different sessions. Falls back to MRUK floor anchor if spatial anchor localization fails.
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
-- **VR Debug Menu** — World-space UI Toolkit panel with controller ray interaction, lazy-follow gaze tracking, live status, server training controls, persistence management, and FPS display
+- **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Training, Tools) and right detail views. Includes scan browser with load/delete per package, context-sensitive artifact deletion, and dynamic button disabled states.
 - **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with occlusion-aware depth testing and atomic score selection. Produces significantly sharper textures than the real-time triplanar cache. Optional server-side HQ refinement via differentiable rendering (currently experimental/broken).
 - **Render Mode Switching** — Cycle between Mesh, Textured, Refined, HQRefined, and Splat views at runtime via debug menu or controller binding (default: A/X button)
 
@@ -138,23 +138,35 @@ Refined textures persist with **Save Scan** and are restored on **Load Scan**.
 
 ### Saving and Loading
 
-- **Save Scan**: Persists the full TSDF + color volumes, triplanar color textures, triplanar depth maps, and MRUK anchor pose to disk (`RoomScans/scan.bin` + `RoomScans/triplanar/`)
-- **Load Scan**: Restores a previously saved scan. If the room anchor has moved since save, bakes the relocation into both the TSDF volume (compute resample) and triplanar textures (forward-splat compute) so the scan aligns with the physical room. Rebuilds the mesh. Validates that volume dimensions match.
-- **Auto-save on quit**: If enabled, the scan is automatically saved when the app exits (default off)
-- **Clear All Data**: Stops scanning, clears volumes/mesh/triplanar/keyframes, deletes saved scan and GSExport from disk
+QuestRoomScan uses a **package-based persistence system**. Each scan is saved as a self-contained package under `RoomScans/`:
 
-> **Known issue — Load alignment**: The MRUK room anchor may not be fully stabilized immediately after the app launches. If a loaded scan appears misaligned with the physical room, try one of these workarounds:
->
-> 1. **Wait a few seconds** after launch before pressing Load — give the headset time to localize the room anchor.
-> 2. **Clear and reload** — press Clear All Data, wait a moment, then Load again.
-> 3. **Rely on auto-save** — saving after a successful load "rebases" the anchor, so subsequent loads from the same session are more reliable.
->
-> The underlying cause is that MRUK's spatial anchor can take a variable amount of time to converge to its true pose after `SceneLoadedEvent` fires. The existing stabilization loop (5 stable frames within ~1 second) handles most cases but may not be sufficient in all environments.
+```
+RoomScans/
+  manifest.json
+  pkg_20260228_143022/
+    scan.bin              # TSDF + color volumes (v1 binary)
+    anchor.json           # Spatial anchor UUID + per-artifact matrices
+    triplanar/            # Color + depth textures
+    keyframes/            # Copied from GSExport/ (images + frames.jsonl)
+    splat.ply             # Auto-saved when GS training completes
+    refined_mesh.bin      # Auto-saved when on-device refinement completes
+    refined_atlas.raw     # Auto-saved with refined mesh
+    hq_atlas.raw          # Auto-saved when HQ refinement completes
+```
+
+- **Save Scan**: Creates a new package. Persists the TSDF + color volumes, triplanar textures, copies keyframes, and creates a persisted `OVRSpatialAnchor` for cross-session relocation. Sets this package as the active target for subsequent artifact auto-saves.
+- **Load Scan**: Browse saved packages in the **Saved Scans** view. Loading a package localizes the spatial anchor, computes per-artifact relocation matrices, and restores all data including splat, refined textures, and HQ atlas.
+- **Auto-save artifacts**: When a splat download completes, on-device refinement finishes, or HQ refinement finishes, the artifact is automatically saved to the active package — no manual "Save Scan" needed.
+- **Delete artifact**: Context-sensitive deletion in the Scan view — deletes the artifact matching the current render mode (splat, refined, or HQ) from the active package.
+- **Delete package**: Full package deletion from the Saved Scans view, including erasing the spatial anchor from persistent storage.
+- **Clear All Data**: Stops scanning, clears volumes/mesh/triplanar/keyframes from memory, clears the active package reference.
 
 ### Architecture
 
 ```
-RoomAnchorManager (MRUK floor anchor → relocation matrix on load)
+RoomAnchorManager (OVRSpatialAnchor persistence + MRUK fallback → per-artifact relocation)
+       │
+RoomScanPersistence (package-based multi-scan persistence, anchor.json, manifest.json)
        │
 PassthroughCameraProvider (RGB frames from headset cameras)
        │
@@ -233,50 +245,52 @@ Trained splats are rendered using a [fork of Unity Gaussian Splatting](https://g
 
 ## VR Debug Menu
 
-World-space UI Toolkit panel activated via **left thumbstick click** (Quest OS reserves the Menu/Start button for system use). Point the controller ray at buttons and press the **index trigger** to click.
+Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. Point the controller ray at buttons and press the **index trigger** to click. The panel lazy-follows your gaze at 0.75m.
 
-The panel lazy-follows your gaze — it floats at 0.75m and re-centers when your head drifts past 45 degrees.
+### Layout
 
-![Debug Menu](docs/debug-menu.png)
+```
++------------------+---------------------------------------------+
+| QUESTROOMSCAN    |  [Right panel — swaps based on nav]          |
+|  DEBUG           |                                             |
+|                  |                                             |
+| [*] Scan         |  (Scan View / Saved Scans / Refine /       |
+| [ ] Saved Scans  |   Training / Tools)                         |
+| [ ] Refine       |                                             |
+| [ ] Training     |                                             |
+| [ ] Tools        |                                             |
+|                  |                                             |
+| 72 FPS           |                                             |
++------------------+---------------------------------------------+
+```
 
-### Sections
+### Views
 
-**Scan Status** — Live readouts updated every frame:
-- **Scanning**: Whether integration is active (Running / Stopped)
-- **Mode**: Current scanning mode
-- **Integrations**: Total depth frames integrated into the volume
-- **Keyframes**: Number of motion-gated JPEG snapshots captured for GS training
-- **Render**: Current render mode (Mesh / Splat / Both)
+**Scan** (default) — Live status rows (Scanning, Mode, Integrations, Keyframes, Render, Package) and action buttons:
+- **Start/Stop Scanning**: Toggle depth integration
+- **Render Mode**: Cycle through Mesh → Textured → Refined → HQRefined → Splat
+- **Save Scan**: Create a new package with current scan data
+- **Delete Artifact**: Context-sensitive — deletes Splat/Refined/HQ atlas from active package based on current render mode
 
-**Server Training** — Gaussian Splat training status:
-- **Server**: Editable URL field pointing to your PC server (e.g. `http://192.168.1.100:8420`)
-- **State**: Idle, Uploading, Training, Downloading, Done, Error
-- **Progress**: Visual progress bar
-- **Iteration**: Current / total training iterations
-- **Elapsed**: Training wall-clock time
-- **Backend**: Which training backend the server is using (msplat / gsplat / 3DGS)
-- **Message**: Status messages from the server
+**Saved Scans** — Scrollable list of saved packages sorted newest-first. Each entry shows display name, date, artifact badges (KF, Splat, Refined, HQ), and Load/Delete buttons. Badge count shown on the nav button.
 
-**Persistence** — Data on disk:
-- **Saved Scan**: Whether a saved scan exists (with size)
-- **GSExport**: Whether keyframes/point cloud are on disk (with count)
+**Refine** — On-device and server refinement status + action buttons:
+- **Refine Textures**: On-device GPU atlas bake from keyframes
+- **HQ Refine (Server)**: Upload to server for differentiable optimization
 
-### Action Buttons
+**Training** — GS training with server URL field, live progress, and Start/Cancel buttons.
 
-| Button | What it does |
-|--------|-------------|
-| **Stop/Start Scanning** | Toggles depth integration, keyframe capture, and triplanar baking. Label updates to reflect current state. |
-| **Render: Mesh** | Cycles render mode: Mesh → Splat → Both → Mesh. If a trained PLY has been downloaded but not yet loaded, switching to Splat auto-loads it. Label shows current mode. |
-| **Save Scan** | Persists TSDF + color volumes, triplanar textures + depth maps, and room-anchor pose to disk. Button shows "Saving..." then "Done!" or "Failed". |
-| **Load Scan** | Restores a previously saved scan, bakes room-anchor relocation if needed, and rebuilds the mesh. Validates volume dimensions match. |
-| **Export Point Cloud** | Manually exports GPU mesh vertices as `points3d.ply` via async readback (also auto-exports every 30s during scanning). |
-| **Start GS Training** | Triggers the full training pipeline: export point cloud → ZIP keyframes → upload → train → download. Disabled while training is in progress. |
-| **Cancel Training** | Sends cancel request to the server. Only enabled while training is in progress. |
-| **Refine Textures** | Runs the on-device texture refinement pipeline: GPU readback → xatlas UV unwrap → compute shader atlas bake → dilation. Produces a UV-mapped atlas from keyframe projections. |
-| **HQ Refine (Server)** | Uploads UV mesh + keyframes to the server for differentiable texture optimization. **Currently broken** — on-device refinement is recommended. |
-| **Clear All Data** | Stops scanning, clears all volumes/mesh/textures, deletes saved scan and GSExport from disk. |
+**Tools** — Export Point Cloud, Clear All Data.
 
-**Footer**: Live FPS counter.
+### Button Disabled States
+
+Buttons are dynamically enabled/disabled based on app context:
+- **Save Scan**: Disabled if no volume data
+- **Start GS Training**: Disabled if already training or no scan loaded
+- **Refine Textures**: Disabled if already refining or no mesh/keyframes
+- **HQ Refine**: Disabled if no server URL configured
+- **Export Point Cloud**: Disabled if no volume data
+- **Delete Artifact**: Only visible in Splat/Refined/HQRefined modes, requires active package
 
 ### Default Controller Bindings
 
@@ -340,7 +354,7 @@ QuestRoomScan builds on that foundation with significant extensions:
 |-|----------|---------------|
 | **Mesh extraction** | CPU marching cubes from GPU volume | Fully GPU-driven Surface Nets via compute shaders — zero CPU readback, single indirect draw call |
 | **Texturing** | Geometry only — no camera RGB texturing | Camera-based texturing: triplanar world-space cache (~8mm/texel) and vertex colors (~5cm) — sourced from passthrough camera RGB |
-| **Persistence** | None — mesh lost on restart | Save/load of TSDF + color volumes + triplanar textures + depth maps to disk, MRUK room-anchor relocation on load |
+| **Persistence** | None — mesh lost on restart | Multi-scan package persistence with OVRSpatialAnchor cross-session relocation |
 | **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, GPU temporal stabilization, RANSAC plane detection & snapping |
 | **Gaussian Splatting** | — | Full pipeline: on-device capture → PC server training → on-device UGS rendering with render mode switching |
 | **VR UI** | — | World-space debug menu with controller ray interaction, live status, and training controls |
