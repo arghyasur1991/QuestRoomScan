@@ -88,7 +88,7 @@ namespace Genesis.RoomScan
         [Header("Unwrap Performance")]
         [Tooltip("Simplify mesh before UV unwrap (0.1 = 10% of tris, 1.0 = no simplification)")]
         [Range(0.1f, 1f)]
-        [SerializeField] internal float decimationRatio = 0.5f;
+        [SerializeField] internal float decimationRatio = 1f;
         [Tooltip("Align charts to 4x4 blocks for faster packing")]
         [SerializeField] internal bool useBlockAlign = true;
         [Tooltip("Chart growth cost limit — lower = more charts, faster unwrap")]
