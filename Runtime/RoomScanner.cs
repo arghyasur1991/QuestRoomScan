@@ -86,7 +86,9 @@ namespace Genesis.RoomScan
         [SerializeField] internal bool skipDenoise = true;
 
         [Header("Unwrap Performance")]
-        [Tooltip("Simplify mesh before UV unwrap (0.1 = 10% of tris, 1.0 = no simplification)")]
+        [Tooltip("Simplify mesh before UV unwrap (0.1 = 10% of tris, 1.0 = no simplification). " +
+                 "Warning: values below 1.0 cause larger UV triangles which degrade GPU bake " +
+                 "performance (warp divergence) and texture alignment. Keep at 1.0 unless testing.")]
         [Range(0.1f, 1f)]
         [SerializeField] internal float decimationRatio = 1f;
         [Tooltip("Align charts to 4x4 blocks for faster packing")]
