@@ -1134,7 +1134,19 @@ namespace Genesis.RoomScan
                 if (plyData == null || plyData.Length == 0) { Debug.LogError("[RoomScan] Download empty"); return; }
 
                 _downloadedPlyData = plyData;
-                Debug.Log($"[RoomScan] Trained splat downloaded ({plyData.Length / (1024 * 1024f):F1}MB) — use 'Switch Render Mode' to view");
+                Debug.Log($"[RoomScan] Trained splat downloaded ({plyData.Length / (1024 * 1024f):F1}MB)");
+
+                // Persist to disk so it survives app restarts
+                if (_persistence != null)
+                {
+                    string splatPath = _persistence.SplatFilePath;
+                    string splatDir = Path.GetDirectoryName(splatPath);
+                    if (!Directory.Exists(splatDir)) Directory.CreateDirectory(splatDir);
+                    await Task.Run(() => File.WriteAllBytes(splatPath, plyData));
+                    Debug.Log($"[RoomScan] splat.ply saved to disk ({plyData.Length / (1024f * 1024f):F1}MB)");
+                }
+
+                LoadDownloadedSplat();
             }
             catch (Exception e)
             {
