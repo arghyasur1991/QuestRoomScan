@@ -84,7 +84,7 @@ namespace Genesis.RoomScan
         [Tooltip("Force CPU bake path instead of GPU compute (for comparison)")]
         [SerializeField] internal bool forceCpuBake = false;
         [Tooltip("Skip denoise pass after baking (GPU bake has fewer speckles)")]
-        [SerializeField] internal bool skipDenoise = false;
+        [SerializeField] internal bool skipDenoise = true;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
