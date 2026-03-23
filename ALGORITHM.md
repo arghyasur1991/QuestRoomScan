@@ -596,3 +596,86 @@ Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-tri
 **Server → Quest (denormalized PLY)**:
 - PLY is in COLMAP world coordinates (Y-down)
 - `GaussianSplatPlyLoader` negates Y position during loading to convert back to Unity space
+
+## 14. Texture Refinement Pipeline
+
+Post-processing pipeline that produces a sharp UV-mapped texture atlas from saved keyframes, replacing the blurry triplanar vertex-color texturing. Uses the same keyframes collected for Gaussian Splat training (§13.1).
+
+### 14.1 Mesh Simplification (optional, meshoptimizer)
+
+Before UV unwrapping, the GPU Surface Nets mesh can be optionally decimated using [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplify`):
+
+- **Input**: Original mesh positions + index buffer from GPU readback
+- **Operation**: Quadric error metric simplification — removes triangles while preserving mesh topology and surface shape. Only the index buffer changes; vertex positions are untouched.
+- **Target**: Configurable ratio (default 0.5 = 50% triangle reduction). Inspector slider `decimationRatio ∈ [0.1, 1.0]`.
+- **Performance**: <5ms even for 100k triangles on ARM64
+- **Purpose**: Reduces xatlas charting/packing time roughly proportionally to triangle reduction. Since the atlas resolution (2048²) is the detail bottleneck — not mesh density — moderate decimation has negligible visual impact on the baked texture.
+
+### 14.2 UV Unwrapping (xatlas)
+
+[xatlas](https://github.com/jpcy/xatlas) generates a UV atlas via native C++ P/Invoke:
+
+```
+Create atlas → AddMesh(positions, normals, indices) → Generate(chartOpts, packOpts) → read output
+```
+
+**Charting phase** segments the mesh into charts (connected patches with low angular distortion):
+- `maxCost` (default 1.5, xatlas default 2.0): Chart growth cost threshold. Lower = more, smaller charts = faster parameterization at the cost of more seams.
+- `normalDeviationWeight`, `straightnessWeight`, `normalSeamWeight`: Control chart boundary placement relative to surface curvature and existing seams.
+- `maxIterations` = 1: Single pass (minimum).
+
+**Packing phase** arranges charts into the atlas texture:
+- `resolution` (default 2048): Atlas resolution in pixels.
+- `blockAlign` (default true, xatlas default false): Aligns charts to 4×4 pixel blocks. Dramatically reduces packing search space at slight atlas utilization cost.
+- `padding` = 2: Pixels between charts to prevent bleeding during bilinear filtering.
+- `bilinear` = true: Reserves extra space for bilinear filter sampling.
+
+**Output**: New vertex buffer (split at UV seams), UV coordinates in atlas-pixel space, index buffer, and xref array mapping each output vertex back to the original mesh vertex.
+
+All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and configurable from the Inspector via `UnwrapOptions`.
+
+### 14.3 GPU Atlas Baking (Compute Shader)
+
+`AtlasBakeCompute.compute` processes each keyframe to project camera imagery onto the UV atlas. All data is in `StructuredBuffer`s with integer pixel indexing — no render targets, no Y-axis ambiguity.
+
+**Three kernels, dispatched per keyframe:**
+
+1. **ClearDepth** (`[numthreads(256,1,1)]`): Fills depth buffer with 999 (far sentinel). One dispatch per keyframe to reset occlusion.
+
+2. **BuildDepth** (`[numthreads(64,1,1)]`): Per original-mesh triangle, rasterizes in screen space using the keyframe's view/projection. Writes `InterlockedMin(asuint(z))` to build an occlusion depth map. This uses the *original* (pre-decimation) mesh to ensure accurate occlusion.
+
+3. **BakeAtlas** (`[numthreads(64,1,1)]`): Per UV-unwrapped triangle:
+   - Rasterizes bounding box in atlas UV space
+   - Barycentric test for point-in-triangle
+   - Interpolates 3D world position from barycentrics
+   - Projects to keyframe screen space via intrinsics (fx, fy, cx, cy with crop offset)
+   - **Bounds check**: Discards if outside image
+   - **Occlusion check**: Compares projected depth against depth buffer (with 0.05 tolerance)
+   - **Score**: `dot(surfaceNormal, viewDirection)` — prefers head-on views
+   - **Atomic best-score selection**: `InterlockedMax(_ScoreBuf[texelIdx], asuint(score))` — since scores are positive floats, `asuint()` preserves ordering. Color is written only when the thread wins the comparison.
+
+**Keyframe processing** is sequential from C#: decode JPEG → `GetPixels32()` → upload to `ComputeBuffer` → dispatch 3 kernels → `await Task.Yield()`. Score and atlas buffers persist across keyframes (best score accumulates).
+
+**Post-processing** (CPU):
+- **Dilation**: Fills empty texels at UV island edges by averaging non-empty neighbors (multiple passes)
+- **Denoise** (optional, `skipDenoise` toggle): Median-like filter to remove speckle noise from misaligned projections. GPU compute bake produces fewer speckles than CPU bake, so this is off by default.
+
+**CPU fallback**: `BakeAtlasCPUAsync` implements identical logic in C# with `unsafe` pointer access. Used when compute shader is null (`forceCpuBake` toggle).
+
+### 14.4 Render Modes
+
+Two additional render modes after refinement:
+
+- **Refined**: On-device atlas applied to a `Mesh` object with `RefinedMesh.shader` (standard unlit UV-mapped rendering). Available immediately after on-device refinement.
+- **HQRefined**: Server-refined atlas (same mesh, different texture). Available after server-side differentiable refinement. **Currently broken** — on-device refinement is recommended.
+
+Both atlases and mesh data persist to disk via `RoomScanPersistence` and survive app restarts / scan reloads.
+
+### 14.5 Server-Side HQ Refinement (experimental, currently broken)
+
+Optional server-side path using differentiable rendering for texture optimization:
+1. Client uploads UV mesh binary (`refined_mesh.bin`) + keyframe ZIP to `gs-server`
+2. Server computes UV-to-pixel correspondences and runs gradient-based texture optimization
+3. Client polls `/refine-texture/status`, downloads result atlas
+
+Uses pure PyTorch tensor operations (no nvdiffrast), supporting MPS (Metal), CUDA, and CPU backends. This path is currently non-functional and is not recommended for use.
