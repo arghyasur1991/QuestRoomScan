@@ -1243,6 +1243,7 @@ namespace Genesis.RoomScan
                         HasRefinedTexture = false;
                         LastRefinedResult = null;
                         _cachedUnwrap = null;
+                        KeyframeRelocation = Matrix4x4.identity;
                         SetRenderMode(ScanRenderMode.Textured);
                     }
                     break;
@@ -1251,6 +1252,7 @@ namespace Genesis.RoomScan
                     _persistence.DeleteArtifactFromPackage(ArtifactType.HQRefined);
                     HasHQRefinedTexture = false;
                     _hqAtlasTexture = null;
+                    KeyframeRelocation = Matrix4x4.identity;
                     SetRenderMode(HasRefinedTexture ? ScanRenderMode.Refined : ScanRenderMode.Textured);
                     break;
             }
