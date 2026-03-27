@@ -249,6 +249,47 @@ namespace Genesis.RoomScan.GSplat
         }
 
         /// <summary>
+        /// Uploads an atlas PNG to the server for Real-ESRGAN super-resolution.
+        /// Returns the upscaled atlas as raw PNG bytes, or null on failure.
+        /// </summary>
+        public async Task<byte[]> EnhanceAtlasAsync(byte[] atlasPng, int scale = 4)
+        {
+            try
+            {
+                string url = $"{serverUrl}/enhance-atlas?scale={scale}";
+                Debug.Log($"[GSplatServerClient] Uploading atlas for SR ({atlasPng.Length / 1024}KB, x{scale})...");
+
+                using var request = new UnityWebRequest(url, "POST");
+                request.uploadHandler = new UploadHandlerRaw(atlasPng);
+                request.downloadHandler = new DownloadHandlerBuffer();
+                request.SetRequestHeader("Content-Type", "image/png");
+                request.timeout = 300;
+
+                var op = request.SendWebRequest();
+                while (!op.isDone)
+                    await Task.Yield();
+
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    string err = $"Atlas enhance failed: {request.error} (HTTP {request.responseCode})";
+                    Debug.LogError($"[GSplatServerClient] {err}");
+                    Error?.Invoke(err);
+                    return null;
+                }
+
+                byte[] result = request.downloadHandler.data;
+                Debug.Log($"[GSplatServerClient] Enhanced atlas received: {result.Length / 1024}KB");
+                return result;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[GSplatServerClient] Atlas enhance error: {e.Message}");
+                Error?.Invoke(e.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Sends a cancel request to the training server.
         /// </summary>
         public async Task CancelTraining()
