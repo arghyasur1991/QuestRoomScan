@@ -56,12 +56,12 @@ namespace Genesis.RoomScan
         /// Lower = more views blended (smoother but potentially blurrier), higher = fewer views (sharper).</summary>
         public static float BlendMinFraction { get; set; } = 0.3f;
 
-        /// <summary>GPU unsharp-mask strength applied after baking (0 = off, 0.3-1.0 typical).
+        /// <summary>GPU unsharp-mask strength applied after baking (0 = off, 0.5-1.5 typical).
         /// Restores crispness lost during multi-view blending.</summary>
-        public static float SharpenStrength { get; set; } = 0.5f;
+        public static float SharpenStrength { get; set; } = 0.8f;
 
-        /// <summary>Radius for the Gaussian blur used in unsharp mask (1 = 3x3, 2 = 5x5).</summary>
-        public static int SharpenRadius { get; set; } = 1;
+        /// <summary>Radius for the Gaussian blur used in unsharp mask (1 = 3x3, 2 = 5x5, 3 = 7x7).</summary>
+        public static int SharpenRadius { get; set; } = 2;
 
         public static event Action<string> StatusChanged;
 
