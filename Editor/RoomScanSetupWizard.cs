@@ -136,7 +136,7 @@ namespace Genesis.RoomScan.Editor
             _panelInputConfig = FindAny<PanelInputConfiguration>();
 
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
-                "depthNormalCompute", "depthDilationCompute");
+                "depthNormalCompute", "depthDilationCompute", "bilateralFilterCompute");
             _volumeWired = _volumeIntegrator != null && AreFieldsAssigned(_volumeIntegrator,
                 "compute");
             _meshMatWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
@@ -788,6 +788,7 @@ namespace Genesis.RoomScan.Editor
                 var so = new SerializedObject(_depthCapture);
                 AssignCompute(so, "depthNormalCompute", PKG + "DepthNormals.compute");
                 AssignCompute(so, "depthDilationCompute", PKG + "DepthDilation.compute");
+                AssignCompute(so, "bilateralFilterCompute", PKG + "BilateralDepthFilter.compute");
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(_depthCapture);
             }

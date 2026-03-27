@@ -18,6 +18,15 @@ namespace Genesis.RoomScan
 
         [SerializeField] private ComputeShader depthNormalCompute;
         [SerializeField] private ComputeShader depthDilationCompute;
+        [SerializeField] private ComputeShader bilateralFilterCompute;
+
+        [Header("Bilateral Depth Filter")]
+        [Tooltip("Edge-preserving depth denoising guided by passthrough RGB. Smooths flat surfaces while keeping object boundaries sharp.")]
+        [SerializeField] private bool enableBilateralFilter = true;
+        [SerializeField, Range(1f, 8f)] private float sigmaSpatial = 3.0f;
+        [SerializeField, Range(0.01f, 0.5f)] private float sigmaColor = 0.1f;
+        [SerializeField, Range(0.001f, 0.1f)] private float sigmaDepth = 0.02f;
+        [SerializeField, Range(1, 5)] private int filterRadius = 2;
 
         [Header("Dilation")]
         [SerializeField] private int dilationSteps = 8;
@@ -55,12 +64,24 @@ namespace Genesis.RoomScan
         public static readonly int VoxDistID = Shader.PropertyToID("gsVoxDist");
         public static readonly int VoxSizeShaderID = Shader.PropertyToID("gsVoxSize");
 
+        // Bilateral filter property IDs
+        private static readonly int BilSrcDepthID = Shader.PropertyToID("_SrcDepth");
+        private static readonly int BilRGBGuideID = Shader.PropertyToID("_RGBGuide");
+        private static readonly int BilDstDepthID = Shader.PropertyToID("_DstDepth");
+        private static readonly int BilDepthWID = Shader.PropertyToID("_DepthW");
+        private static readonly int BilDepthHID = Shader.PropertyToID("_DepthH");
+        private static readonly int BilSigmaSpatialID = Shader.PropertyToID("_SigmaSpatial");
+        private static readonly int BilSigmaColorID = Shader.PropertyToID("_SigmaColor");
+        private static readonly int BilSigmaDepthID = Shader.PropertyToID("_SigmaDepth");
+        private static readonly int BilFilterRadiusID = Shader.PropertyToID("_FilterRadius");
+
         public static bool DepthAvailable { get; private set; }
 
         private ComputeKernelHelper _normKernel;
         private ComputeKernelHelper _monoConvertKernel;
         private ComputeKernelHelper _initDilateKernel;
         private ComputeKernelHelper _dilateStepKernel;
+        private ComputeKernelHelper _bilateralKernel;
 
         private Texture _depthTex;
         public Texture DepthTex => _depthTex;
@@ -73,7 +94,10 @@ namespace Genesis.RoomScan
         public RenderTexture DilatedDepthTex => _dilatedDepth;
 
         private RenderTexture _simulatedDepthTex;
+        private RenderTexture _filteredDepthTex;
         private int _dilationMaxStep;
+
+        private Texture _rgbGuide;
 
         private AROcclusionManager _arOcclusionManager;
         private Unity.XR.CoreUtils.XROrigin _xrOrigin;
@@ -87,6 +111,12 @@ namespace Genesis.RoomScan
         private const string ScenePermission = "com.oculus.permission.USE_SCENE";
 
         public event Action Updated;
+
+        /// <summary>
+        /// Provide an RGB texture as edge guide for bilateral depth filtering.
+        /// Call each frame from RoomScanner with the passthrough camera frame.
+        /// </summary>
+        public void SetRGBGuide(Texture tex) => _rgbGuide = tex;
 
         private static readonly Vector3 ScaleFlipZ = new(1, 1, -1);
 
@@ -122,6 +152,8 @@ namespace Genesis.RoomScan
             _monoConvertKernel = new ComputeKernelHelper(depthNormalCompute, "MonoRawDepthToStereo");
             _initDilateKernel = new ComputeKernelHelper(depthDilationCompute, "InitDepthDilation");
             _dilateStepKernel = new ComputeKernelHelper(depthDilationCompute, "DilateDepthStep");
+            if (bilateralFilterCompute != null)
+                _bilateralKernel = new ComputeKernelHelper(bilateralFilterCompute, "BilateralFilter");
 
             _dilationMaxStep = 1;
             for (int i = 0; i < dilationSteps; i++)
@@ -257,6 +289,7 @@ namespace Genesis.RoomScan
             if (_dilationA) Destroy(_dilationA);
             if (_dilationB) Destroy(_dilationB);
             if (_simulatedDepthTex) Destroy(_simulatedDepthTex);
+            if (_filteredDepthTex) Destroy(_filteredDepthTex);
         }
 
         private void Update()
@@ -285,6 +318,7 @@ namespace Genesis.RoomScan
 
             if (!DepthAvailable) return;
 
+            ApplyBilateralFilter();
             SetGlobalShaderProperties();
             ComputeNormals();
             _dilationDirty = true;
@@ -380,6 +414,44 @@ namespace Genesis.RoomScan
             }
 
             _planes = new Vector2(depthPlanes.nearZ, depthPlanes.farZ);
+        }
+
+        private void ApplyBilateralFilter()
+        {
+            if (!enableBilateralFilter || _bilateralKernel == null || _rgbGuide == null || _depthTex == null)
+                return;
+
+            int w = _depthTex.width;
+            int h = _depthTex.height;
+
+            if (_filteredDepthTex == null || _filteredDepthTex.width != w || _filteredDepthTex.height != h)
+            {
+                if (_filteredDepthTex) Destroy(_filteredDepthTex);
+                _filteredDepthTex = new RenderTexture(w, h, 0, GraphicsFormat.R16_UNorm, 1)
+                {
+                    dimension = TextureDimension.Tex2DArray,
+                    volumeDepth = 2,
+                    enableRandomWrite = true,
+                    filterMode = FilterMode.Point,
+                    wrapMode = TextureWrapMode.Clamp
+                };
+                _filteredDepthTex.Create();
+            }
+
+            var cs = bilateralFilterCompute;
+            _bilateralKernel.Set(BilSrcDepthID, _depthTex);
+            _bilateralKernel.Set(BilRGBGuideID, _rgbGuide);
+            _bilateralKernel.Set(BilDstDepthID, _filteredDepthTex);
+            cs.SetInt(BilDepthWID, w);
+            cs.SetInt(BilDepthHID, h);
+            cs.SetFloat(BilSigmaSpatialID, sigmaSpatial);
+            cs.SetFloat(BilSigmaColorID, sigmaColor);
+            cs.SetFloat(BilSigmaDepthID, sigmaDepth);
+            cs.SetInt(BilFilterRadiusID, filterRadius);
+
+            _bilateralKernel.DispatchFit(w, h, 2);
+
+            _depthTex = _filteredDepthTex;
         }
 
         private void SetGlobalShaderProperties()

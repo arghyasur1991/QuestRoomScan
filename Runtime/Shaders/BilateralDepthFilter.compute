@@ -1,0 +1,71 @@
+// Genesis RoomScan - RGB-guided joint bilateral depth filter
+// Smooths depth where RGB is uniform, preserves edges where RGB changes.
+// Also uses depth-range weighting for robustness when RGB/depth aren't perfectly co-registered.
+
+#pragma kernel BilateralFilter
+
+Texture2DArray<float>    _SrcDepth;
+Texture2D<float4>        _RGBGuide;
+RWTexture2DArray<float>  _DstDepth;
+
+SamplerState sampler_RGBGuide;
+
+uint  _DepthW, _DepthH;
+float _SigmaSpatial;
+float _SigmaColor;
+float _SigmaDepth;
+int   _FilterRadius;
+
+[numthreads(8, 8, 1)]
+void BilateralFilter(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _DepthW || id.y >= _DepthH) return;
+    uint eye = id.z;
+
+    float centerDepth = _SrcDepth[uint3(id.xy, eye)];
+
+    // Map depth pixel to guide-image UV (assumes roughly co-registered FOVs)
+    float2 centerUV = float2((id.x + 0.5) / (float)_DepthW,
+                              (id.y + 0.5) / (float)_DepthH);
+    float3 centerRGB = _RGBGuide.SampleLevel(sampler_RGBGuide, centerUV, 0).rgb;
+
+    float invSigmaS2 = -0.5 / (_SigmaSpatial * _SigmaSpatial);
+    float invSigmaC2 = -0.5 / (_SigmaColor  * _SigmaColor);
+    float invSigmaD2 = -0.5 / (_SigmaDepth  * _SigmaDepth);
+
+    float weightSum = 0.0;
+    float depthSum  = 0.0;
+
+    for (int dy = -_FilterRadius; dy <= _FilterRadius; dy++)
+    {
+        for (int dx = -_FilterRadius; dx <= _FilterRadius; dx++)
+        {
+            int2 nb = int2(id.xy) + int2(dx, dy);
+            if (nb.x < 0 || nb.y < 0 || (uint)nb.x >= _DepthW || (uint)nb.y >= _DepthH)
+                continue;
+
+            float nDepth = _SrcDepth[uint3(nb, eye)];
+
+            // Spatial weight
+            float spatialDist2 = (float)(dx * dx + dy * dy);
+            float ws = exp(spatialDist2 * invSigmaS2);
+
+            // RGB color-edge weight
+            float2 nUV = float2((nb.x + 0.5) / (float)_DepthW,
+                                 (nb.y + 0.5) / (float)_DepthH);
+            float3 nRGB = _RGBGuide.SampleLevel(sampler_RGBGuide, nUV, 0).rgb;
+            float colorDist2 = dot(centerRGB - nRGB, centerRGB - nRGB);
+            float wc = exp(colorDist2 * invSigmaC2);
+
+            // Depth-range weight (prevents blurring across depth discontinuities)
+            float depthDiff = centerDepth - nDepth;
+            float wd = exp((depthDiff * depthDiff) * invSigmaD2);
+
+            float w = ws * wc * wd;
+            weightSum += w;
+            depthSum  += nDepth * w;
+        }
+    }
+
+    _DstDepth[uint3(id.xy, eye)] = (weightSum > 1e-8) ? depthSum / weightSum : centerDepth;
+}

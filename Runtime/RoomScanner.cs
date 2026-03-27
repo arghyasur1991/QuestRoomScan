@@ -1002,6 +1002,8 @@ namespace Genesis.RoomScan
                 Texture frame = pcp.CurrentFrame;
                 if (frame != null)
                 {
+                    _depthCapture?.SetRGBGuide(frame);
+
                     Pose pose = pcp.CameraPose;
                     if (_depthCapture != null)
                         pose = _depthCapture.TrackingToWorld(pose);
