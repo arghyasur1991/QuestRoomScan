@@ -6,7 +6,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 
 - **GPU TSDF Integration** — Depth frames fused into a signed distance field via compute shaders
 - **GPU Surface Nets Meshing** — Fully GPU-driven mesh extraction via compute shaders with zero CPU readback, rendered via a single `Graphics.RenderPrimitivesIndirect` draw call
-- **Vertex Color Texturing** — Real-time per-voxel RGB from passthrough camera, baked into the TSDF color volume and packed into Surface Nets vertices. Triplanar world-space cache available as an optional mode (disabled by default — saves ~192MB GPU memory). Keyframes captured as motion-gated JPEGs to disk for texture refinement and Gaussian Splat training.
+- **Two-Layer Real-Time Texturing** — Triplanar world-space cache (~8mm/texel persistent surface color from passthrough RGB) with vertex color fallback (~5cm). Triplanar can be disabled via inspector toggle to save ~192MB GPU memory when not needed (e.g., if only post-scan refined textures matter). Keyframes captured as motion-gated JPEGs to disk for texture refinement and Gaussian Splat training.
 - **Package-Based Persistence** — Multi-scan persistence system where each scan is a self-contained package (`pkg_YYYYMMDD_HHMMSS/`) with its own TSDF, triplanar textures, keyframes, splat, and refined textures. Scan browser in the debug menu lists all saved packages. Artifacts (splat, refined, HQ) auto-save to the active package on creation.
 - **OVRSpatialAnchor Relocation** — `RoomAnchorManager` creates a persisted `OVRSpatialAnchor` per scan package for reliable cross-session relocation. Per-artifact creation matrices in `anchor.json` track when each artifact was created relative to the spatial anchor, enabling accurate relocation even for artifacts created across different sessions. Falls back to MRUK floor anchor if spatial anchor localization fails.
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
@@ -16,7 +16,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, and GPU unsharp-mask sharpening. Produces sharp, seamless textures from captured keyframes.
 - **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
-- **Render Mode Switching** — Cycle between Mesh, Textured, Refined, HQRefined, and Splat views at runtime via debug menu or controller binding (default: A/X button). Textured mode uses vertex colors by default (triplanar if enabled).
+- **Render Mode Switching** — Cycle between Mesh, Textured, Refined, HQRefined, and Splat views at runtime via debug menu or controller binding (default: A/X button)
 
 ## Requirements
 
@@ -87,7 +87,7 @@ Scanning starts automatically on launch (configurable via `autoStartOnLoad`). As
 
 1. **Depth integration**: Each depth frame is fused into the TSDF volume with color from the passthrough camera
 2. **Mesh extraction**: GPU Surface Nets extracts a mesh from the volume every few frames (after a minimum number of integrations)
-3. **Texturing**: Camera RGB is fused into per-voxel vertex colors (triplanar cache available if enabled in inspector)
+3. **Texturing**: Camera RGB is baked into triplanar world-space textures for persistent surface color (with vertex color fallback)
 4. **Keyframe capture**: Motion-gated JPEG snapshots + camera poses are saved to `GSExport/` on disk — these are used later for Gaussian Splat training
 5. **Point cloud export**: GPU mesh vertices are auto-exported as `points3d.ply` every 30 seconds (configurable)
 
@@ -167,7 +167,7 @@ RoomScans/
   pkg_20260228_143022/
     scan.bin              # TSDF + color volumes (v1 binary)
     anchor.json           # Spatial anchor UUID + per-artifact matrices
-    triplanar/            # Color + depth textures (only if triplanar enabled)
+    triplanar/            # Color + depth textures (saved when triplanar is enabled)
     keyframes/            # Copied from GSExport/ (images + frames.jsonl)
     splat.ply             # Auto-saved when GS training completes
     refined_mesh.bin      # Auto-saved when on-device refinement completes
@@ -176,7 +176,7 @@ RoomScans/
     hq_atlas.png          # Auto-saved when server atlas enhancement completes
 ```
 
-- **Save Scan**: Creates a new package. Persists the TSDF + color volumes, copies keyframes, and creates a persisted `OVRSpatialAnchor` for cross-session relocation. Sets this package as the active target for subsequent artifact auto-saves.
+- **Save Scan**: Creates a new package. Persists the TSDF + color volumes, triplanar textures (when enabled), copies keyframes, and creates a persisted `OVRSpatialAnchor` for cross-session relocation. Sets this package as the active target for subsequent artifact auto-saves.
 - **Load Scan**: Browse saved packages in the **Saved Scans** view. Loading a package localizes the spatial anchor, computes per-artifact relocation matrices, and restores all data including splat, refined textures, enhanced mesh, and HQ atlas.
 - **Auto-save artifacts**: When a splat download completes, on-device refinement finishes, atlas/mesh enhancement finishes, the artifact is automatically saved to the active package — no manual "Save Scan" needed.
 - **Delete artifact**: Context-sensitive deletion in the Scan view — deletes the artifact matching the current render mode (splat, refined, enhanced mesh, or HQ) from the active package.
@@ -199,8 +199,8 @@ VolumeIntegrator (TSDF + color integration, exclusion zones, prune, freeze, bake
 MeshExtractor → GPUSurfaceNets (compute: classify → smooth → snap → temporal → index)
        │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
        │
-       ├── TriplanarCache (optional: bake camera RGB → 3 world-space textures + depth maps,
-       │                    disabled by default — vertex colors used instead)
+       ├── TriplanarCache (bake camera RGB → 3 world-space textures + depth maps,
+       │                    toggleable in inspector — falls back to vertex colors when disabled)
        │
        ├── KeyframeCollector (motion-gated JPEG + poses → GSExport/ on disk)
        │
@@ -341,19 +341,17 @@ Default values — all configurable per-component in the Inspector.
 | TSDF volume (RG8_SNorm) | 256 x 256 x 256 | ~32 MB |
 | Color volume (RGBA8) | 256 x 256 x 256 | ~64 MB |
 | GPU Surface Nets (coord map, vertices, indices, smoothing, temporal 3D texture) | 256³ derived | ~83 MB |
-| **Total GPU (default)** | | **~179 MB** |
+| Triplanar color textures (3x RGBA8) | 3 x 4096 x 4096 | ~192 MB |
+| Triplanar depth textures (3x R8) | 3 x 4096 x 4096 | ~48 MB |
+| **Total GPU** | | **~419 MB** |
 
-With triplanar textures enabled (`TriplanarCache.enableTriplanar = true`):
+**Disabling triplanar** (`TriplanarCache.enableTriplanar = false` in inspector) drops the total to **~179 MB** by skipping all six texture allocations. The mesh falls back to vertex colors (~5cm resolution), which are still adequate for real-time scanning visualization. This is a good option when:
 
-| Component | Default | Memory |
-|-----------|---------|--------|
-| Triplanar color textures (3x RGBA8) | 3 x 4096 x 4096 | +192 MB |
-| Triplanar depth textures (3x R8) | 3 x 4096 x 4096 | +48 MB |
-| **Total GPU (with triplanar)** | | **~419 MB** |
+- You only care about the post-scan refined texture (which is significantly sharper than triplanar)
+- You're running additional GPU-heavy workloads alongside scanning
+- You want to maximize headroom on Quest 3's shared GPU memory
 
-Triplanar textures are disabled by default since the refined texture pipeline produces significantly higher quality results. Vertex colors (~5cm resolution) provide adequate real-time visualization during scanning.
-
-Keyframes are written as JPEGs to disk (not held in GPU memory). To reduce GPU memory on constrained devices, lower `VolumeIntegrator.voxelCount` in the Inspector.
+Keyframes are written as JPEGs to disk (not held in GPU memory). To further reduce GPU memory, lower `VolumeIntegrator.voxelCount` in the Inspector.
 
 ## Comparison with Hyperscape
 
@@ -389,7 +387,7 @@ QuestRoomScan builds on that foundation with significant extensions:
 | | lasertag | QuestRoomScan |
 |-|----------|---------------|
 | **Mesh extraction** | CPU marching cubes from GPU volume | Fully GPU-driven Surface Nets via compute shaders — zero CPU readback, single indirect draw call |
-| **Texturing** | Geometry only — no camera RGB texturing | Real-time vertex colors, optional triplanar cache (~8mm/texel), post-scan refined atlas (keyframe multi-view bake + SR enhancement) |
+| **Texturing** | Geometry only — no camera RGB texturing | Real-time triplanar cache (~8mm/texel) + vertex colors, post-scan refined atlas (keyframe multi-view bake + SR enhancement) |
 | **Persistence** | None — mesh lost on restart | Multi-scan package persistence with OVRSpatialAnchor cross-session relocation |
 | **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, GPU temporal stabilization, RANSAC plane detection & snapping |
 | **Gaussian Splatting** | — | Full pipeline: on-device capture → PC server training → on-device UGS rendering with render mode switching |

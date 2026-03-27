@@ -11,7 +11,7 @@ namespace Genesis.RoomScan
         public static TriplanarCache Instance { get; private set; }
 
         [SerializeField, Tooltip("When disabled, vertex colors are used instead. Saves ~192MB GPU memory.")]
-        private bool enableTriplanar = false;
+        private bool enableTriplanar = true;
 
         [SerializeField] private ComputeShader bakeCompute;
         [SerializeField, Range(512, 8192)] private int textureResolution = 4096;
