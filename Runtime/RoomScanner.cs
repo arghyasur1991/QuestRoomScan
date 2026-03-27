@@ -700,12 +700,25 @@ namespace Genesis.RoomScan
 
                 // Encode current refined atlas to PNG
                 HQRefineStatus = "Encoding atlas...";
+                byte[] pngBytes;
                 var r = LastRefinedResult.Value;
-                var srcTex = new Texture2D(r.AtlasWidth, r.AtlasHeight, TextureFormat.RGBA32, false);
-                srcTex.SetPixelData(r.AtlasPixels, 0);
-                srcTex.Apply();
-                byte[] pngBytes = ImageConversion.EncodeToPNG(srcTex);
-                UnityEngine.Object.Destroy(srcTex);
+                if (r.AtlasPixels != null)
+                {
+                    var srcTex = new Texture2D(r.AtlasWidth, r.AtlasHeight, TextureFormat.RGBA32, false);
+                    srcTex.SetPixelData(r.AtlasPixels, 0);
+                    srcTex.Apply();
+                    pngBytes = ImageConversion.EncodeToPNG(srcTex);
+                    UnityEngine.Object.Destroy(srcTex);
+                }
+                else if (_refinedAtlasTexture != null)
+                {
+                    pngBytes = ImageConversion.EncodeToPNG(_refinedAtlasTexture);
+                }
+                else
+                {
+                    HQRefineStatus = "No atlas data available";
+                    return;
+                }
 
                 Debug.Log($"[RoomScan] HQ refine: uploading {pngBytes.Length / 1024}KB atlas, scale={hqRefineScale}");
                 HQRefineStatus = $"Uploading ({pngBytes.Length / 1024}KB)...";

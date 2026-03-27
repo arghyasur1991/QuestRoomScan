@@ -645,6 +645,7 @@ namespace Genesis.RoomScan
 
                         if (scanner != null)
                         {
+                            meshData.AtlasPixels = atlasBytes;
                             scanner.LastRefinedResult = meshData;
 
                             if (atlasBytes != null)
