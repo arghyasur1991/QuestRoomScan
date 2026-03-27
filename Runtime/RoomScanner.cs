@@ -4,7 +4,6 @@ using System.Threading.Tasks;
 using Genesis.RoomScan.GSplat;
 using Genesis.RoomScan.UI;
 using UnityEngine;
-using UnityEngine.Networking;
 using UnityEngine.Rendering;
 using UnityEngine.Serialization;
 
@@ -89,6 +88,9 @@ namespace Genesis.RoomScan
         [Tooltip("Unsharp mask strength to restore crispness after multi-view blending (0 = off)")]
         [Range(0f, 2f)]
         [SerializeField] internal float sharpenStrength = 0.8f;
+        [Tooltip("Server-side atlas super-resolution scale (1 = SR off, just inpaint)")]
+        [Range(1, 4)]
+        [SerializeField] internal int hqRefineScale = 2;
 
         [Header("Unwrap Performance")]
         [Tooltip("Simplify mesh before UV unwrap (0.1 = 10% of tris, 1.0 = no simplification). " +
@@ -677,90 +679,48 @@ namespace Genesis.RoomScan
                     return;
                 }
 
-                TextureRefinement.StatusChanged += s => HQRefineStatus = s;
-                UnwrappedMeshResult unwrap;
-                try { unwrap = await EnsureUnwrappedAsync(); }
-                finally { TextureRefinement.StatusChanged -= s => HQRefineStatus = s; }
-
-                HQRefineStatus = "Packaging...";
-                string serverUrl = _gsplatServerClient.ServerUrl;
-                string keyframeDir = KeyframeDirectory;
-                byte[] zipData = await Task.Run(() => PackRefinementZip(keyframeDir, unwrap));
-
-                if (zipData == null || zipData.Length == 0)
+                // Auto-trigger on-device refinement if not done yet
+                if (!LastRefinedResult.HasValue)
                 {
-                    HQRefineStatus = "No data to upload";
+                    HQRefineStatus = "Running on-device refine first...";
+                    TextureRefinement.StatusChanged += s => HQRefineStatus = s;
+                    try
+                    {
+                        StartTextureRefinement();
+                        while (IsRefining) await Task.Yield();
+                    }
+                    finally { TextureRefinement.StatusChanged -= s => HQRefineStatus = s; }
+
+                    if (!LastRefinedResult.HasValue)
+                    {
+                        HQRefineStatus = "On-device refine failed";
+                        return;
+                    }
+                }
+
+                // Encode current refined atlas to PNG
+                HQRefineStatus = "Encoding atlas...";
+                var r = LastRefinedResult.Value;
+                var srcTex = new Texture2D(r.AtlasWidth, r.AtlasHeight, TextureFormat.RGBA32, false);
+                srcTex.SetPixelData(r.AtlasPixels, 0);
+                srcTex.Apply();
+                byte[] pngBytes = ImageConversion.EncodeToPNG(srcTex);
+                UnityEngine.Object.Destroy(srcTex);
+
+                Debug.Log($"[RoomScan] HQ refine: uploading {pngBytes.Length / 1024}KB atlas, scale={hqRefineScale}");
+                HQRefineStatus = $"Uploading ({pngBytes.Length / 1024}KB)...";
+
+                byte[] resultPng = await _gsplatServerClient.EnhanceAtlasAsync(pngBytes, hqRefineScale, inpaint: true);
+
+                if (resultPng == null || resultPng.Length == 0)
+                {
+                    HQRefineStatus = "Server returned no data";
                     return;
                 }
 
-                // Phase 1: Upload
-                HQRefineStatus = "Uploading...";
-                using (var upload = new UnityWebRequest($"{serverUrl}/refine-texture", "POST"))
-                {
-                    upload.uploadHandler = new UploadHandlerRaw(zipData);
-                    upload.downloadHandler = new DownloadHandlerBuffer();
-                    upload.SetRequestHeader("Content-Type", "application/octet-stream");
-                    upload.timeout = 300;
-                    await upload.SendWebRequest();
-
-                    if (upload.result != UnityWebRequest.Result.Success)
-                    {
-                        HQRefineStatus = $"Upload failed: {upload.error}";
-                        Debug.LogError($"[RoomScan] HQ refine upload failed: {upload.error}");
-                        return;
-                    }
-                    Debug.Log($"[RoomScan] HQ refine upload OK: {upload.downloadHandler.text}");
-                }
-
-                // Phase 2: Poll until done
-                while (true)
-                {
-                    await Task.Delay(3000);
-                    using var poll = UnityWebRequest.Get($"{serverUrl}/refine-texture/status");
-                    poll.timeout = 10;
-                    await poll.SendWebRequest();
-
-                    if (poll.result != UnityWebRequest.Result.Success)
-                    {
-                        HQRefineStatus = $"Poll error: {poll.error}";
-                        Debug.LogWarning($"[RoomScan] HQ refine poll error: {poll.error}");
-                        continue;
-                    }
-
-                    var status = JsonUtility.FromJson<HQRefineServerStatus>(poll.downloadHandler.text);
-                    if (status.state == "done")
-                    {
-                        HQRefineStatus = "Downloading result...";
-                        break;
-                    }
-                    if (status.state == "error")
-                    {
-                        HQRefineStatus = $"Server error: {status.message}";
-                        Debug.LogError($"[RoomScan] HQ refine server error: {status.message}");
-                        return;
-                    }
-
-                    int pct = Mathf.RoundToInt(status.progress * 100f);
-                    HQRefineStatus = $"Processing ({pct}%)...";
-                }
-
-                // Phase 3: Download result
-                using var download = UnityWebRequest.Get($"{serverUrl}/refine-texture/result");
-                download.timeout = 120;
-                await download.SendWebRequest();
-
-                if (download.result != UnityWebRequest.Result.Success)
-                {
-                    HQRefineStatus = $"Download failed: {download.error}";
-                    Debug.LogError($"[RoomScan] HQ refine download failed: {download.error}");
-                    return;
-                }
-
-                byte[] pngData = download.downloadHandler.data;
                 HQRefineStatus = "Applying atlas...";
-
                 var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                if (ImageConversion.LoadImage(tex, pngData))
+                if (ImageConversion.LoadImage(tex, resultPng))
                 {
                     _hqAtlasTexture = tex;
                     HasHQRefinedTexture = true;
@@ -774,7 +734,7 @@ namespace Genesis.RoomScan
                     }
 
                     HQRefineStatus = "Done";
-                    Debug.Log($"[RoomScan] HQ texture refinement complete: {tex.width}x{tex.height}");
+                    Debug.Log($"[RoomScan] HQ atlas enhancement complete: {tex.width}x{tex.height}");
                 }
                 else
                 {
@@ -791,14 +751,6 @@ namespace Genesis.RoomScan
             {
                 IsHQRefining = false;
             }
-        }
-
-        [Serializable]
-        private class HQRefineServerStatus
-        {
-            public string state;
-            public float progress;
-            public string message;
         }
 
         private void ApplyRefinedAtlas(RefinedTextureResult result)
@@ -943,56 +895,6 @@ namespace Genesis.RoomScan
             }
             _refinedRenderer.material = new Material(shader);
             _refinedRenderer.enabled = false;
-        }
-
-        private byte[] PackRefinementZip(string keyframeDir, UnwrappedMeshResult mesh)
-        {
-            string framesPath = Path.Combine(keyframeDir, "frames.jsonl");
-            if (!File.Exists(framesPath)) return null;
-
-            using var ms = new MemoryStream();
-            using (var archive = new System.IO.Compression.ZipArchive(ms,
-                System.IO.Compression.ZipArchiveMode.Create, true))
-            {
-                var entry = archive.CreateEntry("frames.jsonl");
-                using (var es = entry.Open())
-                {
-                    byte[] data = TextureRefinement.RelocateFramesJsonl(keyframeDir, KeyframeRelocation);
-                    if (data == null) return null;
-                    es.Write(data, 0, data.Length);
-                }
-
-                string imagesDir = Path.Combine(keyframeDir, "images");
-                if (Directory.Exists(imagesDir))
-                {
-                    foreach (string img in Directory.GetFiles(imagesDir, "*.jpg"))
-                    {
-                        string name = "images/" + Path.GetFileName(img);
-                        var imgEntry = archive.CreateEntry(name);
-                        using var ies = imgEntry.Open();
-                        byte[] imgData = File.ReadAllBytes(img);
-                        ies.Write(imgData, 0, imgData.Length);
-                    }
-                }
-
-                var meshEntry = archive.CreateEntry("refined_mesh.bin");
-                using var mes = meshEntry.Open();
-                using var bw = new BinaryWriter(mes);
-                bw.Write(mesh.Positions.Length);
-                bw.Write(mesh.Indices.Length);
-                bw.Write(mesh.AtlasWidth);
-                bw.Write(mesh.AtlasHeight);
-                for (int i = 0; i < mesh.Positions.Length; i++)
-                {
-                    bw.Write(mesh.Positions[i].x); bw.Write(mesh.Positions[i].y); bw.Write(mesh.Positions[i].z);
-                    bw.Write(mesh.Normals[i].x); bw.Write(mesh.Normals[i].y); bw.Write(mesh.Normals[i].z);
-                    bw.Write(mesh.UVs[i].x); bw.Write(mesh.UVs[i].y);
-                }
-                foreach (int idx in mesh.Indices)
-                    bw.Write(idx);
-            }
-
-            return ms.ToArray();
         }
 
         // ─────────────────────────────────────────────────────────────

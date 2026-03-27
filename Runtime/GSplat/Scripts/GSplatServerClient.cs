@@ -249,21 +249,21 @@ namespace Genesis.RoomScan.GSplat
         }
 
         /// <summary>
-        /// Uploads an atlas PNG to the server for Real-ESRGAN super-resolution.
-        /// Returns the upscaled atlas as raw PNG bytes, or null on failure.
+        /// Uploads an atlas PNG for server-side enhancement (super-resolution + optional inpainting).
+        /// Returns the enhanced atlas as raw PNG bytes, or null on failure.
         /// </summary>
-        public async Task<byte[]> EnhanceAtlasAsync(byte[] atlasPng, int scale = 4)
+        public async Task<byte[]> EnhanceAtlasAsync(byte[] atlasPng, int scale = 2, bool inpaint = true)
         {
             try
             {
-                string url = $"{serverUrl}/enhance-atlas?scale={scale}";
-                Debug.Log($"[GSplatServerClient] Uploading atlas for SR ({atlasPng.Length / 1024}KB, x{scale})...");
+                string url = $"{serverUrl}/enhance-atlas?scale={scale}&inpaint={inpaint.ToString().ToLower()}";
+                Debug.Log($"[GSplatServerClient] Uploading atlas for enhancement ({atlasPng.Length / 1024}KB, x{scale}, inpaint={inpaint})...");
 
                 using var request = new UnityWebRequest(url, "POST");
                 request.uploadHandler = new UploadHandlerRaw(atlasPng);
                 request.downloadHandler = new DownloadHandlerBuffer();
                 request.SetRequestHeader("Content-Type", "image/png");
-                request.timeout = 300;
+                request.timeout = 600;
 
                 var op = request.SendWebRequest();
                 while (!op.isDone)
