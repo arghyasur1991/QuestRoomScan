@@ -84,6 +84,8 @@ namespace Genesis.RoomScan
         [SerializeField] internal bool forceCpuBake = false;
         [Tooltip("Skip denoise pass after baking (GPU bake has fewer speckles)")]
         [SerializeField] internal bool skipDenoise = true;
+        [Tooltip("Multi-view blend: 2-pass GPU bake that blends top views per texel for smoother textures")]
+        [SerializeField] internal bool multiViewBlend = true;
 
         [Header("Unwrap Performance")]
         [Tooltip("Simplify mesh before UV unwrap (0.1 = 10% of tris, 1.0 = no simplification). " +
@@ -614,6 +616,7 @@ namespace Genesis.RoomScan
             RefineStatus = "Starting...";
 
             TextureRefinement.StatusChanged += s => RefineStatus = s;
+            TextureRefinement.EnableMultiViewBlend = multiViewBlend;
             try
             {
                 string keyframeDir = KeyframeDirectory;

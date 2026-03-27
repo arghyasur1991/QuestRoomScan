@@ -48,6 +48,14 @@ namespace Genesis.RoomScan
         /// <summary>Pixel radius for gaussian-weighted seam blending (1-5). Higher = wider blend band.</summary>
         public static int SeamBlendRadius { get; set; } = 3;
 
+        /// <summary>Enable multi-view blending: two-pass GPU bake that blends top views per texel
+        /// for smoother, more seamless textures (similar to the HQ server approach).</summary>
+        public static bool EnableMultiViewBlend { get; set; } = true;
+
+        /// <summary>Fraction of best score below which a view is excluded from blending (0.0-1.0).
+        /// Lower = more views blended (smoother but potentially blurrier), higher = fewer views (sharper).</summary>
+        public static float BlendMinFraction { get; set; } = 0.3f;
+
         public static event Action<string> StatusChanged;
 
         // ═══════════════════════════════════════════════════════════════
@@ -593,10 +601,124 @@ namespace Genesis.RoomScan
                 await Task.Yield();
             }
 
-            Debug.Log($"[TextureRefine] GPU baked {bakeCount} keyframes total");
+            Debug.Log($"[TextureRefine] GPU baked {bakeCount} keyframes total (pass 1)");
+
+            // ── Pass 2: Multi-view blend accumulation (optional) ──
+            // Re-iterates keyframes, accumulating score-weighted colors from all
+            // qualifying views into fixed-point buffers, then resolves to final atlas.
+            if (EnableMultiViewBlend)
+            {
+                int kAccum = compute.FindKernel("BlendAccum");
+                int kResolve = compute.FindKernel("ResolveBlend");
+
+                var accumR = new ComputeBuffer(texelCount, 4);
+                var accumG = new ComputeBuffer(texelCount, 4);
+                var accumB = new ComputeBuffer(texelCount, 4);
+                var accumW = new ComputeBuffer(texelCount, 4);
+                accumR.SetData(new uint[texelCount]);
+                accumG.SetData(new uint[texelCount]);
+                accumB.SetData(new uint[texelCount]);
+                accumW.SetData(new uint[texelCount]);
+
+                compute.SetBuffer(kAccum, "_OutPos", outPosBuf);
+                compute.SetBuffer(kAccum, "_OutNorm", outNormBuf);
+                compute.SetBuffer(kAccum, "_OutIdx", outIdxBuf);
+                compute.SetBuffer(kAccum, "_RawUV", rawUVBuf);
+                compute.SetBuffer(kAccum, "_AccumR", accumR);
+                compute.SetBuffer(kAccum, "_AccumG", accumG);
+                compute.SetBuffer(kAccum, "_AccumB", accumB);
+                compute.SetBuffer(kAccum, "_AccumW", accumW);
+                compute.SetBuffer(kAccum, "_BestScore", scoreBuf);
+                compute.SetFloat("_BlendMinFraction", BlendMinFraction);
+
+                ReportStatus("Multi-view blending (pass 2)...");
+                int blendCount = 0;
+
+                for (int ki = 0; ki < total; ki++)
+                {
+                    var kf = metaList[ki];
+                    if (string.IsNullOrEmpty(kf.JpgPath)) continue;
+
+                    byte[] jpgBytes;
+                    try { jpgBytes = await ReadFileAsync(kf.JpgPath); }
+                    catch { continue; }
+
+                    var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    if (!ImageConversion.LoadImage(tex, jpgBytes))
+                    {
+                        UnityEngine.Object.Destroy(tex);
+                        continue;
+                    }
+                    kf.Width = tex.width;
+                    kf.Height = tex.height;
+
+                    Color32[] colors = tex.GetPixels32();
+                    UnityEngine.Object.Destroy(tex);
+
+                    int imgW = kf.Width, imgH = kf.Height;
+                    int imgPixels = imgW * imgH;
+
+                    if (depthBuf == null || depthBuf.count != imgPixels)
+                    {
+                        depthBuf?.Release();
+                        depthBuf = new ComputeBuffer(imgPixels, 4);
+                        kfPixelBuf?.Release();
+                        kfPixelBuf = new ComputeBuffer(imgPixels, 4);
+                    }
+                    kfPixelBuf.SetData(colors);
+
+                    int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
+                    int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
+                    float cropX = (sw - kf.Width) * 0.5f;
+                    float cropY = (sh - kf.Height) * 0.5f;
+                    Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+
+                    compute.SetMatrix("_ViewMat", viewMat);
+                    compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
+                    compute.SetFloat("_Fx", kf.Fx);
+                    compute.SetFloat("_Fy", kf.Fy);
+                    compute.SetFloat("_Cx", kf.Cx);
+                    compute.SetFloat("_Cy", kf.Cy);
+                    compute.SetFloat("_CropX", cropX);
+                    compute.SetFloat("_CropY", cropY);
+                    compute.SetInt("_ImgW", imgW);
+                    compute.SetInt("_ImgH", imgH);
+
+                    compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
+                    compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
+                    compute.SetBuffer(kAccum, "_DepthBuf", depthBuf);
+                    compute.SetBuffer(kAccum, "_KfPixels", kfPixelBuf);
+
+                    compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
+                    compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
+                    compute.Dispatch(kAccum, (outTriCount + 63) / 64, 1, 1);
+
+                    blendCount++;
+                    if (blendCount % 20 == 0 || blendCount < 3)
+                    {
+                        ReportStatus($"Multi-view blend... {blendCount}/{total}");
+                        Debug.Log($"[TextureRefine] Blend pass keyframe {blendCount}/{total}");
+                    }
+
+                    await Task.Yield();
+                }
+
+                Debug.Log($"[TextureRefine] Blend pass 2 complete: {blendCount} keyframes");
+
+                // Resolve: divide accumulated colors by weights → final atlas
+                compute.SetBuffer(kResolve, "_AccumRIn", accumR);
+                compute.SetBuffer(kResolve, "_AccumGIn", accumG);
+                compute.SetBuffer(kResolve, "_AccumBIn", accumB);
+                compute.SetBuffer(kResolve, "_AccumWIn", accumW);
+                compute.SetBuffer(kResolve, "_AtlasBuf", atlasBuf);
+                compute.Dispatch(kResolve, (texelCount + 255) / 256, 1, 1);
+
+                accumR.Release(); accumG.Release();
+                accumB.Release(); accumW.Release();
+                Debug.Log("[TextureRefine] Multi-view blend resolved");
+            }
 
             // ── Seam blending pass (GPU) ──
-            // Copies atlas to a source snapshot, then blends boundary texels in-place.
             int kSeam = -1;
             try { kSeam = compute.FindKernel("BlendSeams"); }
             catch { /* kernel not available in older shader variants */ }
