@@ -290,6 +290,50 @@ namespace Genesis.RoomScan.GSplat
         }
 
         /// <summary>
+        /// Uploads a refined_mesh.bin to the server for geometry enhancement
+        /// (bilateral smoothing + plane snapping). Returns the enhanced mesh bytes, or null on failure.
+        /// </summary>
+        public async Task<byte[]> EnhanceMeshAsync(byte[] meshBin,
+            int smoothIterations = 5, string smoothMethod = "bilateral",
+            bool enablePlaneSnap = true)
+        {
+            try
+            {
+                string url = $"{serverUrl}/enhance-mesh?smooth_iterations={smoothIterations}" +
+                             $"&smooth_method={smoothMethod}&enable_plane_snap={enablePlaneSnap.ToString().ToLower()}";
+                Debug.Log($"[GSplatServerClient] Uploading mesh for enhancement ({meshBin.Length / 1024}KB)...");
+
+                using var request = new UnityWebRequest(url, "POST");
+                request.uploadHandler = new UploadHandlerRaw(meshBin);
+                request.downloadHandler = new DownloadHandlerBuffer();
+                request.SetRequestHeader("Content-Type", "application/octet-stream");
+                request.timeout = 120;
+
+                var op = request.SendWebRequest();
+                while (!op.isDone)
+                    await Task.Yield();
+
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    string err = $"Mesh enhance failed: {request.error} (HTTP {request.responseCode})";
+                    Debug.LogError($"[GSplatServerClient] {err}");
+                    Error?.Invoke(err);
+                    return null;
+                }
+
+                byte[] result = request.downloadHandler.data;
+                Debug.Log($"[GSplatServerClient] Enhanced mesh received: {result.Length / 1024}KB");
+                return result;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[GSplatServerClient] Mesh enhance error: {e.Message}");
+                Error?.Invoke(e.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
         /// Sends a cancel request to the training server.
         /// </summary>
         public async Task CancelTraining()
