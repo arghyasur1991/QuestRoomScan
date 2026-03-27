@@ -88,6 +88,21 @@ namespace Genesis.RoomScan
 
             Debug.Log($"[TextureRefine] Readback: {positions.Length} verts, {indices.Length / 3} tris");
 
+            // GPU surface nets produces vertices in the volume's local grid space.
+            // After a cross-session load with relocation, keyframeRelocation maps
+            // original-scan-space → current-session-space. Apply the same transform
+            // to readback vertices so they match the relocated keyframe poses.
+            if (keyframeRelocation != Matrix4x4.identity)
+            {
+                var rot = keyframeRelocation.rotation;
+                for (int i = 0; i < positions.Length; i++)
+                {
+                    positions[i] = keyframeRelocation.MultiplyPoint3x4(positions[i]);
+                    normals[i] = rot * normals[i];
+                }
+                Debug.Log("[TextureRefine] Readback vertices relocated to current session space");
+            }
+
             Vector3[] inPos = positions;
             Vector3[] inNorm = normals;
             int[] inIdx = indices;
