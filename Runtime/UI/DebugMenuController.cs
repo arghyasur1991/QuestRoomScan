@@ -337,6 +337,7 @@ namespace Genesis.RoomScan.UI
             if (pkg.hasKeyframes) AddBadge(badges, "KF");
             if (pkg.hasSplat) AddBadge(badges, "Splat");
             if (pkg.hasRefined) AddBadge(badges, "Refined");
+            if (pkg.hasEnhancedMesh) AddBadge(badges, "Enh");
             if (pkg.hasHQRefined) AddBadge(badges, "HQ");
             info.Add(badges);
 
@@ -458,7 +459,7 @@ namespace Genesis.RoomScan.UI
                     _btnDeleteArtifact.text = mode switch
                     {
                         ScanRenderMode.Splat => "Delete Splat",
-                        ScanRenderMode.Refined => "Delete Refined",
+                        ScanRenderMode.Refined => scanner.HasEnhancedMesh ? "Delete Enhanced Mesh" : "Delete Refined",
                         ScanRenderMode.HQRefined => "Delete HQ Atlas",
                         _ => "Delete Artifact"
                     };

@@ -23,6 +23,7 @@ namespace Genesis.RoomScan
         public bool hasSplat;
         public bool hasRefined;
         public bool hasHQRefined;
+        public bool hasEnhancedMesh;
         public bool hasKeyframes;
     }
 
@@ -33,7 +34,7 @@ namespace Genesis.RoomScan
         public List<ScanPackageEntry> packages = new();
     }
 
-    public enum ArtifactType { Splat, Refined, HQRefined }
+    public enum ArtifactType { Splat, Refined, HQRefined, EnhancedMesh }
 
     /// <summary>
     /// Per-artifact anchor matrices. All matrices are from localizing the same
@@ -353,11 +354,23 @@ namespace Genesis.RoomScan
                         break;
 
                     case ArtifactType.HQRefined:
-                        string hqPath = Path.Combine(pkgDir, "hq_atlas.raw");
+                        string hqPath = Path.Combine(pkgDir, "hq_atlas.png");
                         await Task.Run(() => File.WriteAllBytes(hqPath, data));
+                        TryDeleteFile(Path.Combine(pkgDir, "hq_atlas.raw"));
                         if (_activeAnchorData != null)
                             _activeAnchorData.hqMatrixAtCreate = MatrixToFloats(currentMatrix);
-                        Debug.Log("[Persistence] HQ atlas auto-saved");
+                        Debug.Log("[Persistence] HQ atlas auto-saved (PNG)");
+                        break;
+
+                    case ArtifactType.EnhancedMesh:
+                        if (refinedResult.HasValue)
+                        {
+                            string enhMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
+                            await Task.Run(() => WriteRefinedMesh(enhMeshPath, refinedResult.Value));
+                        }
+                        if (_activeAnchorData != null)
+                            _activeAnchorData.refinedMatrixAtCreate = MatrixToFloats(currentMatrix);
+                        Debug.Log("[Persistence] Enhanced mesh auto-saved");
                         break;
                 }
 
@@ -397,8 +410,12 @@ namespace Genesis.RoomScan
                     if (_activeAnchorData != null) _activeAnchorData.refinedMatrixAtCreate = null;
                     break;
                 case ArtifactType.HQRefined:
+                    TryDeleteFile(Path.Combine(pkgDir, "hq_atlas.png"));
                     TryDeleteFile(Path.Combine(pkgDir, "hq_atlas.raw"));
                     if (_activeAnchorData != null) _activeAnchorData.hqMatrixAtCreate = null;
+                    break;
+                case ArtifactType.EnhancedMesh:
+                    TryDeleteFile(Path.Combine(pkgDir, "enhanced_mesh.bin"));
                     break;
             }
 
@@ -614,39 +631,50 @@ namespace Genesis.RoomScan
 
                 // Load refined mesh + atlas
                 string refinedMeshPath = Path.Combine(pkgDir, "refined_mesh.bin");
+                string enhancedMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
                 string refinedAtlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
-                string hqAtlasPath = Path.Combine(pkgDir, "hq_atlas.raw");
+                string hqAtlasPng = Path.Combine(pkgDir, "hq_atlas.png");
+                string hqAtlasRaw = Path.Combine(pkgDir, "hq_atlas.raw");
                 bool hasMesh = File.Exists(refinedMeshPath);
+                bool hasEnhanced = File.Exists(enhancedMeshPath);
                 bool hasAtlas = File.Exists(refinedAtlasPath);
-                bool hasHQ = File.Exists(hqAtlasPath);
+                bool hasHQ = File.Exists(hqAtlasPng) || File.Exists(hqAtlasRaw);
 
                 if (hasMesh)
                 {
                     try
                     {
                         RefinedTextureResult meshData = default;
+                        RefinedTextureResult enhancedData = default;
                         byte[] atlasBytes = null;
+                        bool loadedEnhanced = false;
                         await Task.Run(() =>
                         {
                             meshData = ReadRefinedMesh(refinedMeshPath);
                             if (hasAtlas) atlasBytes = File.ReadAllBytes(refinedAtlasPath);
+                            if (hasEnhanced)
+                            {
+                                enhancedData = ReadRefinedMesh(enhancedMeshPath);
+                                loadedEnhanced = true;
+                            }
                         });
                         await SwitchToUnityMainThreadAsync(unitySync);
 
-                        // Per-artifact relocation on refined mesh vertices
+                        // Per-artifact relocation
                         if (relocRefined != Matrix4x4.identity)
                         {
-                            for (int i = 0; i < meshData.Positions.Length; i++)
-                            {
-                                meshData.Positions[i] = relocRefined.MultiplyPoint3x4(meshData.Positions[i]);
-                                meshData.Normals[i] = relocRefined.MultiplyVector(meshData.Normals[i]).normalized;
-                            }
+                            RelocateVertices(ref meshData, relocRefined);
+                            if (loadedEnhanced) RelocateVertices(ref enhancedData, relocRefined);
                         }
 
                         if (scanner != null)
                         {
                             meshData.AtlasPixels = atlasBytes;
                             scanner.LastRefinedResult = meshData;
+                            scanner.HasEnhancedMesh = loadedEnhanced;
+
+                            // Use enhanced mesh geometry for display if available
+                            var displayData = loadedEnhanced ? enhancedData : meshData;
 
                             if (atlasBytes != null)
                             {
@@ -657,16 +685,17 @@ namespace Genesis.RoomScan
 
                                 var mesh = new Mesh
                                 {
-                                    name = "RefinedScanMesh",
+                                    name = loadedEnhanced ? "EnhancedScanMesh" : "RefinedScanMesh",
                                     indexFormat = IndexFormat.UInt32
                                 };
-                                mesh.SetVertices(meshData.Positions);
-                                mesh.SetNormals(meshData.Normals);
-                                mesh.SetUVs(0, meshData.UVs);
-                                mesh.SetTriangles(meshData.Indices, 0);
+                                mesh.SetVertices(displayData.Positions);
+                                mesh.SetNormals(displayData.Normals);
+                                mesh.SetUVs(0, displayData.UVs);
+                                mesh.SetTriangles(displayData.Indices, 0);
 
                                 scanner.ApplyRefinedTexture(atlasTex, mesh);
-                                Debug.Log($"[Persistence] Refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})");
+                                Debug.Log($"[Persistence] Refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})" +
+                                          (loadedEnhanced ? " [enhanced mesh]" : ""));
                             }
                         }
                     }
@@ -680,24 +709,43 @@ namespace Genesis.RoomScan
                 {
                     try
                     {
+                        string hqPath = File.Exists(hqAtlasPng) ? hqAtlasPng : hqAtlasRaw;
+                        bool isPng = hqPath == hqAtlasPng;
                         byte[] hqBytes = null;
-                        await Task.Run(() => hqBytes = File.ReadAllBytes(hqAtlasPath));
+                        await Task.Run(() => hqBytes = File.ReadAllBytes(hqPath));
                         await SwitchToUnityMainThreadAsync(unitySync);
 
-                        int hqW = 2048, hqH = 2048;
-                        if (scanner?.LastRefinedResult != null)
+                        Texture2D hqTex;
+                        if (isPng)
                         {
-                            hqW = scanner.LastRefinedResult.Value.AtlasWidth;
-                            hqH = scanner.LastRefinedResult.Value.AtlasHeight;
+                            hqTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
+                                { filterMode = FilterMode.Bilinear };
+                            if (!ImageConversion.LoadImage(hqTex, hqBytes))
+                            {
+                                UnityEngine.Object.Destroy(hqTex);
+                                Debug.LogWarning("[Persistence] HQ atlas PNG decode failed");
+                                hqTex = null;
+                            }
+                        }
+                        else
+                        {
+                            int hqW = 2048, hqH = 2048;
+                            if (scanner?.LastRefinedResult != null)
+                            {
+                                hqW = scanner.LastRefinedResult.Value.AtlasWidth;
+                                hqH = scanner.LastRefinedResult.Value.AtlasHeight;
+                            }
+                            hqTex = new Texture2D(hqW, hqH, TextureFormat.RGBA32, false)
+                                { filterMode = FilterMode.Bilinear };
+                            hqTex.SetPixelData(hqBytes, 0);
+                            hqTex.Apply();
                         }
 
-                        var hqTex = new Texture2D(hqW, hqH, TextureFormat.RGBA32, false)
-                            { filterMode = FilterMode.Bilinear };
-                        hqTex.SetPixelData(hqBytes, 0);
-                        hqTex.Apply();
-
-                        scanner?.ApplyHQTexture(hqTex);
-                        Debug.Log("[Persistence] HQ atlas loaded");
+                        if (hqTex != null)
+                        {
+                            scanner?.ApplyHQTexture(hqTex);
+                            Debug.Log($"[Persistence] HQ atlas loaded ({hqTex.width}x{hqTex.height}, {(isPng ? "PNG" : "raw")})");
+                        }
                     }
                     catch (Exception e)
                     {
@@ -795,6 +843,7 @@ namespace Genesis.RoomScan
                 case ArtifactType.Splat: entry.hasSplat = present; break;
                 case ArtifactType.Refined: entry.hasRefined = present; break;
                 case ArtifactType.HQRefined: entry.hasHQRefined = present; break;
+                case ArtifactType.EnhancedMesh: entry.hasEnhancedMesh = present; break;
             }
             WriteManifest(manifest);
         }
@@ -933,6 +982,15 @@ namespace Genesis.RoomScan
                 w.Write(r.UVs[i].x); w.Write(r.UVs[i].y);
             }
             foreach (int idx in r.Indices) w.Write(idx);
+        }
+
+        private static void RelocateVertices(ref RefinedTextureResult data, Matrix4x4 reloc)
+        {
+            for (int i = 0; i < data.Positions.Length; i++)
+            {
+                data.Positions[i] = reloc.MultiplyPoint3x4(data.Positions[i]);
+                data.Normals[i] = reloc.MultiplyVector(data.Normals[i]).normalized;
+            }
         }
 
         private static RefinedTextureResult ReadRefinedMesh(string path)

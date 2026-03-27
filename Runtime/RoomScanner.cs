@@ -178,6 +178,7 @@ namespace Genesis.RoomScan
         public bool IsRefining { get; private set; }
         public bool IsHQRefining { get; private set; }
         public bool IsMeshEnhancing { get; private set; }
+        public bool HasEnhancedMesh { get; internal set; }
         public string RefineStatus { get; private set; }
         public string HQRefineStatus { get; private set; }
         public string MeshEnhanceStatus { get; private set; }
@@ -464,6 +465,7 @@ namespace Genesis.RoomScan
                 _downloadedPlyData = null;
                 HasRefinedTexture = false;
                 HasHQRefinedTexture = false;
+                HasEnhancedMesh = false;
                 LastRefinedResult = null;
 
                 _meshExtractor.DisposeOnly();
@@ -743,10 +745,7 @@ namespace Genesis.RoomScan
                     SetRenderMode(ScanRenderMode.HQRefined);
 
                     if (_persistence != null && _persistence.HasActivePackage)
-                    {
-                        byte[] rawPixels = tex.GetRawTextureData();
-                        await _persistence.SaveArtifactAsync(ArtifactType.HQRefined, rawPixels);
-                    }
+                        await _persistence.SaveArtifactAsync(ArtifactType.HQRefined, resultPng);
 
                     HQRefineStatus = "Done";
                     Debug.Log($"[RoomScan] HQ atlas enhancement complete: {tex.width}x{tex.height}");
@@ -808,8 +807,10 @@ namespace Genesis.RoomScan
                 enhanced.AtlasPixels = r.AtlasPixels;
 
                 ApplyEnhancedMesh(enhanced);
-                // Don't overwrite LastRefinedResult or persist — this is a preview-only
-                // change. The user can reload the original via the saved package.
+                HasEnhancedMesh = true;
+
+                if (_persistence != null && _persistence.HasActivePackage)
+                    await _persistence.SaveArtifactAsync(ArtifactType.EnhancedMesh, null, enhanced);
 
                 MeshEnhanceStatus = "Done";
                 Debug.Log($"[RoomScan] Mesh enhancement complete: {enhanced.Positions.Length} verts");
@@ -1232,11 +1233,18 @@ namespace Genesis.RoomScan
                     break;
 
                 case ScanRenderMode.Refined:
-                    _persistence.DeleteArtifactFromPackage(ArtifactType.Refined);
-                    HasRefinedTexture = false;
-                    LastRefinedResult = null;
-                    _cachedUnwrap = null;
-                    SetRenderMode(ScanRenderMode.Textured);
+                    if (HasEnhancedMesh)
+                    {
+                        DeleteEnhancedMesh();
+                    }
+                    else
+                    {
+                        _persistence.DeleteArtifactFromPackage(ArtifactType.Refined);
+                        HasRefinedTexture = false;
+                        LastRefinedResult = null;
+                        _cachedUnwrap = null;
+                        SetRenderMode(ScanRenderMode.Textured);
+                    }
                     break;
 
                 case ScanRenderMode.HQRefined:
@@ -1246,6 +1254,34 @@ namespace Genesis.RoomScan
                     SetRenderMode(HasRefinedTexture ? ScanRenderMode.Refined : ScanRenderMode.Textured);
                     break;
             }
+        }
+
+        /// <summary>
+        /// Removes the enhanced mesh overlay and restores the original refined mesh geometry.
+        /// </summary>
+        public void DeleteEnhancedMesh()
+        {
+            if (!HasEnhancedMesh) return;
+
+            _persistence?.DeleteArtifactFromPackage(ArtifactType.EnhancedMesh);
+            HasEnhancedMesh = false;
+
+            if (LastRefinedResult.HasValue)
+            {
+                var r = LastRefinedResult.Value;
+                if (_refinedMesh != null)
+                {
+                    _refinedMesh.Clear();
+                    _refinedMesh.SetVertices(r.Positions);
+                    _refinedMesh.SetNormals(r.Normals);
+                    _refinedMesh.SetUVs(0, r.UVs);
+                    _refinedMesh.SetTriangles(r.Indices, 0);
+                    EnsureRefinedRenderer();
+                    _refinedMeshFilter.mesh = _refinedMesh;
+                }
+            }
+
+            Debug.Log("[RoomScan] Enhanced mesh deleted, original restored");
         }
 
         /// <summary>
