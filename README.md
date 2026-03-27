@@ -2,9 +2,13 @@
 
 Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from depth + RGB camera data using GPU TSDF volume integration and Surface Nets mesh extraction, with server-based Gaussian Splat training and on-device rendering via [Unity Gaussian Splatting](https://github.com/arghyasur1991/UnityGaussianSplatting).
 
-| Scanning (Triplanar) | Vertex Colors | Texture Refinement | Gaussian Splat |
-|:---:|:---:|:---:|:---:|
-| ![Scanning](docs/tsdf2.gif) | ![Vertex Colors](docs/vertex2.gif) | ![Refined](docs/refined3.gif) | ![Splat](docs/splat.gif) |
+| Scanning (Triplanar) | Vertex Colors |
+|:---:|:---:|
+| ![Scanning](docs/tsdf2.gif) | ![Vertex Colors](docs/vertex2.gif) |
+
+| Texture Refinement | Gaussian Splat |
+|:---:|:---:|
+| ![Refined](docs/refined3.gif) | ![Splat](docs/splat.gif) |
 
 ## Features
 
