@@ -88,7 +88,7 @@ namespace Genesis.RoomScan
         private string PkgSplatPath => Path.Combine(ActivePackageDirectory, "splat.ply");
         private string PkgRefinedMeshPath => Path.Combine(ActivePackageDirectory, "refined_mesh.bin");
         private string PkgRefinedAtlasPath => Path.Combine(ActivePackageDirectory, "refined_atlas.raw");
-        private string PkgHQAtlasPath => Path.Combine(ActivePackageDirectory, "hq_atlas.raw");
+        private string PkgHQAtlasPath => Path.Combine(ActivePackageDirectory, "hq_atlas.png");
 
         // Legacy single-slot paths (for backward compat references in RoomScanner.ClearAllDataAsync)
         [Obsolete("Use package-based paths")] public string SaveFilePath => PkgScanBin;
@@ -356,7 +356,6 @@ namespace Genesis.RoomScan
                     case ArtifactType.HQRefined:
                         string hqPath = Path.Combine(pkgDir, "hq_atlas.png");
                         await Task.Run(() => File.WriteAllBytes(hqPath, data));
-                        TryDeleteFile(Path.Combine(pkgDir, "hq_atlas.raw"));
                         if (_activeAnchorData != null)
                             _activeAnchorData.hqMatrixAtCreate = MatrixToFloats(currentMatrix);
                         Debug.Log("[Persistence] HQ atlas auto-saved (PNG)");
@@ -411,7 +410,6 @@ namespace Genesis.RoomScan
                     break;
                 case ArtifactType.HQRefined:
                     TryDeleteFile(Path.Combine(pkgDir, "hq_atlas.png"));
-                    TryDeleteFile(Path.Combine(pkgDir, "hq_atlas.raw"));
                     if (_activeAnchorData != null) _activeAnchorData.hqMatrixAtCreate = null;
                     break;
                 case ArtifactType.EnhancedMesh:
@@ -633,12 +631,11 @@ namespace Genesis.RoomScan
                 string refinedMeshPath = Path.Combine(pkgDir, "refined_mesh.bin");
                 string enhancedMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
                 string refinedAtlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
-                string hqAtlasPng = Path.Combine(pkgDir, "hq_atlas.png");
-                string hqAtlasRaw = Path.Combine(pkgDir, "hq_atlas.raw");
+                string hqAtlasPath = Path.Combine(pkgDir, "hq_atlas.png");
                 bool hasMesh = File.Exists(refinedMeshPath);
                 bool hasEnhanced = File.Exists(enhancedMeshPath);
                 bool hasAtlas = File.Exists(refinedAtlasPath);
-                bool hasHQ = File.Exists(hqAtlasPng) || File.Exists(hqAtlasRaw);
+                bool hasHQ = File.Exists(hqAtlasPath);
 
                 if (hasMesh)
                 {
@@ -709,42 +706,21 @@ namespace Genesis.RoomScan
                 {
                     try
                     {
-                        string hqPath = File.Exists(hqAtlasPng) ? hqAtlasPng : hqAtlasRaw;
-                        bool isPng = hqPath == hqAtlasPng;
                         byte[] hqBytes = null;
-                        await Task.Run(() => hqBytes = File.ReadAllBytes(hqPath));
+                        await Task.Run(() => hqBytes = File.ReadAllBytes(hqAtlasPath));
                         await SwitchToUnityMainThreadAsync(unitySync);
 
-                        Texture2D hqTex;
-                        if (isPng)
+                        var hqTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
+                            { filterMode = FilterMode.Bilinear };
+                        if (ImageConversion.LoadImage(hqTex, hqBytes))
                         {
-                            hqTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
-                                { filterMode = FilterMode.Bilinear };
-                            if (!ImageConversion.LoadImage(hqTex, hqBytes))
-                            {
-                                UnityEngine.Object.Destroy(hqTex);
-                                Debug.LogWarning("[Persistence] HQ atlas PNG decode failed");
-                                hqTex = null;
-                            }
+                            scanner?.ApplyHQTexture(hqTex);
+                            Debug.Log($"[Persistence] HQ atlas loaded ({hqTex.width}x{hqTex.height})");
                         }
                         else
                         {
-                            int hqW = 2048, hqH = 2048;
-                            if (scanner?.LastRefinedResult != null)
-                            {
-                                hqW = scanner.LastRefinedResult.Value.AtlasWidth;
-                                hqH = scanner.LastRefinedResult.Value.AtlasHeight;
-                            }
-                            hqTex = new Texture2D(hqW, hqH, TextureFormat.RGBA32, false)
-                                { filterMode = FilterMode.Bilinear };
-                            hqTex.SetPixelData(hqBytes, 0);
-                            hqTex.Apply();
-                        }
-
-                        if (hqTex != null)
-                        {
-                            scanner?.ApplyHQTexture(hqTex);
-                            Debug.Log($"[Persistence] HQ atlas loaded ({hqTex.width}x{hqTex.height}, {(isPng ? "PNG" : "raw")})");
+                            UnityEngine.Object.Destroy(hqTex);
+                            Debug.LogWarning("[Persistence] HQ atlas PNG decode failed");
                         }
                     }
                     catch (Exception e)
