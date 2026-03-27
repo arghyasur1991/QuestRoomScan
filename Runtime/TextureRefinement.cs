@@ -605,8 +605,9 @@ namespace Genesis.RoomScan
             {
                 ReportStatus("Blending seams...");
                 var seamSrcBuf = new ComputeBuffer(texelCount, 4);
-                ComputeBuffer.CopyCount(atlasBuf, seamSrcBuf, 0);
-                Graphics.CopyBuffer(atlasBuf, seamSrcBuf);
+                var tmp = new uint[texelCount];
+                atlasBuf.GetData(tmp);
+                seamSrcBuf.SetData(tmp);
 
                 compute.SetInt("_AtlasW", atlasW);
                 compute.SetInt("_AtlasH", atlasH);

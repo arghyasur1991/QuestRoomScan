@@ -82,6 +82,7 @@ namespace Genesis.RoomScan
         private ComputeKernelHelper _initDilateKernel;
         private ComputeKernelHelper _dilateStepKernel;
         private ComputeKernelHelper _bilateralKernel;
+        private bool _hasBilateralKernel;
 
         private Texture _depthTex;
         public Texture DepthTex => _depthTex;
@@ -153,7 +154,10 @@ namespace Genesis.RoomScan
             _initDilateKernel = new ComputeKernelHelper(depthDilationCompute, "InitDepthDilation");
             _dilateStepKernel = new ComputeKernelHelper(depthDilationCompute, "DilateDepthStep");
             if (bilateralFilterCompute != null)
+            {
                 _bilateralKernel = new ComputeKernelHelper(bilateralFilterCompute, "BilateralFilter");
+                _hasBilateralKernel = true;
+            }
 
             _dilationMaxStep = 1;
             for (int i = 0; i < dilationSteps; i++)
@@ -418,7 +422,7 @@ namespace Genesis.RoomScan
 
         private void ApplyBilateralFilter()
         {
-            if (!enableBilateralFilter || _bilateralKernel == null || _rgbGuide == null || _depthTex == null)
+            if (!enableBilateralFilter || !_hasBilateralKernel || _rgbGuide == null || _depthTex == null)
                 return;
 
             int w = _depthTex.width;
