@@ -46,6 +46,10 @@ namespace Genesis.RoomScan
         [DllImport(LIB)] private static extern void xatlas_get_indices(
             IntPtr atlas, int meshIndex,
             int[] outIndices, int maxIndices);
+        [DllImport(LIB)] private static extern int xatlas_get_chart_count(IntPtr atlas, int meshIndex);
+        [DllImport(LIB)] private static extern void xatlas_get_chart_indices(
+            IntPtr atlas, int meshIndex,
+            int[] chartIndices, int maxVerts);
 
         [DllImport(LIB)] private static extern int meshopt_simplify_mesh(
             float[] positions, int vertexCount, int positionStride,
@@ -104,11 +108,13 @@ namespace Genesis.RoomScan
         {
             public int AtlasWidth;
             public int AtlasHeight;
-            public float[] UVs;      // [vertCount * 2] — raw UV in atlas-pixel coords
-            public int[] Xrefs;      // [vertCount] — maps output vert -> input vert index
-            public int[] Indices;     // [indexCount] — triangle indices into output verts
+            public float[] UVs;           // [vertCount * 2] — raw UV in atlas-pixel coords
+            public int[] Xrefs;           // [vertCount] — maps output vert -> input vert index
+            public int[] ChartIndices;    // [vertCount] — chart assignment per output vertex (-1 if none)
+            public int[] Indices;         // [indexCount] — triangle indices into output verts
             public int VertexCount;
             public int IndexCount;
+            public int ChartCount;
         }
 
         /// <summary>
@@ -189,6 +195,10 @@ namespace Genesis.RoomScan
             int[] xrefs = new int[outVertCount];
             xatlas_get_vertices(atlas, 0, uvs, xrefs, outVertCount);
 
+            int[] chartIndices = new int[outVertCount];
+            xatlas_get_chart_indices(atlas, 0, chartIndices, outVertCount);
+            int chartCount = xatlas_get_chart_count(atlas, 0);
+
             int[] outIndices = new int[outIdxCount];
             xatlas_get_indices(atlas, 0, outIndices, outIdxCount);
 
@@ -198,9 +208,11 @@ namespace Genesis.RoomScan
                 AtlasHeight = h,
                 UVs = uvs,
                 Xrefs = xrefs,
+                ChartIndices = chartIndices,
                 Indices = outIndices,
                 VertexCount = outVertCount,
-                IndexCount = outIdxCount
+                IndexCount = outIdxCount,
+                ChartCount = chartCount
             };
         }
 

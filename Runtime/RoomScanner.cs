@@ -103,6 +103,8 @@ namespace Genesis.RoomScan
         [Tooltip("Chart growth cost limit — lower = more charts, faster unwrap")]
         [Range(0.5f, 4f)]
         [SerializeField] internal float xatlasMaxCost = 1.5f;
+        [Tooltip("Repack atlas charts in spatial order so 3D-adjacent surfaces are adjacent in the PNG")]
+        [SerializeField] internal bool spatialAtlasPacking = true;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
@@ -972,7 +974,7 @@ namespace Genesis.RoomScan
             opts.MaxCost = xatlasMaxCost;
             opts.BlockAlign = useBlockAlign;
             var unwrap2 = await TextureRefinement.UnwrapMeshAsync(
-                kfDir, KeyframeRelocation, opts, decimationRatio);
+                kfDir, KeyframeRelocation, opts, decimationRatio, spatialAtlasPacking);
             _cachedUnwrap = unwrap2;
 
             EnsureRefinedMesh(unwrap2);

@@ -125,6 +125,22 @@ XATLAS_EXPORT void xatlas_generate_opts(
     xatlas::Generate(atlas, co, po);
 }
 
+XATLAS_EXPORT int xatlas_get_chart_count(const xatlas::Atlas* atlas, int meshIndex) {
+    if (!atlas || meshIndex < 0 || (uint32_t)meshIndex >= atlas->meshCount) return 0;
+    return (int)atlas->meshes[meshIndex].chartCount;
+}
+
+XATLAS_EXPORT void xatlas_get_chart_indices(
+    const xatlas::Atlas* atlas, int meshIndex,
+    int* chartIndices, int maxVerts)
+{
+    if (!atlas || meshIndex < 0 || (uint32_t)meshIndex >= atlas->meshCount) return;
+    const xatlas::Mesh& mesh = atlas->meshes[meshIndex];
+    int count = (int)mesh.vertexCount < maxVerts ? (int)mesh.vertexCount : maxVerts;
+    for (int i = 0; i < count; i++)
+        chartIndices[i] = mesh.vertexArray[i].chartIndex;
+}
+
 XATLAS_EXPORT int meshopt_simplify_mesh(
     const float* positions, int vertexCount, int positionStride,
     const unsigned int* indices, int indexCount,

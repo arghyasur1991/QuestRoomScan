@@ -70,16 +70,18 @@ namespace Genesis.RoomScan
         // ═══════════════════════════════════════════════════════════════
 
         public static Task<UnwrappedMeshResult> UnwrapMeshAsync(
-            string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048)
+            string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048,
+            bool spatialRepack = false)
         {
             var opts = XAtlasWrapper.UnwrapOptions.Default;
             opts.Resolution = (uint)atlasResolution;
-            return UnwrapMeshAsync(keyframeDir, keyframeRelocation, opts);
+            return UnwrapMeshAsync(keyframeDir, keyframeRelocation, opts, 1f, spatialRepack);
         }
 
         public static async Task<UnwrappedMeshResult> UnwrapMeshAsync(
             string keyframeDir, Matrix4x4 keyframeRelocation,
-            XAtlasWrapper.UnwrapOptions opts, float decimationRatio = 1f)
+            XAtlasWrapper.UnwrapOptions opts, float decimationRatio = 1f,
+            bool spatialRepack = false)
         {
             ReportStatus("Reading mesh from GPU...");
             var (positions, normals, colors, indices) = await ReadbackMeshAsync();
@@ -140,7 +142,33 @@ namespace Genesis.RoomScan
             int atlasW = uvResult.AtlasWidth;
             int atlasH = uvResult.AtlasHeight;
             Debug.Log($"[TextureRefine] xatlas: {uvResult.VertexCount} verts, " +
-                      $"{uvResult.IndexCount / 3} tris, atlas {atlasW}x{atlasH}");
+                      $"{uvResult.IndexCount / 3} tris, atlas {atlasW}x{atlasH}, " +
+                      $"{uvResult.ChartCount} charts");
+
+            if (spatialRepack && uvResult.ChartCount > 1)
+            {
+                ReportStatus("Spatial atlas repack...");
+                var srcUVs = uvResult.UVs;
+                var srcCharts = uvResult.ChartIndices;
+                var srcXrefs = uvResult.Xrefs;
+                int srcVertCount = uvResult.VertexCount;
+                int pad = Mathf.Max((int)opts.Padding, 2);
+                var posRef = inPos;
+
+                float[] newUVs = null;
+                int newW = atlasW, newH = atlasH;
+                await Task.Run(() =>
+                {
+                    (newUVs, newW, newH) = SpatialRepackCharts(
+                        srcUVs, srcCharts, srcVertCount,
+                        srcXrefs, posRef, atlasW, atlasH, pad);
+                });
+                uvResult.UVs = newUVs;
+                atlasW = newW;
+                atlasH = newH;
+                Debug.Log($"[TextureRefine] Spatial repack: {uvResult.ChartCount} charts, " +
+                          $"atlas {atlasW}x{atlasH}");
+            }
 
             Vector3[] outPos = new Vector3[uvResult.VertexCount];
             Vector3[] outNorm = new Vector3[uvResult.VertexCount];
@@ -168,6 +196,156 @@ namespace Genesis.RoomScan
                 OrigNormals = inNorm,
                 OrigIndices = inIdx,
             };
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  SPATIAL ATLAS REPACK
+        // ═══════════════════════════════════════════════════════════════
+
+        static uint ExpandBits10(uint v)
+        {
+            v &= 0x3FFu;
+            v = (v | (v << 16)) & 0x030000FFu;
+            v = (v | (v <<  8)) & 0x0300F00Fu;
+            v = (v | (v <<  4)) & 0x030C30C3u;
+            v = (v | (v <<  2)) & 0x09249249u;
+            return v;
+        }
+
+        static uint Morton3D(float x, float y, float z)
+        {
+            uint ix = (uint)Mathf.Clamp(x * 1023f, 0, 1023);
+            uint iy = (uint)Mathf.Clamp(y * 1023f, 0, 1023);
+            uint iz = (uint)Mathf.Clamp(z * 1023f, 0, 1023);
+            return ExpandBits10(ix) | (ExpandBits10(iy) << 1) | (ExpandBits10(iz) << 2);
+        }
+
+        /// <summary>
+        /// Rearranges xatlas UV chart positions so that spatially nearby surfaces
+        /// in 3D end up adjacent in the 2D atlas. Preserves per-chart parameterization
+        /// — only translates charts, no rotation or re-parameterization.
+        /// Uses 3D Morton codes for spatial ordering and shelf packing for layout.
+        /// </summary>
+        static (float[] uvs, int atlasW, int atlasH) SpatialRepackCharts(
+            float[] rawUVs, int[] chartIndices, int vertexCount,
+            int[] xrefs, Vector3[] inputPositions,
+            int origAtlasW, int origAtlasH, int padding)
+        {
+            var chartMap = new Dictionary<int, List<int>>();
+            for (int i = 0; i < vertexCount; i++)
+            {
+                int ci = chartIndices[i];
+                if (ci < 0) continue;
+                if (!chartMap.TryGetValue(ci, out var list))
+                {
+                    list = new List<int>();
+                    chartMap[ci] = list;
+                }
+                list.Add(i);
+            }
+
+            if (chartMap.Count <= 1)
+                return (rawUVs, origAtlasW, origAtlasH);
+
+            int chartCount = chartMap.Count;
+            var centroids = new Vector3[chartCount];
+            var uvMinArr = new Vector2[chartCount];
+            var uvMaxArr = new Vector2[chartCount];
+            var vertLists = new List<int>[chartCount];
+
+            Vector3 globalMin = Vector3.one * float.MaxValue;
+            Vector3 globalMax = Vector3.one * float.MinValue;
+
+            int slot = 0;
+            foreach (var kvp in chartMap)
+            {
+                vertLists[slot] = kvp.Value;
+                var verts = kvp.Value;
+
+                float minU = float.MaxValue, minV = float.MaxValue;
+                float maxU = float.MinValue, maxV = float.MinValue;
+                Vector3 sum = Vector3.zero;
+
+                foreach (int vi in verts)
+                {
+                    float u = rawUVs[vi * 2], v = rawUVs[vi * 2 + 1];
+                    if (u < minU) minU = u;
+                    if (u > maxU) maxU = u;
+                    if (v < minV) minV = v;
+                    if (v > maxV) maxV = v;
+                    sum += inputPositions[xrefs[vi]];
+                }
+
+                centroids[slot] = sum / verts.Count;
+                uvMinArr[slot] = new Vector2(minU, minV);
+                uvMaxArr[slot] = new Vector2(maxU, maxV);
+                globalMin = Vector3.Min(globalMin, centroids[slot]);
+                globalMax = Vector3.Max(globalMax, centroids[slot]);
+                slot++;
+            }
+
+            Vector3 range = globalMax - globalMin;
+            range.x = Mathf.Max(range.x, 1e-6f);
+            range.y = Mathf.Max(range.y, 1e-6f);
+            range.z = Mathf.Max(range.z, 1e-6f);
+
+            var mortonCodes = new uint[chartCount];
+            for (int i = 0; i < chartCount; i++)
+            {
+                Vector3 n = new Vector3(
+                    (centroids[i].x - globalMin.x) / range.x,
+                    (centroids[i].y - globalMin.y) / range.y,
+                    (centroids[i].z - globalMin.z) / range.z);
+                mortonCodes[i] = Morton3D(n.x, n.y, n.z);
+            }
+
+            int[] sortOrder = new int[chartCount];
+            for (int i = 0; i < chartCount; i++) sortOrder[i] = i;
+            Array.Sort(sortOrder, (a, b) => mortonCodes[a].CompareTo(mortonCodes[b]));
+
+            // Shelf-pack charts in Morton order
+            float[] newUVs = new float[rawUVs.Length];
+            Array.Copy(rawUVs, newUVs, rawUVs.Length);
+
+            int atlasW = origAtlasW;
+            int curX = padding, curY = padding;
+            int shelfH = 0;
+            int totalMaxY = 0;
+
+            for (int si = 0; si < chartCount; si++)
+            {
+                int ci = sortOrder[si];
+                int intMinU = Mathf.FloorToInt(uvMinArr[ci].x);
+                int intMinV = Mathf.FloorToInt(uvMinArr[ci].y);
+                int chartW = Mathf.CeilToInt(uvMaxArr[ci].x) - intMinU;
+                int chartH = Mathf.CeilToInt(uvMaxArr[ci].y) - intMinV;
+
+                if (curX + chartW + padding > atlasW)
+                {
+                    curY += shelfH + padding;
+                    curX = padding;
+                    shelfH = 0;
+                }
+
+                float deltaU = curX - intMinU;
+                float deltaV = curY - intMinV;
+
+                foreach (int vi in vertLists[ci])
+                {
+                    newUVs[vi * 2] = rawUVs[vi * 2] + deltaU;
+                    newUVs[vi * 2 + 1] = rawUVs[vi * 2 + 1] + deltaV;
+                }
+
+                curX += chartW + padding;
+                if (chartH > shelfH) shelfH = chartH;
+                int chartBottom = curY + chartH;
+                if (chartBottom > totalMaxY) totalMaxY = chartBottom;
+            }
+
+            int atlasH = totalMaxY + padding;
+            if (atlasH < origAtlasH) atlasH = origAtlasH;
+
+            return (newUVs, atlasW, atlasH);
         }
 
         // ═══════════════════════════════════════════════════════════════
