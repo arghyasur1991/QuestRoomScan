@@ -10,10 +10,15 @@ namespace Genesis.RoomScan
     {
         public static TriplanarCache Instance { get; private set; }
 
+        [SerializeField, Tooltip("When disabled, vertex colors are used instead. Saves ~192MB GPU memory.")]
+        private bool enableTriplanar = false;
+
         [SerializeField] private ComputeShader bakeCompute;
         [SerializeField, Range(512, 8192)] private int textureResolution = 4096;
         [SerializeField, Tooltip("Auto-calculated if 0. Higher = faster fill but more GPU work per pixel")]
         private int splatRadiusOverride = 0;
+
+        public bool IsTriplanarEnabled => enableTriplanar;
 
         private RenderTexture _triXZ, _triXY, _triYZ;
         private RenderTexture _depthXZ, _depthXY, _depthYZ;
@@ -58,6 +63,13 @@ namespace Genesis.RoomScan
 
         private void Start()
         {
+            if (!enableTriplanar)
+            {
+                Shader.SetGlobalFloat(TriAvailableID, 0f);
+                Debug.Log("[RoomScan] Triplanar disabled — using vertex colors");
+                return;
+            }
+
             CreateTextures();
             if (bakeCompute != null)
             {
@@ -125,7 +137,7 @@ namespace Genesis.RoomScan
 
         public void Clear()
         {
-            if (!_kernelsReady) return;
+            if (!enableTriplanar || !_kernelsReady) return;
             _clearKernel.Set(TriXZRWID, _triXZ);
             _clearKernel.Set(TriXYRWID, _triXY);
             _clearKernel.Set(TriYZRWID, _triYZ);
@@ -156,6 +168,7 @@ namespace Genesis.RoomScan
         /// </summary>
         public void BakeRelocation(Matrix4x4 relocationMatrix, string triplanarDir)
         {
+            if (!enableTriplanar) return;
             var vi = VolumeIntegrator.Instance;
             if (vi == null || bakeCompute == null) return;
 
@@ -297,7 +310,7 @@ namespace Genesis.RoomScan
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes,
             float exposure, List<Transform> exclusionZones)
         {
-            if (!_kernelsReady || camFrame == null)
+            if (!enableTriplanar || !_kernelsReady || camFrame == null)
             {
                 if (_bakeCount < 3) Debug.Log($"[RoomScan] TriBake skip: kernels={_kernelsReady}, frame={camFrame != null}");
                 return;
@@ -383,6 +396,7 @@ namespace Genesis.RoomScan
 
         public void Save(string directory)
         {
+            if (!enableTriplanar) return;
             if (!Directory.Exists(directory)) Directory.CreateDirectory(directory);
             SaveRT(_triXZ, Path.Combine(directory, "tri_xz.raw"));
             SaveRT(_triXY, Path.Combine(directory, "tri_xy.raw"));
@@ -432,6 +446,7 @@ namespace Genesis.RoomScan
 
         public void Load(string directory)
         {
+            if (!enableTriplanar) return;
             LoadRT(_triXZ, Path.Combine(directory, "tri_xz.raw"));
             LoadRT(_triXY, Path.Combine(directory, "tri_xy.raw"));
             LoadRT(_triYZ, Path.Combine(directory, "tri_yz.raw"));
@@ -441,6 +456,7 @@ namespace Genesis.RoomScan
 
         public void LoadDepth(string directory)
         {
+            if (!enableTriplanar) return;
             LoadDepthRT(_depthXZ, Path.Combine(directory, "depth_xz.raw"));
             LoadDepthRT(_depthXY, Path.Combine(directory, "depth_xy.raw"));
             LoadDepthRT(_depthYZ, Path.Combine(directory, "depth_yz.raw"));
