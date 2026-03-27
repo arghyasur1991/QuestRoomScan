@@ -452,7 +452,6 @@ namespace Genesis.RoomScan
             return kf;
         }
 
-
         /// <summary>
         /// GPU-accelerated atlas baking via compute shader.
         /// Mirrors the CPU rasterization logic 1:1 using integer pixel indexing
@@ -790,23 +789,6 @@ namespace Genesis.RoomScan
                     $"({100f * filled / texelCount:F1}%)");
             }
 
-            // Debug atlas dump
-            try
-            {
-                var debugTex = new Texture2D(atlasW, atlasH, TextureFormat.RGBA32, false);
-                debugTex.SetPixelData(atlasPixels, 0);
-                debugTex.Apply();
-                byte[] png = ImageConversion.EncodeToPNG(debugTex);
-                UnityEngine.Object.Destroy(debugTex);
-                string debugPath = Path.Combine(Application.persistentDataPath, "debug_atlas_gpu.png");
-                File.WriteAllBytes(debugPath, png);
-                Debug.Log($"[TextureRefine] GPU debug atlas saved: {debugPath} ({png.Length / 1024}KB)");
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning($"[TextureRefine] Failed to save debug atlas: {e.Message}");
-            }
-
             // Post-process on background thread
             if (!skipDenoise)
             {
@@ -957,22 +939,6 @@ namespace Genesis.RoomScan
                     if (atlasPixels[i * 4 + 3] != 0) filled++;
                 Debug.Log($"[TextureRefine] Pre-dilation: {filled}/{texelCount} texels filled " +
                     $"({100f * filled / texelCount:F1}%)");
-            }
-
-            try
-            {
-                var debugTex = new Texture2D(atlasW, atlasH, TextureFormat.RGBA32, false);
-                debugTex.SetPixelData(atlasPixels, 0);
-                debugTex.Apply();
-                byte[] png = ImageConversion.EncodeToPNG(debugTex);
-                UnityEngine.Object.Destroy(debugTex);
-                string debugPath = Path.Combine(Application.persistentDataPath, "debug_atlas.png");
-                File.WriteAllBytes(debugPath, png);
-                Debug.Log($"[TextureRefine] Debug atlas saved: {debugPath} ({png.Length / 1024}KB)");
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning($"[TextureRefine] Failed to save debug atlas: {e.Message}");
             }
 
             if (!skipDenoise)
