@@ -6,15 +6,17 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 
 - **GPU TSDF Integration** — Depth frames fused into a signed distance field via compute shaders
 - **GPU Surface Nets Meshing** — Fully GPU-driven mesh extraction via compute shaders with zero CPU readback, rendered via a single `Graphics.RenderPrimitivesIndirect` draw call
-- **Three-Layer Texturing** — Triplanar world-space cache (persistent ~8mm/texel) → vertex colors (~5cm fallback) — all sourced from passthrough camera RGB. Keyframes captured as motion-gated JPEGs to disk for Gaussian Splat training.
+- **Vertex Color Texturing** — Real-time per-voxel RGB from passthrough camera, baked into the TSDF color volume and packed into Surface Nets vertices. Triplanar world-space cache available as an optional mode (disabled by default — saves ~192MB GPU memory). Keyframes captured as motion-gated JPEGs to disk for texture refinement and Gaussian Splat training.
 - **Package-Based Persistence** — Multi-scan persistence system where each scan is a self-contained package (`pkg_YYYYMMDD_HHMMSS/`) with its own TSDF, triplanar textures, keyframes, splat, and refined textures. Scan browser in the debug menu lists all saved packages. Artifacts (splat, refined, HQ) auto-save to the active package on creation.
 - **OVRSpatialAnchor Relocation** — `RoomAnchorManager` creates a persisted `OVRSpatialAnchor` per scan package for reliable cross-session relocation. Per-artifact creation matrices in `anchor.json` track when each artifact was created relative to the spatial anchor, enabling accurate relocation even for artifacts created across different sessions. Falls back to MRUK floor anchor if spatial anchor localization fails.
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
 - **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Training, Tools) and right detail views. Includes scan browser with load/delete per package, context-sensitive artifact deletion, and dynamic button disabled states.
-- **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with occlusion-aware depth testing and atomic score selection. Produces significantly sharper textures than the real-time triplanar cache. Optional server-side HQ refinement via differentiable rendering (currently experimental/broken).
-- **Render Mode Switching** — Cycle between Mesh, Textured, Refined, HQRefined, and Splat views at runtime via debug menu or controller binding (default: A/X button)
+- **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, and GPU unsharp-mask sharpening. Produces sharp, seamless textures from captured keyframes.
+- **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
+- **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
+- **Render Mode Switching** — Cycle between Mesh, Textured, Refined, HQRefined, and Splat views at runtime via debug menu or controller binding (default: A/X button). Textured mode uses vertex colors by default (triplanar if enabled).
 
 ## Requirements
 
@@ -85,7 +87,7 @@ Scanning starts automatically on launch (configurable via `autoStartOnLoad`). As
 
 1. **Depth integration**: Each depth frame is fused into the TSDF volume with color from the passthrough camera
 2. **Mesh extraction**: GPU Surface Nets extracts a mesh from the volume every few frames (after a minimum number of integrations)
-3. **Texturing**: Camera RGB is baked into triplanar world-space textures for persistent surface color
+3. **Texturing**: Camera RGB is fused into per-voxel vertex colors (triplanar cache available if enabled in inspector)
 4. **Keyframe capture**: Motion-gated JPEG snapshots + camera poses are saved to `GSExport/` on disk — these are used later for Gaussian Splat training
 5. **Point cloud export**: GPU mesh vertices are auto-exported as `points3d.ply` every 30 seconds (configurable)
 
@@ -126,15 +128,34 @@ After scanning, you can produce a sharper UV-mapped texture atlas from the captu
    - **GPU readback**: Reads the current mesh from the GPU Surface Nets buffers
    - **Mesh simplification** (optional): meshoptimizer reduces triangle count (default 50%) to speed up unwrapping
    - **UV unwrapping**: xatlas (native C++ via P/Invoke) generates a UV atlas with seam-aware parameterization, with tunable chart/pack options for speed vs quality
-   - **GPU atlas baking**: A compute shader (`AtlasBakeCompute.compute`) processes each keyframe — builds an occlusion depth buffer, then rasterizes UV-space triangles with per-texel keyframe projection, occlusion testing, and atomic best-score selection (~5-10s for 300 keyframes)
+   - **GPU atlas baking**: A compute shader (`AtlasBakeCompute.compute`) processes each keyframe — two-pass multi-view blending selects and blends the top-scoring views per texel with occlusion-aware depth testing (~5-10s for 300 keyframes)
+   - **GPU seam blending**: Gaussian-weighted blend across UV chart boundaries reduces color discontinuities
+   - **GPU sharpening**: Unsharp mask restores crispness lost during multi-view blending (configurable strength and radius)
    - **Dilation**: Fills gaps at UV island edges
-3. Press **Render Mode** to cycle to **Refined** — the UV-mapped mesh with baked atlas texture replaces the triplanar view
+3. Press **Render Mode** to cycle to **Refined** — the UV-mapped mesh with baked atlas texture
 
-The refined texture is significantly sharper than the real-time triplanar cache because it selects the single best keyframe per texel rather than blending multiple noisy projections.
+Refined textures persist automatically with the active package and are restored on load.
 
-**HQ Refine (Server)** is also available in the debug menu — it uploads the UV-unwrapped mesh and keyframes to the server for differentiable texture optimization. **Note: server-side refinement is currently broken** (produces incorrect atlas output). On-device refinement is the recommended path.
+### Atlas Enhancement (HQ Refine)
 
-Refined textures persist with **Save Scan** and are restored on **Load Scan**.
+For further quality improvement, the on-device atlas can be enhanced via a server-side pipeline:
+
+1. Press **HQ Refine (Server)** in the debug menu (auto-triggers on-device refinement if not done)
+2. The refined atlas is encoded as PNG, uploaded to the server
+3. Server applies **Real-ESRGAN** super-resolution (2x/4x, configurable via `hqRefineScale`) + **LaMa** inpainting to fill gaps
+4. Enhanced atlas is downloaded and applied
+
+The SR scale is configurable in the inspector. Requires a server running at the configured URL.
+
+### Mesh Enhancement
+
+Server-side mesh geometry enhancement:
+
+1. Press **Enhance Mesh (Server)** in the Refine view
+2. The refined mesh is serialized and uploaded to the server
+3. Server applies bilateral normal filter (smoothing) + optional RANSAC plane detection and vertex snapping
+4. Enhanced mesh is downloaded and displayed, saved as a **separate artifact** (`enhanced_mesh.bin`) — the original refined mesh is preserved
+5. **Delete Enhanced Mesh** in the debug menu restores the original refined mesh
 
 ### Saving and Loading
 
@@ -146,20 +167,21 @@ RoomScans/
   pkg_20260228_143022/
     scan.bin              # TSDF + color volumes (v1 binary)
     anchor.json           # Spatial anchor UUID + per-artifact matrices
-    triplanar/            # Color + depth textures
+    triplanar/            # Color + depth textures (only if triplanar enabled)
     keyframes/            # Copied from GSExport/ (images + frames.jsonl)
     splat.ply             # Auto-saved when GS training completes
     refined_mesh.bin      # Auto-saved when on-device refinement completes
     refined_atlas.raw     # Auto-saved with refined mesh
-    hq_atlas.raw          # Auto-saved when HQ refinement completes
+    enhanced_mesh.bin     # Auto-saved when server mesh enhancement completes
+    hq_atlas.png          # Auto-saved when server atlas enhancement completes
 ```
 
-- **Save Scan**: Creates a new package. Persists the TSDF + color volumes, triplanar textures, copies keyframes, and creates a persisted `OVRSpatialAnchor` for cross-session relocation. Sets this package as the active target for subsequent artifact auto-saves.
-- **Load Scan**: Browse saved packages in the **Saved Scans** view. Loading a package localizes the spatial anchor, computes per-artifact relocation matrices, and restores all data including splat, refined textures, and HQ atlas.
-- **Auto-save artifacts**: When a splat download completes, on-device refinement finishes, or HQ refinement finishes, the artifact is automatically saved to the active package — no manual "Save Scan" needed.
-- **Delete artifact**: Context-sensitive deletion in the Scan view — deletes the artifact matching the current render mode (splat, refined, or HQ) from the active package.
+- **Save Scan**: Creates a new package. Persists the TSDF + color volumes, copies keyframes, and creates a persisted `OVRSpatialAnchor` for cross-session relocation. Sets this package as the active target for subsequent artifact auto-saves.
+- **Load Scan**: Browse saved packages in the **Saved Scans** view. Loading a package localizes the spatial anchor, computes per-artifact relocation matrices, and restores all data including splat, refined textures, enhanced mesh, and HQ atlas.
+- **Auto-save artifacts**: When a splat download completes, on-device refinement finishes, atlas/mesh enhancement finishes, the artifact is automatically saved to the active package — no manual "Save Scan" needed.
+- **Delete artifact**: Context-sensitive deletion in the Scan view — deletes the artifact matching the current render mode (splat, refined, enhanced mesh, or HQ) from the active package.
 - **Delete package**: Full package deletion from the Saved Scans view, including erasing the spatial anchor from persistent storage.
-- **Clear All Data**: Stops scanning, clears volumes/mesh/triplanar/keyframes from memory, clears the active package reference.
+- **Clear All Data**: Stops scanning, clears volumes/mesh/keyframes from memory, clears the active package reference.
 
 ### Architecture
 
@@ -177,8 +199,8 @@ VolumeIntegrator (TSDF + color integration, exclusion zones, prune, freeze, bake
 MeshExtractor → GPUSurfaceNets (compute: classify → smooth → snap → temporal → index)
        │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
        │
-       ├── TriplanarCache (bake camera RGB → 3 world-space textures + depth maps,
-       │                    forward-splat relocation on load)
+       ├── TriplanarCache (optional: bake camera RGB → 3 world-space textures + depth maps,
+       │                    disabled by default — vertex colors used instead)
        │
        ├── KeyframeCollector (motion-gated JPEG + poses → GSExport/ on disk)
        │
@@ -190,9 +212,13 @@ MeshExtractor → GPUSurfaceNets (compute: classify → smooth → snap → temp
        │               │
        │               On-device Gaussian Splat rendering
        │
-       └── TextureRefinement (GPU readback → xatlas UV unwrap → compute shader atlas bake)
+       └── TextureRefinement (GPU readback → xatlas UV unwrap → multi-view atlas bake
+                   │              → seam blend → sharpen)
                    │
-                   RefinedMesh.shader (UV-mapped atlas rendering)
+                   ├── RefinedMesh.shader (UV-mapped atlas rendering)
+                   │
+                   └── GSplatServerClient (atlas enhancement: SR + inpaint,
+                                           mesh enhancement: smooth + plane snap)
 ```
 
 See [ALGORITHM.md](ALGORITHM.md) for the full technical reference.
@@ -272,11 +298,12 @@ Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. 
 - **Save Scan**: Create a new package with current scan data
 - **Delete Artifact**: Context-sensitive — deletes Splat/Refined/HQ atlas from active package based on current render mode
 
-**Saved Scans** — Scrollable list of saved packages sorted newest-first. Each entry shows display name, date, artifact badges (KF, Splat, Refined, HQ), and Load/Delete buttons. Badge count shown on the nav button.
+**Saved Scans** — Scrollable list of saved packages sorted newest-first. Each entry shows display name, date, artifact badges (KF, Splat, Refined, HQ, Enh), and Load/Delete buttons. Badge count shown on the nav button.
 
 **Refine** — On-device and server refinement status + action buttons:
-- **Refine Textures**: On-device GPU atlas bake from keyframes
-- **HQ Refine (Server)**: Upload to server for differentiable optimization
+- **Refine Textures**: On-device GPU atlas bake from keyframes (multi-view blend + sharpen)
+- **HQ Refine (Server)**: Upload atlas for server-side super-resolution + inpainting
+- **Enhance Mesh (Server)**: Upload mesh for server-side bilateral smooth + plane snap
 
 **Training** — GS training with server URL field, live progress, and Start/Cancel buttons.
 
@@ -290,7 +317,8 @@ Buttons are dynamically enabled/disabled based on app context:
 - **Refine Textures**: Disabled if already refining or no mesh/keyframes
 - **HQ Refine**: Disabled if no server URL configured
 - **Export Point Cloud**: Disabled if no volume data
-- **Delete Artifact**: Only visible in Splat/Refined/HQRefined modes, requires active package
+- **Delete Artifact**: Only visible in Splat/Refined/HQRefined modes, requires active package. If enhanced mesh exists in Refined mode, deletes enhanced mesh first.
+- **Enhance Mesh**: Disabled if no refined mesh or already enhancing
 
 ### Default Controller Bindings
 
@@ -313,11 +341,19 @@ Default values — all configurable per-component in the Inspector.
 | TSDF volume (RG8_SNorm) | 256 x 256 x 256 | ~32 MB |
 | Color volume (RGBA8) | 256 x 256 x 256 | ~64 MB |
 | GPU Surface Nets (coord map, vertices, indices, smoothing, temporal 3D texture) | 256³ derived | ~83 MB |
-| Triplanar color textures (3x RGBA8) | 3 x 4096 x 4096 | ~192 MB |
-| Triplanar depth textures (3x R8) | 3 x 4096 x 4096 | ~48 MB |
-| **Total GPU** | | **~419 MB** |
+| **Total GPU (default)** | | **~179 MB** |
 
-Keyframes are written as JPEGs to disk (not held in GPU memory). To reduce GPU memory on constrained devices, lower `VolumeIntegrator.voxelCount` and `TriplanarCache.textureResolution` in the Inspector.
+With triplanar textures enabled (`TriplanarCache.enableTriplanar = true`):
+
+| Component | Default | Memory |
+|-----------|---------|--------|
+| Triplanar color textures (3x RGBA8) | 3 x 4096 x 4096 | +192 MB |
+| Triplanar depth textures (3x R8) | 3 x 4096 x 4096 | +48 MB |
+| **Total GPU (with triplanar)** | | **~419 MB** |
+
+Triplanar textures are disabled by default since the refined texture pipeline produces significantly higher quality results. Vertex colors (~5cm resolution) provide adequate real-time visualization during scanning.
+
+Keyframes are written as JPEGs to disk (not held in GPU memory). To reduce GPU memory on constrained devices, lower `VolumeIntegrator.voxelCount` in the Inspector.
 
 ## Comparison with Hyperscape
 
@@ -353,7 +389,7 @@ QuestRoomScan builds on that foundation with significant extensions:
 | | lasertag | QuestRoomScan |
 |-|----------|---------------|
 | **Mesh extraction** | CPU marching cubes from GPU volume | Fully GPU-driven Surface Nets via compute shaders — zero CPU readback, single indirect draw call |
-| **Texturing** | Geometry only — no camera RGB texturing | Camera-based texturing: triplanar world-space cache (~8mm/texel) and vertex colors (~5cm) — sourced from passthrough camera RGB |
+| **Texturing** | Geometry only — no camera RGB texturing | Real-time vertex colors, optional triplanar cache (~8mm/texel), post-scan refined atlas (keyframe multi-view bake + SR enhancement) |
 | **Persistence** | None — mesh lost on restart | Multi-scan package persistence with OVRSpatialAnchor cross-session relocation |
 | **Mesh quality** | Basic TSDF blending | Quality² modulation, confidence-gated Surface Nets, warmup clearing, pruning, body exclusion zones, GPU temporal stabilization, RANSAC plane detection & snapping |
 | **Gaussian Splatting** | — | Full pipeline: on-device capture → PC server training → on-device UGS rendering with render mode switching |
