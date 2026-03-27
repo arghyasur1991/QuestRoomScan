@@ -34,8 +34,8 @@ namespace Genesis.RoomScan.UI
         private Label _lblNoScans;
 
         // Refine view
-        private Label _valRefineStatus, _valHqStatus;
-        private Button _btnRefineTex, _btnHqRefine;
+        private Label _valRefineStatus, _valHqStatus, _valMeshEnhanceStatus;
+        private Button _btnRefineTex, _btnHqRefine, _btnMeshEnhance;
 
         // Training view
         private TextField _fieldServerUrl;
@@ -158,8 +158,10 @@ namespace Genesis.RoomScan.UI
             // Refine
             _valRefineStatus = _root.Q<Label>("val-refine-status");
             _valHqStatus = _root.Q<Label>("val-hq-status");
+            _valMeshEnhanceStatus = _root.Q<Label>("val-mesh-enhance-status");
             _btnRefineTex = _root.Q<Button>("btn-refine-tex");
             _btnHqRefine = _root.Q<Button>("btn-hq-refine");
+            _btnMeshEnhance = _root.Q<Button>("btn-mesh-enhance");
 
             // Training
             _fieldServerUrl = _root.Q<TextField>("field-server-url");
@@ -222,6 +224,9 @@ namespace Genesis.RoomScan.UI
 
             _btnHqRefine?.RegisterCallback<ClickEvent>(_ =>
                 RoomScanner.Instance?.StartHQRefinement());
+
+            _btnMeshEnhance?.RegisterCallback<ClickEvent>(_ =>
+                RoomScanner.Instance?.StartMeshEnhancement());
 
             // Training
             _fieldServerUrl?.RegisterValueChangedCallback(evt =>
@@ -496,6 +501,22 @@ namespace Genesis.RoomScan.UI
                 ? (scanner.RefineStatus ?? "Refining...") : (scanner.HasRefinedTexture ? "Done" : "Idle"));
             SetLabel(_valHqStatus, scanner.IsHQRefining
                 ? (scanner.HQRefineStatus ?? "Processing...") : (scanner.HasHQRefinedTexture ? "Done" : "Idle"));
+
+            if (_btnMeshEnhance != null)
+            {
+                if (scanner.IsMeshEnhancing)
+                {
+                    _btnMeshEnhance.text = scanner.MeshEnhanceStatus ?? "Enhancing...";
+                    _btnMeshEnhance.SetEnabled(false);
+                }
+                else
+                {
+                    _btnMeshEnhance.text = "Enhance Mesh (Server)";
+                    _btnMeshEnhance.SetEnabled(true);
+                }
+            }
+            SetLabel(_valMeshEnhanceStatus, scanner.IsMeshEnhancing
+                ? (scanner.MeshEnhanceStatus ?? "Processing...") : "Idle");
         }
 
         private void RefreshTrainingStatus()
@@ -564,6 +585,14 @@ namespace Genesis.RoomScan.UI
                 bool hasServer = _cachedClient != null &&
                     !string.IsNullOrEmpty(_cachedClient.ServerUrl);
                 _btnHqRefine.SetEnabled((hasVolume || hasActivePackage) && hasServer);
+            }
+
+            if (_btnMeshEnhance != null && !scanner.IsMeshEnhancing)
+            {
+                bool hasServer = _cachedClient != null &&
+                    !string.IsNullOrEmpty(_cachedClient.ServerUrl);
+                bool hasRefined = scanner.HasRefinedTexture || scanner.LastRefinedResult.HasValue;
+                _btnMeshEnhance.SetEnabled(hasRefined && hasServer);
             }
 
             // Export Point Cloud: disabled if no volume

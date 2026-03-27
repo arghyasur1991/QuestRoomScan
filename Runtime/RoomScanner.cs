@@ -177,8 +177,10 @@ namespace Genesis.RoomScan
         public bool HasHQRefinedTexture { get; private set; }
         public bool IsRefining { get; private set; }
         public bool IsHQRefining { get; private set; }
+        public bool IsMeshEnhancing { get; private set; }
         public string RefineStatus { get; private set; }
         public string HQRefineStatus { get; private set; }
+        public string MeshEnhanceStatus { get; private set; }
 
         /// <summary>
         /// Shared UV mesh data used by persistence to save/restore refinement results.
@@ -764,6 +766,145 @@ namespace Genesis.RoomScan
             {
                 IsHQRefining = false;
             }
+        }
+
+        public async void StartMeshEnhancement()
+        {
+            if (IsMeshEnhancing) return;
+            IsMeshEnhancing = true;
+            MeshEnhanceStatus = "Starting...";
+
+            try
+            {
+                if (_gsplatServerClient == null)
+                {
+                    MeshEnhanceStatus = "No server configured";
+                    return;
+                }
+
+                if (!LastRefinedResult.HasValue)
+                {
+                    MeshEnhanceStatus = "No refined mesh — refine first";
+                    return;
+                }
+
+                MeshEnhanceStatus = "Serializing mesh...";
+                var r = LastRefinedResult.Value;
+                byte[] meshBin = await Task.Run(() => SerializeRefinedMesh(r));
+                Debug.Log($"[RoomScan] Mesh enhance: uploading {meshBin.Length / 1024}KB ({r.Positions.Length} verts)");
+
+                MeshEnhanceStatus = $"Uploading ({meshBin.Length / 1024}KB)...";
+                byte[] resultBin = await _gsplatServerClient.EnhanceMeshAsync(meshBin);
+
+                if (resultBin == null || resultBin.Length == 0)
+                {
+                    MeshEnhanceStatus = "Server returned no data";
+                    return;
+                }
+
+                MeshEnhanceStatus = "Applying enhanced mesh...";
+                var enhanced = await Task.Run(() => DeserializeRefinedMesh(resultBin));
+                enhanced.AtlasPixels = r.AtlasPixels;
+
+                ApplyEnhancedMesh(enhanced);
+                LastRefinedResult = enhanced;
+
+                if (_persistence != null && _persistence.HasActivePackage)
+                    await _persistence.SaveArtifactAsync(ArtifactType.Refined, null, enhanced);
+
+                MeshEnhanceStatus = "Done";
+                Debug.Log($"[RoomScan] Mesh enhancement complete: {enhanced.Positions.Length} verts");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[RoomScan] Mesh enhancement failed: {e.Message}\n{e.StackTrace}");
+                MeshEnhanceStatus = "Failed";
+            }
+            finally
+            {
+                IsMeshEnhancing = false;
+            }
+        }
+
+        private static byte[] SerializeRefinedMesh(RefinedTextureResult r)
+        {
+            int vertCount = r.Positions.Length;
+            int idxCount = r.Indices.Length;
+            int size = 24 + vertCount * 32 + idxCount * 4;
+
+            using var ms = new MemoryStream(size);
+            using var w = new BinaryWriter(ms);
+
+            w.Write((uint)0x46524D52); // RMRF magic
+            w.Write(1);                // version
+            w.Write(vertCount);
+            w.Write(idxCount);
+            w.Write(r.AtlasWidth);
+            w.Write(r.AtlasHeight);
+
+            for (int i = 0; i < vertCount; i++)
+            {
+                w.Write(r.Positions[i].x); w.Write(r.Positions[i].y); w.Write(r.Positions[i].z);
+                w.Write(r.Normals[i].x); w.Write(r.Normals[i].y); w.Write(r.Normals[i].z);
+                w.Write(r.UVs[i].x); w.Write(r.UVs[i].y);
+            }
+            foreach (int idx in r.Indices) w.Write(idx);
+
+            return ms.ToArray();
+        }
+
+        private static RefinedTextureResult DeserializeRefinedMesh(byte[] data)
+        {
+            using var ms = new MemoryStream(data);
+            using var r = new BinaryReader(ms);
+
+            uint magic = r.ReadUInt32();
+            if (magic == 0x46524D52) r.ReadInt32(); // skip version
+            else ms.Position = 4; // no header, rewind past magic (treat as vertCount)
+
+            int vertCount = magic == 0x46524D52 ? r.ReadInt32() : (int)magic;
+            int idxCount = r.ReadInt32();
+            int atlasW = r.ReadInt32();
+            int atlasH = r.ReadInt32();
+
+            var positions = new Vector3[vertCount];
+            var normals = new Vector3[vertCount];
+            var uvs = new Vector2[vertCount];
+            for (int i = 0; i < vertCount; i++)
+            {
+                positions[i] = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                normals[i] = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                uvs[i] = new Vector2(r.ReadSingle(), r.ReadSingle());
+            }
+
+            int[] indices = new int[idxCount];
+            for (int i = 0; i < idxCount; i++) indices[i] = r.ReadInt32();
+
+            return new RefinedTextureResult
+            {
+                Positions = positions, Normals = normals, UVs = uvs,
+                Indices = indices, AtlasWidth = atlasW, AtlasHeight = atlasH,
+            };
+        }
+
+        private void ApplyEnhancedMesh(RefinedTextureResult enhanced)
+        {
+            if (_refinedMesh == null)
+            {
+                _refinedMesh = new Mesh { name = "EnhancedScanMesh", indexFormat = IndexFormat.UInt32 };
+            }
+
+            _refinedMesh.Clear();
+            _refinedMesh.SetVertices(enhanced.Positions);
+            _refinedMesh.SetNormals(enhanced.Normals);
+            _refinedMesh.SetUVs(0, enhanced.UVs);
+            _refinedMesh.SetTriangles(enhanced.Indices, 0);
+
+            EnsureRefinedRenderer();
+            _refinedMeshFilter.mesh = _refinedMesh;
+
+            if (_refinedAtlasTexture != null)
+                _refinedRenderer.material.mainTexture = _refinedAtlasTexture;
         }
 
         private void ApplyRefinedAtlas(RefinedTextureResult result)

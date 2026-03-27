@@ -84,10 +84,15 @@
                     <ui:Label text="HQ (Server)" class="status-key" />
                     <ui:Label name="val-hq-status" text="Idle" class="status-val" />
                 </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Mesh Enhance" class="status-key" />
+                    <ui:Label name="val-mesh-enhance-status" text="Idle" class="status-val" />
+                </ui:VisualElement>
 
                 <ui:VisualElement class="btn-group">
                     <ui:Button name="btn-refine-tex" text="Refine Textures" class="action-btn action-btn--primary" />
                     <ui:Button name="btn-hq-refine" text="HQ Refine (Server)" class="action-btn action-btn--primary" />
+                    <ui:Button name="btn-mesh-enhance" text="Enhance Mesh (Server)" class="action-btn action-btn--primary" />
                 </ui:VisualElement>
             </ui:VisualElement>
 
