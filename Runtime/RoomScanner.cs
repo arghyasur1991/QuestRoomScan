@@ -86,6 +86,9 @@ namespace Genesis.RoomScan
         [SerializeField] internal bool skipDenoise = true;
         [Tooltip("Multi-view blend: 2-pass GPU bake that blends top views per texel for smoother textures")]
         [SerializeField] internal bool multiViewBlend = true;
+        [Tooltip("Unsharp mask strength to restore crispness after multi-view blending (0 = off)")]
+        [Range(0f, 2f)]
+        [SerializeField] internal float sharpenStrength = 0.5f;
 
         [Header("Unwrap Performance")]
         [Tooltip("Simplify mesh before UV unwrap (0.1 = 10% of tris, 1.0 = no simplification). " +
@@ -617,6 +620,7 @@ namespace Genesis.RoomScan
 
             TextureRefinement.StatusChanged += s => RefineStatus = s;
             TextureRefinement.EnableMultiViewBlend = multiViewBlend;
+            TextureRefinement.SharpenStrength = sharpenStrength;
             try
             {
                 string keyframeDir = KeyframeDirectory;

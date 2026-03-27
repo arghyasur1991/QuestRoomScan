@@ -56,6 +56,13 @@ namespace Genesis.RoomScan
         /// Lower = more views blended (smoother but potentially blurrier), higher = fewer views (sharper).</summary>
         public static float BlendMinFraction { get; set; } = 0.3f;
 
+        /// <summary>GPU unsharp-mask strength applied after baking (0 = off, 0.3-1.0 typical).
+        /// Restores crispness lost during multi-view blending.</summary>
+        public static float SharpenStrength { get; set; } = 0.5f;
+
+        /// <summary>Radius for the Gaussian blur used in unsharp mask (1 = 3x3, 2 = 5x5).</summary>
+        public static int SharpenRadius { get; set; } = 1;
+
         public static event Action<string> StatusChanged;
 
         // ═══════════════════════════════════════════════════════════════
@@ -716,6 +723,31 @@ namespace Genesis.RoomScan
                 accumR.Release(); accumG.Release();
                 accumB.Release(); accumW.Release();
                 Debug.Log("[TextureRefine] Multi-view blend resolved");
+            }
+
+            // ── Sharpening pass (GPU unsharp mask) ──
+            if (SharpenStrength > 0.01f)
+            {
+                ReportStatus("Sharpening...");
+                int kSharpen = compute.FindKernel("SharpenAtlas");
+                var sharpenSrcBuf = new ComputeBuffer(texelCount, 4);
+                var tmp = new uint[texelCount];
+                atlasBuf.GetData(tmp);
+                sharpenSrcBuf.SetData(tmp);
+
+                compute.SetFloat("_SharpenStrength", SharpenStrength);
+                compute.SetInt("_SharpenRadius", SharpenRadius);
+                compute.SetInt("_AtlasW", atlasW);
+                compute.SetInt("_AtlasH", atlasH);
+                compute.SetBuffer(kSharpen, "_AtlasBufSrc", sharpenSrcBuf);
+                compute.SetBuffer(kSharpen, "_AtlasBuf", atlasBuf);
+
+                int groupsX = (atlasW + 7) / 8;
+                int groupsY = (atlasH + 7) / 8;
+                compute.Dispatch(kSharpen, groupsX, groupsY, 1);
+
+                sharpenSrcBuf.Release();
+                Debug.Log($"[TextureRefine] Sharpening complete (strength={SharpenStrength}, radius={SharpenRadius})");
             }
 
             // ── Seam blending pass (GPU) ──

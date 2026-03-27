@@ -4,6 +4,7 @@
 #pragma kernel BlendSeams
 #pragma kernel BlendAccum
 #pragma kernel ResolveBlend
+#pragma kernel SharpenAtlas
 
 // ── Shared uniforms ──────────────────────────────────────────
 float4x4 _ViewMat;
@@ -440,5 +441,71 @@ void ResolveBlend(uint3 id : SV_DispatchThreadID)
     uint r = clamp(_AccumRIn[idx] / w, 0, 255);
     uint g = clamp(_AccumGIn[idx] / w, 0, 255);
     uint b = clamp(_AccumBIn[idx] / w, 0, 255);
+    _AtlasBuf[idx] = r | (g << 8) | (b << 16) | (255u << 24);
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Kernel 6: Unsharp mask sharpening on the atlas.
+//  sharpened = original + strength * (original - gaussian_blur)
+//  Reads from _AtlasBufSrc (snapshot), writes to _AtlasBuf.
+//  Only processes filled texels (alpha > 0) and only samples
+//  from filled neighbors so UV island edges stay clean.
+// ═════════════════════════════════════════════════════════════
+
+float _SharpenStrength;  // typically 0.3 - 1.0
+int   _SharpenRadius;    // 1 = 3x3, 2 = 5x5
+
+[numthreads(8, 8, 1)]
+void SharpenAtlas(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _AtlasW || (int)id.y >= _AtlasH) return;
+
+    int idx = (int)id.y * _AtlasW + (int)id.x;
+    uint centerPacked = _AtlasBufSrc[idx];
+    if ((centerPacked >> 24) == 0) return;
+
+    float3 centerColor = float3(
+        (float)(centerPacked & 0xFF),
+        (float)((centerPacked >> 8) & 0xFF),
+        (float)((centerPacked >> 16) & 0xFF));
+
+    float sigma = max((float)_SharpenRadius * 0.5, 0.5);
+    float invSig2 = -0.5 / (sigma * sigma);
+    float3 blurSum = 0;
+    float wSum = 0;
+
+    for (int dy = -_SharpenRadius; dy <= _SharpenRadius; dy++)
+    {
+        for (int dx = -_SharpenRadius; dx <= _SharpenRadius; dx++)
+        {
+            int nx = (int)id.x + dx;
+            int ny = (int)id.y + dy;
+            if (nx < 0 || ny < 0 || nx >= _AtlasW || ny >= _AtlasH) continue;
+
+            uint nPacked = _AtlasBufSrc[ny * _AtlasW + nx];
+            if ((nPacked >> 24) == 0) continue;
+
+            float dist2 = (float)(dx * dx + dy * dy);
+            float gw = exp(dist2 * invSig2);
+
+            float3 nc = float3(
+                (float)(nPacked & 0xFF),
+                (float)((nPacked >> 8) & 0xFF),
+                (float)((nPacked >> 16) & 0xFF));
+
+            blurSum += nc * gw;
+            wSum += gw;
+        }
+    }
+
+    if (wSum < 1e-6) return;
+
+    float3 blurred = blurSum / wSum;
+    float3 sharpened = centerColor + _SharpenStrength * (centerColor - blurred);
+    sharpened = clamp(sharpened, 0, 255);
+
+    uint r = (uint)round(sharpened.x);
+    uint g = (uint)round(sharpened.y);
+    uint b = (uint)round(sharpened.z);
     _AtlasBuf[idx] = r | (g << 8) | (b << 16) | (255u << 24);
 }
