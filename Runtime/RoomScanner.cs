@@ -841,28 +841,69 @@ namespace Genesis.RoomScan
                 return _cachedUnwrap.Value;
             }
 
+            // Reconstruct from persisted refined mesh if available (skip xatlas)
+            if (LastRefinedResult.HasValue)
+            {
+                var r = LastRefinedResult.Value;
+                var unwrap = ReconstructUnwrapFromResult(r);
+                _cachedUnwrap = unwrap;
+                EnsureRefinedMesh(unwrap);
+                Debug.Log("[RoomScan] Reconstructed UV mesh from persisted refined_mesh.bin (no xatlas needed)");
+                return unwrap;
+            }
+
             string kfDir = KeyframeDirectory;
             var opts = XAtlasWrapper.UnwrapOptions.Default;
             opts.MaxCost = xatlasMaxCost;
             opts.BlockAlign = useBlockAlign;
-            var unwrap = await TextureRefinement.UnwrapMeshAsync(
+            var unwrap2 = await TextureRefinement.UnwrapMeshAsync(
                 kfDir, KeyframeRelocation, opts, decimationRatio);
-            _cachedUnwrap = unwrap;
+            _cachedUnwrap = unwrap2;
 
-            EnsureRefinedMesh(unwrap);
+            EnsureRefinedMesh(unwrap2);
 
             LastRefinedResult = new RefinedTextureResult
             {
-                Positions = unwrap.Positions,
-                Normals = unwrap.Normals,
-                UVs = unwrap.UVs,
-                Indices = unwrap.Indices,
-                AtlasWidth = unwrap.AtlasWidth,
-                AtlasHeight = unwrap.AtlasHeight,
+                Positions = unwrap2.Positions,
+                Normals = unwrap2.Normals,
+                UVs = unwrap2.UVs,
+                Indices = unwrap2.Indices,
+                AtlasWidth = unwrap2.AtlasWidth,
+                AtlasHeight = unwrap2.AtlasHeight,
                 AtlasPixels = null,
             };
 
-            return unwrap;
+            return unwrap2;
+        }
+
+        /// <summary>
+        /// Rebuilds an UnwrappedMeshResult from a persisted RefinedTextureResult.
+        /// RawUVs are reconstructed from normalized UVs * atlas dimensions.
+        /// OrigPositions/OrigIndices use the unwrapped mesh as fallback (sufficient for depth buffer).
+        /// </summary>
+        private static UnwrappedMeshResult ReconstructUnwrapFromResult(RefinedTextureResult r)
+        {
+            int vertCount = r.Positions.Length;
+            float[] rawUVs = new float[vertCount * 2];
+            for (int i = 0; i < vertCount; i++)
+            {
+                rawUVs[i * 2] = r.UVs[i].x * r.AtlasWidth;
+                rawUVs[i * 2 + 1] = r.UVs[i].y * r.AtlasHeight;
+            }
+
+            return new UnwrappedMeshResult
+            {
+                Positions = r.Positions,
+                Normals = r.Normals,
+                UVs = r.UVs,
+                RawUVs = rawUVs,
+                Indices = r.Indices,
+                AtlasWidth = r.AtlasWidth,
+                AtlasHeight = r.AtlasHeight,
+                OrigPositions = r.Positions,
+                OrigNormals = r.Normals,
+                OrigIndices = r.Indices,
+            };
         }
 
         private void EnsureRefinedMesh(UnwrappedMeshResult unwrap)
