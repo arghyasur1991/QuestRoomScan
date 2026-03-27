@@ -467,6 +467,8 @@ namespace Genesis.RoomScan
                 HasHQRefinedTexture = false;
                 HasEnhancedMesh = false;
                 LastRefinedResult = null;
+                _cachedUnwrap = null;
+                _refinedMesh = null;
 
                 _meshExtractor.DisposeOnly();
                 _volumeIntegrator.Clear();
@@ -1243,6 +1245,7 @@ namespace Genesis.RoomScan
                         HasRefinedTexture = false;
                         LastRefinedResult = null;
                         _cachedUnwrap = null;
+                        _refinedMesh = null;
                         SetRenderMode(ScanRenderMode.Textured);
                     }
                     break;
