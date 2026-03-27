@@ -794,7 +794,8 @@ namespace Genesis.RoomScan
                 Debug.Log($"[RoomScan] Mesh enhance: uploading {meshBin.Length / 1024}KB ({r.Positions.Length} verts)");
 
                 MeshEnhanceStatus = $"Uploading ({meshBin.Length / 1024}KB)...";
-                byte[] resultBin = await _gsplatServerClient.EnhanceMeshAsync(meshBin);
+                byte[] resultBin = await _gsplatServerClient.EnhanceMeshAsync(
+                    meshBin, smoothIterations: 3, enablePlaneSnap: false);
 
                 if (resultBin == null || resultBin.Length == 0)
                 {
@@ -807,10 +808,8 @@ namespace Genesis.RoomScan
                 enhanced.AtlasPixels = r.AtlasPixels;
 
                 ApplyEnhancedMesh(enhanced);
-                LastRefinedResult = enhanced;
-
-                if (_persistence != null && _persistence.HasActivePackage)
-                    await _persistence.SaveArtifactAsync(ArtifactType.Refined, null, enhanced);
+                // Don't overwrite LastRefinedResult or persist — this is a preview-only
+                // change. The user can reload the original via the saved package.
 
                 MeshEnhanceStatus = "Done";
                 Debug.Log($"[RoomScan] Mesh enhancement complete: {enhanced.Positions.Length} verts");
