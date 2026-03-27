@@ -4,7 +4,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 
 | Scanning (Triplanar) | Vertex Colors | Texture Refinement | Gaussian Splat |
 |:---:|:---:|:---:|:---:|
-| ![Scanning](docs/scanning-triplanar.png) | ![Vertex Colors](docs/vertex-colors.png) | ![Refined](docs/texture-refinement.png) | ![Splat](docs/gsplat-training.png) |
+| ![Scanning](docs/tsdf2.gif) | ![Vertex Colors](docs/vertex2.gif) | ![Refined](docs/refined3.gif) | ![Splat](docs/splat.gif) |
 
 ## Features
 
