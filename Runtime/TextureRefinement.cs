@@ -42,6 +42,12 @@ namespace Genesis.RoomScan
     {
         private const int GpuVertexStride = 32; // float3 pos + float3 norm + uint color + uint voxelIdx
 
+        /// <summary>Enable GPU seam blending after atlas bake. Reduces color discontinuities at UV chart edges.</summary>
+        public static bool EnableSeamBlending { get; set; } = true;
+
+        /// <summary>Pixel radius for gaussian-weighted seam blending (1-5). Higher = wider blend band.</summary>
+        public static int SeamBlendRadius { get; set; } = 3;
+
         public static event Action<string> StatusChanged;
 
         // ═══════════════════════════════════════════════════════════════
@@ -588,6 +594,33 @@ namespace Genesis.RoomScan
             }
 
             Debug.Log($"[TextureRefine] GPU baked {bakeCount} keyframes total");
+
+            // ── Seam blending pass (GPU) ──
+            // Copies atlas to a source snapshot, then blends boundary texels in-place.
+            int kSeam = -1;
+            try { kSeam = compute.FindKernel("BlendSeams"); }
+            catch { /* kernel not available in older shader variants */ }
+
+            if (kSeam >= 0 && EnableSeamBlending)
+            {
+                ReportStatus("Blending seams...");
+                var seamSrcBuf = new ComputeBuffer(texelCount, 4);
+                ComputeBuffer.CopyCount(atlasBuf, seamSrcBuf, 0);
+                Graphics.CopyBuffer(atlasBuf, seamSrcBuf);
+
+                compute.SetInt("_AtlasW", atlasW);
+                compute.SetInt("_AtlasH", atlasH);
+                compute.SetInt("_BlendRadius", SeamBlendRadius);
+                compute.SetBuffer(kSeam, "_AtlasBufSrc", seamSrcBuf);
+                compute.SetBuffer(kSeam, "_AtlasBuf", atlasBuf);
+
+                int groupsX = (atlasW + 7) / 8;
+                int groupsY = (atlasH + 7) / 8;
+                compute.Dispatch(kSeam, groupsX, groupsY, 1);
+
+                seamSrcBuf.Release();
+                Debug.Log("[TextureRefine] Seam blending complete");
+            }
 
             // Readback atlas buffer
             ReportStatus("Reading back atlas...");

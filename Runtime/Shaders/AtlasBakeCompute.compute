@@ -1,6 +1,7 @@
 #pragma kernel ClearDepth
 #pragma kernel BuildDepth
 #pragma kernel BakeAtlas
+#pragma kernel BlendSeams
 
 // ── Shared uniforms ──────────────────────────────────────────
 float4x4 _ViewMat;
@@ -204,5 +205,87 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
             uint kfColor = _KfPixels[py * _ImgW + px];
             _AtlasBuf[texelIdx] = kfColor | (255u << 24);
         }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Kernel 3: Seam blending — gaussian-weighted averaging at UV
+//  island boundaries. Detects boundary texels (filled texel
+//  adjacent to texels from a different UV island or unfilled)
+//  and blends them with nearby filled neighbors.
+// ═════════════════════════════════════════════════════════════
+
+RWStructuredBuffer<uint> _AtlasBufSrc;  // snapshot copy (read-only during blend)
+int _BlendRadius;
+
+[numthreads(8, 8, 1)]
+void BlendSeams(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _AtlasW || (int)id.y >= _AtlasH) return;
+
+    int idx = (int)id.y * _AtlasW + (int)id.x;
+    uint centerPacked = _AtlasBufSrc[idx];
+    uint centerA = (centerPacked >> 24) & 0xFF;
+    if (centerA == 0) return;  // unfilled texel, skip
+
+    // Check if this texel is near a UV island boundary:
+    // a filled texel that has at least one unfilled neighbor within 1 pixel
+    bool nearBoundary = false;
+    for (int dy = -1; dy <= 1 && !nearBoundary; dy++)
+    {
+        for (int dx = -1; dx <= 1 && !nearBoundary; dx++)
+        {
+            if (dx == 0 && dy == 0) continue;
+            int nx = (int)id.x + dx;
+            int ny = (int)id.y + dy;
+            if (nx < 0 || ny < 0 || nx >= _AtlasW || ny >= _AtlasH)
+            {
+                nearBoundary = true;
+                continue;
+            }
+            uint nPacked = _AtlasBufSrc[ny * _AtlasW + nx];
+            uint nA = (nPacked >> 24) & 0xFF;
+            if (nA == 0) nearBoundary = true;
+        }
+    }
+
+    if (!nearBoundary) return;
+
+    // Gaussian-weighted blend of filled neighbors within _BlendRadius
+    float sigmaS = (float)_BlendRadius * 0.5;
+    float invSigS2 = -0.5 / (sigmaS * sigmaS);
+    float wSum = 0;
+    float3 colorSum = 0;
+
+    for (int by = -_BlendRadius; by <= _BlendRadius; by++)
+    {
+        for (int bx = -_BlendRadius; bx <= _BlendRadius; bx++)
+        {
+            int sx = (int)id.x + bx;
+            int sy = (int)id.y + by;
+            if (sx < 0 || sy < 0 || sx >= _AtlasW || sy >= _AtlasH) continue;
+
+            uint nPacked = _AtlasBufSrc[sy * _AtlasW + sx];
+            uint nA = (nPacked >> 24) & 0xFF;
+            if (nA == 0) continue;
+
+            float dist2 = (float)(bx * bx + by * by);
+            float w = exp(dist2 * invSigS2);
+
+            float3 c = float3((nPacked & 0xFF) / 255.0,
+                              ((nPacked >> 8) & 0xFF) / 255.0,
+                              ((nPacked >> 16) & 0xFF) / 255.0);
+            colorSum += c * w;
+            wSum += w;
+        }
+    }
+
+    if (wSum > 1e-6)
+    {
+        float3 blended = colorSum / wSum;
+        uint r = (uint)round(saturate(blended.x) * 255.0);
+        uint g = (uint)round(saturate(blended.y) * 255.0);
+        uint b = (uint)round(saturate(blended.z) * 255.0);
+        _AtlasBuf[idx] = r | (g << 8) | (b << 16) | (255u << 24);
     }
 }
