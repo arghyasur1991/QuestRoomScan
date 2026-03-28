@@ -143,6 +143,8 @@ namespace Genesis.RoomScan
         public MeshExtractor MeshExtractor => _meshExtractor;
         /// <summary>The active camera provider (custom or passthrough).</summary>
         public ICameraProvider ActiveCameraProvider => GetActiveCameraProvider();
+        /// <summary>The optional Gaussian Splat provider, or null if the GSplat module is not attached.</summary>
+        public IGSplatProvider GSplatProvider => _gsplatProvider;
 
         // ─────────────────────────────────────────────────────────────
         //  Events

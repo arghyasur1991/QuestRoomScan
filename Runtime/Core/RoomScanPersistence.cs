@@ -636,21 +636,17 @@ namespace Genesis.RoomScan
                         await Task.Run(() => plyBytes = File.ReadAllBytes(splatPath));
                         await SwitchToUnityMainThreadAsync(unitySync);
 
-                        var gm = scanner?.GetComponent<GSplat.GSplatManager>();
-                        if (gm != null && plyBytes != null && plyBytes.Length > 0)
+                        var gsplat = scanner?.GSplatProvider;
+                        if (gsplat != null && plyBytes != null && plyBytes.Length > 0)
                         {
-                            gm.LoadTrainedPly(plyBytes);
-                            gm.RenderVisible = scanner.CurrentRenderMode == ScanRenderMode.Splat;
+                            gsplat.LoadTrainedPly(plyBytes);
+                            gsplat.RenderVisible = scanner.CurrentRenderMode == ScanRenderMode.Splat;
                             scanner.DownloadedPlyData = plyBytes;
 
-                            if (relocSplat != Matrix4x4.identity && gm.SplatHolder != null)
-                            {
-                                gm.SplatHolder.SetPositionAndRotation(
-                                    new Vector3(relocSplat.m03, relocSplat.m13, relocSplat.m23),
-                                    relocSplat.rotation);
-                            }
+                            if (relocSplat != Matrix4x4.identity)
+                                gsplat.ApplySplatRelocation(relocSplat);
                             else
-                                gm.ResetSplatTransform();
+                                gsplat.ResetSplatTransform();
 
                             Logger.Info($"Splat loaded ({plyBytes.Length / (1024f * 1024f):F1}MB)");
                         }

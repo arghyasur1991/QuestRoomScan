@@ -125,6 +125,16 @@ namespace Genesis.RoomScan.GSplat
                 _ugsRenderer.ClearRuntimeSplatData();
         }
 
+        public void ApplySplatRelocation(Matrix4x4 relocation)
+        {
+            if (_splatHolder != null)
+            {
+                _splatHolder.SetPositionAndRotation(
+                    new Vector3(relocation.m03, relocation.m13, relocation.m23),
+                    relocation.rotation);
+            }
+        }
+
         /// <summary>Reset the splat holder to local identity (no relocation offset).</summary>
         public void ResetSplatTransform()
         {

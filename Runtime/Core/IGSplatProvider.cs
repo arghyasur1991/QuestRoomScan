@@ -15,6 +15,8 @@ namespace Genesis.RoomScan
         bool RenderVisible { get; set; }
         void ClearSplat();
         void ResetSplatTransform();
+        /// <summary>Applies a relocation matrix to the splat holder transform.</summary>
+        void ApplySplatRelocation(Matrix4x4 relocation);
         void LoadTrainedPly(byte[] plyData);
 
         /// <summary>
