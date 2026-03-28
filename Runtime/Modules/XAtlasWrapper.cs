@@ -60,12 +60,6 @@ namespace Genesis.RoomScan
             int targetIndexCount, float targetError,
             uint options, out float resultError);
 
-        [DllImport(LIB)] private static extern int meshopt_simplify_mesh(
-            float[] positions, int vertexCount, int positionStride,
-            uint[] indices, int indexCount,
-            int targetIndexCount, float targetError,
-            uint[] outIndices, out float outError);
-
         public struct UnwrapOptions
         {
             // ChartOptions
@@ -257,35 +251,22 @@ namespace Genesis.RoomScan
             uint[] outIndices = new uint[indexCount];
             int resultCount;
 
-            try
+            float[] flatAttrs = new float[vertexCount * 2];
+            for (int i = 0; i < vertexCount; i++)
             {
-                float[] flatAttrs = new float[vertexCount * 2];
-                for (int i = 0; i < vertexCount; i++)
-                {
-                    flatAttrs[i * 2]     = uvs[i].x;
-                    flatAttrs[i * 2 + 1] = uvs[i].y;
-                }
-                float[] attrWeights = { 1f, 1f };
+                flatAttrs[i * 2]     = uvs[i].x;
+                flatAttrs[i * 2 + 1] = uvs[i].y;
+            }
+            float[] attrWeights = { 1f, 1f };
 
-                resultCount = meshopt_simplify_with_attrs(
-                    outIndices,
-                    uIndices, indexCount,
-                    flatPos, vertexCount, 12,
-                    flatAttrs, 8,
-                    attrWeights, 2,
-                    targetIndexCount, targetError,
-                    MeshoptSimplifyLockBorder, out _);
-            }
-            catch (EntryPointNotFoundException)
-            {
-                Logger.Warning("[MeshOpt] meshopt_simplify_with_attrs not found in native lib, " +
-                               "falling back to position-only simplification. Rebuild libxatlas to enable UV-aware path.");
-                resultCount = meshopt_simplify_mesh(
-                    flatPos, vertexCount, 12,
-                    uIndices, indexCount,
-                    targetIndexCount, targetError,
-                    outIndices, out _);
-            }
+            resultCount = meshopt_simplify_with_attrs(
+                outIndices,
+                uIndices, indexCount,
+                flatPos, vertexCount, 12,
+                flatAttrs, 8,
+                attrWeights, 2,
+                targetIndexCount, targetError,
+                MeshoptSimplifyLockBorder, out _);
 
             if (resultCount <= 0)
             {
