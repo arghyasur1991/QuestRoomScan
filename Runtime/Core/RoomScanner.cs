@@ -639,20 +639,14 @@ namespace Genesis.RoomScan
             IsRefining = true;
             RefineStatus = "Starting...";
 
-            TextureRefinement.StatusChanged += s => RefineStatus = s;
-            if (_textureRefinement != null)
-            {
-                TextureRefinement.EnableMultiViewBlend = _textureRefinement.multiViewBlend;
-                TextureRefinement.SharpenStrength = _textureRefinement.sharpenStrength;
-            }
+            Action<string> statusHandler = s => RefineStatus = s;
+            _textureRefinement.StatusChanged += statusHandler;
             try
             {
                 string keyframeDir = KeyframeDirectory;
                 var unwrap = await EnsureUnwrappedAsync();
-                byte[] atlasPixels = await TextureRefinement.BakeAtlasAsync(
-                    unwrap, keyframeDir, KeyframeRelocation,
-                    _textureRefinement != null && !_textureRefinement.forceCpuBake ? _textureRefinement.atlasBakeCompute : null,
-                    _textureRefinement != null ? _textureRefinement.skipDenoise : true);
+                byte[] atlasPixels = await _textureRefinement.BakeAtlasAsync(
+                    unwrap, keyframeDir, KeyframeRelocation);
 
                 var result = new RefinedTextureResult
                 {
@@ -682,7 +676,7 @@ namespace Genesis.RoomScan
             }
             finally
             {
-                TextureRefinement.StatusChanged -= s => RefineStatus = s;
+                _textureRefinement.StatusChanged -= statusHandler;
                 IsRefining = false;
             }
         }
@@ -714,13 +708,14 @@ namespace Genesis.RoomScan
                 if (!LastRefinedResult.HasValue)
                 {
                     HQRefineStatus = "Running on-device refine first...";
-                    TextureRefinement.StatusChanged += s => HQRefineStatus = s;
+                    Action<string> hqStatusHandler = s => HQRefineStatus = s;
+                    _textureRefinement.StatusChanged += hqStatusHandler;
                     try
                     {
                         StartTextureRefinement();
                         while (IsRefining) await Task.Yield();
                     }
-                    finally { TextureRefinement.StatusChanged -= s => HQRefineStatus = s; }
+                    finally { _textureRefinement.StatusChanged -= hqStatusHandler; }
 
                     if (!LastRefinedResult.HasValue)
                     {
@@ -1003,15 +998,7 @@ namespace Genesis.RoomScan
             }
 
             string kfDir = KeyframeDirectory;
-            var opts = XAtlasWrapper.UnwrapOptions.Default;
-            if (_textureRefinement != null)
-            {
-                opts.MaxCost = _textureRefinement.xatlasMaxCost;
-                opts.BlockAlign = _textureRefinement.useBlockAlign;
-            }
-            float decRatio = _textureRefinement != null ? _textureRefinement.decimationRatio : 1f;
-            var unwrap2 = await TextureRefinement.UnwrapMeshAsync(
-                kfDir, KeyframeRelocation, opts, decRatio);
+            var unwrap2 = await _textureRefinement.UnwrapMeshAsync(kfDir, KeyframeRelocation);
             _cachedUnwrap = unwrap2;
 
             EnsureRefinedMesh(unwrap2);

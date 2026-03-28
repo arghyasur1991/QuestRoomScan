@@ -56,6 +56,17 @@ namespace Genesis.RoomScan
         [Tooltip("Unsharp mask strength (0 = off)")]
         [Range(0f, 2f)]
         [SerializeField] internal float sharpenStrength = 0.8f;
+        [Tooltip("Sharpening kernel radius")]
+        [Range(1, 4)]
+        [SerializeField] internal int sharpenRadius = 2;
+        [Tooltip("Blend seams between UV charts")]
+        [SerializeField] internal bool enableSeamBlending = true;
+        [Tooltip("Seam blending pixel radius")]
+        [Range(1, 8)]
+        [SerializeField] internal int seamBlendRadius = 3;
+        [Tooltip("Minimum score fraction for multi-view blend inclusion")]
+        [Range(0.1f, 0.9f)]
+        [SerializeField] internal float blendMinFraction = 0.3f;
 
         [Header("HQ Server Refinement")]
         [Tooltip("Server-side atlas super-resolution scale")]
@@ -81,30 +92,25 @@ namespace Genesis.RoomScan
 
         private const int GpuVertexStride = 32;
 
-        public static bool EnableSeamBlending { get; set; } = true;
-        public static int SeamBlendRadius { get; set; } = 3;
-        public static bool EnableMultiViewBlend { get; set; } = true;
-        public static float BlendMinFraction { get; set; } = 0.3f;
-        public static float SharpenStrength { get; set; } = 0.8f;
-        public static int SharpenRadius { get; set; } = 2;
-
-        public static event Action<string> StatusChanged;
+        internal event Action<string> StatusChanged;
 
         // ═══════════════════════════════════════════════════════════════
         //  UV UNWRAP (shared prerequisite for both on-device and HQ refine)
         // ═══════════════════════════════════════════════════════════════
 
-        internal static Task<UnwrappedMeshResult> UnwrapMeshAsync(
+        internal Task<UnwrappedMeshResult> UnwrapMeshAsync(
             string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048)
         {
             var opts = XAtlasWrapper.UnwrapOptions.Default;
             opts.Resolution = (uint)atlasResolution;
+            opts.MaxCost = xatlasMaxCost;
+            opts.BlockAlign = useBlockAlign;
             return UnwrapMeshAsync(keyframeDir, keyframeRelocation, opts);
         }
 
-        internal static async Task<UnwrappedMeshResult> UnwrapMeshAsync(
+        internal async Task<UnwrappedMeshResult> UnwrapMeshAsync(
             string keyframeDir, Matrix4x4 keyframeRelocation,
-            XAtlasWrapper.UnwrapOptions opts, float decimationRatio = 1f)
+            XAtlasWrapper.UnwrapOptions opts)
         {
             ReportStatus("Reading mesh from GPU...");
             var (positions, normals, colors, indices) = await ReadbackMeshAsync();
@@ -117,10 +123,10 @@ namespace Genesis.RoomScan
             Vector3[] inNorm = normals;
             int[] inIdx = indices;
 
-            // Optional mesh decimation before UV unwrap
-            if (decimationRatio < 1f && decimationRatio > 0f)
+            float decRatio = decimationRatio;
+            if (decRatio < 1f && decRatio > 0f)
             {
-                ReportStatus($"Simplifying mesh ({decimationRatio:P0})...");
+                ReportStatus($"Simplifying mesh ({decRatio:P0})...");
                 await Task.Run(() =>
                 {
                     float[] flatPos = new float[inPos.Length * 3];
@@ -131,7 +137,7 @@ namespace Genesis.RoomScan
                         flatPos[i * 3 + 2] = inPos[i].z;
                     }
                     var sr = XAtlasWrapper.Simplify(flatPos, inPos.Length,
-                        inIdx, inIdx.Length, decimationRatio);
+                        inIdx, inIdx.Length, decRatio);
                     inIdx = new int[sr.IndexCount];
                     for (int i = 0; i < sr.IndexCount; i++)
                         inIdx[i] = (int)sr.Indices[i];
@@ -483,14 +489,14 @@ namespace Genesis.RoomScan
         /// on StructuredBuffers — no texture UV ambiguity, no framebuffer orientation issues.
         /// Falls back to CPU path if the compute shader is unavailable.
         /// </summary>
-        internal static async Task<byte[]> BakeAtlasAsync(
-            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation,
-            ComputeShader compute = null, bool skipDenoise = false)
+        internal async Task<byte[]> BakeAtlasAsync(
+            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation)
         {
+            ComputeShader compute = forceCpuBake ? null : atlasBakeCompute;
             if (compute == null)
             {
                 Logger.Warning("[TextureRefine] No compute shader, falling back to CPU bake");
-                return await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation, skipDenoise);
+                return await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation);
             }
 
             ReportStatus("Loading keyframe metadata...");
@@ -637,7 +643,7 @@ namespace Genesis.RoomScan
             // ── Pass 2: Multi-view blend accumulation (optional) ──
             // Re-iterates keyframes, accumulating score-weighted colors from all
             // qualifying views into fixed-point buffers, then resolves to final atlas.
-            if (EnableMultiViewBlend)
+            if (multiViewBlend)
             {
                 int kAccum = compute.FindKernel("BlendAccum");
                 int kResolve = compute.FindKernel("ResolveBlend");
@@ -660,7 +666,7 @@ namespace Genesis.RoomScan
                 compute.SetBuffer(kAccum, "_AccumB", accumB);
                 compute.SetBuffer(kAccum, "_AccumW", accumW);
                 compute.SetBuffer(kAccum, "_BestScore", scoreBuf);
-                compute.SetFloat("_BlendMinFraction", BlendMinFraction);
+                compute.SetFloat("_BlendMinFraction", blendMinFraction);
 
                 ReportStatus("Multi-view blending (pass 2)...");
                 int blendCount = 0;
@@ -750,7 +756,7 @@ namespace Genesis.RoomScan
             }
 
             // ── Sharpening pass (GPU unsharp mask) ──
-            if (SharpenStrength > 0.01f)
+            if (sharpenStrength > 0.01f)
             {
                 ReportStatus("Sharpening...");
                 int kSharpen = compute.FindKernel("SharpenAtlas");
@@ -759,8 +765,8 @@ namespace Genesis.RoomScan
                 atlasBuf.GetData(tmp);
                 sharpenSrcBuf.SetData(tmp);
 
-                compute.SetFloat("_SharpenStrength", SharpenStrength);
-                compute.SetInt("_SharpenRadius", SharpenRadius);
+                compute.SetFloat("_SharpenStrength", sharpenStrength);
+                compute.SetInt("_SharpenRadius", sharpenRadius);
                 compute.SetInt("_AtlasW", atlasW);
                 compute.SetInt("_AtlasH", atlasH);
                 compute.SetBuffer(kSharpen, "_AtlasBufSrc", sharpenSrcBuf);
@@ -771,7 +777,7 @@ namespace Genesis.RoomScan
                 compute.Dispatch(kSharpen, groupsX, groupsY, 1);
 
                 sharpenSrcBuf.Release();
-                Logger.Info($"[TextureRefine] Sharpening complete (strength={SharpenStrength}, radius={SharpenRadius})");
+                Logger.Info($"[TextureRefine] Sharpening complete (strength={sharpenStrength}, radius={sharpenRadius})");
             }
 
             // ── Seam blending pass (GPU) ──
@@ -779,7 +785,7 @@ namespace Genesis.RoomScan
             try { kSeam = compute.FindKernel("BlendSeams"); }
             catch { /* kernel not available in older shader variants */ }
 
-            if (kSeam >= 0 && EnableSeamBlending)
+            if (kSeam >= 0 && enableSeamBlending)
             {
                 ReportStatus("Blending seams...");
                 var seamSrcBuf = new ComputeBuffer(texelCount, 4);
@@ -789,7 +795,7 @@ namespace Genesis.RoomScan
 
                 compute.SetInt("_AtlasW", atlasW);
                 compute.SetInt("_AtlasH", atlasH);
-                compute.SetInt("_BlendRadius", SeamBlendRadius);
+                compute.SetInt("_BlendRadius", seamBlendRadius);
                 compute.SetBuffer(kSeam, "_AtlasBufSrc", seamSrcBuf);
                 compute.SetBuffer(kSeam, "_AtlasBuf", atlasBuf);
 
@@ -876,9 +882,8 @@ namespace Genesis.RoomScan
         /// CPU-based atlas baking fallback.
         /// Decodes one JPEG at a time on the main thread to avoid OOM, bakes on BG thread.
         /// </summary>
-        static async Task<byte[]> BakeAtlasCPUAsync(
-            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation,
-            bool skipDenoise = false)
+        async Task<byte[]> BakeAtlasCPUAsync(
+            UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation)
         {
             ReportStatus("Loading keyframe metadata...");
             var metaList = ParseKeyframeManifest(keyframeDir, keyframeRelocation);
@@ -1321,7 +1326,7 @@ namespace Genesis.RoomScan
             }
         }
 
-        static void ReportStatus(string status)
+        void ReportStatus(string status)
         {
             StatusChanged?.Invoke(status);
         }
