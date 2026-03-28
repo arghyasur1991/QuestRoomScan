@@ -184,7 +184,7 @@ namespace Genesis.RoomScan.GSplat
         public async Task<byte[]> EnhanceMeshAsync(byte[] meshBin, int smoothIterations, bool enablePlaneSnap)
         {
             if (_serverClient == null) return null;
-            return await _serverClient.EnhanceMeshAsync(meshBin, smoothIterations, enablePlaneSnap);
+            return await _serverClient.EnhanceMeshAsync(meshBin, smoothIterations, enablePlaneSnap: enablePlaneSnap);
         }
 
         public async Task<bool> UploadTrainingDataAsync(UnityEngine.Matrix4x4 keyframeRelocation)
