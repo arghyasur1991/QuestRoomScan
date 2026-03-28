@@ -482,6 +482,7 @@ namespace Genesis.RoomScan
                 foreach (var m in _modules) m.OnScanStopped();
         }
 
+        /// <summary>Toggles between <see cref="StartScanning"/> and <see cref="StopScanning"/>.</summary>
         public void ToggleScanning()
         {
             if (IsScanning) StopScanning();
@@ -735,6 +736,7 @@ namespace Genesis.RoomScan
             RunServerTrainingAsync();
         }
 
+        /// <summary>Shows or hides the debug menu HUD if present.</summary>
         public void ToggleDebugMenu()
         {
             if (_debugMenu != null) _debugMenu.Toggle();
@@ -1102,6 +1104,9 @@ namespace Genesis.RoomScan
 
         private void ApplyRefinedAtlas(RefinedTextureResult result)
         {
+            if (_refinedAtlasTexture != null)
+                Destroy(_refinedAtlasTexture);
+
             _refinedAtlasTexture = new Texture2D(result.AtlasWidth, result.AtlasHeight,
                 TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
@@ -1351,7 +1356,7 @@ namespace Genesis.RoomScan
                 phase = ScanPhase.Discovering;
             else if (_stableColorCycles < StableThresholdCycles)
                 phase = ScanPhase.Refining;
-            else if (Time.time - _stabilizedTime < StabilizedHoldSeconds)
+            else if (_stabilizedTime > 0f && Time.time - _stabilizedTime < StabilizedHoldSeconds)
                 phase = ScanPhase.Stabilized;
             else
                 phase = ScanPhase.Complete;

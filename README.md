@@ -87,7 +87,7 @@ For Gaussian Splat support, also add the optional dependency:
 1. Create a new blank URP scene
 2. Add a **Camera Rig** and **Passthrough** from Meta's Building Blocks (`Menu > Meta > Building Blocks`). The Camera Rig provides `OVRCameraRig` and the Passthrough block enables the passthrough layer — both are required before running the wizard.
 3. Open the setup wizard: **RoomScan > Setup Scene**
-4. The wizard checks prerequisites (AR Session, AROcclusionManager), configures project settings (boundaryless manifest, cleartext HTTP for LAN server), and adds all required core components plus VR input handlers and the debug menu. Optional modules (TriplanarCache, TextureRefinement, GSplat, etc.) are added via the inspector's **Add Module** dropdown on the RoomScanner component
+4. The wizard checks prerequisites (AR Session, AROcclusionManager), configures project settings (boundaryless manifest, cleartext HTTP for LAN server), and adds required core components. Use the **Game-Ready Preset** for lean game integration (PCA + TextureRefinement with 0.5 simplification ratio), and the **Debug Preset** for development tools (debug HUD, input handler, overlays, VR input infrastructure). Optional modules (TriplanarCache, GSplat, etc.) are added via the inspector's **Add Module** dropdown on the RoomScanner component
 5. Build and deploy to Quest 3
 6. The room mesh appears as you look around — surfaces solidify with repeated observations
 
@@ -185,6 +185,7 @@ RoomScans/
     splat.ply             # Auto-saved when GS training completes
     refined_mesh.bin      # Auto-saved when on-device refinement completes
     refined_atlas.raw     # Auto-saved with refined mesh
+    simplified_mesh.bin   # Auto-saved when post-bake simplification runs (ratio < 1)
     enhanced_mesh.bin     # Auto-saved when server mesh enhancement completes
     hq_atlas.png          # Auto-saved when server atlas enhancement completes
 ```
@@ -298,7 +299,7 @@ Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. 
 
 ### Views
 
-**Scan** (default) — Live status rows (Scanning, Mode, Integrations, Keyframes, Render, Package) and action buttons:
+**Scan** (default) — Live status rows (Scanning, Mode, Integrations, Keyframes, Render, Package) plus coverage metrics (Progress, Phase, Color Coverage, Frozen, Mesh Stats) and action buttons:
 - **Start/Stop Scanning**: Toggle depth integration
 - **Render Mode**: Cycle through Wireframe → Vertex → Triplanar → Refined → HQRefined → Splat → None (unavailable modes skipped)
 - **Freeze Tint**: Toggle blue tint overlay on frozen voxels (works in Vertex, Triplanar, and Wireframe modes)
@@ -307,7 +308,7 @@ Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. 
 
 **Saved Scans** — Scrollable list of saved packages sorted newest-first. Each entry shows display name, date, artifact badges (KF, Tri, Splat, Refined, HQ, Enh), and Load/Delete buttons. Badge count shown on the nav button.
 
-**Refine** — On-device and server refinement status + action buttons. Tab is disabled when `TextureRefinement` module is not attached.
+**Refine** — On-device and server refinement status, mesh stats (original refined and simplified vertex/tri counts), and action buttons. Tab is disabled when `TextureRefinement` module is not attached.
 - **Refine Textures**: On-device GPU atlas bake from keyframes (multi-view blend + sharpen)
 - **HQ Refine (Server)**: Upload atlas for server-side super-resolution + inpainting
 - **Enhance Mesh (Server)**: Upload mesh for server-side bilateral smooth + plane snap

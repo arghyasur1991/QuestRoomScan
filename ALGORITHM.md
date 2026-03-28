@@ -289,6 +289,7 @@ Temporal blending on the GPU provides implicit convergence-based stability (see 
     splat.ply                      # Auto-saved when GS training completes
     refined_mesh.bin               # Auto-saved when refinement completes
     refined_atlas.raw              # On-device refined atlas (RGBA32)
+    simplified_mesh.bin            # Post-bake simplified mesh (when ratio < 1)
     hq_atlas.png                   # Server-side HQ refined atlas (PNG)
 ```
 
@@ -449,7 +450,37 @@ Cylindrical exclusion zones around tracked transforms (typically the user's head
 
 Voxels inside any exclusion cylinder are skipped during integration, preventing the user's body from being reconstructed.
 
-## 12. Key Parameters
+## 12. Coverage Metrics & Scan Progress
+
+### CountSurfaceCoverage (compute kernel)
+Dispatched every ~30 integrations (1× per second) to count surface statistics via `InterlockedAdd`:
+- **Surface voxels**: `abs(tsdf) < 0.3 && absWeight > PRUNE_WEIGHT`
+- **Frozen voxels**: Surface voxels with `weight < 0` (frozen encoding)
+- **Colored voxels**: Surface voxels with `colorAlpha > 0.05`
+
+Results read back via `AsyncGPUReadback` to avoid GPU stalls.
+
+### ScanCoverage / ScanProgress (CPU)
+- `ScanCoverage`: Raw metrics — `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction`, `MeshVertexCount`, `MeshIndexCount`, `IsStabilized`
+- `ScanProgress`: Blended progress — `OverallProgress = FrozenFraction×0.5 + ColorCoverage×0.3 + GeometryStability×0.2`
+- `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`
+
+### Plateau Detection
+Per mesh extraction cycle, `UpdatePlateauDetection` tracks:
+- **Vertex stability**: `abs(growth) < 1%` increments `_stableVertexCycles`
+- **Color stability**: `abs(colorGrowth) < 0.5%` increments `_stableColorCycles`
+- `IsStabilized` when vertex cycles ≥ threshold (5). `Stabilized` phase entered when both vertex and color cycles reach the threshold. After `StabilizedHoldSeconds` (3s), phase transitions to `Complete`.
+
+## 12b. Depth Subsystem Gating
+
+`DepthCapture` manages the `AROcclusionManager` lifecycle to avoid unnecessary GPU work:
+- **`StartDepthCapture()`**: Enables `AROcclusionManager`, subscribes to `frameReceived`. Called by `RoomScanner.StartScanning()`.
+- **`StopDepthCapture()`**: Unsubscribes, disables `AROcclusionManager` (calls `subsystem.Stop()` — shuts down depth sensor and neural inference on Quest). Called by `RoomScanner.StopScanning()`.
+- **`_permissionReady`**: Set once after USE_SCENE permission is confirmed and subsystem verified.
+- **`_captureActive`**: Persists across app pause/resume. `OnApplicationPause(false)` only re-enables the subsystem if `_captureActive` was true.
+- On startup, `EnableOcclusion()` briefly enables the subsystem for verification, then disables it unless scanning is already active.
+
+## 13. Key Parameters
 
 ### Volume
 | Parameter | Default | Description |
@@ -547,11 +578,11 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | **Total GPU (without triplanar)** | **~519 MB** |
 | **Persistence on disk** | **~34 MB** |
 
-## 13. Gaussian Splat Pipeline
+## 14. Gaussian Splat Pipeline
 
 End-to-end pipeline: on-device keyframe + point cloud capture → server-based COLMAP conversion + GS training → on-device rendering via Unity Gaussian Splatting (UGS).
 
-### 13.1 KeyframeCollector (Quest, automatic)
+### 14.1 KeyframeCollector (Quest, automatic)
 Runs alongside scanning with no user interaction. Saves posed camera frames to `{persistentDataPath}/GSExport/`:
 - **Selection**: Motion-gated — translation > 0.3m OR rotation > 20 deg from any saved keyframe
 - **Rejection**: Frames with angular velocity > 120 deg/s are discarded (motion blur)
@@ -562,7 +593,7 @@ Runs alongside scanning with no user interaction. Saves posed camera frames to `
 - **Deduplication**: Multiple pose entries per image ID may occur; the server keeps only the last pose per image
 - **Typical output**: 100-300 keyframes, 10-30MB total
 
-### 13.2 PointCloudExporter (Quest, periodic)
+### 14.2 PointCloudExporter (Quest, periodic)
 Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
 - Async GPU readback of the `GPUSurfaceNets` vertex buffer
 - Parses `GPUVertex` structs: position (float3), normal (float3), packedColor (uint) → RGB
@@ -570,7 +601,7 @@ Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
 - Runs every 30s automatically
 - Provides dense initialization for GS training (10-100x more points than SfM)
 
-### 13.3 Server Training (RoomScan-GaussianSplatServer)
+### 14.3 Server Training (RoomScan-GaussianSplatServer)
 
 The Quest app's `GSplatServerClient` uploads a ZIP of keyframes + point cloud to a PC-based FastAPI server (`/upload?iterations=N`), then polls for status and downloads the result. Training iterations are configurable via the inspector (`trainingIterations`, default 7000).
 
@@ -599,7 +630,7 @@ The output PLY is in COLMAP world coordinates (right-handed Y-down).
 #### Run Management
 Each upload creates a timestamped directory. A `current_run` symlink points to the active run. Past runs can be browsed, activated, or deleted via the web dashboard API.
 
-### 13.4 On-Device Rendering (UGS)
+### 14.4 On-Device Rendering (UGS)
 
 Trained PLY is rendered using a [fork of Unity Gaussian Splatting](https://github.com/arghyasur1991/UnityGaussianSplatting) with runtime loading support.
 
@@ -639,7 +670,7 @@ The UGS fork includes several Quest 3-specific optimizations:
 #### Visibility Control
 `GaussianSplatRenderer.renderVisible` boolean — checked in `GatherSplatsForCamera()` — allows toggling rendering without disabling the component or releasing GPU resources. Used by `GSplatManager.RenderVisible` → `RoomScanner.ApplyRenderMode()` for render mode switching. The `ScanRenderMode` enum controls which representation is active: `Wireframe`, `Vertex`, `Triplanar`, `Refined`, `HQRefined`, `Splat`, or `None`. `CycleRenderMode()` skips modes whose backing data or module is not present (e.g., Triplanar requires `TriplanarCache`, Splat requires trained data).
 
-### 13.5 Coordinate Conversion Detail
+### 14.5 Coordinate Conversion Detail
 Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-trip:
 
 **Quest → Server (export)**:
@@ -651,11 +682,11 @@ Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-tri
 - PLY is in COLMAP world coordinates (Y-down)
 - `GaussianSplatPlyLoader` negates Y position during loading to convert back to Unity space
 
-## 14. Texture Refinement Pipeline
+## 15. Texture Refinement Pipeline
 
 Post-processing pipeline that produces a sharp UV-mapped texture atlas from saved keyframes, replacing the blurry triplanar vertex-color texturing. Uses the same keyframes collected for Gaussian Splat training (§13.1).
 
-### 14.1 Post-Bake Mesh Simplification (optional, meshoptimizer)
+### 15.1 Post-Bake Mesh Simplification (optional, meshoptimizer)
 
 After atlas baking, the refined mesh can be optionally simplified using [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplifyWithAttributes`):
 
@@ -667,7 +698,7 @@ After atlas baking, the refined mesh can be optionally simplified using [meshopt
 
 > Running simplification *after* baking (instead of before) preserves atlas quality: the UV unwrap and atlas bake operate on the full-resolution mesh, and only the final game-ready mesh is reduced. This replaces the old pre-bake decimation which degraded baking quality.
 
-### 14.2 UV Unwrapping (xatlas)
+### 15.2 UV Unwrapping (xatlas)
 
 [xatlas](https://github.com/jpcy/xatlas) generates a UV atlas via native C++ P/Invoke:
 
@@ -690,7 +721,7 @@ Create atlas → AddMesh(positions, normals, indices) → Generate(chartOpts, pa
 
 All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and configurable from the Inspector via `UnwrapOptions`.
 
-### 14.3 GPU Atlas Baking (Compute Shader)
+### 15.3 GPU Atlas Baking (Compute Shader)
 
 `AtlasBakeCompute.compute` processes each keyframe to project camera imagery onto the UV atlas. All data is in `StructuredBuffer`s with integer pixel indexing — no render targets, no Y-axis ambiguity.
 
@@ -718,7 +749,7 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
 
 **CPU fallback**: `BakeAtlasCPUAsync` implements identical logic in C# with `unsafe` pointer access. Used when compute shader is null (`forceCpuBake` toggle).
 
-### 14.4 Render Modes
+### 15.4 Render Modes
 
 `ScanRenderMode` controls which representation of the scan is displayed. `CycleRenderMode()` steps through in the order below, automatically skipping modes whose backing data or module is not present.
 
@@ -736,7 +767,7 @@ The **Freeze Tint** toggle (`ShowFreezeTint`) is independent of render mode — 
 
 Both refined atlases and mesh data persist to disk via `RoomScanPersistence` and survive app restarts / scan reloads.
 
-### 14.5 Server-Side HQ Refinement
+### 15.5 Server-Side HQ Refinement
 
 Server-side atlas enhancement via Real-ESRGAN super-resolution + LaMa inpainting:
 1. Client uploads the on-device refined atlas as PNG to `{serverUrl}/refine-texture/upload`

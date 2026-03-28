@@ -342,8 +342,8 @@ namespace Genesis.RoomScan
         // ─────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Persists an artifact (splat, refined mesh, HQ atlas, enhanced mesh) to the active package.
-        /// Updates anchor.json with the current anchor matrix and the manifest flags.
+        /// Persists an artifact (splat, refined mesh, simplified mesh, HQ atlas, enhanced mesh)
+        /// to the active package. Updates anchor.json with the current anchor matrix and the manifest flags.
         /// </summary>
         internal async Task<bool> SaveArtifactAsync(ArtifactType type, byte[] data,
             RefinedTextureResult? refinedResult = null)

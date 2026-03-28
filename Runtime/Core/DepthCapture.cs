@@ -347,6 +347,7 @@ namespace Genesis.RoomScan
                     _arOcclusionManager.enabled = false;
                     _subscribed = false;
                 }
+                DepthAvailable = false;
             }
             else if (_captureActive)
             {

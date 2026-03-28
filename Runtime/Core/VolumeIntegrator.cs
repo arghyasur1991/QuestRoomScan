@@ -404,14 +404,7 @@ namespace Genesis.RoomScan
         private void RebindVolumeTextures()
         {
             if (_clearKernel.Shader == null) return;
-            _clearKernel.Set(VolumeRWID, _volume);
-            _clearKernel.Set(ColorVolumeRWID, _colorVolume);
-            _integrateKernel.Set(VolumeRWID, _volume);
-            _integrateKernel.Set(ColorVolumeRWID, _colorVolume);
-            _pruneKernel.Set(VolumeRWID, _volume);
-            _pruneKernel.Set(ColorVolumeRWID, _colorVolume);
-            _freezeKernel.Set(VolumeRWID, _volume);
-            _unfreezeKernel.Set(VolumeRWID, _volume);
+            RebindKernelTextures();
         }
 
         /// <summary>

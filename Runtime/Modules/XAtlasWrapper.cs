@@ -222,10 +222,11 @@ namespace Genesis.RoomScan
         private const uint MeshoptSimplifyLockBorder = 1;
 
         /// <summary>
-        /// Post-bake mesh simplification. Tries UV-preserving path (meshopt_simplifyWithAttributes)
-        /// first; falls back to position-only (meshopt_simplify) if the native export is missing.
+        /// Post-bake mesh simplification using meshopt_simplifyWithAttributes (UV-preserving).
+        /// UVs are passed as vertex attributes with LockBorder to prevent seam tears.
         /// Returns a new <see cref="RefinedTextureResult"/> with compacted vertex/index arrays
         /// (atlas pixels are NOT copied — caller must set them).
+        /// Throws if the native export is missing; caller should catch and skip simplification.
         /// </summary>
         public static RefinedTextureResult SimplifyWithUVs(
             Vector3[] positions, Vector3[] normals, Vector2[] uvs,
