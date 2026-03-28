@@ -68,11 +68,20 @@ namespace Genesis.RoomScan.Editor
                     menu.AddItem(new GUIContent(label), false, () =>
                     {
                         Undo.RegisterCompleteObjectUndo(scanner.gameObject, $"Add {label}");
-                        Undo.AddComponent(scanner.gameObject, type);
+                        var added = Undo.AddComponent(scanner.gameObject, type);
                         if (extraDeps != null)
+                        {
                             foreach (var dep in extraDeps)
+                            {
                                 if (scanner.GetComponent(dep) == null)
-                                    Undo.AddComponent(scanner.gameObject, dep);
+                                {
+                                    var depComp = Undo.AddComponent(scanner.gameObject, dep);
+                                    RoomScanSetupWizard.WireComponent(depComp);
+                                }
+                            }
+                        }
+
+                        RoomScanSetupWizard.WireComponent(added);
 
                         if (triggerBuild)
                             EnsureXAtlasPlugins();
@@ -82,7 +91,7 @@ namespace Genesis.RoomScan.Editor
                 }
             }
 
-            // GSplat module — uses reflection since it may be in a separate assembly
+            // GSplat module — full setup via the wizard helper
             bool hasGSplat = scanner.GetComponent<IGSplatProvider>() != null;
             var gsplatType = AppDomain.CurrentDomain.GetAssemblies()
                 .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
@@ -96,7 +105,7 @@ namespace Genesis.RoomScan.Editor
                     menu.AddItem(new GUIContent("Gaussian Splat"), false, () =>
                     {
                         Undo.RegisterCompleteObjectUndo(scanner.gameObject, "Add Gaussian Splat");
-                        Undo.AddComponent(scanner.gameObject, gsplatType);
+                        RoomScanSetupWizard.SetupGSplatModule(scanner.gameObject);
                         EditorUtility.SetDirty(scanner.gameObject);
                     });
             }

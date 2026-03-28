@@ -526,12 +526,14 @@ namespace Genesis.RoomScan.Editor
 
         void DrawComponents()
         {
-            BeginSection("ROOM SCAN COMPONENTS");
+            // ── Core (required) ──
+            BeginSection("CORE COMPONENTS (Required)");
 
+            StatusRow("RoomScanner", _roomScanner != null);
             StatusRow("DepthCapture", _depthCapture != null);
             StatusRow("VolumeIntegrator", _volumeIntegrator != null);
             StatusRow("MeshExtractor", _meshExtractor != null);
-            StatusRow("RoomScanner", _roomScanner != null);
+            StatusRow("RoomScanPersistence", _persistence != null);
             StatusRow("RoomAnchorManager (MRUK + SpatialAnchor)", _roomAnchor != null);
 
             var ovrConfig = OVRProjectConfig.CachedProjectConfig;
@@ -546,27 +548,46 @@ namespace Genesis.RoomScan.Editor
                     OVRProjectConfig.CommitProjectConfig(ovrConfig);
                 }
             }
-            StatusRow("PassthroughCameraProvider", _cameraProvider != null);
-            StatusRow("PassthroughCameraAccess", _pcaComponent != null);
-            StatusRow("CameraDebugOverlay", _cameraDebug != null);
-            StatusRow("DepthDebugOverlay", _depthDebug != null);
-            StatusRow("TriplanarCache", _triplanarCache != null);
-            StatusRow("RoomScanPersistence", _persistence != null);
-            StatusRow("KeyframeCollector (GS export)", _keyframeCollector != null);
-            StatusRow("PointCloudExporter (GS export)", _pointCloudExporter != null);
-            StatusRow("GSplatManager (PLY loader)", _gsplatManager != null);
-            StatusRow("GaussianSplatRenderer (UGS)", _ugsRenderer != null);
-            StatusRow("GSplatServerClient (PC training)", _gsplatServerClient != null);
+
+            bool coreMissing = _roomScanner == null || _depthCapture == null ||
+                               _volumeIntegrator == null || _meshExtractor == null ||
+                               _persistence == null || _roomAnchor == null;
+            if (coreMissing)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Add Core Components", GUILayout.Width(180)))
+                    FixCoreComponents();
+                EditorGUILayout.EndHorizontal();
+            }
+
+            EndSection();
+
+            // ── Optional modules ──
+            BeginSection("OPTIONAL MODULES");
+            EditorGUILayout.HelpBox(
+                "These are optional. Add them via the RoomScanner inspector's \"Add Module\" dropdown, or use \"Add All\" below.",
+                MessageType.Info);
+
+            StatusRowOptional("PassthroughCameraProvider", _cameraProvider != null);
+            StatusRowOptional("PassthroughCameraAccess", _pcaComponent != null);
+            StatusRowOptional("TriplanarCache", _triplanarCache != null);
+            StatusRowOptional("KeyframeCollector", _keyframeCollector != null);
+            StatusRowOptional("PointCloudExporter", _pointCloudExporter != null);
+            StatusRowOptional("GSplatManager (Gaussian Splat)", _gsplatManager != null);
+            StatusRowOptional("GaussianSplatRenderer (UGS)", _ugsRenderer != null);
+            StatusRowOptional("GSplatServerClient (PC training)", _gsplatServerClient != null);
             if (_gsplatServerClient != null)
             {
                 if (_serverUrlCurrent)
                 {
-                    StatusRow($"  Server URL → {_detectedLanIp}:8420", true);
+                    StatusRow($"  Server URL \u2192 {_detectedLanIp}:8420", true);
                 }
                 else
                 {
                     string stale = string.IsNullOrEmpty(_currentServerUrl) ? "(empty)" : _currentServerUrl;
-                    StatusRow($"  Server URL STALE: {stale} (LAN: {_detectedLanIp})", false);
+                    StatusRow($"  Server URL stale: {stale} (LAN: {_detectedLanIp})", false);
                     if (GUILayout.Button("Fix Server URL"))
                     {
                         ConfigureServerUrl();
@@ -574,43 +595,56 @@ namespace Genesis.RoomScan.Editor
                     }
                 }
             }
-            StatusRow("DebugMenuController (HUD)", _debugMenu != null);
-            StatusRow("RoomScanInputHandler (bindings)", _inputHandler != null);
+            StatusRowOptional("TextureRefinement", _roomScanner != null && _roomScanner.GetComponent<TextureRefinement>() != null);
+            StatusRowOptional("CameraDebugOverlay", _cameraDebug != null);
+            StatusRowOptional("DepthDebugOverlay", _depthDebug != null);
+            StatusRowOptional("RoomScanInputHandler", _inputHandler != null);
+            StatusRowOptional("DebugMenuController (HUD)", _debugMenu != null);
+
+            bool anyOptionalMissing = _cameraProvider == null || _triplanarCache == null ||
+                                      _gsplatManager == null || _debugMenu == null ||
+                                      _inputHandler == null;
+            if (anyOptionalMissing)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Add All Optional", GUILayout.Width(160)))
+                    FixAllOptionalModules();
+                EditorGUILayout.EndHorizontal();
+            }
+
+            EndSection();
+
+            // ── VR Input Infrastructure ──
+            BeginSection("VR INPUT INFRASTRUCTURE");
             StatusRow("EventSystem + OVRInputModule", _eventSystem != null && _ovrInputModule != null);
             StatusRow("VRDocumentRaycaster (UI pointer)", _vrRaycaster != null);
             StatusRow("ControllerRayDriver (laser)", _rayDriver != null);
             StatusRow("PanelInputConfiguration", _panelInputConfig != null);
 
-            bool anyMissing = _depthCapture == null || _volumeIntegrator == null ||
-                              _meshExtractor == null ||
-                              _roomScanner == null || _roomAnchor == null || _cameraProvider == null ||
-                              _pcaComponent == null || _cameraDebug == null ||
-                              _triplanarCache == null ||
-                              _persistence == null || _keyframeCollector == null ||
-                              _pointCloudExporter == null ||
-                              _gsplatManager == null || _ugsRenderer == null ||
-                              _gsplatServerClient == null ||
-                              _debugMenu == null || _inputHandler == null ||
-                              _eventSystem == null || _ovrInputModule == null ||
-                              _vrRaycaster == null || _rayDriver == null ||
-                              _panelInputConfig == null;
-
-            if (anyMissing)
+            bool inputMissing = _eventSystem == null || _ovrInputModule == null ||
+                                _vrRaycaster == null || _rayDriver == null ||
+                                _panelInputConfig == null;
+            if (inputMissing)
             {
                 GUILayout.Space(2);
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.FlexibleSpace();
-                if (GUILayout.Button("Add All Missing", GUILayout.Width(160)))
-                    FixComponents();
+                if (GUILayout.Button("Setup VR Input", GUILayout.Width(160)))
+                {
+                    EnsureVRInputInfrastructure();
+                    MarkDirty();
+                    Refresh();
+                }
                 EditorGUILayout.EndHorizontal();
             }
 
             EndSection();
         }
 
-        void FixComponents()
+        GameObject FindOrCreateRoot()
         {
-            // Create or find the root GameObject
             GameObject root = null;
             if (_roomScanner != null)
                 root = _roomScanner.gameObject;
@@ -626,32 +660,50 @@ namespace Genesis.RoomScan.Editor
                     Undo.RegisterCreatedObjectUndo(root, "Create RoomScan");
                 }
             }
+            return root;
+        }
+
+        void FixCoreComponents()
+        {
+            var root = FindOrCreateRoot();
+
+            // Adding RoomScanner auto-adds [RequireComponent] core siblings:
+            // DepthCapture, VolumeIntegrator, MeshExtractor,
+            // RoomScanPersistence, RoomAnchorManager
+            if (root.GetComponent<RoomScanner>() == null)
+                Undo.AddComponent<RoomScanner>(root);
+
+            // Wire shader/compute on newly added core components
+            foreach (var c in root.GetComponents<Component>())
+                WireComponent(c);
+
+            MarkDirty();
+            Refresh();
+        }
+
+        void FixAllOptionalModules()
+        {
+            var root = FindOrCreateRoot();
+
+            // Ensure core exists first
+            if (root.GetComponent<RoomScanner>() == null)
+                Undo.AddComponent<RoomScanner>(root);
 
             // PassthroughCameraAccess isn't pulled in by RequireComponent
             if (root.GetComponent<PassthroughCameraAccess>() == null)
                 Undo.AddComponent<PassthroughCameraAccess>(root);
+            if (root.GetComponent<PassthroughCameraProvider>() == null)
+                Undo.AddComponent<PassthroughCameraProvider>(root);
 
-            // Adding RoomScanner auto-adds all [RequireComponent] siblings:
-            // DepthCapture, VolumeIntegrator, MeshExtractor,
-            // PassthroughCameraProvider, TriplanarCache, RoomScanPersistence,
-            // KeyframeCollector, PointCloudExporter, GSplatManager,
-            // GSplatServerClient, RoomAnchorManager (GaussianSplatRenderer created by GSplatManager on child GO)
-            if (root.GetComponent<RoomScanner>() == null)
-                Undo.AddComponent<RoomScanner>(root);
+            if (root.GetComponent<TriplanarCache>() == null)
+                Undo.AddComponent<TriplanarCache>(root);
+            if (root.GetComponent<TextureRefinement>() == null)
+                Undo.AddComponent<TextureRefinement>(root);
+            if (root.GetComponent<PointCloudExporter>() == null)
+                Undo.AddComponent<PointCloudExporter>(root);
 
-            // GaussianSplatRenderer lives on a child GO so its transform can be
-            // set independently for room-anchor relocation. GSplatManager.Awake()
-            // creates this at runtime, but we also need it in the editor for shader wiring.
-            var splatChild = root.transform.Find("SplatRenderer");
-            if (splatChild == null)
-            {
-                var go = new GameObject("SplatRenderer");
-                go.transform.SetParent(root.transform, false);
-                Undo.RegisterCreatedObjectUndo(go, "Create SplatRenderer");
-                splatChild = go.transform;
-            }
-            if (splatChild.GetComponent<GaussianSplatRenderer>() == null)
-                Undo.AddComponent<GaussianSplatRenderer>(splatChild.gameObject);
+            // GSplat module (separate assembly)
+            SetupGSplatModule(root);
 
             // Optional components not covered by RequireComponent
             if (root.GetComponent<RoomScanInputHandler>() == null)
@@ -683,14 +735,21 @@ namespace Genesis.RoomScan.Editor
             // Always ensure UIDocument has its assets assigned
             EnsureDebugMenuAssets();
 
-            // Auto-configure GS training server URL with this PC's LAN IP
-            ConfigureServerUrl();
+            // Wire all components (core + optional)
+            foreach (var c in root.GetComponents<Component>())
+                WireComponent(c);
 
             // EventSystem + VR controller UI input pipeline
             EnsureVRInputInfrastructure();
 
             MarkDirty();
             Refresh();
+        }
+
+        void FixComponents()
+        {
+            FixCoreComponents();
+            FixAllOptionalModules();
         }
 
         /// <summary>
@@ -783,92 +842,16 @@ namespace Genesis.RoomScan.Editor
 
         void FixShaderWiring()
         {
-            // DepthCapture
-            if (_depthCapture != null)
-            {
-                var so = new SerializedObject(_depthCapture);
-                AssignCompute(so, "depthNormalCompute", PKG + "DepthNormals.compute");
-                AssignCompute(so, "depthDilationCompute", PKG + "DepthDilation.compute");
-                AssignCompute(so, "bilateralFilterCompute", PKG + "BilateralDepthFilter.compute");
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_depthCapture);
-            }
+            WireComponent(_depthCapture);
+            WireComponent(_volumeIntegrator);
+            WireComponent(_meshExtractor);
+            WireComponent(_triplanarCache);
+            WireComponent(_depthDebug);
 
-            // VolumeIntegrator
-            if (_volumeIntegrator != null)
-            {
-                var so = new SerializedObject(_volumeIntegrator);
-                AssignCompute(so, "compute", PKG + "VolumeIntegration.compute");
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_volumeIntegrator);
-            }
+            var tr = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
+            WireComponent(tr);
 
-            // TriplanarCache
-            if (_triplanarCache != null)
-            {
-                var so = new SerializedObject(_triplanarCache);
-                AssignCompute(so, "bakeCompute", PKG + "TriplanarBake.compute");
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_triplanarCache);
-            }
-
-            // DepthDebugOverlay
-            if (_depthDebug != null)
-            {
-                var so = new SerializedObject(_depthDebug);
-                AssignAsset<Shader>(so, "depthVisualizeShader", PKG + "DepthVisualize.shader");
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_depthDebug);
-            }
-
-            // MeshExtractor — needs a Material + compute shader
-            if (_meshExtractor != null)
-            {
-                var so = new SerializedObject(_meshExtractor);
-                var prop = so.FindProperty("scanMeshMaterial");
-                if (prop != null && prop.objectReferenceValue == null)
-                {
-                    Material mat = GetOrCreateScanMaterial();
-                    if (mat != null)
-                        prop.objectReferenceValue = mat;
-                }
-                AssignCompute(so, "surfaceNetsCompute", PKG + "SurfaceNetsExtract.compute");
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_meshExtractor);
-            }
-
-            // TextureRefinement — refined mesh + atlas bake shaders
-            {
-                var tr = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
-                if (tr != null)
-                {
-                    var so = new SerializedObject(tr);
-                    AssignAsset<Shader>(so, "refinedMeshShader", PKG + "RefinedMesh.shader");
-                    AssignAsset<ComputeShader>(so, "atlasBakeCompute", PKG + "AtlasBakeCompute.compute");
-                    so.ApplyModifiedProperties();
-                    EditorUtility.SetDirty(tr);
-                }
-            }
-
-            // UGS GaussianSplatRenderer — shaders + compute
-            if (_ugsRenderer != null)
-            {
-                const string UGS_PKG = "Packages/org.nesnausk.gaussian-splatting/Shaders/";
-                var so = new SerializedObject(_ugsRenderer);
-                AssignAsset<Shader>(so, "m_ShaderSplats", UGS_PKG + "RenderGaussianSplats.shader");
-                AssignAsset<Shader>(so, "m_ShaderComposite", UGS_PKG + "GaussianComposite.shader");
-                AssignAsset<Shader>(so, "m_ShaderDebugPoints", UGS_PKG + "GaussianDebugRenderPoints.shader");
-                AssignAsset<Shader>(so, "m_ShaderDebugBoxes", UGS_PKG + "GaussianDebugRenderBoxes.shader");
-                AssignCompute(so, "m_CSSplatUtilities", UGS_PKG + "SplatUtilities.compute");
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_ugsRenderer);
-            }
-
-            if (!_ugsRenderFeatureAdded)
-                AddUGSRenderFeature();
-
-            if (!_deferredRendering)
-                SetDeferredRendering();
+            WireComponent(_ugsRenderer);
 
             MarkDirty();
             Refresh();
@@ -1074,6 +1057,142 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
             }
             EndSection();
+        }
+
+        /// <summary>
+        /// Wires shader/compute/material references on a freshly added component.
+        /// Called by both the setup wizard and the RoomScannerEditor "Add Module" dropdown.
+        /// </summary>
+        internal static void WireComponent(Component component)
+        {
+            if (component == null) return;
+
+            const string PKG_SHADERS = "Packages/com.genesis.roomscan/Runtime/Shaders/";
+
+            switch (component)
+            {
+                case DepthCapture dc:
+                {
+                    var so = new SerializedObject(dc);
+                    AssignCompute(so, "depthNormalCompute", PKG_SHADERS + "DepthNormals.compute");
+                    AssignCompute(so, "depthDilationCompute", PKG_SHADERS + "DepthDilation.compute");
+                    AssignCompute(so, "bilateralFilterCompute", PKG_SHADERS + "BilateralDepthFilter.compute");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(dc);
+                    break;
+                }
+                case VolumeIntegrator vi:
+                {
+                    var so = new SerializedObject(vi);
+                    AssignCompute(so, "compute", PKG_SHADERS + "VolumeIntegration.compute");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(vi);
+                    break;
+                }
+                case MeshExtractor me:
+                {
+                    var so = new SerializedObject(me);
+                    var prop = so.FindProperty("scanMeshMaterial");
+                    if (prop != null && prop.objectReferenceValue == null)
+                    {
+                        Material mat = GetOrCreateScanMaterial();
+                        if (mat != null) prop.objectReferenceValue = mat;
+                    }
+                    AssignCompute(so, "surfaceNetsCompute", PKG_SHADERS + "SurfaceNetsExtract.compute");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(me);
+                    break;
+                }
+                case TriplanarCache tc:
+                {
+                    var so = new SerializedObject(tc);
+                    AssignCompute(so, "bakeCompute", PKG_SHADERS + "TriplanarBake.compute");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(tc);
+                    break;
+                }
+                case TextureRefinement tr:
+                {
+                    var so = new SerializedObject(tr);
+                    AssignAsset<Shader>(so, "refinedMeshShader", PKG_SHADERS + "RefinedMesh.shader");
+                    AssignAsset<ComputeShader>(so, "atlasBakeCompute", PKG_SHADERS + "AtlasBakeCompute.compute");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(tr);
+                    break;
+                }
+                case DepthDebugOverlay dd:
+                {
+                    var so = new SerializedObject(dd);
+                    AssignAsset<Shader>(so, "depthVisualizeShader", PKG_SHADERS + "DepthVisualize.shader");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(dd);
+                    break;
+                }
+            }
+
+            // If it's a GaussianSplatRenderer (UGS), wire its shaders
+            if (component is GaussianSplatRenderer ugsr)
+            {
+                const string UGS_PKG = "Packages/org.nesnausk.gaussian-splatting/Shaders/";
+                var so = new SerializedObject(ugsr);
+                AssignAsset<Shader>(so, "m_ShaderSplats", UGS_PKG + "RenderGaussianSplats.shader");
+                AssignAsset<Shader>(so, "m_ShaderComposite", UGS_PKG + "GaussianComposite.shader");
+                AssignAsset<Shader>(so, "m_ShaderDebugPoints", UGS_PKG + "GaussianDebugRenderPoints.shader");
+                AssignAsset<Shader>(so, "m_ShaderDebugBoxes", UGS_PKG + "GaussianDebugRenderBoxes.shader");
+                AssignCompute(so, "m_CSSplatUtilities", UGS_PKG + "SplatUtilities.compute");
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(ugsr);
+
+                if (!HasUGSRenderFeature()) AddUGSRenderFeature();
+                if (!IsDeferredRendering()) SetDeferredRendering();
+            }
+        }
+
+        /// <summary>
+        /// Sets up the full GSplat module on the given root: adds GSplatManager (from the GSplat
+        /// assembly), GSplatServerClient, the SplatRenderer child GO, wires UGS shaders, and
+        /// auto-configures the server URL.
+        /// </summary>
+        internal static void SetupGSplatModule(GameObject root)
+        {
+            // Find GSplatManager type by reflection
+            System.Type gsplatManagerType = null;
+            System.Type gsplatClientType = null;
+            foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
+            {
+                gsplatManagerType ??= asm.GetType("Genesis.RoomScan.GSplat.GSplatManager");
+                gsplatClientType ??= asm.GetType("Genesis.RoomScan.GSplat.GSplatServerClient");
+                if (gsplatManagerType != null && gsplatClientType != null) break;
+            }
+
+            if (gsplatManagerType == null)
+            {
+                Debug.LogWarning("[RoomScan Setup] GSplatManager type not found — is the GaussianSplatting package installed?");
+                return;
+            }
+
+            if (root.GetComponent(gsplatManagerType) == null)
+                Undo.AddComponent(root, gsplatManagerType);
+            if (gsplatClientType != null && root.GetComponent(gsplatClientType) == null)
+                Undo.AddComponent(root, gsplatClientType);
+
+            // SplatRenderer child GO with GaussianSplatRenderer
+            var splatChild = root.transform.Find("SplatRenderer");
+            if (splatChild == null)
+            {
+                var go = new GameObject("SplatRenderer");
+                go.transform.SetParent(root.transform, false);
+                Undo.RegisterCreatedObjectUndo(go, "Create SplatRenderer");
+                splatChild = go.transform;
+            }
+
+            var ugsType = typeof(GaussianSplatRenderer);
+            var ugsr = splatChild.GetComponent(ugsType);
+            if (ugsr == null)
+                ugsr = Undo.AddComponent(splatChild.gameObject, ugsType);
+
+            WireComponent(ugsr);
+            ConfigureServerUrl();
         }
 
         internal static void BuildXAtlasPlugin()
@@ -1379,6 +1498,30 @@ namespace Genesis.RoomScan.Editor
             string icon = ok ? "\u2713" : "\u2717";
             Color col = ok ? COL_OK : COL_MISS;
             string detail = ok ? "OK" : "Missing";
+
+            var prev = GUI.color;
+            GUI.color = col;
+            GUILayout.Label(icon, EditorStyles.boldLabel, GUILayout.Width(18));
+            GUI.color = prev;
+
+            GUILayout.Label(label, GUILayout.ExpandWidth(true));
+
+            prev = GUI.color;
+            GUI.color = col;
+            GUILayout.Label(detail, EditorStyles.miniLabel, GUILayout.Width(60));
+            GUI.color = prev;
+
+            EditorGUILayout.EndHorizontal();
+        }
+
+        void StatusRowOptional(string label, bool attached)
+        {
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Space(12);
+
+            string icon = attached ? "\u2713" : "\u2022";
+            Color col = attached ? COL_OK : COL_INFO;
+            string detail = attached ? "OK" : "Not Added";
 
             var prev = GUI.color;
             GUI.color = col;
