@@ -169,7 +169,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 // 2. Apply freeze tint
                 baseColor = ApplyFreezeTint(baseColor, IN.positionWS);
 
-                // 3. Wireframe overlay
+                // 3. Wireframe: discard interior, white edges blending to vertex color at vertices
                 if (_RSWireframe > 0.5)
                 {
                     float thickness = max(_RSWireThickness, 0.5);
@@ -178,8 +178,14 @@ Shader "Genesis/ScanMeshVertexColor"
                     float3 dy = ddy(bary);
                     float3 edgeWidth = sqrt(dx * dx + dy * dy);
                     float3 edge = smoothstep(0.0, edgeWidth * thickness, bary);
-                    float wireAlpha = 1.0 - min(edge.x, min(edge.y, edge.z));
-                    half3 wireColor = lerp(half3(0.02, 0.02, 0.04), baseColor, wireAlpha);
+                    float minEdge = min(edge.x, min(edge.y, edge.z));
+
+                    if (minEdge > 0.95)
+                        discard;
+
+                    float vertexProximity = max(bary.x, max(bary.y, bary.z));
+                    float vertBlend = smoothstep(0.7, 1.0, vertexProximity);
+                    half3 wireColor = lerp(half3(1, 1, 1), baseColor, vertBlend);
                     return half4(wireColor, 1);
                 }
 
