@@ -332,6 +332,7 @@ namespace Genesis.RoomScan.UI
             var badges = new VisualElement();
             badges.AddToClassList("scan-entry-badges");
             if (pkg.hasKeyframes) AddBadge(badges, "KF");
+            if (pkg.hasTriplanar) AddBadge(badges, "Tri");
             if (pkg.hasSplat) AddBadge(badges, "Splat");
             if (pkg.hasRefined) AddBadge(badges, "Refined");
             if (pkg.hasEnhancedMesh) AddBadge(badges, "Enh");

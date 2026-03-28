@@ -56,6 +56,7 @@ Shader "Genesis/ScanMeshVertexColor"
             float _RSNoFreezeTint;
             float _RSNormalFallback;
             float _RSWireframe;
+            float _RSWireThickness;
 
             #define DEPTH_TOLERANCE 0.015
 
@@ -171,11 +172,12 @@ Shader "Genesis/ScanMeshVertexColor"
                 // 3. Wireframe overlay
                 if (_RSWireframe > 0.5)
                 {
+                    float thickness = max(_RSWireThickness, 0.5);
                     float3 bary = IN.barycentric;
                     float3 dx = ddx(bary);
                     float3 dy = ddy(bary);
                     float3 edgeWidth = sqrt(dx * dx + dy * dy);
-                    float3 edge = smoothstep(0.0, edgeWidth * 1.5, bary);
+                    float3 edge = smoothstep(0.0, edgeWidth * thickness, bary);
                     float wireAlpha = 1.0 - min(edge.x, min(edge.y, edge.z));
                     half3 wireColor = lerp(half3(0.02, 0.02, 0.04), baseColor, wireAlpha);
                     return half4(wireColor, 1);

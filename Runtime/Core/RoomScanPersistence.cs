@@ -20,6 +20,7 @@ namespace Genesis.RoomScan
         public string displayName;
         public long timestamp;
         public string anchorUuid;
+        public bool hasTriplanar;
         public bool hasSplat;
         public bool hasRefined;
         public bool hasHQRefined;
@@ -313,6 +314,7 @@ namespace Genesis.RoomScan
                     displayName = $"Scan {DateTime.Now:MMM dd HH:mm}",
                     timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                     anchorUuid = anchorUuidStr,
+                    hasTriplanar = triRes > 0,
                     hasKeyframes = hasKf
                 });
                 WriteManifest(manifest);

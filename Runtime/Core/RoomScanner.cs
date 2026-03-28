@@ -45,7 +45,10 @@ namespace Genesis.RoomScan
         [SerializeField] private float meshExtractionHz = 30f;
 
         [Header("Render Mode")]
-        [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Vertex;
+        [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Wireframe;
+
+        [SerializeField, Range(0.5f, 4f), Tooltip("Wireframe line thickness multiplier")]
+        private float wireThickness = 1.5f;
 
         [SerializeField, Tooltip("Show blue tint overlay on frozen voxels (Vertex/Triplanar/Wireframe modes)")]
         private bool showFreezeTint = true;
@@ -181,6 +184,9 @@ namespace Genesis.RoomScan
         {
             _modules = GetComponents<IRoomScanModule>();
             foreach (var m in _modules) m.OnModuleInitialize(this);
+
+            if (_persistence != null)
+                _persistence.LoadCompleted += ApplyRenderMode;
 
             SetupHeadExclusion();
 
@@ -1129,6 +1135,7 @@ namespace Genesis.RoomScan
             Shader.SetGlobalFloat(TriAvailableID, 0f);
             Shader.SetGlobalFloat(NormalFallbackID, 0f);
             Shader.SetGlobalFloat(WireframeID, 0f);
+            Shader.SetGlobalFloat(WireThicknessID, wireThickness);
             Shader.SetGlobalFloat(NoFreezeTintID, showFreezeTint ? 0f : 1f);
         }
 
@@ -1199,6 +1206,7 @@ namespace Genesis.RoomScan
         private static readonly int NoFreezeTintID = Shader.PropertyToID("_RSNoFreezeTint");
         private static readonly int TriAvailableID = Shader.PropertyToID("_RSTriAvailable");
         private static readonly int WireframeID = Shader.PropertyToID("_RSWireframe");
+        private static readonly int WireThicknessID = Shader.PropertyToID("_RSWireThickness");
 
         private void ApplyRenderMode()
         {
@@ -1227,11 +1235,14 @@ namespace Genesis.RoomScan
                 }
             }
 
-            // Vertex mode: force triplanar off regardless of TriplanarCache state
+            // Vertex mode: force triplanar off; Triplanar mode: reassert globals from cache
             if (renderMode == ScanRenderMode.Vertex)
                 Shader.SetGlobalFloat(TriAvailableID, 0f);
+            else if (renderMode == ScanRenderMode.Triplanar && _triplanarCache != null)
+                _triplanarCache.UpdateShaderGlobals();
 
             Shader.SetGlobalFloat(WireframeID, renderMode == ScanRenderMode.Wireframe ? 1f : 0f);
+            Shader.SetGlobalFloat(WireThicknessID, wireThickness);
             Shader.SetGlobalFloat(NoFreezeTintID, showFreezeTint ? 0f : 1f);
         }
 
