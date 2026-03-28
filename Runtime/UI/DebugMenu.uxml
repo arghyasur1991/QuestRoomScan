@@ -18,7 +18,7 @@
             <ui:Button name="nav-scan"        text="Scan"        class="nav-btn nav-btn--active" />
             <ui:Button name="nav-saved"       text="Saved Scans" class="nav-btn" />
             <ui:Button name="nav-refine"      text="Refine"      class="nav-btn" />
-            <ui:Button name="nav-training"    text="Training"    class="nav-btn" />
+            <ui:Button name="nav-training"    text="Gaussian Splat"    class="nav-btn" />
             <ui:Button name="nav-tools"       text="Tools"       class="nav-btn" />
 
             <ui:VisualElement class="nav-spacer" />
@@ -95,7 +95,7 @@
 
             <!-- ── TRAINING VIEW ── -->
             <ui:VisualElement name="view-training" class="detail-view" style="display:none;">
-                <ui:Label text="GS TRAINING" class="view-title" />
+                <ui:Label text="GAUSSIAN SPLAT" class="view-title" />
 
                 <ui:TextField name="field-server-url" label="Server" value="http://192.168.1.100:8420" class="server-url-field" />
 

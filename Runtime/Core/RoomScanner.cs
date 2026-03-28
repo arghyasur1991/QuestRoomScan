@@ -103,6 +103,8 @@ namespace Genesis.RoomScan
         public ICameraProvider ActiveCameraProvider => GetActiveCameraProvider();
         /// <summary>The optional Gaussian Splat provider, or null if the GSplat module is not attached.</summary>
         public IGSplatProvider GSplatProvider => _gsplatProvider;
+        /// <summary>True when the TextureRefinement module is attached.</summary>
+        public bool HasTextureRefinementModule => _textureRefinement != null;
 
         // ─────────────────────────────────────────────────────────────
         //  Events
@@ -629,6 +631,11 @@ namespace Genesis.RoomScan
         public async void StartTextureRefinement()
         {
             if (IsRefining) return;
+            if (_textureRefinement == null)
+            {
+                Logger.Warn("TextureRefinement module not attached — skipping refinement");
+                return;
+            }
             IsRefining = true;
             RefineStatus = "Starting...";
 
@@ -687,6 +694,11 @@ namespace Genesis.RoomScan
         public async void StartHQRefinement()
         {
             if (IsHQRefining) return;
+            if (_textureRefinement == null)
+            {
+                Logger.Warn("TextureRefinement module not attached — skipping HQ refinement");
+                return;
+            }
             IsHQRefining = true;
             HQRefineStatus = "Starting...";
 
@@ -790,6 +802,11 @@ namespace Genesis.RoomScan
         public async void StartMeshEnhancement()
         {
             if (IsMeshEnhancing) return;
+            if (_textureRefinement == null)
+            {
+                Logger.Warn("TextureRefinement module not attached — skipping mesh enhancement");
+                return;
+            }
             IsMeshEnhancing = true;
             MeshEnhanceStatus = "Starting...";
 

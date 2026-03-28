@@ -64,6 +64,9 @@ namespace Genesis.RoomScan.UI
             _follower = GetComponent<DebugMenuFollower>();
         }
 
+        private bool _refineAvailable;
+        private bool _gsplatAvailable;
+
         private void OnEnable()
         {
             _root = _doc.rootVisualElement;
@@ -72,6 +75,7 @@ namespace Genesis.RoomScan.UI
 
             QueryElements();
             BindButtons();
+            UpdateModuleAvailability();
             SelectNav(_navScan);
         }
 
@@ -95,6 +99,7 @@ namespace Genesis.RoomScan.UI
             _visible = true;
             _root.style.display = DisplayStyle.Flex;
             if (_follower != null) _follower.SnapToView();
+            UpdateModuleAvailability();
             PopulateScanList();
             RefreshStatus();
         }
@@ -264,11 +269,34 @@ namespace Genesis.RoomScan.UI
         }
 
         // ─────────────────────────────────────────────────────────────
+        //  Module Availability
+        // ─────────────────────────────────────────────────────────────
+
+        private void UpdateModuleAvailability()
+        {
+            var scanner = RoomScanner.Instance;
+            _refineAvailable = scanner != null && scanner.HasTextureRefinementModule;
+            _gsplatAvailable = scanner != null && scanner.GSplatProvider != null;
+
+            SetNavAvailable(_navRefine, _refineAvailable);
+            SetNavAvailable(_navTraining, _gsplatAvailable);
+        }
+
+        private static void SetNavAvailable(Button btn, bool available)
+        {
+            if (btn == null) return;
+            btn.SetEnabled(available);
+            btn.EnableInClassList("nav-btn--unavailable", !available);
+        }
+
+        // ─────────────────────────────────────────────────────────────
         //  Navigation
         // ─────────────────────────────────────────────────────────────
 
         private void SelectNav(Button selected)
         {
+            if (selected != null && !selected.enabledSelf) return;
+
             for (int i = 0; i < _navButtons.Length; i++)
             {
                 if (_navButtons[i] == null) continue;
@@ -559,27 +587,26 @@ namespace Genesis.RoomScan.UI
             if (_btnSaveScan != null && !_btnSaveScan.text.Contains("..."))
                 _btnSaveScan.SetEnabled(hasVolume);
 
-            // Start GS Training: disabled if already training or no data
+            // GS Training: entirely disabled if module absent
             if (_btnGsTrain != null)
             {
-                bool canTrain = !scanner.IsGsTrainingInProgress && (hasVolume || hasActivePackage);
+                bool canTrain = _gsplatAvailable && !scanner.IsGsTrainingInProgress && (hasVolume || hasActivePackage);
                 _btnGsTrain.SetEnabled(canTrain);
             }
 
-            // Cancel Training
             bool isTraining = _cachedGSplat?.TrainingState == "training";
             if (_btnCancelTrain != null && !_btnCancelTrain.text.Contains("..."))
                 _btnCancelTrain.SetEnabled(isTraining);
 
-            // Refine: disabled if already refining or no mesh/keyframes
+            // Refine: entirely disabled if module absent
             if (_btnRefineTex != null && !scanner.IsRefining)
-                _btnRefineTex.SetEnabled(hasVolume || hasActivePackage);
+                _btnRefineTex.SetEnabled(_refineAvailable && (hasVolume || hasActivePackage));
 
             if (_btnHqRefine != null && !scanner.IsHQRefining)
             {
                 bool hasServer = _cachedGSplat != null &&
                     !string.IsNullOrEmpty(_cachedGSplat.ServerUrl);
-                _btnHqRefine.SetEnabled((hasVolume || hasActivePackage) && hasServer);
+                _btnHqRefine.SetEnabled(_refineAvailable && (hasVolume || hasActivePackage) && hasServer);
             }
 
             if (_btnMeshEnhance != null && !scanner.IsMeshEnhancing)
@@ -587,7 +614,7 @@ namespace Genesis.RoomScan.UI
                 bool hasServer = _cachedGSplat != null &&
                     !string.IsNullOrEmpty(_cachedGSplat.ServerUrl);
                 bool hasRefined = scanner.HasRefinedTexture || scanner.LastRefinedResult.HasValue;
-                _btnMeshEnhance.SetEnabled(hasRefined && hasServer);
+                _btnMeshEnhance.SetEnabled(_refineAvailable && hasRefined && hasServer);
             }
 
             // Export Point Cloud: disabled if no volume

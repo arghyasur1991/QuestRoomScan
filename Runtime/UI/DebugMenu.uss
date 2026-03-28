@@ -67,6 +67,19 @@
     color: rgb(200, 215, 235);
 }
 
+.nav-btn--unavailable {
+    opacity: 0.25;
+    background-color: rgba(20, 22, 30, 0.6);
+    border-color: rgba(40, 45, 55, 0.3);
+    color: rgb(80, 85, 95);
+}
+
+.nav-btn--unavailable:hover {
+    background-color: rgba(20, 22, 30, 0.6);
+    border-color: rgba(40, 45, 55, 0.3);
+    color: rgb(80, 85, 95);
+}
+
 .nav-btn--active {
     background-color: rgba(0, 80, 130, 0.6);
     border-color: rgba(0, 200, 255, 0.7);
