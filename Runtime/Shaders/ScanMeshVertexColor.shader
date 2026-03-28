@@ -1,12 +1,6 @@
 Shader "Genesis/ScanMeshVertexColor"
 {
-    Properties
-    {
-        _Smoothness ("Smoothness", Range(0,1)) = 0.3
-        [Toggle(_DEBUG_SOLID)] _DebugSolid ("Debug Solid Color", Float) = 0
-        [Toggle(_SHOW_NORMALS)] _ShowNormals ("Show Normals", Float) = 0
-        [Toggle(_VERTEX_ONLY)] _VertexOnly ("Vertex Colors Only", Float) = 0
-    }
+    Properties { }
     SubShader
     {
         Tags { "RenderType"="Opaque" "RenderPipeline"="UniversalPipeline" "Queue"="Geometry" }
@@ -21,18 +15,8 @@ Shader "Genesis/ScanMeshVertexColor"
             HLSLPROGRAM
             #pragma vertex vert
             #pragma fragment frag
-            #pragma shader_feature_local _DEBUG_SOLID
-            #pragma shader_feature_local _SHOW_NORMALS
-            #pragma shader_feature_local _VERTEX_ONLY
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-
-            CBUFFER_START(UnityPerMaterial)
-                float _Smoothness;
-                float _DebugSolid;
-                float _ShowNormals;
-                float _VertexOnly;
-            CBUFFER_END
 
             struct GPUVertex
             {
@@ -53,7 +37,7 @@ Shader "Genesis/ScanMeshVertexColor"
                     ((packed >> 24)& 0xFF) / 255.0h);
             }
 
-            // Triplanar persistent textures (color + depth for missing axis)
+            // ── Triplanar persistent textures ──
             TEXTURE2D(_RSTriXZ);  SAMPLER(sampler_RSTriXZ);
             TEXTURE2D(_RSTriXY);  SAMPLER(sampler_RSTriXY);
             TEXTURE2D(_RSTriYZ);  SAMPLER(sampler_RSTriYZ);
@@ -62,17 +46,17 @@ Shader "Genesis/ScanMeshVertexColor"
             TEXTURE2D(_RSTriDepthYZ);  SAMPLER(sampler_RSTriDepthYZ);
             float _RSTriAvailable;
 
-            // TSDF volume (for freeze tint feedback)
+            // ── TSDF volume (for freeze tint) ──
             TEXTURE3D(gsVolume);
             SAMPLER(sampler_gsVolume);
-
-            // Volume params (set by VolumeIntegrator as globals)
             float4 gsVoxCount;
             float gsVoxSize;
 
-            // Depth tolerance in UVW space — reject texels whose stored depth
-            // differs from the vertex's actual missing-axis coordinate by more
-            // than this. ~2 voxels in a 256-wide grid ≈ 0.008.
+            // ── Globals set by RoomScanner ──
+            float _RSNoFreezeTint;
+            float _RSNormalFallback;
+            float _RSWireframe;
+
             #define DEPTH_TOLERANCE 0.015
 
             float3 WorldToVoxelUVW(float3 worldPos)
@@ -100,8 +84,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 half4 colXY = SAMPLE_TEXTURE2D(_RSTriXY, sampler_RSTriXY, uvXY);
                 half4 colYZ = SAMPLE_TEXTURE2D(_RSTriYZ, sampler_RSTriYZ, uvYZ);
 
-                // Depth rejection: compare vertex's missing axis against stored depth.
-                // XZ face stores Y, XY face stores Z, YZ face stores X.
                 float dXZ = SAMPLE_TEXTURE2D(_RSTriDepthXZ, sampler_RSTriDepthXZ, uvXZ).r;
                 float dXY = SAMPLE_TEXTURE2D(_RSTriDepthXY, sampler_RSTriDepthXY, uvXY).r;
                 float dYZ = SAMPLE_TEXTURE2D(_RSTriDepthYZ, sampler_RSTriDepthYZ, uvYZ).r;
@@ -116,12 +98,27 @@ Shader "Genesis/ScanMeshVertexColor"
                 return totalAlpha > 0.01 ? rgb : half3(-1, -1, -1);
             }
 
+            bool IsVoxelFrozen(float3 worldPos)
+            {
+                float3 uvw = WorldToVoxelUVW(worldPos);
+                float2 tsdf = SAMPLE_TEXTURE3D_LOD(gsVolume, sampler_gsVolume, uvw, 0).rg;
+                return tsdf.g < 0;
+            }
+
+            half3 ApplyFreezeTint(half3 color, float3 worldPos)
+            {
+                if (_RSNoFreezeTint < 0.5 && IsVoxelFrozen(worldPos))
+                    color = lerp(color, half3(0.3, 0.5, 0.9), 0.25);
+                return color;
+            }
+
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
                 float4 color : COLOR;
                 float3 positionWS : TEXCOORD0;
                 float3 normalWS : TEXCOORD1;
+                float3 barycentric : TEXCOORD2;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -137,57 +134,54 @@ Shader "Genesis/ScanMeshVertexColor"
                 OUT.positionHCS = TransformWorldToHClip(gv.pos);
                 OUT.normalWS    = gv.norm;
                 OUT.color       = UnpackColor(gv.packedColor);
+
+                // Barycentric coords for wireframe: each triangle vertex gets one axis
+                uint triVert = vertID % 3;
+                OUT.barycentric = triVert == 0 ? float3(1, 0, 0)
+                                : triVert == 1 ? float3(0, 1, 0)
+                                :                float3(0, 0, 1);
                 return OUT;
-            }
-
-            bool IsVoxelFrozen(float3 worldPos)
-            {
-                float3 uvw = WorldToVoxelUVW(worldPos);
-                float2 tsdf = SAMPLE_TEXTURE3D_LOD(gsVolume, sampler_gsVolume, uvw, 0).rg;
-                return tsdf.g < 0;
-            }
-
-            float _RSNoFreezeTint;
-            float _RSNormalFallback;
-
-            half3 ApplyFreezeTint(half3 color, float3 worldPos)
-            {
-                if (_RSNoFreezeTint < 0.5 && IsVoxelFrozen(worldPos))
-                    color = lerp(color, half3(0.3, 0.5, 0.9), 0.25);
-                return color;
             }
 
             half4 frag(Varyings IN) : SV_Target
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(IN);
 
-                #ifdef _DEBUG_SOLID
-                return half4(ApplyFreezeTint(half3(1, 0.2, 0.1), IN.positionWS), 1);
-                #endif
-
                 float3 normal = normalize(IN.normalWS);
 
-                #ifdef _SHOW_NORMALS
-                return half4(ApplyFreezeTint(half3(normal * 0.5 + 0.5), IN.positionWS), 1);
-                #endif
-
-                #ifdef _VERTEX_ONLY
-                return half4(ApplyFreezeTint(IN.color.rgb, IN.positionWS), 1);
-                #endif
-
-                // Priority 1: Triplanar persistent texture
+                // 1. Compute base color
+                half3 baseColor;
                 if (_RSTriAvailable > 0.5)
                 {
                     half3 tri = SampleTriplanar(IN.positionWS, normal);
-                    if (tri.r >= 0) return half4(ApplyFreezeTint(tri, IN.positionWS), 1);
+                    baseColor = tri.r >= 0 ? tri : IN.color.rgb;
+                }
+                else if (_RSNormalFallback > 0.5)
+                {
+                    baseColor = half3(normal * 0.5 + 0.5);
+                }
+                else
+                {
+                    baseColor = IN.color.rgb;
                 }
 
-                // Priority 2: Normal-colored fallback when camera is unavailable
-                if (_RSNormalFallback > 0.5)
-                    return half4(ApplyFreezeTint(half3(normal * 0.5 + 0.5), IN.positionWS), 1);
+                // 2. Apply freeze tint
+                baseColor = ApplyFreezeTint(baseColor, IN.positionWS);
 
-                // Priority 3: Vertex colors
-                return half4(ApplyFreezeTint(IN.color.rgb, IN.positionWS), 1);
+                // 3. Wireframe overlay
+                if (_RSWireframe > 0.5)
+                {
+                    float3 bary = IN.barycentric;
+                    float3 dx = ddx(bary);
+                    float3 dy = ddy(bary);
+                    float3 edgeWidth = sqrt(dx * dx + dy * dy);
+                    float3 edge = smoothstep(0.0, edgeWidth * 1.5, bary);
+                    float wireAlpha = 1.0 - min(edge.x, min(edge.y, edge.z));
+                    half3 wireColor = lerp(half3(0.02, 0.02, 0.04), baseColor, wireAlpha);
+                    return half4(wireColor, 1);
+                }
+
+                return half4(baseColor, 1);
             }
             ENDHLSL
         }

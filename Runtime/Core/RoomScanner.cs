@@ -9,32 +9,25 @@ using UnityEngine.Serialization;
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// Visual style applied to the live scan mesh in the GPU renderer.
-    /// </summary>
-    public enum ScanVisualization
-    {
-        VertexColored,
-        Wireframe,
-        OcclusionOnly,
-        Hidden
-    }
-
-    /// <summary>
-    /// Which representation of the scan to display. Modes requiring server results
-    /// (HQRefined, Splat) are skipped by <see cref="RoomScanner.CycleRenderMode"/> when unavailable.
+    /// Which representation of the scan to display. <see cref="RoomScanner.CycleRenderMode"/>
+    /// automatically skips modes whose backing data or module is not present.
     /// </summary>
     public enum ScanRenderMode
     {
-        /// <summary>Live GPU Surface Nets mesh with vertex colors.</summary>
-        Mesh,
-        /// <summary>Live mesh with triplanar-projected camera textures.</summary>
-        Textured,
+        /// <summary>Live GPU mesh with vertex colors only (triplanar forced off).</summary>
+        Vertex,
+        /// <summary>Live GPU mesh with triplanar-projected camera textures (falls back to vertex colors where data is missing).</summary>
+        Triplanar,
         /// <summary>UV-unwrapped mesh with on-device baked atlas.</summary>
         Refined,
         /// <summary>UV-unwrapped mesh with server-enhanced high-resolution atlas.</summary>
         HQRefined,
         /// <summary>Gaussian Splat point cloud rendered from server-trained PLY data.</summary>
-        Splat
+        Splat,
+        /// <summary>All scan rendering disabled.</summary>
+        None,
+        /// <summary>Live GPU mesh wireframe via barycentric edge detection.</summary>
+        Wireframe
     }
 
     /// <summary>
@@ -49,8 +42,6 @@ namespace Genesis.RoomScan
         public static RoomScanner Instance { get; private set; }
 
         [Header("Scan Settings")]
-        [SerializeField] private ScanVisualization visualization = ScanVisualization.VertexColored;
-
         [SerializeField, FormerlySerializedAs("autoStartOnLoad"), Tooltip(
             "When enabled, depth/color integration starts as soon as the scene loads. " +
             "When disabled (default), scanning stays paused until you tap Start Scanning in the debug menu — " +
@@ -65,7 +56,10 @@ namespace Genesis.RoomScan
         [SerializeField] private int minIntegrationsBeforeMesh = 5;
 
         [Header("Render Mode")]
-        [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Mesh;
+        [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Vertex;
+
+        [SerializeField, Tooltip("Show blue tint overlay on frozen voxels (Vertex/Triplanar/Wireframe modes)")]
+        private bool showFreezeTint = true;
 
         [Header("Logging")]
         [SerializeField] private LogLevel logLevel = LogLevel.Info;
@@ -99,10 +93,11 @@ namespace Genesis.RoomScan
         //  Public read-only state
         // ─────────────────────────────────────────────────────────────
 
-        public ScanVisualization Visualization
+        /// <summary>Toggle blue tint overlay on frozen voxels in live mesh modes.</summary>
+        public bool ShowFreezeTint
         {
-            get => visualization;
-            set => SetVisualization(value);
+            get => showFreezeTint;
+            set { showFreezeTint = value; Shader.SetGlobalFloat(NoFreezeTintID, value ? 0f : 1f); }
         }
 
         public bool IsScanning { get; private set; }
@@ -319,6 +314,8 @@ namespace Genesis.RoomScan
                 _lastIntegrationTime = t;
 
                 ProvideColorFrame();
+                if (renderMode == ScanRenderMode.Vertex)
+                    Shader.SetGlobalFloat(TriAvailableID, 0f);
                 _volumeIntegrator.Integrate();
                 Integrated?.Invoke();
                 _integrateCount++;
@@ -416,12 +413,6 @@ namespace Genesis.RoomScan
             else StartScanning();
         }
 
-        public void SetVisualization(ScanVisualization vis)
-        {
-            visualization = vis;
-            ApplyVisualization();
-        }
-
         /// <summary>
         /// Clears the TSDF volume and reinitializes the GPU mesh pipeline.
         /// Does not delete persisted files — use <see cref="ClearAllDataAsync"/> for a full wipe.
@@ -517,26 +508,28 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Advances to the next available render mode, skipping modes whose data hasn't been generated yet.
+        /// Advances to the next available render mode, skipping modes whose backing
+        /// data or module is not present.
         /// </summary>
         public void CycleRenderMode()
         {
-            // Ordered cycle; skip modes whose data isn't available yet
             ScanRenderMode[] order =
             {
-                ScanRenderMode.Mesh, ScanRenderMode.Textured,
+                ScanRenderMode.Wireframe, ScanRenderMode.Vertex, ScanRenderMode.Triplanar,
                 ScanRenderMode.Refined, ScanRenderMode.HQRefined,
-                ScanRenderMode.Splat
+                ScanRenderMode.Splat, ScanRenderMode.None
             };
 
             int cur = Array.IndexOf(order, renderMode);
-            for (int i = 1; i < order.Length; i++)
+            if (cur < 0) cur = 0;
+
+            for (int i = 1; i <= order.Length; i++)
             {
                 var candidate = order[(cur + i) % order.Length];
-                if (candidate == ScanRenderMode.Refined && !HasRefinedTexture) continue;
-                if (candidate == ScanRenderMode.HQRefined && !HasHQRefinedTexture) continue;
+                if (!IsModeAvailable(candidate)) continue;
 
-                if (candidate == ScanRenderMode.Splat && HasDownloadedSplat && (_gsplatProvider == null || !_gsplatProvider.HasServerTrainedSplats))
+                if (candidate == ScanRenderMode.Splat && HasDownloadedSplat
+                    && (_gsplatProvider == null || !_gsplatProvider.HasServerTrainedSplats))
                 {
                     LoadDownloadedSplat();
                     return;
@@ -545,6 +538,24 @@ namespace Genesis.RoomScan
                 SetRenderMode(candidate);
                 return;
             }
+        }
+
+        /// <summary>
+        /// Returns true if the given render mode's backing module/data is present.
+        /// </summary>
+        public bool IsModeAvailable(ScanRenderMode mode)
+        {
+            return mode switch
+            {
+                ScanRenderMode.Vertex => true,
+                ScanRenderMode.Wireframe => true,
+                ScanRenderMode.None => true,
+                ScanRenderMode.Triplanar => _triplanarCache != null,
+                ScanRenderMode.Refined => HasRefinedTexture,
+                ScanRenderMode.HQRefined => HasHQRefinedTexture,
+                ScanRenderMode.Splat => (_gsplatProvider != null && _gsplatProvider.HasServerTrainedSplats) || HasDownloadedSplat,
+                _ => false
+            };
         }
 
         /// <summary>
@@ -1156,8 +1167,10 @@ namespace Genesis.RoomScan
 
         private void SetSafeShaderDefaults()
         {
-            Shader.SetGlobalFloat(Shader.PropertyToID("_RSTriAvailable"), 0f);
+            Shader.SetGlobalFloat(TriAvailableID, 0f);
             Shader.SetGlobalFloat(NormalFallbackID, 0f);
+            Shader.SetGlobalFloat(WireframeID, 0f);
+            Shader.SetGlobalFloat(NoFreezeTintID, showFreezeTint ? 0f : 1f);
         }
 
         private int _colorFrameLog;
@@ -1228,20 +1241,23 @@ namespace Genesis.RoomScan
         }
 
         private static readonly int NoFreezeTintID = Shader.PropertyToID("_RSNoFreezeTint");
+        private static readonly int TriAvailableID = Shader.PropertyToID("_RSTriAvailable");
+        private static readonly int WireframeID = Shader.PropertyToID("_RSWireframe");
 
         private void ApplyRenderMode()
         {
             var gpuRenderer = _meshExtractor != null ? _meshExtractor.GetComponent<GPUMeshRenderer>() : null;
 
-            bool gpuMeshVisible = renderMode == ScanRenderMode.Mesh || renderMode == ScanRenderMode.Textured;
-            bool refinedVisible = renderMode == ScanRenderMode.Refined || renderMode == ScanRenderMode.HQRefined;
+            bool gpuMeshVisible = renderMode == ScanRenderMode.Vertex
+                               || renderMode == ScanRenderMode.Triplanar
+                               || renderMode == ScanRenderMode.Wireframe;
+            bool refinedVisible = renderMode == ScanRenderMode.Refined
+                               || renderMode == ScanRenderMode.HQRefined;
 
             if (gpuRenderer != null)
                 gpuRenderer.RenderVisible = gpuMeshVisible;
             if (_gsplatProvider != null)
                 _gsplatProvider.RenderVisible = renderMode == ScanRenderMode.Splat;
-
-            // Show/hide the UV-mapped refined mesh renderer
             if (_refinedRenderer != null)
             {
                 _refinedRenderer.enabled = refinedVisible;
@@ -1255,7 +1271,12 @@ namespace Genesis.RoomScan
                 }
             }
 
-            Shader.SetGlobalFloat(NoFreezeTintID, renderMode == ScanRenderMode.Textured ? 1f : 0f);
+            // Vertex mode: force triplanar off regardless of TriplanarCache state
+            if (renderMode == ScanRenderMode.Vertex)
+                Shader.SetGlobalFloat(TriAvailableID, 0f);
+
+            Shader.SetGlobalFloat(WireframeID, renderMode == ScanRenderMode.Wireframe ? 1f : 0f);
+            Shader.SetGlobalFloat(NoFreezeTintID, showFreezeTint ? 0f : 1f);
         }
 
         /// <summary>
@@ -1304,7 +1325,7 @@ namespace Genesis.RoomScan
                     _persistence.DeleteArtifactFromPackage(ArtifactType.Splat);
                     _gsplatProvider?.ClearSplat();
                     _downloadedPlyData = null;
-                    SetRenderMode(ScanRenderMode.Mesh);
+                    SetRenderMode(ScanRenderMode.Vertex);
                     break;
 
                 case ScanRenderMode.Refined:
@@ -1319,7 +1340,7 @@ namespace Genesis.RoomScan
                         LastRefinedResult = null;
                         _cachedUnwrap = null;
                         _refinedMesh = null;
-                        SetRenderMode(ScanRenderMode.Textured);
+                        SetRenderMode(ScanRenderMode.Vertex);
                     }
                     break;
 
@@ -1327,7 +1348,7 @@ namespace Genesis.RoomScan
                     _persistence.DeleteArtifactFromPackage(ArtifactType.HQRefined);
                     HasHQRefinedTexture = false;
                     _hqAtlasTexture = null;
-                    SetRenderMode(HasRefinedTexture ? ScanRenderMode.Refined : ScanRenderMode.Textured);
+                    SetRenderMode(HasRefinedTexture ? ScanRenderMode.Refined : ScanRenderMode.Vertex);
                     break;
             }
         }
@@ -1416,13 +1437,5 @@ namespace Genesis.RoomScan
             return _cameraProvider;
         }
 
-        private void ApplyVisualization()
-        {
-            if (_meshExtractor == null) return;
-            var gpuRenderer = _meshExtractor.GetComponent<GPUMeshRenderer>();
-            if (gpuRenderer == null) return;
-
-            gpuRenderer.RenderVisible = visualization != ScanVisualization.Hidden;
-        }
     }
 }

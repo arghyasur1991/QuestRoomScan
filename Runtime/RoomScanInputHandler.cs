@@ -20,6 +20,7 @@ namespace Genesis.RoomScan
         ToggleDebugMenu,
         SaveScan,
         LoadScan,
+        ToggleFreezeTint,
     }
 
     /// <summary>
@@ -56,6 +57,7 @@ namespace Genesis.RoomScan
             new() { action = ScanAction.UnfreezeInView,      button = OVRInput.Button.Two,   enabled = true },
             new() { action = ScanAction.CycleRenderMode,     button = OVRInput.Button.Three, enabled = true },
             new() { action = ScanAction.StartServerTraining,  button = OVRInput.Button.Four,  enabled = false },
+            new() { action = ScanAction.ToggleFreezeTint,      button = OVRInput.Button.None,  enabled = false },
         };
 
         /// <summary>
@@ -151,6 +153,9 @@ namespace Genesis.RoomScan
                         scanner.DebugMenu.Show();
                         scanner.DebugMenu.ShowSavedScans();
                     }
+                    break;
+                case ScanAction.ToggleFreezeTint:
+                    scanner.ShowFreezeTint = !scanner.ShowFreezeTint;
                     break;
             }
         }

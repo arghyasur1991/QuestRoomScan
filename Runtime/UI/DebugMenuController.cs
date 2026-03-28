@@ -26,7 +26,7 @@ namespace Genesis.RoomScan.UI
 
         // Scan view elements
         private Label _valScanning, _valIntegrations, _valKeyframes, _valRender, _valPackage;
-        private Button _btnToggleScan, _btnRenderMode, _btnSaveScan, _btnDeleteArtifact;
+        private Button _btnToggleScan, _btnRenderMode, _btnFreezeTint, _btnSaveScan, _btnDeleteArtifact;
 
         // Saved scans view
         private ScrollView _scanList;
@@ -147,6 +147,7 @@ namespace Genesis.RoomScan.UI
             _valPackage = _root.Q<Label>("val-package");
             _btnToggleScan = _root.Q<Button>("btn-toggle-scan");
             _btnRenderMode = _root.Q<Button>("btn-render-mode");
+            _btnFreezeTint = _root.Q<Button>("btn-freeze-tint");
             _btnSaveScan = _root.Q<Button>("btn-save-scan");
             _btnDeleteArtifact = _root.Q<Button>("btn-delete-artifact");
 
@@ -196,13 +197,12 @@ namespace Genesis.RoomScan.UI
                 RoomScanner.Instance?.ToggleScanning());
 
             _btnRenderMode?.RegisterCallback<ClickEvent>(_ =>
+                RoomScanner.Instance?.CycleRenderMode());
+
+            _btnFreezeTint?.RegisterCallback<ClickEvent>(_ =>
             {
                 var s = RoomScanner.Instance;
-                if (s == null) return;
-                if (s.HasDownloadedSplat && s.CurrentRenderMode == ScanRenderMode.Mesh)
-                    s.LoadDownloadedSplat();
-                else
-                    s.CycleRenderMode();
+                if (s != null) s.ShowFreezeTint = !s.ShowFreezeTint;
             });
 
             _btnSaveScan?.RegisterCallback<ClickEvent>(async _ =>
@@ -428,12 +428,10 @@ namespace Genesis.RoomScan.UI
                 _btnToggleScan.text = scanner.IsScanning ? "Stop Scanning" : "Start Scanning";
 
             if (_btnRenderMode != null)
-            {
-                string modeLabel = scanner.CurrentRenderMode.ToString();
-                if (scanner.HasDownloadedSplat && scanner.CurrentRenderMode == ScanRenderMode.Mesh)
-                    modeLabel += " [Splat Ready]";
-                _btnRenderMode.text = $"Render: {modeLabel}";
-            }
+                _btnRenderMode.text = $"Render: {scanner.CurrentRenderMode}";
+
+            if (_btnFreezeTint != null)
+                _btnFreezeTint.text = scanner.ShowFreezeTint ? "Freeze Tint: ON" : "Freeze Tint: OFF";
 
             var vi = VolumeIntegrator.Instance;
             if (vi != null) SetLabel(_valIntegrations, vi.IntegrationCount.ToString());
