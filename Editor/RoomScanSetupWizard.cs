@@ -51,6 +51,8 @@ namespace Genesis.RoomScan.Editor
         ControllerRayDriver _rayDriver;
         PanelInputConfiguration _panelInputConfig;
 
+        TextureRefinement _textureRefinement;
+
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
         bool _refinedShaderWired, _atlasBakeComputeWired;
         bool _ugsRendererWired;
@@ -135,6 +137,8 @@ namespace Genesis.RoomScan.Editor
             _rayDriver = FindAny<ControllerRayDriver>();
             _panelInputConfig = FindAny<PanelInputConfiguration>();
 
+            _textureRefinement = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
+
             _depthCaptureWired = _depthCapture != null && AreFieldsAssigned(_depthCapture,
                 "depthNormalCompute", "depthDilationCompute", "bilateralFilterCompute");
             _volumeWired = _volumeIntegrator != null && AreFieldsAssigned(_volumeIntegrator,
@@ -145,7 +149,6 @@ namespace Genesis.RoomScan.Editor
                 "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
-            var _textureRefinement = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
             _refinedShaderWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "refinedMeshShader");
             _atlasBakeComputeWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
@@ -616,6 +619,9 @@ namespace Genesis.RoomScan.Editor
 
             EndSection();
 
+            // ── Game-Ready Preset ──
+            DrawGameReadyPreset();
+
             // ── VR Input Infrastructure ──
             BeginSection("VR INPUT INFRASTRUCTURE");
             StatusRow("EventSystem + OVRInputModule", _eventSystem != null && _ovrInputModule != null);
@@ -752,6 +758,126 @@ namespace Genesis.RoomScan.Editor
             FixAllOptionalModules();
         }
 
+        // -- Game-Ready Preset ----------------------------------------------
+
+        void DrawGameReadyPreset()
+        {
+            BeginSection("GAME-READY PRESET");
+            EditorGUILayout.HelpBox(
+                "Lightweight module set for game integration: scan \u2192 refine \u2192 release GPU \u2192 play. " +
+                "Skips TriplanarCache and Gaussian Splat to save ~400 MB GPU during scanning.",
+                MessageType.Info);
+
+            bool hasPCA = _pcaComponent != null;
+            bool hasPCAProvider = _cameraProvider != null;
+            bool hasKeyframes = _keyframeCollector != null;
+            bool hasRefinement = _textureRefinement != null;
+            bool hasInput = _inputHandler != null;
+            bool hasDebug = _debugMenu != null;
+
+            StatusRowOptional("PassthroughCameraAccess (camera RGB)", hasPCA);
+            StatusRowOptional("PassthroughCameraProvider", hasPCAProvider);
+            StatusRowOptional("KeyframeCollector (keyframe capture)", hasKeyframes);
+            StatusRowOptional("TextureRefinement (atlas baking)", hasRefinement);
+            StatusRowOptional("RoomScanInputHandler (VR controls)", hasInput);
+            StatusRowOptional("DebugMenuController (HUD)", hasDebug);
+
+            if (hasRefinement)
+            {
+                var so = new SerializedObject(_textureRefinement);
+                var simplifyProp = so.FindProperty("postBakeSimplificationRatio");
+                if (simplifyProp != null)
+                {
+                    float val = simplifyProp.floatValue;
+                    bool configured = val < 1f;
+                    StatusRowOptional($"Post-bake simplification ({val:P0})", configured);
+                }
+            }
+
+            bool triplanarAttached = _triplanarCache != null;
+            if (triplanarAttached)
+            {
+                var prev = GUI.color;
+                GUI.color = COL_WARN;
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(12);
+                GUILayout.Label("\u26A0", EditorStyles.boldLabel, GUILayout.Width(18));
+                GUI.color = prev;
+                GUILayout.Label("TriplanarCache is attached (\u2212240 MB GPU if removed)", GUILayout.ExpandWidth(true));
+                prev = GUI.color;
+                GUI.color = COL_WARN;
+                GUILayout.Label("Optional", EditorStyles.miniLabel, GUILayout.Width(60));
+                GUI.color = prev;
+                EditorGUILayout.EndHorizontal();
+            }
+
+            bool gameReadyMissing = !hasPCA || !hasPCAProvider || !hasKeyframes || !hasRefinement
+                                    || !hasInput || !hasDebug;
+            if (gameReadyMissing)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Add Game-Ready Modules", GUILayout.Width(200)))
+                    FixGameReadyModules();
+                EditorGUILayout.EndHorizontal();
+            }
+
+            EndSection();
+        }
+
+        void FixGameReadyModules()
+        {
+            var root = FindOrCreateRoot();
+
+            if (root.GetComponent<RoomScanner>() == null)
+                Undo.AddComponent<RoomScanner>(root);
+
+            if (root.GetComponent<PassthroughCameraAccess>() == null)
+                Undo.AddComponent<PassthroughCameraAccess>(root);
+            if (root.GetComponent<PassthroughCameraProvider>() == null)
+                Undo.AddComponent<PassthroughCameraProvider>(root);
+
+            if (root.GetComponent<TextureRefinement>() == null)
+                Undo.AddComponent<TextureRefinement>(root);
+
+            if (root.GetComponent<RoomScanInputHandler>() == null)
+                Undo.AddComponent<RoomScanInputHandler>(root);
+
+            if (FindAny<DebugMenuController>() == null)
+            {
+                var debugGo = new GameObject("DebugMenu");
+                debugGo.transform.SetParent(root.transform);
+                Undo.RegisterCreatedObjectUndo(debugGo, "Create DebugMenu");
+                Undo.AddComponent<UIDocument>(debugGo);
+                Undo.AddComponent<DebugMenuController>(debugGo);
+            }
+            EnsureDebugMenuAssets();
+
+            // Configure TextureRefinement for game use
+            var tr = root.GetComponent<TextureRefinement>();
+            if (tr != null)
+            {
+                var so = new SerializedObject(tr);
+                var simplifyProp = so.FindProperty("postBakeSimplificationRatio");
+                if (simplifyProp != null && simplifyProp.floatValue >= 1f)
+                {
+                    simplifyProp.floatValue = 0.5f;
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(tr);
+                    Debug.Log("[RoomScan Setup] Set postBakeSimplificationRatio to 0.5 for game-ready mesh");
+                }
+            }
+
+            foreach (var c in root.GetComponents<Component>())
+                WireComponent(c);
+
+            EnsureVRInputInfrastructure();
+
+            MarkDirty();
+            Refresh();
+        }
+
         /// <summary>
         /// Static entry point for ensuring VR input infrastructure exists.
         /// Called by <see cref="RoomScannerEditor"/> when adding the Debug Menu module.
@@ -815,9 +941,8 @@ namespace Genesis.RoomScan.Editor
             // Optional — only show if the module is attached
             if (_triplanarCache != null) { StatusRow("TriplanarCache bake compute", _triplanarWired);      needsFix |= !_triplanarWired; }
 
-            var textureRefine = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
-            if (textureRefine != null)   { StatusRow("RefinedMesh shader (texture refine)", _refinedShaderWired); needsFix |= !_refinedShaderWired; }
-            if (textureRefine != null)   { StatusRow("AtlasBakeCompute (GPU bake)", _atlasBakeComputeWired);      needsFix |= !_atlasBakeComputeWired; }
+            if (_textureRefinement != null)   { StatusRow("RefinedMesh shader (texture refine)", _refinedShaderWired); needsFix |= !_refinedShaderWired; }
+            if (_textureRefinement != null)   { StatusRow("AtlasBakeCompute (GPU bake)", _atlasBakeComputeWired);      needsFix |= !_atlasBakeComputeWired; }
 
             if (_ugsRenderer != null)    { StatusRow("UGS renderer shaders + compute", _ugsRendererWired);        needsFix |= !_ugsRendererWired; }
             if (_ugsRenderer != null)    { StatusRow("UGS RenderFeature on URP Renderer", _ugsRenderFeatureAdded); needsFix |= !_ugsRenderFeatureAdded; }
