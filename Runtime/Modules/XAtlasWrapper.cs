@@ -9,7 +9,7 @@ namespace Genesis.RoomScan
     /// Call sequence: Create -> AddMesh -> Generate -> read results -> Destroy.
     /// Thread-safe for a single atlas instance per thread.
     /// </summary>
-    public static class XAtlasWrapper
+    internal static class XAtlasWrapper
     {
 #if UNITY_IOS || UNITY_WEBGL
         private const string LIB = "__Internal";
