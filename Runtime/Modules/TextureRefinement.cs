@@ -73,14 +73,16 @@ namespace Genesis.RoomScan
         [SerializeField] internal int hqRefineScale = 2;
 
         [Header("Unwrap")]
-        [Tooltip("Simplify mesh before UV unwrap (1.0 = no simplification)")]
-        [Range(0.1f, 1f)]
-        [SerializeField] internal float decimationRatio = 1f;
         [Tooltip("Align charts to 4x4 blocks for faster packing")]
         [SerializeField] internal bool useBlockAlign = true;
         [Tooltip("Chart growth cost limit")]
         [Range(0.5f, 4f)]
         [SerializeField] internal float xatlasMaxCost = 1.5f;
+
+        [Header("Post-Bake Simplification")]
+        [Tooltip("Simplify after atlas baking to preserve UVs (1.0 = disabled, 0.5 = 50% triangles). Runs on background thread.")]
+        [Range(0.1f, 1f)]
+        [SerializeField] internal float postBakeSimplificationRatio = 1f;
 
         private RoomScanner _scanner;
 
@@ -121,28 +123,6 @@ namespace Genesis.RoomScan
             Vector3[] inPos = positions;
             Vector3[] inNorm = normals;
             int[] inIdx = indices;
-
-            float decRatio = decimationRatio;
-            if (decRatio < 1f && decRatio > 0f)
-            {
-                ReportStatus($"Simplifying mesh ({decRatio:P0})...");
-                await Task.Run(() =>
-                {
-                    float[] flatPos = new float[inPos.Length * 3];
-                    for (int i = 0; i < inPos.Length; i++)
-                    {
-                        flatPos[i * 3] = inPos[i].x;
-                        flatPos[i * 3 + 1] = inPos[i].y;
-                        flatPos[i * 3 + 2] = inPos[i].z;
-                    }
-                    var sr = XAtlasWrapper.Simplify(flatPos, inPos.Length,
-                        inIdx, inIdx.Length, decRatio);
-                    inIdx = new int[sr.IndexCount];
-                    for (int i = 0; i < sr.IndexCount; i++)
-                        inIdx[i] = (int)sr.Indices[i];
-                });
-                Logger.Info($"[TextureRefine] Simplified: {inIdx.Length / 3} tris (was {indices.Length / 3})");
-            }
 
             ReportStatus("UV unwrapping...");
             XAtlasWrapper.Result uvResult = default;
@@ -1323,6 +1303,34 @@ namespace Genesis.RoomScan
                 Buffer.BlockCopy(temp, 0, atlas, 0, atlas.Length);
                 if (!changed) break;
             }
+        }
+
+        /// <summary>
+        /// Simplifies a baked refined mesh on a background thread, preserving UVs via
+        /// meshopt_simplifyWithAttributes with UV coordinates as vertex attributes and
+        /// border-locked vertices to prevent seam tearing.
+        /// </summary>
+        internal async Task<RefinedTextureResult> SimplifyRefinedMeshAsync(RefinedTextureResult source, float ratio)
+        {
+            if (ratio >= 1f) return source;
+            ratio = Mathf.Clamp(ratio, 0.05f, 1f);
+
+            ReportStatus($"Simplifying baked mesh ({ratio:P0})...");
+
+            RefinedTextureResult result = source;
+            await Task.Run(() =>
+            {
+                result = XAtlasWrapper.SimplifyWithUVs(
+                    source.Positions, source.Normals, source.UVs,
+                    source.Indices, ratio);
+                result.AtlasPixels = source.AtlasPixels;
+                result.AtlasWidth = source.AtlasWidth;
+                result.AtlasHeight = source.AtlasHeight;
+            });
+
+            Logger.Info($"[TextureRefine] Post-bake simplify: {result.Indices.Length / 3} tris " +
+                        $"(was {source.Indices.Length / 3}, ratio={ratio:F2})");
+            return result;
         }
 
         void ReportStatus(string status)

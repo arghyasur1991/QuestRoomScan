@@ -714,6 +714,10 @@ namespace Genesis.RoomScan
                     AtlasHeight = unwrap.AtlasHeight
                 };
 
+                if (_textureRefinement.postBakeSimplificationRatio < 1f)
+                    result = await _textureRefinement.SimplifyRefinedMeshAsync(
+                        result, _textureRefinement.postBakeSimplificationRatio);
+
                 ApplyRefinedAtlas(result);
                 LastRefinedResult = result;
                 HasRefinedTexture = true;
