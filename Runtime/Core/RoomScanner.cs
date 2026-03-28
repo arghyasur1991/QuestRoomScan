@@ -633,7 +633,7 @@ namespace Genesis.RoomScan
             if (IsRefining) return;
             if (_textureRefinement == null)
             {
-                Logger.Warn("TextureRefinement module not attached — skipping refinement");
+                Logger.Warning("TextureRefinement module not attached — skipping refinement");
                 return;
             }
             IsRefining = true;
@@ -690,7 +690,7 @@ namespace Genesis.RoomScan
             if (IsHQRefining) return;
             if (_textureRefinement == null)
             {
-                Logger.Warn("TextureRefinement module not attached — skipping HQ refinement");
+                Logger.Warning("TextureRefinement module not attached — skipping HQ refinement");
                 return;
             }
             IsHQRefining = true;
@@ -799,7 +799,7 @@ namespace Genesis.RoomScan
             if (IsMeshEnhancing) return;
             if (_textureRefinement == null)
             {
-                Logger.Warn("TextureRefinement module not attached — skipping mesh enhancement");
+                Logger.Warning("TextureRefinement module not attached — skipping mesh enhancement");
                 return;
             }
             IsMeshEnhancing = true;
