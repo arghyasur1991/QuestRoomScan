@@ -172,11 +172,40 @@ namespace Genesis.RoomScan
 
         private void OnDestroy()
         {
-            _frustumVolume?.Release();
-            if (_volume) Destroy(_volume);
-            if (_colorVolume) Destroy(_colorVolume);
+            ReleaseVolumes();
             if (_camFrameCopy) Destroy(_camFrameCopy);
             if (_dummyCamTex) Destroy(_dummyCamTex);
+        }
+
+        /// <summary>
+        /// Destroys the TSDF + color volume RenderTextures and the frustum buffer to free GPU memory.
+        /// The component stays alive; calling <see cref="CreateVolume"/> + <see cref="SetShaderConstants"/>
+        /// re-allocates everything (handled transparently by the integration path).
+        /// </summary>
+        public void ReleaseVolumes()
+        {
+            _frustumVolume?.Release();
+            _frustumVolume = null;
+            _frustumReady = false;
+            if (_volume) { Destroy(_volume); _volume = null; }
+            if (_colorVolume) { Destroy(_colorVolume); _colorVolume = null; }
+            IntegrationCount = 0;
+            Logger.Info("VolumeIntegrator: GPU volumes released");
+        }
+
+        /// <summary>True when volumes have been released and need re-allocation before integration.</summary>
+        public bool VolumesReleased => _volume == null;
+
+        /// <summary>
+        /// Re-creates TSDF + color volumes after a prior <see cref="ReleaseVolumes"/> call.
+        /// </summary>
+        public void ReallocateVolumes()
+        {
+            if (_volume != null) return;
+            CreateVolume();
+            SetShaderConstants();
+            Clear();
+            Logger.Info("VolumeIntegrator: GPU volumes re-allocated");
         }
 
         private void CreateVolume()

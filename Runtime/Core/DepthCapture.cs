@@ -304,11 +304,22 @@ namespace Genesis.RoomScan
 
         private void OnDestroy()
         {
-            if (_normTex) Destroy(_normTex);
-            if (_dilationA) Destroy(_dilationA);
-            if (_dilationB) Destroy(_dilationB);
-            if (_simulatedDepthTex) Destroy(_simulatedDepthTex);
-            if (_filteredDepthTex) Destroy(_filteredDepthTex);
+            ReleaseResources();
+        }
+
+        /// <summary>
+        /// Destroys GPU textures (normals, dilation, filtered depth) to free memory.
+        /// Textures are lazily recreated when the next depth frame arrives.
+        /// </summary>
+        public void ReleaseResources()
+        {
+            if (_normTex) { Destroy(_normTex); _normTex = null; }
+            if (_dilationA) { Destroy(_dilationA); _dilationA = null; }
+            if (_dilationB) { Destroy(_dilationB); _dilationB = null; }
+            if (_simulatedDepthTex) { Destroy(_simulatedDepthTex); _simulatedDepthTex = null; }
+            if (_filteredDepthTex) { Destroy(_filteredDepthTex); _filteredDepthTex = null; }
+            _dilatedDepth = null;
+            Logger.Info("DepthCapture: GPU resources released");
         }
 
         private void Update()

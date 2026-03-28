@@ -134,6 +134,7 @@ namespace Genesis.RoomScan
         private float _lastMeshTime;
         private bool _started;
         private bool _serverTrainingInProgress;
+        private bool _scanResourcesReleased;
 
         // ─────────────────────────────────────────────────────────────
         //  Texture refinement state
@@ -331,6 +332,13 @@ namespace Genesis.RoomScan
             _cachedUnwrap = null;
             if (_persistence != null) _persistence.ClearActivePackage();
 
+            if (_scanResourcesReleased)
+            {
+                _volumeIntegrator.ReallocateVolumes();
+                _meshExtractor.Reinitialize();
+                _scanResourcesReleased = false;
+            }
+
             if (_keyframeCollector != null)
             {
                 _keyframeCollector.ClearInMemory();
@@ -388,6 +396,34 @@ namespace Genesis.RoomScan
         {
             if (IsScanning) StopScanning();
             else StartScanning();
+        }
+
+        /// <summary>True after <see cref="ReleaseScanResources"/> has been called. Cleared when scanning restarts.</summary>
+        public bool ScanResourcesReleased => _scanResourcesReleased;
+
+        /// <summary>
+        /// Frees heavy GPU resources (TSDF volumes, Surface Nets buffers, depth textures) to reclaim
+        /// ~400-500 MB of GPU memory. Call after scanning + refinement is complete, before entering gameplay.
+        /// The refined MeshRenderer stays alive for game-phase rendering.
+        /// Call <see cref="StartScanning"/> to re-allocate everything if a new scan is needed.
+        /// </summary>
+        public void ReleaseScanResources()
+        {
+            if (_scanResourcesReleased) return;
+            StopScanning();
+
+            _volumeIntegrator.ReleaseVolumes();
+            _meshExtractor.DisposeOnly();
+            _depthCapture.ReleaseResources();
+
+            if (_triplanarCache != null) _triplanarCache.Clear();
+
+            _scanResourcesReleased = true;
+
+            if (renderMode is ScanRenderMode.Vertex or ScanRenderMode.Wireframe or ScanRenderMode.Triplanar)
+                SetRenderMode(HasRefinedTexture ? ScanRenderMode.Refined : ScanRenderMode.None);
+
+            Logger.Info("Scan GPU resources released (~400-500 MB freed)");
         }
 
         /// <summary>
@@ -524,10 +560,10 @@ namespace Genesis.RoomScan
         {
             return mode switch
             {
-                ScanRenderMode.Vertex => true,
-                ScanRenderMode.Wireframe => true,
+                ScanRenderMode.Vertex => !_scanResourcesReleased,
+                ScanRenderMode.Wireframe => !_scanResourcesReleased,
                 ScanRenderMode.None => true,
-                ScanRenderMode.Triplanar => _triplanarCache != null,
+                ScanRenderMode.Triplanar => !_scanResourcesReleased && _triplanarCache != null,
                 ScanRenderMode.Refined => HasRefinedTexture,
                 ScanRenderMode.HQRefined => HasHQRefinedTexture,
                 ScanRenderMode.Splat => (_gsplatProvider != null && _gsplatProvider.HasServerTrainedSplats) || HasDownloadedSplat,
