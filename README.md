@@ -100,7 +100,7 @@ Call `RoomScanner.Instance.StartScanning()` to begin (or use the debug menu). As
 1. **Depth integration**: Each depth frame is fused into the TSDF volume with color from the passthrough camera
 2. **Mesh extraction**: GPU Surface Nets extracts a mesh from the volume every few frames (after a minimum number of integrations)
 3. **Texturing**: Camera RGB is baked into triplanar world-space textures for persistent surface color (with vertex color fallback)
-4. **Keyframe capture**: Motion-gated JPEG snapshots + camera poses are saved to `GSExport/` on disk — these are used later for Gaussian Splat training
+4. **Keyframe capture**: Motion-gated JPEG snapshots + camera poses are saved into the active scan package on disk — these are used later for Gaussian Splat training
 5. **Point cloud export**: GPU mesh vertices exported as `points3d.ply` on demand (before GS training or via debug menu)
 
 **Tips for a good scan**: Move slowly around the room. Look at surfaces from multiple angles — repeated observations from different viewpoints improve mesh quality. Make sure to cover walls, floor, ceiling, and furniture from several directions before training.
@@ -122,7 +122,7 @@ Once the room is well-scanned:
 2. Verify the **Server URL** points to your PC running [RoomScan-GaussianSplatServer](https://github.com/arghyasur1991/RoomScan-GaussianSplatServer). If you used the setup wizard and your PC is on the same LAN, the IP is auto-detected and should already be correct. For a cloud/remote server, edit the URL in the debug menu or set it in the Inspector before building.
 3. Press **Start GS Training** — this triggers the full pipeline automatically:
    - Exports the current mesh as a point cloud (`points3d.ply`)
-   - ZIPs all keyframes, poses, and point cloud from `GSExport/`
+   - ZIPs all keyframes, poses, and point cloud from the active package
    - Uploads the ZIP to the server
    - The debug menu shows live training status: state, progress bar, iteration count, elapsed time, backend
    - When training completes, the trained PLY is downloaded back to the Quest
@@ -181,7 +181,7 @@ RoomScans/
     scan.bin              # TSDF + color volumes (v1 binary)
     anchor.json           # Spatial anchor UUID + per-artifact matrices
     triplanar/            # Color + depth textures (saved when triplanar is enabled)
-    keyframes/            # Copied from GSExport/ (images + frames.jsonl)
+    keyframes/            # Motion-gated keyframes (images/ + frames.jsonl)
     splat.ply             # Auto-saved when GS training completes
     refined_mesh.bin      # Auto-saved when on-device refinement completes
     refined_atlas.raw     # Auto-saved with refined mesh
@@ -190,12 +190,14 @@ RoomScans/
     hq_atlas.png          # Auto-saved when server atlas enhancement completes
 ```
 
-- **Save Scan**: Creates a new package. Persists the TSDF + color volumes, triplanar textures (when enabled), copies keyframes, and creates a persisted `OVRSpatialAnchor` for cross-session relocation. Sets this package as the active target for subsequent artifact auto-saves.
+- **Save Scan**: Promotes the temporary scan package to a permanent package. Persists the TSDF + color volumes, triplanar textures (when enabled), and creates a persisted `OVRSpatialAnchor` for cross-session relocation. Keyframes are already in-place from scanning. Sets this package as the active target for subsequent artifact auto-saves. Saving is disabled while scanning is active.
 - **Load Scan**: Browse saved packages in the **Saved Scans** view. Loading a package localizes the spatial anchor, computes per-artifact relocation matrices, and restores all data including splat, refined textures, enhanced mesh, and HQ atlas.
 - **Auto-save artifacts**: When a splat download completes, on-device refinement finishes, atlas/mesh enhancement finishes, the artifact is automatically saved to the active package — no manual "Save Scan" needed.
 - **Delete artifact**: Context-sensitive deletion in the Scan view — deletes the artifact matching the current render mode (splat, refined, enhanced mesh, or HQ) from the active package.
 - **Delete package**: Full package deletion from the Saved Scans view, including erasing the spatial anchor from persistent storage.
-- **Clear All Data**: Stops scanning, clears volumes/mesh/keyframes from memory, clears the active package reference.
+- **Clear All Data**: Stops scanning, clears volumes/mesh/keyframes from memory, cleans up any temporary package, clears the active package reference.
+
+**Data flow**: When scanning starts, a temporary package (`_tmp`) is created. All keyframes and artifacts write directly into it. On save, `_tmp` is atomically promoted to a permanent package — no file copying needed. If the app crashes, `_tmp` is cleaned up on next startup.
 
 ### Architecture
 
@@ -233,7 +235,7 @@ QuestRoomScan captures keyframes and a dense point cloud during scanning, upload
 
 ### On-Device Capture (automatic during scanning)
 
-- **KeyframeCollector**: Motion-gated JPEG frames + camera poses saved to `GSExport/` on disk (`images/*.jpg`, `frames.jsonl`). Captures are triggered by camera movement — you get more keyframes by looking at the room from different angles.
+- **KeyframeCollector**: Motion-gated JPEG frames + camera poses saved directly into the active scan package (`keyframes/images/*.jpg`, `keyframes/frames.jsonl`). Captures are triggered by camera movement — you get more keyframes by looking at the room from different angles.
 - **PointCloudExporter**: GPU mesh vertices exported as binary PLY (`points3d.ply`) via `AsyncGPUReadback`. Exported on demand — automatically before GS training upload, or manually via the debug menu's Tools view.
 
 ### Server Training (via [RoomScan-GaussianSplatServer](https://github.com/arghyasur1991/RoomScan-GaussianSplatServer))
@@ -248,7 +250,7 @@ npm run dev                  # Dashboard at http://localhost:5173
 When you press **Start GS Training** in the debug menu, the following happens automatically:
 
 1. **Export**: Final point cloud exported from GPU mesh
-2. **ZIP & Upload**: Quest packages `GSExport/` contents (`frames.jsonl`, `points3d.ply`, `images/*.jpg`) into a ZIP and POSTs to `{serverUrl}/upload?iterations={N}`
+2. **ZIP & Upload**: Quest packages the active scan's keyframe directory (`frames.jsonl`, `points3d.ply`, `images/*.jpg`) into a ZIP and POSTs to `{serverUrl}/upload?iterations={N}`
 3. **Convert**: Server converts Unity poses + intrinsics to COLMAP binary format, computes scene normalization
 4. **Train**: Gaussian Splat training via msplat (Metal), gsplat (CUDA), or 3DGS — the debug menu shows live progress
 5. **Denormalize**: Output PLY is transformed back to world coordinates (reverses nerfstudio-style scene normalization)

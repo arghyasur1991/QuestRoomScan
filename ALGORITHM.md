@@ -285,13 +285,24 @@ Temporal blending on the GPU provides implicit convergence-based stability (see 
     scan.bin                       # TSDF + color volumes (RMSH v1 binary)
     anchor.json                    # OVRSpatialAnchor UUID + per-artifact matrices
     triplanar/                     # 6 raw files (3 color + 3 depth)
-    keyframes/                     # Copied from GSExport/ (images/*.jpg + frames.jsonl)
+    keyframes/                     # Motion-gated keyframes (images/*.jpg + frames.jsonl)
     splat.ply                      # Auto-saved when GS training completes
     refined_mesh.bin               # Auto-saved when refinement completes
     refined_atlas.raw              # On-device refined atlas (RGBA32)
     simplified_mesh.bin            # Post-bake simplified mesh (when ratio < 1)
     hq_atlas.png                   # Server-side HQ refined atlas (PNG)
 ```
+
+### Temporary Package (`_tmp`)
+When scanning starts, a temporary package `RoomScans/_tmp/` is created with the same directory structure as a saved package. All keyframes and artifacts are written directly into `_tmp/` during the scan session — no intermediate staging directory. This provides:
+- **Crash recovery**: Keyframes on disk survive app crashes (orphaned `_tmp` is cleaned up on next startup)
+- **Artifact persistence**: Refined meshes, splats, etc. auto-save into `_tmp/` since it's the active package
+- **Zero-copy save**: `SaveToNewPackageAsync` promotes `_tmp` to `pkg_{timestamp}` via `Directory.Move` — no keyframe copying needed
+
+Edge cases:
+- **Load → scan**: `CreateTmpPackage()` creates a fresh `_tmp`; loaded package is untouched
+- **Multiple scan starts without save**: Each `StartScanning()` deletes the old `_tmp` and creates a new one
+- **Save while scanning**: Disallowed at both API level (`SaveScanAsync` returns false) and debug menu (button disabled)
 
 ### anchor.json — Per-Artifact Creation Matrices
 ```json
@@ -321,15 +332,19 @@ Color:   length (int) | raw bytes (RGBA8_UNorm)
 Triplanar data saved separately as 6 raw files: `tri_xz.raw`, `tri_xy.raw`, `tri_yz.raw` (RGBA8 color) + `depth_xz.raw`, `depth_xy.raw`, `depth_yz.raw` (R8 depth).
 
 ### Save Pipeline (`SaveToNewPackageAsync`)
-1. Generate `pkg_{timestamp}` directory
+1. Promote temporary package: `Directory.Move(_tmp → pkg_{timestamp})`  
+   (If no tmp package exists, creates a new directory)
 2. `AsyncGPUReadback` full TSDF + color volumes (slice-by-slice)
 3. `RoomAnchorManager.CreateAndSaveSpatialAnchorAsync()` at MRUK floor position → persisted `OVRSpatialAnchor`
 4. Write `scan.bin` (same v1 format) with anchor matrix
 5. Write `anchor.json` with UUID + `baseMatrixAtSave`
 6. Save triplanar textures + depth maps
-7. Copy `GSExport/` contents to `keyframes/`
+7. Keyframes are already in-place from scanning (written directly to package during scan)
 8. Update `manifest.json`
 9. Set as `ActivePackageId` — subsequent artifact saves go here automatically
+10. Update `KeyframeCollector` export directory to point to promoted package
+
+**Note**: Saving is disallowed while scanning is active (`SaveScanAsync` returns false if `IsScanning`).
 
 ### Artifact Auto-Save (`SaveArtifactAsync`)
 Called automatically when: splat download completes, on-device refinement finishes, HQ refinement finishes.
@@ -583,7 +598,7 @@ Per mesh extraction cycle, `UpdatePlateauDetection` tracks:
 End-to-end pipeline: on-device keyframe + point cloud capture → server-based COLMAP conversion + GS training → on-device rendering via Unity Gaussian Splatting (UGS).
 
 ### 14.1 KeyframeCollector (Quest, automatic)
-Runs alongside scanning with no user interaction. Saves posed camera frames to `{persistentDataPath}/GSExport/`:
+Runs alongside scanning with no user interaction. Saves posed camera frames directly into the active scan package (`keyframes/`):
 - **Selection**: Motion-gated — translation > 0.3m OR rotation > 20 deg from any saved keyframe
 - **Rejection**: Frames with angular velocity > 120 deg/s are discarded (motion blur)
 - **Per frame**: JPEG (1280x960, quality 90) + one JSON line in `frames.jsonl` with:
@@ -594,7 +609,7 @@ Runs alongside scanning with no user interaction. Saves posed camera frames to `
 - **Typical output**: 100-300 keyframes, 10-30MB total
 
 ### 14.2 PointCloudExporter (Quest, on-demand)
-Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
+Exports GPU mesh vertices as binary PLY to the active package's keyframe directory (`points3d.ply`):
 - Async GPU readback of the `GPUSurfaceNets` vertex buffer
 - Parses `GPUVertex` structs: position (float3), normal (float3), packedColor (uint) → RGB
 - Writes position, normal, color per vertex in Unity coordinates (left-handed Y-up)

@@ -53,12 +53,6 @@ namespace Genesis.RoomScan
 
         private void Start()
         {
-            _exportDir = Path.Combine(Application.persistentDataPath, "GSExport");
-            _imagesDir = Path.Combine(_exportDir, "images");
-            _manifestPath = Path.Combine(_exportDir, "frames.jsonl");
-
-            Directory.CreateDirectory(_imagesDir);
-
             _prevRot = Quaternion.identity;
             _prevRotTime = Time.time;
             _initialized = true;
@@ -66,7 +60,26 @@ namespace Genesis.RoomScan
             _scanner = GetComponent<RoomScanner>();
             if (_scanner != null)
                 _scanner.ColorFrameProvided += OnColorFrame;
+        }
 
+        /// <summary>
+        /// Sets the keyframe export directory. Creates the directory structure if needed.
+        /// Pass null to disable keyframe capture.
+        /// </summary>
+        public void SetExportDirectory(string dir)
+        {
+            if (string.IsNullOrEmpty(dir))
+            {
+                _exportDir = null;
+                _imagesDir = null;
+                _manifestPath = null;
+                return;
+            }
+
+            _exportDir = dir;
+            _imagesDir = Path.Combine(dir, "images");
+            _manifestPath = Path.Combine(dir, "frames.jsonl");
+            Directory.CreateDirectory(_imagesDir);
             Logger.Info($"KeyframeCollector: export dir={_exportDir}");
         }
 
@@ -89,7 +102,7 @@ namespace Genesis.RoomScan
         public void TrySaveKeyframe(Texture frame, Vector3 pos, Quaternion rot,
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
         {
-            if (!_initialized || frame == null) return;
+            if (!_initialized || frame == null || _exportDir == null) return;
 
             if (Time.time - _lastCaptureTime < minCaptureInterval) return;
 
@@ -222,27 +235,5 @@ namespace Genesis.RoomScan
             _nextId = 0;
         }
 
-        /// <summary>
-        /// Recreates the export directory after a background deletion completes.
-        /// Must be called on the main thread.
-        /// </summary>
-        public void ReinitExportDir()
-        {
-            Directory.CreateDirectory(_imagesDir);
-            Logger.Info("KeyframeCollector: export cleared");
-        }
-
-        /// <summary>
-        /// Clears the export directory for a fresh capture session (synchronous).
-        /// Prefer ClearInMemory + background delete + ReinitExportDir for non-blocking clear.
-        /// </summary>
-        public void ClearExport()
-        {
-            if (Directory.Exists(_exportDir))
-                Directory.Delete(_exportDir, true);
-            Directory.CreateDirectory(_imagesDir);
-            ClearInMemory();
-            Logger.Info("KeyframeCollector: export cleared");
-        }
     }
 }

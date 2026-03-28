@@ -20,11 +20,16 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Reads the GPU vertex buffer via async readback and writes a binary PLY to disk.
-        /// Writes to <paramref name="outputDir"/> if specified, otherwise to GSExport/.
+        /// <paramref name="outputDir"/> must be a valid directory path.
         /// </summary>
-        public static async Task ExportAsync(string outputDir = null)
+        public static async Task ExportAsync(string outputDir)
         {
             if (_exporting) return;
+            if (string.IsNullOrEmpty(outputDir))
+            {
+                Logger.Warning("PointCloudExporter: no output directory specified");
+                return;
+            }
             _exporting = true;
 
             try
@@ -74,8 +79,6 @@ namespace Genesis.RoomScan
                 byte[] data = new byte[raw.Length];
                 NativeArray<byte>.Copy(raw, data, raw.Length);
 
-                if (outputDir == null)
-                    outputDir = Path.Combine(Application.persistentDataPath, "GSExport");
                 Directory.CreateDirectory(outputDir);
                 string path = Path.Combine(outputDir, PlyFileName);
 

@@ -345,18 +345,9 @@ namespace Genesis.RoomScan
                 if (_meshExtractor != null && !_meshExtractor.IsInitialized)
                     _meshExtractor.Reinitialize();
 
-                if (_keyframeCollector != null)
-                    _keyframeCollector.ReinitExportDir();
                 Logger.Info("All scan + export data cleared");
                 _clearDoneCallback?.Invoke();
                 _clearDoneCallback = null;
-            }
-
-            if (_reinitExportPending)
-            {
-                _reinitExportPending = false;
-                if (_keyframeCollector != null)
-                    _keyframeCollector.ReinitExportDir();
             }
 
             // Enforce triplanar override every frame (not just while scanning)
@@ -424,26 +415,11 @@ namespace Genesis.RoomScan
             _stabilizedTime = 0f;
 
             if (_keyframeCollector != null)
-            {
                 _keyframeCollector.ClearInMemory();
-                string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
-                System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-                {
-                    try
-                    {
-                        if (Directory.Exists(gsExportDir))
-                            Directory.Delete(gsExportDir, true);
-                    }
-                    catch (Exception e)
-                    {
-                        Logger.Error($"StartScanning clear error: {e.Message}");
-                    }
-                    finally
-                    {
-                        _reinitExportPending = true;
-                    }
-                });
-            }
+
+            _persistence.CreateTmpPackage();
+            _keyframeCollector?.SetExportDirectory(
+                Path.Combine(_persistence.ActivePackageDirectory, "keyframes"));
 
             float t = Time.time;
             _lastIntegrationTime = t;
@@ -527,7 +503,7 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Clears all persisted data: in-memory scan, saved scan files, triplanar
-        /// textures, and GSExport (keyframes + point cloud). Safe to call at runtime.
+        /// textures, and temporary package. Safe to call at runtime.
         /// File I/O runs on a background thread via ThreadPool to avoid main-thread
         /// stalls and potential SynchronizationContext deadlocks on Quest/IL2CPP.
         /// GPU resources are disposed without immediate re-allocation to avoid
@@ -538,8 +514,6 @@ namespace Genesis.RoomScan
         {
             if (_clearInProgress) return;
             _clearInProgress = true;
-
-            string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
 
             try
             {
@@ -564,7 +538,11 @@ namespace Genesis.RoomScan
                 if (_keyframeCollector != null)
                     _keyframeCollector.ClearInMemory();
 
-                if (_persistence != null) _persistence.ClearActivePackage();
+                if (_persistence != null)
+                {
+                    _persistence.CleanupTmpPackage();
+                    _persistence.ClearActivePackage();
+                }
             }
             catch (Exception e)
             {
@@ -573,28 +551,12 @@ namespace Genesis.RoomScan
                 return;
             }
 
-            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    if (Directory.Exists(gsExportDir))
-                        Directory.Delete(gsExportDir, true);
-                }
-                catch (Exception e)
-                {
-                    Logger.Error($"ClearAllData I/O error: {e.Message}");
-                }
-                finally
-                {
-                    _clearDoneCallback = onComplete;
-                    _clearDone = true;
-                }
-            });
+            _clearDoneCallback = onComplete;
+            _clearDone = true;
         }
 
         private volatile bool _clearInProgress;
         private volatile bool _clearDone;
-        private volatile bool _reinitExportPending;
         private Action _clearDoneCallback;
 
         /// <summary>
@@ -687,11 +649,20 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Persists the current scan (TSDF volume, keyframes, artifacts) to a new package on disk.
+        /// Returns false if scanning is active — stop scanning before saving.
         /// </summary>
         public async Task<bool> SaveScanAsync()
         {
             if (_persistence == null) return false;
-            return await _persistence.SaveToNewPackageAsync();
+            if (IsScanning)
+            {
+                Logger.Warning("Cannot save while scanning — stop scan first");
+                return false;
+            }
+            bool ok = await _persistence.SaveToNewPackageAsync();
+            if (ok && _keyframeCollector != null)
+                _keyframeCollector.SetExportDirectory(KeyframeDirectory);
+            return ok;
         }
 
         /// <summary>
@@ -1528,18 +1499,15 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Keyframe directory. Uses active package's keyframes/ if loaded, else GSExport/.
+        /// Keyframe directory within the active package (tmp or saved).
+        /// Returns null if no package is active.
         /// </summary>
         public string KeyframeDirectory
         {
             get
             {
-                if (_persistence != null && _persistence.HasActivePackage)
-                {
-                    string pkgKf = Path.Combine(_persistence.ActivePackageDirectory, "keyframes");
-                    if (Directory.Exists(pkgKf)) return pkgKf;
-                }
-                return Path.Combine(Application.persistentDataPath, "GSExport");
+                if (_persistence == null || !_persistence.HasActivePackage) return null;
+                return Path.Combine(_persistence.ActivePackageDirectory, "keyframes");
             }
         }
 

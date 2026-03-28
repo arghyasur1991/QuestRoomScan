@@ -623,9 +623,9 @@ namespace Genesis.RoomScan.UI
             bool hasVolume = vi != null && vi.IntegrationCount > 0;
             bool hasActivePackage = persistence != null && persistence.HasActivePackage;
 
-            // Save Scan: disabled if no volume data
+            // Save Scan: disabled if no volume data or while scanning
             if (_btnSaveScan != null && !_btnSaveScan.text.Contains("..."))
-                _btnSaveScan.SetEnabled(hasVolume);
+                _btnSaveScan.SetEnabled(hasVolume && !scanner.IsScanning);
 
             // GS Training: entirely disabled if module absent
             if (_btnGsTrain != null)

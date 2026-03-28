@@ -94,8 +94,13 @@ namespace Genesis.RoomScan
         /// <summary>Whether there is an active package that artifacts can be saved to.</summary>
         public bool HasActivePackage => !string.IsNullOrEmpty(ActivePackageId);
 
+        internal const string TmpPkgId = "_tmp";
+
         private string RoomScansRoot => Path.Combine(Application.persistentDataPath, "RoomScans");
         private string ManifestPath => Path.Combine(RoomScansRoot, "manifest.json");
+
+        /// <summary>True when the active package is an unsaved temporary package.</summary>
+        public bool IsTmpPackage => ActivePackageId == TmpPkgId;
 
         /// <summary>Absolute path to the active package's directory, or null if no package is active.</summary>
         public string ActivePackageDirectory =>
@@ -118,7 +123,11 @@ namespace Genesis.RoomScan
 
         private PackageAnchorData _activeAnchorData;
 
-        private void Awake() => Instance = this;
+        private void Awake()
+        {
+            Instance = this;
+            CleanupTmpPackage();
+        }
 
         // ─────────────────────────────────────────────────────────────
         //  Manifest I/O
@@ -205,8 +214,9 @@ namespace Genesis.RoomScan
         // ─────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Creates a new package directory, reads TSDF/color volumes from GPU, saves scan.bin,
-        /// anchor data, triplanar textures, and keyframes. Sets <see cref="ActivePackageId"/> on success.
+        /// Promotes the temporary package to a permanent package. Reads TSDF/color volumes from GPU,
+        /// saves scan.bin, anchor data, and triplanar textures. If no tmp package is active, creates
+        /// a new package directory. Sets <see cref="ActivePackageId"/> on success.
         /// </summary>
         public async Task<bool> SaveToNewPackageAsync()
         {
@@ -223,7 +233,17 @@ namespace Genesis.RoomScan
             {
                 string pkgId = $"pkg_{DateTimeOffset.UtcNow:yyyyMMdd_HHmmss}";
                 string pkgDir = Path.Combine(RoomScansRoot, pkgId);
-                Directory.CreateDirectory(pkgDir);
+
+                if (IsTmpPackage)
+                {
+                    string tmpDir = Path.Combine(RoomScansRoot, TmpPkgId);
+                    Directory.Move(tmpDir, pkgDir);
+                    Logger.Info($"Promoted tmp package → {pkgId}");
+                }
+                else
+                {
+                    Directory.CreateDirectory(pkgDir);
+                }
 
                 int3 s = vi.VoxelCount;
 
@@ -296,17 +316,9 @@ namespace Genesis.RoomScan
                     await SaveTriplanarOneAtATime(tc, triDir);
                 }
 
-                // Copy keyframes from GSExport/
-                string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
-                string kfDir = Path.Combine(pkgDir, "keyframes");
-                if (Directory.Exists(gsExportDir))
-                {
-                    await Task.Run(() => CopyDirectoryContents(gsExportDir, kfDir));
-                    Logger.Info("Keyframes copied to package");
-                }
-
-                // Update manifest
+                // Update manifest (keyframes are already in-place from scanning)
                 var manifest = ReadManifest();
+                string kfDir = Path.Combine(pkgDir, "keyframes");
                 bool hasKf = Directory.Exists(kfDir) &&
                     Directory.GetFiles(kfDir, "*.jpg", SearchOption.AllDirectories).Length > 0;
                 manifest.packages.Add(new ScanPackageEntry
@@ -1008,6 +1020,40 @@ namespace Genesis.RoomScan
         {
             ActivePackageId = null;
             _activeAnchorData = null;
+        }
+
+        /// <summary>
+        /// Creates a temporary package directory for the current scan session.
+        /// Keyframes and artifacts are written here during scanning. Call
+        /// <see cref="SaveToNewPackageAsync"/> to promote to a permanent package.
+        /// </summary>
+        public void CreateTmpPackage()
+        {
+            CleanupTmpPackage();
+            string tmpDir = Path.Combine(RoomScansRoot, TmpPkgId);
+            Directory.CreateDirectory(Path.Combine(tmpDir, "keyframes", "images"));
+            ActivePackageId = TmpPkgId;
+            _activeAnchorData = null;
+            Logger.Info($"Tmp package created: {tmpDir}");
+        }
+
+        /// <summary>
+        /// Deletes the temporary package directory if it exists. Called on startup
+        /// for crash recovery and before creating a new tmp package.
+        /// </summary>
+        public void CleanupTmpPackage()
+        {
+            string tmpDir = Path.Combine(RoomScansRoot, TmpPkgId);
+            if (Directory.Exists(tmpDir))
+            {
+                try { Directory.Delete(tmpDir, true); }
+                catch (Exception e) { Logger.Warning($"Tmp cleanup failed: {e.Message}"); }
+            }
+            if (ActivePackageId == TmpPkgId)
+            {
+                ActivePackageId = null;
+                _activeAnchorData = null;
+            }
         }
 
         // ─────────────────────────────────────────────────────────────
