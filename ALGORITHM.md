@@ -655,16 +655,17 @@ Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-tri
 
 Post-processing pipeline that produces a sharp UV-mapped texture atlas from saved keyframes, replacing the blurry triplanar vertex-color texturing. Uses the same keyframes collected for Gaussian Splat training (§13.1).
 
-### 14.1 Mesh Simplification (optional, meshoptimizer — currently disabled)
+### 14.1 Post-Bake Mesh Simplification (optional, meshoptimizer)
 
-Before UV unwrapping, the GPU Surface Nets mesh can be optionally decimated using [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplify`):
+After atlas baking, the refined mesh can be optionally simplified using [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplifyWithAttributes`):
 
-- **Input**: Original mesh positions + index buffer from GPU readback
-- **Operation**: Quadric error metric simplification — removes triangles while preserving mesh topology and surface shape. Only the index buffer changes; vertex positions are untouched.
-- **Target**: Configurable ratio, inspector slider `decimationRatio ∈ [0.1, 1.0]`.
-- **Performance**: <5ms even for 100k triangles on ARM64
+- **Input**: Baked mesh positions, normals, UVs, and index buffer
+- **Operation**: Quadric error metric simplification with UV coordinates as vertex attributes — penalizes collapses that would distort UVs. `meshopt_SimplifyLockBorder` flag prevents vertices on UV seam boundaries from being collapsed, avoiding seam tearing.
+- **Target**: Configurable ratio, inspector slider `postBakeSimplificationRatio ∈ [0.1, 1.0]`. Default: 1.0 (disabled).
+- **Performance**: <5ms for 100k triangles on ARM64, runs on background thread (`Task.Run`)
+- **Output**: Compacted vertex/index arrays with preserved UVs. Atlas texture is unchanged — simplification only removes geometry, not texels.
 
-> **Status: Disabled by default** (`decimationRatio = 1.0`). Mesh decimation degrades atlas baking quality and performance — the simplified index buffer produces poor UV charts and misaligned projections during atlas baking. Until the interaction between meshoptimizer simplification and the atlas bake pipeline is resolved, decimation should remain off.
+> Running simplification *after* baking (instead of before) preserves atlas quality: the UV unwrap and atlas bake operate on the full-resolution mesh, and only the final game-ready mesh is reduced. This replaces the old pre-bake decimation which degraded baking quality.
 
 ### 14.2 UV Unwrapping (xatlas)
 
@@ -697,7 +698,7 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
 
 1. **ClearDepth** (`[numthreads(256,1,1)]`): Fills depth buffer with 999 (far sentinel). One dispatch per keyframe to reset occlusion.
 
-2. **BuildDepth** (`[numthreads(64,1,1)]`): Per original-mesh triangle, rasterizes in screen space using the keyframe's view/projection. Writes `InterlockedMin(asuint(z))` to build an occlusion depth map. This uses the *original* (pre-decimation) mesh to ensure accurate occlusion.
+2. **BuildDepth** (`[numthreads(64,1,1)]`): Per original-mesh triangle, rasterizes in screen space using the keyframe's view/projection. Writes `InterlockedMin(asuint(z))` to build an occlusion depth map. This uses the original mesh vertices/indices to ensure accurate occlusion.
 
 3. **BakeAtlas** (`[numthreads(64,1,1)]`): Per UV-unwrapped triangle:
    - Rasterizes bounding box in atlas UV space

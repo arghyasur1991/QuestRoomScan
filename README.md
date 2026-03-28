@@ -28,6 +28,8 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
 - **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, HQRefined, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Splat requires trained data).
 - **Freeze Tint Toggle** — Independent toggle (not tied to render mode) shows/hides a blue tint overlay on frozen voxels in live mesh modes (Vertex, Triplanar, Wireframe). Bindable via `RoomScanInputHandler`.
+- **Game Integration APIs** — `LoadRefinedOnlyAsync()` for fast game-mode loading (skips TSDF/Surface Nets reconstruction, loads only the baked mesh + atlas). `ReleaseScanResources()` frees ~400-500 MB GPU memory after scanning. Public `RefinedMesh`/`RefinedAtlas` properties and `RefinedMeshReady` event for custom rendering. `ScanCoverage`/`ScanProgress` structs expose scan metrics for guided UX.
+- **Post-Bake Mesh Simplification** — UV-preserving mesh simplification via `meshopt_simplifyWithAttributes` runs after atlas baking (configurable ratio), preserving texture quality. Replaces the old broken pre-bake decimation.
 
 ## Requirements
 
@@ -378,6 +380,113 @@ QuestRoomScan exists for a different reason: it's **open source, fully on-device
 
 QuestRoomScan is best suited for developers who need to integrate room scanning into their own applications, want full control over the reconstruction pipeline, or need to work with the raw scan data directly.
 
+## Game Integration Guide
+
+This section covers how to embed QuestRoomScan into a game that needs a one-time room scan followed by lightweight rendering.
+
+### Lifecycle: Scan Phase → Game Phase
+
+```
+1. Scan Phase:    StartScanning() → user looks around → StopScanning()
+2. Refine:        StartTextureRefinement() → wait for RefinedMeshReady event
+3. Transition:    ReleaseScanResources() → frees ~400-500 MB GPU memory
+4. Game Phase:    Render with standard MeshRenderer (1 draw call, baked texture)
+```
+
+On subsequent launches, skip scanning entirely:
+
+```
+1. LoadRefinedOnlyAsync(pkgId) → loads refined mesh + atlas in < 1 second
+2. Game Phase immediately
+```
+
+### Recommended Configuration
+
+For game integration where you want to minimize GPU overhead during scanning:
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| TriplanarCache | **Disabled** | Saves ~240 MB GPU; vertex colors are sufficient for scan-phase visualization |
+| VolumeIntegrator.voxelCount | 160³ or 192³ | Lower than default 256³ to reduce memory and integration cost |
+| TextureRefinement.postBakeSimplificationRatio | 0.3–0.5 | Reduce triangle count for game-phase rendering |
+| GaussianSplatRenderer | **Not attached** | Remove unless splat rendering is needed |
+
+### API Reference
+
+#### Accessing the Refined Mesh
+
+```csharp
+var scanner = RoomScanner.Instance;
+
+// Option 1: Subscribe to the event
+scanner.RefinedMeshReady += (mesh, atlas) =>
+{
+    // mesh: Unity Mesh with UV coordinates
+    // atlas: Texture2D with baked texture atlas
+    myMeshFilter.mesh = mesh;
+    myRenderer.material.mainTexture = atlas;
+};
+
+// Option 2: Read properties directly (null until refinement completes)
+Mesh mesh = scanner.RefinedMesh;
+Texture2D atlas = scanner.RefinedAtlas;
+Texture2D hqAtlas = scanner.HQAtlas; // null if no server enhancement
+```
+
+#### Lightweight Loading (Game Sessions)
+
+```csharp
+// Save the package ID after scanning
+string pkgId = scanner.Persistence.ActivePackageId;
+
+// On next launch — loads only refined mesh + atlas, no TSDF/Surface Nets
+bool ok = await RoomScanner.Instance.LoadRefinedOnlyAsync(pkgId);
+// Mesh is now visible with standard MeshRenderer, render mode auto-set to Refined
+```
+
+#### Releasing GPU Resources
+
+```csharp
+// After scanning + refinement, before entering gameplay
+scanner.ReleaseScanResources();
+// Frees ~400-500 MB (TSDF volumes, Surface Nets buffers, depth textures)
+// Refined MeshRenderer stays alive for game-phase rendering
+// Vertex/Wireframe/Triplanar modes become unavailable (IsModeAvailable returns false)
+
+// To scan again later (re-allocates everything):
+scanner.StartScanning();
+```
+
+#### Monitoring Scan Progress
+
+```csharp
+// Raw coverage metrics
+ScanCoverage cov = scanner.CurrentCoverage;
+Debug.Log($"Surfaces: {cov.SurfaceVoxelCount}, " +
+          $"Colored: {cov.ColorCoverage:P0}, " +
+          $"Frozen: {cov.FrozenFraction:P0}, " +
+          $"Stable: {cov.IsStabilized}");
+
+// High-level progress
+ScanProgress prog = scanner.CurrentProgress;
+progressBar.value = prog.OverallProgress; // 0.0 – 1.0
+statusText.text = prog.Phase.ToString();  // Discovering → Refining → Stabilized → Complete
+```
+
+#### Post-Bake Mesh Simplification
+
+Set `TextureRefinement.postBakeSimplificationRatio` in the Inspector (e.g. 0.5 for 50% triangle reduction). Simplification runs automatically after atlas baking, preserving UV coordinates via `meshopt_simplifyWithAttributes` with locked border vertices to prevent seam tearing.
+
+### Minimal Integration Checklist
+
+1. Add QuestRoomScan package to your project
+2. Run **RoomScan > Setup Scene** wizard
+3. Disable `TriplanarCache` in inspector (save GPU memory)
+4. Set `postBakeSimplificationRatio` to 0.3–0.5 on `TextureRefinement`
+5. Subscribe to `RefinedMeshReady` event
+6. After refinement: call `ReleaseScanResources()`, enter gameplay
+7. On subsequent launches: use `LoadRefinedOnlyAsync(pkgId)` to skip scanning
+
 ## Credits & Prior Art
 
 The TSDF volume integration and Surface Nets meshing approach draws inspiration from [anaglyphs/lasertag](https://github.com/anaglyphs/lasertag) by Julian Triveri & Hazel Roeder (MIT), which demonstrated real-time room reconstruction on Quest 3 inside a mixed reality game.
@@ -385,7 +494,7 @@ The TSDF volume integration and Surface Nets meshing approach draws inspiration 
 The texture refinement pipeline uses two open-source native C++ libraries:
 
 - **[xatlas](https://github.com/jpcy/xatlas)** by Jonathan Young (MIT) — automatic UV atlas generation with seam-aware chart parameterization and efficient packing. Used for UV unwrapping the GPU Surface Nets mesh prior to atlas baking.
-- **[meshoptimizer](https://github.com/zeux/meshoptimizer)** v1.0 by Arseny Kapoulkine (MIT) — mesh optimization toolkit. The `meshopt_simplify` function is available for optional mesh decimation before UV unwrapping. **Note:** Mesh decimation is currently disabled by default — it degrades atlas baking quality and performance. The decimation ratio defaults to 1.0 (no simplification).
+- **[meshoptimizer](https://github.com/zeux/meshoptimizer)** v1.0 by Arseny Kapoulkine (MIT) — mesh optimization toolkit. `meshopt_simplifyWithAttributes` is used for optional post-bake mesh simplification that preserves UV coordinates, with `LockBorder` to prevent seam tearing. Set `TextureRefinement.postBakeSimplificationRatio` < 1.0 to enable.
 
 Both libraries are compiled into a single native shared library (`libxatlas.so` / `libxatlas.bundle`) and invoked via P/Invoke from C#.
 
