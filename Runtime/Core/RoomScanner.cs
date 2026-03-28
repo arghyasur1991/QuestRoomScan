@@ -121,7 +121,6 @@ namespace Genesis.RoomScan
         private PassthroughCameraProvider _cameraProvider;
         private TriplanarCache _triplanarCache;
         private KeyframeCollector _keyframeCollector;
-        private PointCloudExporter _pointCloudExporter;
         private IGSplatProvider _gsplatProvider;
         private TextureRefinement _textureRefinement;
         private DebugMenuController _debugMenu;
@@ -309,7 +308,6 @@ namespace Genesis.RoomScan
             _triplanarCache = GetComponent<TriplanarCache>();
             _persistence = GetComponent<RoomScanPersistence>();
             _keyframeCollector = GetComponent<KeyframeCollector>();
-            _pointCloudExporter = GetComponent<PointCloudExporter>();
             _gsplatProvider = GetComponent<IGSplatProvider>();
             _textureRefinement = GetComponent<TextureRefinement>();
             _debugMenu = GetComponentInChildren<DebugMenuController>();
@@ -717,13 +715,9 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Exports the current keyframe point cloud to disk via <see cref="PointCloudExporter"/>.
+        /// Exports the current GPU mesh as a PLY point cloud to disk via <see cref="PointCloudExporter"/>.
         /// </summary>
-        public async Task ExportPointCloudAsync()
-        {
-            if (_pointCloudExporter != null)
-                await _pointCloudExporter.ExportAsync();
-        }
+        public Task ExportPointCloudAsync() => PointCloudExporter.ExportAsync();
 
         /// <summary>
         /// Kicks off the server-side Gaussian Splat training pipeline. Downloads the trained PLY on completion.

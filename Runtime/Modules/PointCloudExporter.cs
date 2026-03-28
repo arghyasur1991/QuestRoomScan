@@ -11,29 +11,21 @@ namespace Genesis.RoomScan
     /// Exports the current GPU mesh as a dense PLY point cloud for Gaussian Splat initialization.
     /// Reads vertices from the GPU Surface Nets vertex buffer via async readback.
     /// </summary>
-    public class PointCloudExporter : MonoBehaviour
+    internal static class PointCloudExporter
     {
-        private string _exportDir;
-        private string _plyPath;
-        private bool _exporting;
-
-        /// <summary>Absolute path of the exported PLY file on device.</summary>
-        public string ExportPath => _plyPath;
-
-        private void Start()
-        {
-            _exportDir = Path.Combine(Application.persistentDataPath, "GSExport");
-            _plyPath = Path.Combine(_exportDir, "points3d.ply");
-            Directory.CreateDirectory(_exportDir);
-        }
-
         // GPUVertex layout must match the compute shader: float3 pos, float3 norm, uint packedColor, uint voxelFlatIdx
         private const int GpuVertexStride = 32;
+
+        private static bool _exporting;
+
+        /// <summary>Absolute path of the exported PLY file on device.</summary>
+        public static string ExportPath =>
+            Path.Combine(Application.persistentDataPath, "GSExport", "points3d.ply");
 
         /// <summary>
         /// Reads the GPU vertex buffer via async readback and writes a binary PLY point cloud to disk.
         /// </summary>
-        public async Task ExportAsync()
+        public static async Task ExportAsync()
         {
             if (_exporting) return;
             _exporting = true;
@@ -47,7 +39,6 @@ namespace Genesis.RoomScan
                     return;
                 }
 
-                // Read actual vertex count from the GPU counters buffer (index 0)
                 int activeVertCount = 0;
                 if (gpuSN.CountersBuffer != null)
                 {
@@ -72,7 +63,6 @@ namespace Genesis.RoomScan
                 var raw = req.GetData<byte>();
                 int bufferCapacity = raw.Length / GpuVertexStride;
 
-                // Use the GPU counter if valid, otherwise fall back to buffer capacity
                 int vertCount = (activeVertCount > 0 && activeVertCount <= bufferCapacity)
                     ? activeVertCount
                     : bufferCapacity;
@@ -86,7 +76,8 @@ namespace Genesis.RoomScan
 
                 byte[] data = new byte[raw.Length];
                 NativeArray<byte>.Copy(raw, data, raw.Length);
-                string path = _plyPath;
+                string path = ExportPath;
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
 
                 await Task.Run(() => WritePly(path, data, vertCount));
 
@@ -125,22 +116,18 @@ namespace Genesis.RoomScan
 
             bw.Write(System.Text.Encoding.ASCII.GetBytes(header));
 
-            // Parse GPUVertex structs: float3 pos (12B), float3 norm (12B), uint packedColor (4B), uint voxelFlatIdx (4B)
             for (int i = 0; i < vertCount; i++)
             {
                 int off = i * GpuVertexStride;
 
-                // pos xyz
                 bw.Write(BitConverter.ToSingle(vertexData, off));
                 bw.Write(BitConverter.ToSingle(vertexData, off + 4));
                 bw.Write(BitConverter.ToSingle(vertexData, off + 8));
 
-                // norm xyz
                 bw.Write(BitConverter.ToSingle(vertexData, off + 12));
                 bw.Write(BitConverter.ToSingle(vertexData, off + 16));
                 bw.Write(BitConverter.ToSingle(vertexData, off + 20));
 
-                // packedColor → RGB
                 uint packed = BitConverter.ToUInt32(vertexData, off + 24);
                 bw.Write((byte)(packed & 0xFF));
                 bw.Write((byte)((packed >> 8) & 0xFF));

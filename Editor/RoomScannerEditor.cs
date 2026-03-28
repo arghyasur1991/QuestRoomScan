@@ -21,7 +21,6 @@ namespace Genesis.RoomScan.Editor
             ("Passthrough Camera", typeof(PassthroughCameraProvider), new[] { typeof(PassthroughCameraAccess) }, false),
             ("Triplanar Cache", typeof(TriplanarCache), null, false),
             ("Texture Refinement", typeof(TextureRefinement), null, true),
-            ("Point Cloud Export", typeof(PointCloudExporter), null, false),
             ("Input Handler", typeof(RoomScanInputHandler), null, false),
             ("Debug Overlays", typeof(CameraDebugOverlay), new[] { typeof(DepthDebugOverlay) }, false),
         };

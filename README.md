@@ -219,9 +219,8 @@ RoomScanner (orchestrator, events, scan lifecycle)
   ├── TriplanarCache (bake camera RGB → 3 world-space textures + depth maps)
   ├── TextureRefinement (GPU readback → xatlas UV unwrap → multi-view atlas bake)
   │     └── requires KeyframeCollector (auto-added)
-  ├── PointCloudExporter (GPU mesh → points3d.ply via AsyncGPUReadback)
   └── [separate assembly] GSplatManager + GSplatServerClient (Gaussian Splat training & rendering)
-        └── requires KeyframeCollector + PointCloudExporter (auto-added)
+        └── requires KeyframeCollector (auto-added)
 ```
 
 All optional modules implement `IRoomScanModule` and are discovered automatically at startup. The `GaussianSplatting` package dependency lives in the separate `Genesis.RoomScan.GSplat` assembly — consumers who don't need Gaussian Splats can omit it entirely.

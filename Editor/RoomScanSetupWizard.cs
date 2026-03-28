@@ -38,7 +38,6 @@ namespace Genesis.RoomScan.Editor
         TriplanarCache _triplanarCache;
         RoomScanPersistence _persistence;
         KeyframeCollector _keyframeCollector;
-        PointCloudExporter _pointCloudExporter;
         GSplatManager _gsplatManager;
         GaussianSplatRenderer _ugsRenderer;
         GSplatServerClient _gsplatServerClient;
@@ -124,7 +123,6 @@ namespace Genesis.RoomScan.Editor
             _triplanarCache = FindAny<TriplanarCache>();
             _persistence = FindAny<RoomScanPersistence>();
             _keyframeCollector = FindAny<KeyframeCollector>();
-            _pointCloudExporter = FindAny<PointCloudExporter>();
             _gsplatManager = FindAny<GSplatManager>();
             _ugsRenderer = FindAny<GaussianSplatRenderer>();
             _gsplatServerClient = FindAny<GSplatServerClient>();
@@ -577,7 +575,6 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("PassthroughCameraAccess", _pcaComponent != null);
             StatusRowOptional("TriplanarCache", _triplanarCache != null);
             StatusRowOptional("KeyframeCollector", _keyframeCollector != null);
-            StatusRowOptional("PointCloudExporter", _pointCloudExporter != null);
             StatusRowOptional("GSplatManager (Gaussian Splat)", _gsplatManager != null);
             StatusRowOptional("GaussianSplatRenderer (UGS)", _ugsRenderer != null);
             StatusRowOptional("GSplatServerClient (PC training)", _gsplatServerClient != null);
@@ -682,9 +679,6 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<TriplanarCache>(root);
             if (root.GetComponent<TextureRefinement>() == null)
                 Undo.AddComponent<TextureRefinement>(root);
-            if (root.GetComponent<PointCloudExporter>() == null)
-                Undo.AddComponent<PointCloudExporter>(root);
-
             // GSplat module (separate assembly)
             SetupGSplatModule(root);
 
