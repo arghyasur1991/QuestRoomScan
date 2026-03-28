@@ -790,8 +790,7 @@ namespace Genesis.RoomScan
                 };
 
                 if (_textureRefinement.postBakeSimplificationRatio < 1f)
-                    result = await _textureRefinement.SimplifyRefinedMeshAsync(
-                        result, _textureRefinement.postBakeSimplificationRatio);
+                    result = await _textureRefinement.SimplifyRefinedMeshAsync(result);
 
                 ApplyRefinedAtlas(result);
                 LastRefinedResult = result;

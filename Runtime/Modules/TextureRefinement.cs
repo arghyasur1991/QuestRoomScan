@@ -1310,8 +1310,9 @@ namespace Genesis.RoomScan
         /// meshopt_simplifyWithAttributes with UV coordinates as vertex attributes and
         /// border-locked vertices to prevent seam tearing.
         /// </summary>
-        internal async Task<RefinedTextureResult> SimplifyRefinedMeshAsync(RefinedTextureResult source, float ratio)
+        internal async Task<RefinedTextureResult> SimplifyRefinedMeshAsync(RefinedTextureResult source)
         {
+            float ratio = postBakeSimplificationRatio;
             if (ratio >= 1f) return source;
             ratio = Mathf.Clamp(ratio, 0.05f, 1f);
 
