@@ -480,9 +480,9 @@ Set `TextureRefinement.postBakeSimplificationRatio` in the Inspector (e.g. 0.5 f
 ### Minimal Integration Checklist
 
 1. Add QuestRoomScan package to your project
-2. Run **RoomScan > Setup Scene** wizard
-3. Disable `TriplanarCache` in inspector (save GPU memory)
-4. Set `postBakeSimplificationRatio` to 0.3–0.5 on `TextureRefinement`
+2. Run **RoomScan > Setup Scene** wizard (recommended with Game-Ready Preset)
+3. Disable `TriplanarCache` in inspector (save GPU memory) (Doesn't apply if Game-Ready preset used for setup)
+4. Set `postBakeSimplificationRatio` to 0.3–0.5 on `TextureRefinement` (Game-Ready Preset auto sets it to 0.5)
 5. Subscribe to `RefinedMeshReady` event
 6. After refinement: call `ReleaseScanResources()`, enter gameplay
 7. On subsequent launches: use `LoadRefinedOnlyAsync(pkgId)` to skip scanning
