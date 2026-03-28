@@ -172,7 +172,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 // 3. Wireframe: discard interior, white edges blending to vertex color at vertices
                 if (_RSWireframe > 0.5)
                 {
-                    float thickness = max(_RSWireThickness, 0.5);
+                    float thickness = max(_RSWireThickness, 0.2);
                     float3 bary = IN.barycentric;
                     float3 dx = ddx(bary);
                     float3 dy = ddy(bary);
@@ -180,12 +180,15 @@ Shader "Genesis/ScanMeshVertexColor"
                     float3 edge = smoothstep(0.0, edgeWidth * thickness, bary);
                     float minEdge = min(edge.x, min(edge.y, edge.z));
 
-                    if (minEdge > 0.95)
+                    // Discard interior — threshold scales inversely with thickness
+                    float discardThreshold = saturate(1.0 - thickness * 0.15);
+                    if (minEdge > discardThreshold)
                         discard;
 
+                    // Vertex proximity: 1 at vertex, ~0.5 at edge midpoint
                     float vertexProximity = max(bary.x, max(bary.y, bary.z));
-                    float vertBlend = smoothstep(0.7, 1.0, vertexProximity);
-                    half3 wireColor = lerp(half3(1, 1, 1), baseColor, vertBlend);
+                    float vertBlend = smoothstep(0.35, 0.85, vertexProximity);
+                    half3 wireColor = lerp(half3(0.9, 0.9, 0.92), baseColor, vertBlend);
                     return half4(wireColor, 1);
                 }
 

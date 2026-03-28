@@ -47,7 +47,7 @@ namespace Genesis.RoomScan
         [Header("Render Mode")]
         [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Wireframe;
 
-        [SerializeField, Range(0.5f, 4f), Tooltip("Wireframe line thickness multiplier")]
+        [SerializeField, Range(0.2f, 5f), Tooltip("Wireframe line thickness multiplier")]
         private float wireThickness = 1.5f;
 
         [SerializeField, Tooltip("Show blue tint overlay on frozen voxels (Vertex/Triplanar/Wireframe modes)")]
@@ -271,6 +271,11 @@ namespace Genesis.RoomScan
                     _keyframeCollector.ReinitExportDir();
             }
 
+            // Enforce triplanar override every frame (not just while scanning)
+            // so loaded scans don't flash triplanar before ApplyRenderMode runs.
+            if (renderMode == ScanRenderMode.Vertex)
+                Shader.SetGlobalFloat(TriAvailableID, 0f);
+
             if (!IsScanning || !DepthCapture.DepthAvailable) return;
 
             float t = Time.time;
@@ -280,8 +285,6 @@ namespace Genesis.RoomScan
                 _lastIntegrationTime = t;
 
                 ProvideColorFrame();
-                if (renderMode == ScanRenderMode.Vertex)
-                    Shader.SetGlobalFloat(TriAvailableID, 0f);
                 _volumeIntegrator.Integrate();
                 Integrated?.Invoke();
                 _integrateCount++;
