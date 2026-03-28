@@ -115,6 +115,7 @@ namespace Genesis.RoomScan
         private Vector2 _pendingSensorRes;
         private Vector2 _pendingCurrentRes;
         private RenderTexture _camFrameCopy;
+        private Texture2D _dummyCamTex;
 
         private void Awake()
         {
@@ -144,6 +145,10 @@ namespace Genesis.RoomScan
             _unfreezeKernel = new ComputeKernelHelper(compute, "UnfreezeInFrustum");
             _unfreezeKernel.Set(VolumeRWID, _volume);
 
+            _dummyCamTex = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+            _dummyCamTex.SetPixel(0, 0, Color.black);
+            _dummyCamTex.Apply(false, true);
+
             SetShaderConstants();
             Clear();
 
@@ -157,6 +162,7 @@ namespace Genesis.RoomScan
             if (_volume) Destroy(_volume);
             if (_colorVolume) Destroy(_colorVolume);
             if (_camFrameCopy) Destroy(_camFrameCopy);
+            if (_dummyCamTex) Destroy(_dummyCamTex);
         }
 
         private void CreateVolume()
@@ -473,6 +479,7 @@ namespace Genesis.RoomScan
             }
             else
             {
+                compute.SetTexture(_integrateKernel.KernelIndex, CamRGBID, _dummyCamTex);
                 compute.SetInt(CamAvailableID, 0);
             }
 
