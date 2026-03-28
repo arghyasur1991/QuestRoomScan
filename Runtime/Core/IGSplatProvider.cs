@@ -30,8 +30,8 @@ namespace Genesis.RoomScan
         /// <summary>Server-side mesh enhancement.</summary>
         Task<byte[]> EnhanceMeshAsync(byte[] meshBin, int smoothIterations, bool enablePlaneSnap);
 
-        /// <summary>Uploads training data to the server.</summary>
-        Task<bool> UploadTrainingDataAsync(Matrix4x4 keyframeRelocation);
+        /// <summary>Uploads training data to the server from the given keyframe directory.</summary>
+        Task<bool> UploadTrainingDataAsync(string keyframeDir, Matrix4x4 keyframeRelocation);
 
         // ── Server / training status (used by debug UI) ──
 

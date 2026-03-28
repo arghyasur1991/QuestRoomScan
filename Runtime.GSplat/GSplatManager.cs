@@ -191,10 +191,10 @@ namespace Genesis.RoomScan.GSplat
             return await _serverClient.EnhanceMeshAsync(meshBin, smoothIterations, enablePlaneSnap: enablePlaneSnap);
         }
 
-        public async Task<bool> UploadTrainingDataAsync(UnityEngine.Matrix4x4 keyframeRelocation)
+        public async Task<bool> UploadTrainingDataAsync(string keyframeDir, UnityEngine.Matrix4x4 keyframeRelocation)
         {
             if (_serverClient == null) return false;
-            return await _serverClient.UploadTrainingData(keyframeRelocation);
+            return await _serverClient.UploadTrainingData(keyframeDir, keyframeRelocation);
         }
 
         // ── IGSplatProvider: server / training status ──
