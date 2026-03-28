@@ -622,6 +622,9 @@ namespace Genesis.RoomScan.Editor
             // ── Game-Ready Preset ──
             DrawGameReadyPreset();
 
+            // ── Debug Preset ──
+            DrawDebugPreset();
+
             // ── VR Input Infrastructure ──
             BeginSection("VR INPUT INFRASTRUCTURE");
             StatusRow("EventSystem + OVRInputModule", _eventSystem != null && _ovrInputModule != null);
@@ -765,22 +768,16 @@ namespace Genesis.RoomScan.Editor
             BeginSection("GAME-READY PRESET");
             EditorGUILayout.HelpBox(
                 "Lightweight module set for game integration: scan \u2192 refine \u2192 release GPU \u2192 play. " +
-                "Skips TriplanarCache and Gaussian Splat to save ~400 MB GPU during scanning.",
+                "Skips TriplanarCache, Gaussian Splat, and debug tools to save GPU and keep the build lean.",
                 MessageType.Info);
 
             bool hasPCA = _pcaComponent != null;
             bool hasPCAProvider = _cameraProvider != null;
-            bool hasKeyframes = _keyframeCollector != null;
             bool hasRefinement = _textureRefinement != null;
-            bool hasInput = _inputHandler != null;
-            bool hasDebug = _debugMenu != null;
 
             StatusRowOptional("PassthroughCameraAccess (camera RGB)", hasPCA);
             StatusRowOptional("PassthroughCameraProvider", hasPCAProvider);
-            StatusRowOptional("KeyframeCollector (keyframe capture)", hasKeyframes);
             StatusRowOptional("TextureRefinement (atlas baking)", hasRefinement);
-            StatusRowOptional("RoomScanInputHandler (VR controls)", hasInput);
-            StatusRowOptional("DebugMenuController (HUD)", hasDebug);
 
             if (hasRefinement)
             {
@@ -811,8 +808,7 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
             }
 
-            bool gameReadyMissing = !hasPCA || !hasPCAProvider || !hasKeyframes || !hasRefinement
-                                    || !hasInput || !hasDebug;
+            bool gameReadyMissing = !hasPCA || !hasPCAProvider || !hasRefinement;
             if (gameReadyMissing)
             {
                 GUILayout.Space(2);
@@ -820,6 +816,38 @@ namespace Genesis.RoomScan.Editor
                 GUILayout.FlexibleSpace();
                 if (GUILayout.Button("Add Game-Ready Modules", GUILayout.Width(200)))
                     FixGameReadyModules();
+                EditorGUILayout.EndHorizontal();
+            }
+
+            EndSection();
+        }
+
+        void DrawDebugPreset()
+        {
+            BeginSection("DEBUG PRESET");
+            EditorGUILayout.HelpBox(
+                "Development tools: debug HUD, input handler, and camera/depth overlays. " +
+                "Overlays are added disabled by default.",
+                MessageType.Info);
+
+            bool hasInput = _inputHandler != null;
+            bool hasDebug = _debugMenu != null;
+            bool hasCamOverlay = _cameraDebug != null;
+            bool hasDepthOverlay = _depthDebug != null;
+
+            StatusRowOptional("RoomScanInputHandler (VR controls)", hasInput);
+            StatusRowOptional("DebugMenuController (HUD)", hasDebug);
+            StatusRowOptional("CameraDebugOverlay (disabled)", hasCamOverlay);
+            StatusRowOptional("DepthDebugOverlay (disabled)", hasDepthOverlay);
+
+            bool debugMissing = !hasInput || !hasDebug || !hasCamOverlay || !hasDepthOverlay;
+            if (debugMissing)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Add Debug Modules", GUILayout.Width(200)))
+                    FixDebugModules();
                 EditorGUILayout.EndHorizontal();
             }
 
@@ -841,20 +869,6 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<TextureRefinement>() == null)
                 Undo.AddComponent<TextureRefinement>(root);
 
-            if (root.GetComponent<RoomScanInputHandler>() == null)
-                Undo.AddComponent<RoomScanInputHandler>(root);
-
-            if (FindAny<DebugMenuController>() == null)
-            {
-                var debugGo = new GameObject("DebugMenu");
-                debugGo.transform.SetParent(root.transform);
-                Undo.RegisterCreatedObjectUndo(debugGo, "Create DebugMenu");
-                Undo.AddComponent<UIDocument>(debugGo);
-                Undo.AddComponent<DebugMenuController>(debugGo);
-            }
-            EnsureDebugMenuAssets();
-
-            // Configure TextureRefinement for game use
             var tr = root.GetComponent<TextureRefinement>();
             if (tr != null)
             {
@@ -868,6 +882,44 @@ namespace Genesis.RoomScan.Editor
                     Debug.Log("[RoomScan Setup] Set postBakeSimplificationRatio to 0.5 for game-ready mesh");
                 }
             }
+
+            foreach (var c in root.GetComponents<Component>())
+                WireComponent(c);
+
+            MarkDirty();
+            Refresh();
+        }
+
+        void FixDebugModules()
+        {
+            var root = FindOrCreateRoot();
+
+            if (root.GetComponent<RoomScanner>() == null)
+                Undo.AddComponent<RoomScanner>(root);
+
+            if (root.GetComponent<RoomScanInputHandler>() == null)
+                Undo.AddComponent<RoomScanInputHandler>(root);
+
+            if (root.GetComponent<CameraDebugOverlay>() == null)
+            {
+                var c = Undo.AddComponent<CameraDebugOverlay>(root);
+                c.enabled = false;
+            }
+            if (root.GetComponent<DepthDebugOverlay>() == null)
+            {
+                var c = Undo.AddComponent<DepthDebugOverlay>(root);
+                c.enabled = false;
+            }
+
+            if (FindAny<DebugMenuController>() == null)
+            {
+                var debugGo = new GameObject("DebugMenu");
+                debugGo.transform.SetParent(root.transform);
+                Undo.RegisterCreatedObjectUndo(debugGo, "Create DebugMenu");
+                Undo.AddComponent<UIDocument>(debugGo);
+                Undo.AddComponent<DebugMenuController>(debugGo);
+            }
+            EnsureDebugMenuAssets();
 
             foreach (var c in root.GetComponents<Component>())
                 WireComponent(c);

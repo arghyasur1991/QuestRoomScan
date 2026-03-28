@@ -453,6 +453,8 @@ namespace Genesis.RoomScan
             _lastIntegrationTime = t;
             _lastMeshTime = t;
 
+            _cameraAvailable = false;
+
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StartCapture();
             _depthCapture.StartDepthCapture();
