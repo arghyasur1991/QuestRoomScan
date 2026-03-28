@@ -36,7 +36,7 @@ namespace Genesis.RoomScan
             set => gpuMeshMaterial = value;
         }
 
-        public void Initialize(GPUSurfaceNets surfaceNets, Bounds volumeBounds)
+        internal void Initialize(GPUSurfaceNets surfaceNets, Bounds volumeBounds)
         {
             _surfaceNets = surfaceNets;
             _bounds = volumeBounds;

@@ -6,7 +6,7 @@ using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
 {
-    public class GPUSurfaceNets : IDisposable
+    internal class GPUSurfaceNets : IDisposable
     {
         private readonly ComputeShader _compute;
 

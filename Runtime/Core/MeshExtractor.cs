@@ -45,7 +45,7 @@ namespace Genesis.RoomScan
         private GPUMeshRenderer _gpuRenderer;
         private int _extractCount;
 
-        public GPUSurfaceNets GpuSurfaceNets => _gpuSurfaceNets;
+        internal GPUSurfaceNets GpuSurfaceNets => _gpuSurfaceNets;
         public bool IsInitialized => _gpuSurfaceNets != null;
 
         private VolumeIntegrator _volume;
