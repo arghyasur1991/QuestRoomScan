@@ -25,6 +25,7 @@ namespace Genesis.RoomScan.UI
 
         // Scan view elements
         private Label _valScanning, _valIntegrations, _valKeyframes, _valRender, _valPackage;
+        private Label _valProgress, _valPhase, _valColorCoverage, _valFrozen, _valMeshStats;
         private Button _btnToggleScan, _btnRenderMode, _btnFreezeTint, _btnSaveScan, _btnDeleteArtifact;
 
         // Saved scans view
@@ -149,6 +150,11 @@ namespace Genesis.RoomScan.UI
             _valKeyframes = _root.Q<Label>("val-keyframes");
             _valRender = _root.Q<Label>("val-render");
             _valPackage = _root.Q<Label>("val-package");
+            _valProgress = _root.Q<Label>("val-progress");
+            _valPhase = _root.Q<Label>("val-phase");
+            _valColorCoverage = _root.Q<Label>("val-color-coverage");
+            _valFrozen = _root.Q<Label>("val-frozen");
+            _valMeshStats = _root.Q<Label>("val-mesh-stats");
             _btnToggleScan = _root.Q<Button>("btn-toggle-scan");
             _btnRenderMode = _root.Q<Button>("btn-render-mode");
             _btnFreezeTint = _root.Q<Button>("btn-freeze-tint");
@@ -466,6 +472,16 @@ namespace Genesis.RoomScan.UI
 
             var kf = FindAnyObjectByType<KeyframeCollector>();
             if (kf != null) SetLabel(_valKeyframes, kf.SavedCount.ToString());
+
+            var progress = scanner.CurrentProgress;
+            var cov = progress.Coverage;
+            SetLabel(_valProgress, $"{progress.OverallProgress:P0}");
+            SetLabel(_valPhase, progress.Phase.ToString());
+            SetLabel(_valColorCoverage, $"{cov.ColorCoverage:P0}");
+            SetLabel(_valFrozen, $"{cov.FrozenFraction:P0}");
+            SetLabel(_valMeshStats, cov.MeshVertexCount > 0
+                ? $"{cov.MeshVertexCount / 1000f:F1}K verts, {cov.MeshTriangleCount / 1000f:F1}K tris"
+                : "--");
 
             // Delete artifact button visibility
             if (_btnDeleteArtifact != null)

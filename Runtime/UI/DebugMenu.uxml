@@ -53,6 +53,28 @@
                     <ui:Label name="val-package" text="--" class="status-val" />
                 </ui:VisualElement>
 
+                <ui:Label text="COVERAGE" class="view-subtitle" />
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Progress" class="status-key" />
+                    <ui:Label name="val-progress" text="--" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Phase" class="status-key" />
+                    <ui:Label name="val-phase" text="--" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Color Coverage" class="status-key" />
+                    <ui:Label name="val-color-coverage" text="--" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Frozen" class="status-key" />
+                    <ui:Label name="val-frozen" text="--" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Mesh" class="status-key" />
+                    <ui:Label name="val-mesh-stats" text="--" class="status-val" />
+                </ui:VisualElement>
+
                 <ui:VisualElement class="btn-group">
                     <ui:Button name="btn-toggle-scan" text="Stop Scanning" class="action-btn" />
                     <ui:Button name="btn-render-mode" text="Render: Vertex" class="action-btn action-btn--primary" />
