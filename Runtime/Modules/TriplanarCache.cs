@@ -6,8 +6,19 @@ using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
 {
-    public class TriplanarCache : MonoBehaviour
+    /// <summary>
+    /// Maintains three axis-aligned color textures (XZ, XY, YZ) and matching depth maps
+    /// that store camera frames projected onto the room mesh via compute-shader splatting.
+    /// These textures drive triplanar sampling in the scan visualization shader.
+    /// </summary>
+    public class TriplanarCache : MonoBehaviour, IRoomScanModule
     {
+        /// <inheritdoc />
+        public string ModuleName => "Triplanar Cache";
+
+        private RoomScanner _scanner;
+
+        /// <summary>Singleton instance set in <see cref="Awake"/>.</summary>
         public static TriplanarCache Instance { get; private set; }
 
         [SerializeField, Tooltip("When disabled, vertex colors are used instead. Saves ~192MB GPU memory.")]
@@ -18,6 +29,7 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Auto-calculated if 0. Higher = faster fill but more GPU work per pixel")]
         private int splatRadiusOverride = 0;
 
+        /// <summary>Whether triplanar texturing is active (false = vertex-color fallback).</summary>
         public bool IsTriplanarEnabled => enableTriplanar;
 
         private RenderTexture _triXZ, _triXY, _triYZ;
@@ -27,11 +39,17 @@ namespace Genesis.RoomScan
         private ComputeKernelHelper _clearKernel;
         private bool _kernelsReady;
 
+        /// <summary>Color texture for the XZ (floor/ceiling) projection plane.</summary>
         public RenderTexture TriXZ => _triXZ;
+        /// <summary>Color texture for the XY (front/back wall) projection plane.</summary>
         public RenderTexture TriXY => _triXY;
+        /// <summary>Color texture for the YZ (left/right wall) projection plane.</summary>
         public RenderTexture TriYZ => _triYZ;
+        /// <summary>Depth buffer for the XZ projection plane (R8, used for relocation).</summary>
         public RenderTexture DepthXZ => _depthXZ;
+        /// <summary>Depth buffer for the XY projection plane.</summary>
         public RenderTexture DepthXY => _depthXY;
+        /// <summary>Depth buffer for the YZ projection plane.</summary>
         public RenderTexture DepthYZ => _depthYZ;
 
         static readonly int TriXZID = Shader.PropertyToID("_RSTriXZ");
@@ -60,6 +78,22 @@ namespace Genesis.RoomScan
         static readonly int MaxUpdateDistID = Shader.PropertyToID("gsMaxUpdateDist");
 
         private void Awake() => Instance = this;
+
+        /// <inheritdoc />
+        public void OnModuleInitialize(RoomScanner scanner)
+        {
+            _scanner = scanner;
+            scanner.ColorFrameProvided += OnColorFrame;
+        }
+
+        private void OnColorFrame(Texture frame, Pose pose, Vector2 focal, Vector2 principal,
+            Vector2 sensor, Vector2 current)
+        {
+            if (_scanner == null || _scanner.VolumeIntegrator == null) return;
+            DispatchBake(frame, pose.position, pose.rotation, focal, principal, sensor, current,
+                _scanner.VolumeIntegrator.CameraExposure,
+                _scanner.VolumeIntegrator.ExclusionZones);
+        }
 
         private void Start()
         {
@@ -135,6 +169,7 @@ namespace Genesis.RoomScan
             return rt;
         }
 
+        /// <summary>Clears all triplanar color and depth textures to black via compute dispatch.</summary>
         public void Clear()
         {
             if (!enableTriplanar || !_kernelsReady) return;
@@ -148,6 +183,7 @@ namespace Genesis.RoomScan
             _clearKernel.DispatchFit(textureResolution, textureResolution);
         }
 
+        /// <summary>Pushes the current triplanar textures into global shader properties.</summary>
         public void UpdateShaderGlobals()
         {
             if (_triXZ) Shader.SetGlobalTexture(TriXZID, _triXZ);
@@ -306,6 +342,11 @@ namespace Genesis.RoomScan
         }
 
         private int _bakeCount;
+
+        /// <summary>
+        /// Projects a camera frame into the triplanar textures using depth-aware compute splatting.
+        /// Skipped if triplanar is disabled, depth is unavailable, or the frame is null.
+        /// </summary>
         public void DispatchBake(Texture camFrame, Vector3 camPos, Quaternion camRot,
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes,
             float exposure, List<Transform> exclusionZones)
@@ -394,6 +435,7 @@ namespace Genesis.RoomScan
             _camFrameCopy.Create();
         }
 
+        /// <summary>Saves all triplanar color and depth textures to raw files in the given directory.</summary>
         public void Save(string directory)
         {
             if (!enableTriplanar) return;
@@ -418,6 +460,7 @@ namespace Genesis.RoomScan
                     ReadDepthRTBytes(_depthXZ), ReadDepthRTBytes(_depthXY), ReadDepthRTBytes(_depthYZ));
         }
 
+        /// <summary>Reads an RGBA32 RenderTexture back to CPU as a raw byte array.</summary>
         public static byte[] ReadRTBytes(RenderTexture rt)
         {
             var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGBA32, false, true);
@@ -431,6 +474,7 @@ namespace Genesis.RoomScan
             return data;
         }
 
+        /// <summary>Reads an R8 depth RenderTexture back to CPU as a raw byte array.</summary>
         public static byte[] ReadDepthRTBytes(RenderTexture rt)
         {
             var tex = new Texture2D(rt.width, rt.height, TextureFormat.R8, false, true);
@@ -444,6 +488,7 @@ namespace Genesis.RoomScan
             return data;
         }
 
+        /// <summary>Loads triplanar color textures from raw files in the given directory.</summary>
         public void Load(string directory)
         {
             if (!enableTriplanar) return;
@@ -454,6 +499,7 @@ namespace Genesis.RoomScan
             Logger.Info($"Triplanar textures loaded from {directory}");
         }
 
+        /// <summary>Loads triplanar depth textures from raw files in the given directory.</summary>
         public void LoadDepth(string directory)
         {
             if (!enableTriplanar) return;

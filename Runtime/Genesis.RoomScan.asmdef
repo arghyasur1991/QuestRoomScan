@@ -12,8 +12,7 @@
     "Unity.RenderPipelines.Core.Runtime",
     "meta.xr.mrutilitykit",
     "Oculus.VR",
-    "UnityEngine.UI",
-    "GaussianSplatting"
+    "UnityEngine.UI"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],

@@ -9,7 +9,10 @@ namespace Genesis.RoomScan
     /// </summary>
     public interface ICameraProvider
     {
+        /// <summary>True when the provider has a valid frame available this tick.</summary>
         bool IsReady { get; }
+
+        /// <summary>The most recent camera RGB frame as a GPU texture.</summary>
         Texture CurrentFrame { get; }
 
         /// <summary>Camera-to-world matrix (extrinsics).</summary>
@@ -18,7 +21,10 @@ namespace Genesis.RoomScan
         /// <summary>Camera projection matrix (intrinsics → projection).</summary>
         Matrix4x4 ProjectionMatrix { get; }
 
+        /// <summary>Begins camera frame acquisition.</summary>
         void StartCapture();
+
+        /// <summary>Stops camera frame acquisition and releases resources.</summary>
         void StopCapture();
     }
 }

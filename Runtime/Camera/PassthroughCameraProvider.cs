@@ -20,6 +20,7 @@ namespace Genesis.RoomScan
 
         private PassthroughCameraAccess _pca;
 
+        /// <summary>True when the camera subsystem is running and delivered a new frame this tick.</summary>
         public bool IsReady => _pca != null && _pca.IsPlaying && _pca.IsUpdatedThisFrame;
 
         /// <summary>
@@ -28,8 +29,10 @@ namespace Genesis.RoomScan
         /// </summary>
         public bool IsPlaying => _pca != null && _pca.IsPlaying;
 
+        /// <summary>The latest passthrough camera RGB texture, or null if not playing.</summary>
         public Texture CurrentFrame => _pca != null && _pca.IsPlaying ? _pca.GetTexture() : null;
 
+        /// <summary>Camera-to-world matrix derived from the passthrough camera pose.</summary>
         public Matrix4x4 CameraToWorld
         {
             get
@@ -40,6 +43,7 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>World-space pose of the passthrough camera this frame.</summary>
         public Pose CameraPose
         {
             get
@@ -49,20 +53,25 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>Camera intrinsic focal length in pixels (fx, fy).</summary>
         public Vector2 FocalLength =>
             _pca != null && _pca.IsPlaying ? _pca.Intrinsics.FocalLength : Vector2.one;
 
+        /// <summary>Camera intrinsic principal point in pixels (cx, cy).</summary>
         public Vector2 PrincipalPoint =>
             _pca != null && _pca.IsPlaying ? _pca.Intrinsics.PrincipalPoint : Vector2.zero;
 
+        /// <summary>Native sensor resolution in pixels.</summary>
         public Vector2 SensorResolution =>
             _pca != null && _pca.IsPlaying ? _pca.Intrinsics.SensorResolution : new Vector2(1280, 960);
 
+        /// <summary>Actual delivered frame resolution (may differ from sensor resolution).</summary>
         public Vector2 CurrentResolution =>
             _pca != null && _pca.IsPlaying
                 ? new Vector2(_pca.CurrentResolution.x, _pca.CurrentResolution.y)
                 : new Vector2(1280, 960);
 
+        /// <summary>OpenGL-style projection matrix built from camera intrinsics.</summary>
         public Matrix4x4 ProjectionMatrix
         {
             get
@@ -92,6 +101,7 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>Requests headset camera permission (Android) and starts the passthrough camera subsystem.</summary>
         public void StartCapture()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -115,6 +125,7 @@ namespace Genesis.RoomScan
             _pca.enabled = true;
         }
 
+        /// <summary>Disables the passthrough camera subsystem.</summary>
         public void StopCapture()
         {
             if (_pca != null)

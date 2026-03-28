@@ -8,7 +8,7 @@ using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
 {
-    public struct UnwrappedMeshResult
+    internal struct UnwrappedMeshResult
     {
         public Vector3[] Positions;
         public Vector3[] Normals;
@@ -22,7 +22,7 @@ namespace Genesis.RoomScan
         internal int[] OrigIndices;
     }
 
-    public struct RefinedTextureResult
+    internal struct RefinedTextureResult
     {
         public Vector3[] Positions;
         public Vector3[] Normals;
@@ -37,30 +37,55 @@ namespace Genesis.RoomScan
     /// On-device texture refinement pipeline: reads back the GPU mesh,
     /// UV-unwraps via xatlas, and bakes a sharp texture atlas from saved keyframes.
     /// All CPU-heavy work runs on background threads.
+    /// Attach as an optional module on the same GameObject as <see cref="RoomScanner"/>.
     /// </summary>
-    public static class TextureRefinement
+    [RequireComponent(typeof(KeyframeCollector))]
+    public class TextureRefinement : MonoBehaviour, IRoomScanModule
     {
-        private const int GpuVertexStride = 32; // float3 pos + float3 norm + uint color + uint voxelIdx
+        public string ModuleName => "Texture Refinement";
 
-        /// <summary>Enable GPU seam blending after atlas bake. Reduces color discontinuities at UV chart edges.</summary>
+        [Header("Bake Pipeline")]
+        [SerializeField] internal Shader refinedMeshShader;
+        [SerializeField] internal ComputeShader atlasBakeCompute;
+        [Tooltip("Force CPU bake path instead of GPU compute")]
+        [SerializeField] internal bool forceCpuBake = false;
+        [Tooltip("Skip denoise pass after baking")]
+        [SerializeField] internal bool skipDenoise = true;
+        [Tooltip("Multi-view blend: 2-pass GPU bake that blends top views per texel")]
+        [SerializeField] internal bool multiViewBlend = true;
+        [Tooltip("Unsharp mask strength (0 = off)")]
+        [Range(0f, 2f)]
+        [SerializeField] internal float sharpenStrength = 0.8f;
+
+        [Header("HQ Server Refinement")]
+        [Tooltip("Server-side atlas super-resolution scale")]
+        [Range(1, 4)]
+        [SerializeField] internal int hqRefineScale = 2;
+
+        [Header("Unwrap")]
+        [Tooltip("Simplify mesh before UV unwrap (1.0 = no simplification)")]
+        [Range(0.1f, 1f)]
+        [SerializeField] internal float decimationRatio = 1f;
+        [Tooltip("Align charts to 4x4 blocks for faster packing")]
+        [SerializeField] internal bool useBlockAlign = true;
+        [Tooltip("Chart growth cost limit")]
+        [Range(0.5f, 4f)]
+        [SerializeField] internal float xatlasMaxCost = 1.5f;
+
+        private RoomScanner _scanner;
+
+        public void OnModuleInitialize(RoomScanner scanner)
+        {
+            _scanner = scanner;
+        }
+
+        private const int GpuVertexStride = 32;
+
         public static bool EnableSeamBlending { get; set; } = true;
-
-        /// <summary>Pixel radius for gaussian-weighted seam blending (1-5). Higher = wider blend band.</summary>
         public static int SeamBlendRadius { get; set; } = 3;
-
-        /// <summary>Enable multi-view blending: two-pass GPU bake that blends top views per texel
-        /// for smoother, more seamless textures (similar to the HQ server approach).</summary>
         public static bool EnableMultiViewBlend { get; set; } = true;
-
-        /// <summary>Fraction of best score below which a view is excluded from blending (0.0-1.0).
-        /// Lower = more views blended (smoother but potentially blurrier), higher = fewer views (sharper).</summary>
         public static float BlendMinFraction { get; set; } = 0.3f;
-
-        /// <summary>GPU unsharp-mask strength applied after baking (0 = off, 0.5-1.5 typical).
-        /// Restores crispness lost during multi-view blending.</summary>
         public static float SharpenStrength { get; set; } = 0.8f;
-
-        /// <summary>Radius for the Gaussian blur used in unsharp mask (1 = 3x3, 2 = 5x5, 3 = 7x7).</summary>
         public static int SharpenRadius { get; set; } = 2;
 
         public static event Action<string> StatusChanged;

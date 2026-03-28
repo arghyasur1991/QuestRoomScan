@@ -44,7 +44,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 | `com.unity.burst` | 1.8+ | Required by Collections/Mathematics |
 | `com.unity.collections` | 2.4+ | NativeArray for plane detection |
 | `com.unity.mathematics` | 1.3+ | Math types used throughout |
-| `org.nesnausk.gaussian-splatting` | [fork](https://github.com/arghyasur1991/UnityGaussianSplatting) | Gaussian splat rendering with runtime PLY loading |
+| `org.nesnausk.gaussian-splatting` | [fork](https://github.com/arghyasur1991/UnityGaussianSplatting) | **Optional** — Gaussian splat rendering with runtime PLY loading |
 
 Additional project-level dependencies (not in `package.json` — installed via Meta's SDK or XR plugin management):
 - `com.unity.xr.meta-openxr` (bridges Meta depth to AR Foundation)
@@ -63,19 +63,18 @@ Add to your project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git",
-    "org.nesnausk.gaussian-splatting": "https://github.com/arghyasur1991/UnityGaussianSplatting.git?path=package#main"
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git"
   }
 }
 ```
 
-Or clone locally and reference as local packages:
+For Gaussian Splat support, also add the optional dependency:
 
 ```json
 {
   "dependencies": {
-    "com.genesis.roomscan": "file:../QuestRoomScan",
-    "org.nesnausk.gaussian-splatting": "file:/path/to/UnityGaussianSplatting/package"
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git",
+    "org.nesnausk.gaussian-splatting": "https://github.com/arghyasur1991/UnityGaussianSplatting.git?path=package#main"
   }
 }
 ```
@@ -195,41 +194,32 @@ RoomScans/
 
 ### Architecture
 
+The package follows a **modular architecture**. Core components are always required; optional modules can be added via the RoomScanner inspector's "Add Module" dropdown.
+
+**Core (always required):**
+
 ```
-RoomAnchorManager (OVRSpatialAnchor persistence + MRUK fallback → per-artifact relocation)
-       │
-RoomScanPersistence (package-based multi-scan persistence, anchor.json, manifest.json)
-       │
-PassthroughCameraProvider (RGB frames from headset cameras)
-       │
-DepthCapture (AROcclusionManager → depth → normals → dilation, tracking→world)
-       │
-VolumeIntegrator (TSDF + color integration, exclusion zones, prune, freeze, bake relocation)
-       │
-MeshExtractor → GPUSurfaceNets (compute: classify → smooth → snap → temporal → index)
-       │         └── GPUMeshRenderer (Graphics.RenderPrimitivesIndirect, single draw call)
-       │
-       ├── TriplanarCache (bake camera RGB → 3 world-space textures + depth maps,
-       │                    toggleable in inspector — falls back to vertex colors when disabled)
-       │
-       ├── KeyframeCollector (motion-gated JPEG + poses → GSExport/ on disk)
-       │
-       ├── PointCloudExporter (GPU mesh → points3d.ply via AsyncGPUReadback)
-       │
-       ├── GSplatServerClient (ZIP upload → poll status → PLY download)
-       │               │
-       │               GSplatManager + GaussianSplatRenderer (UGS)
-       │               │
-       │               On-device Gaussian Splat rendering
-       │
-       └── TextureRefinement (GPU readback → xatlas UV unwrap → multi-view atlas bake
-                   │              → seam blend → sharpen)
-                   │
-                   ├── RefinedMesh.shader (UV-mapped atlas rendering)
-                   │
-                   └── GSplatServerClient (atlas enhancement: SR + inpaint,
-                                           mesh enhancement: smooth + plane snap)
+RoomScanner (orchestrator, events, scan lifecycle)
+  ├── DepthCapture (AROcclusionManager → depth → normals → dilation, tracking→world)
+  ├── VolumeIntegrator (TSDF + color integration, exclusion zones, prune, freeze)
+  ├── MeshExtractor → GPUSurfaceNets → GPUMeshRenderer (fully GPU-driven mesh)
+  ├── RoomScanPersistence (package-based multi-scan persistence)
+  └── RoomAnchorManager (OVRSpatialAnchor relocation)
 ```
+
+**Optional modules (add via inspector):**
+
+```
+  ├── PassthroughCameraProvider (RGB frames from headset cameras)
+  ├── TriplanarCache (bake camera RGB → 3 world-space textures + depth maps)
+  ├── TextureRefinement (GPU readback → xatlas UV unwrap → multi-view atlas bake)
+  │     └── requires KeyframeCollector (auto-added)
+  ├── PointCloudExporter (GPU mesh → points3d.ply via AsyncGPUReadback)
+  └── [separate assembly] GSplatManager + GSplatServerClient (Gaussian Splat training & rendering)
+        └── requires KeyframeCollector + PointCloudExporter (auto-added)
+```
+
+All optional modules implement `IRoomScanModule` and are discovered automatically at startup. The `GaussianSplatting` package dependency lives in the separate `Genesis.RoomScan.GSplat` assembly — consumers who don't need Gaussian Splats can omit it entirely.
 
 See [ALGORITHM.md](ALGORITHM.md) for the full technical reference.
 

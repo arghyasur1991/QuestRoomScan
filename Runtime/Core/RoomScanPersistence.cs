@@ -53,12 +53,20 @@ namespace Genesis.RoomScan
 
     // ─────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Manages saving and loading scan packages (TSDF volume, triplanar textures, keyframes,
+    /// splat PLYs, refined meshes) to persistent storage with spatial-anchor–based relocation.
+    /// Each scan is stored as a versioned package directory under <c>RoomScans/</c>.
+    /// </summary>
     public class RoomScanPersistence : MonoBehaviour, IRoomScanModule
     {
+        /// <summary>Singleton instance set in <see cref="Awake"/>.</summary>
         public static RoomScanPersistence Instance { get; private set; }
 
+        /// <inheritdoc />
         public string ModuleName => "Room Persistence";
 
+        /// <inheritdoc />
         public void OnModuleInitialize(RoomScanner scanner) { }
 
         private const uint Magic = 0x48534D52; // "RMSH"
@@ -66,10 +74,16 @@ namespace Genesis.RoomScan
         private const uint RefinedMeshMagic = 0x46524D52; // "RMRF"
         private const int RefinedMeshVersion = 1;
 
+        /// <summary>True while an async save operation is in progress.</summary>
         public bool IsSaving { get; private set; }
+
+        /// <summary>True while an async load operation is in progress.</summary>
         public bool IsLoading { get; private set; }
 
+        /// <summary>Raised on the main thread after a package save completes successfully.</summary>
         public event Action SaveCompleted;
+
+        /// <summary>Raised on the main thread after a package load completes successfully.</summary>
         public event Action LoadCompleted;
 
         /// <summary>Currently active package ID (set after save or load).</summary>
@@ -81,6 +95,7 @@ namespace Genesis.RoomScan
         private string RoomScansRoot => Path.Combine(Application.persistentDataPath, "RoomScans");
         private string ManifestPath => Path.Combine(RoomScansRoot, "manifest.json");
 
+        /// <summary>Absolute path to the active package's directory, or null if no package is active.</summary>
         public string ActivePackageDirectory =>
             HasActivePackage ? Path.Combine(RoomScansRoot, ActivePackageId) : null;
 
@@ -107,6 +122,7 @@ namespace Genesis.RoomScan
         //  Manifest I/O
         // ─────────────────────────────────────────────────────────────
 
+        /// <summary>Reads and deserializes the package manifest from disk. Returns an empty manifest on failure.</summary>
         public ScanPackageManifest ReadManifest()
         {
             if (!File.Exists(ManifestPath))
@@ -130,6 +146,7 @@ namespace Genesis.RoomScan
             File.WriteAllText(ManifestPath, JsonUtility.ToJson(manifest, true));
         }
 
+        /// <summary>Returns all saved scan packages sorted newest-first.</summary>
         public List<ScanPackageEntry> ListPackages()
         {
             var manifest = ReadManifest();
@@ -137,6 +154,7 @@ namespace Genesis.RoomScan
             return manifest.packages;
         }
 
+        /// <summary>Returns true if at least one scan package exists on disk.</summary>
         public bool HasAnyPackage()
         {
             var manifest = ReadManifest();
@@ -184,6 +202,10 @@ namespace Genesis.RoomScan
         //  Save — creates a new package with base scan data
         // ─────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Creates a new package directory, reads TSDF/color volumes from GPU, saves scan.bin,
+        /// anchor data, triplanar textures, and keyframes. Sets <see cref="ActivePackageId"/> on success.
+        /// </summary>
         public async Task<bool> SaveToNewPackageAsync()
         {
             var vi = VolumeIntegrator.Instance;
@@ -316,6 +338,10 @@ namespace Genesis.RoomScan
         //  Save artifact to active package
         // ─────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Persists an artifact (splat, refined mesh, HQ atlas, enhanced mesh) to the active package.
+        /// Updates anchor.json with the current anchor matrix and the manifest flags.
+        /// </summary>
         public async Task<bool> SaveArtifactAsync(ArtifactType type, byte[] data,
             RefinedTextureResult? refinedResult = null)
         {
@@ -431,6 +457,10 @@ namespace Genesis.RoomScan
         //  Load package
         // ─────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Loads a saved scan package by ID: restores TSDF/color volumes, triplanar textures,
+        /// splat, refined mesh, and HQ atlas. Applies spatial-anchor relocation if available.
+        /// </summary>
         public async Task<bool> LoadPackageAsync(string pkgId)
         {
             string pkgDir = Path.Combine(RoomScansRoot, pkgId);
@@ -756,6 +786,7 @@ namespace Genesis.RoomScan
         //  Delete package
         // ─────────────────────────────────────────────────────────────
 
+        /// <summary>Deletes a package's directory, erases its spatial anchor, and removes it from the manifest.</summary>
         public async Task DeletePackageAsync(string pkgId)
         {
             string pkgDir = Path.Combine(RoomScansRoot, pkgId);
@@ -792,6 +823,7 @@ namespace Genesis.RoomScan
             Logger.Info($"Package deleted: {pkgId}");
         }
 
+        /// <summary>Clears the in-memory active package reference without deleting files on disk.</summary>
         public void ClearActivePackage()
         {
             ActivePackageId = null;

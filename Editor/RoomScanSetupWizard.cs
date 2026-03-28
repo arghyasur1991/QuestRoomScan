@@ -145,9 +145,10 @@ namespace Genesis.RoomScan.Editor
                 "bakeCompute");
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
-            _refinedShaderWired = _roomScanner != null && AreFieldsAssigned(_roomScanner,
+            var _textureRefinement = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
+            _refinedShaderWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "refinedMeshShader");
-            _atlasBakeComputeWired = _roomScanner != null && AreFieldsAssigned(_roomScanner,
+            _atlasBakeComputeWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "atlasBakeCompute");
             _ugsRendererWired = _ugsRenderer != null && AreFieldsAssigned(_ugsRenderer,
                 "m_ShaderSplats", "m_ShaderComposite", "m_ShaderDebugPoints", "m_ShaderDebugBoxes", "m_CSSplatUtilities");
@@ -836,14 +837,17 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(_meshExtractor);
             }
 
-            // RoomScanner — refined mesh + atlas bake shaders
-            if (_roomScanner != null)
+            // TextureRefinement — refined mesh + atlas bake shaders
             {
-                var so = new SerializedObject(_roomScanner);
-                AssignAsset<Shader>(so, "refinedMeshShader", PKG + "RefinedMesh.shader");
-                AssignAsset<ComputeShader>(so, "atlasBakeCompute", PKG + "AtlasBakeCompute.compute");
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_roomScanner);
+                var tr = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
+                if (tr != null)
+                {
+                    var so = new SerializedObject(tr);
+                    AssignAsset<Shader>(so, "refinedMeshShader", PKG + "RefinedMesh.shader");
+                    AssignAsset<ComputeShader>(so, "atlasBakeCompute", PKG + "AtlasBakeCompute.compute");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(tr);
+                }
             }
 
             // UGS GaussianSplatRenderer — shaders + compute
@@ -1072,7 +1076,7 @@ namespace Genesis.RoomScan.Editor
             EndSection();
         }
 
-        static void BuildXAtlasPlugin()
+        internal static void BuildXAtlasPlugin()
         {
             string pkgRoot = Path.GetFullPath("Packages/com.genesis.roomscan/Runtime");
             string srcDir = Path.Combine(pkgRoot, "Native/xatlas");

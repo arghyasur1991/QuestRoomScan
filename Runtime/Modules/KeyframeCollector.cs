@@ -43,8 +43,13 @@ namespace Genesis.RoomScan
         private float _lastCaptureTime;
         private bool _initialized;
 
+        /// <summary>Number of keyframes saved so far in this session.</summary>
         public int SavedCount => _nextId;
+
+        /// <summary>Absolute path to the keyframe export directory on device.</summary>
         public string ExportDirectory => _exportDir;
+
+        private RoomScanner _scanner;
 
         private void Start()
         {
@@ -58,7 +63,23 @@ namespace Genesis.RoomScan
             _prevRotTime = Time.time;
             _initialized = true;
 
+            _scanner = GetComponent<RoomScanner>();
+            if (_scanner != null)
+                _scanner.ColorFrameProvided += OnColorFrame;
+
             Logger.Info($"KeyframeCollector: export dir={_exportDir}");
+        }
+
+        private void OnColorFrame(Texture frame, Pose pose, Vector2 focal, Vector2 principal,
+            Vector2 sensor, Vector2 current)
+        {
+            TrySaveKeyframe(frame, pose.position, pose.rotation, focal, principal, sensor, current);
+        }
+
+        private void OnDestroy()
+        {
+            if (_scanner != null)
+                _scanner.ColorFrameProvided -= OnColorFrame;
         }
 
         /// <summary>

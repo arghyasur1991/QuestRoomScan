@@ -13,12 +13,21 @@ namespace Genesis.RoomScan
     /// Computes per-artifact relocation matrices via <c>R = A_now * Inv(A_create)</c>.
     /// </summary>
     [DisallowMultipleComponent]
-    public class RoomAnchorManager : MonoBehaviour
+    public class RoomAnchorManager : MonoBehaviour, IRoomScanModule
     {
+        /// <inheritdoc />
+        public string ModuleName => "Room Anchor";
+
+        /// <inheritdoc />
+        public void OnModuleInitialize(RoomScanner scanner) { }
+
+        /// <summary>Singleton instance set in <see cref="Awake"/>.</summary>
         public static RoomAnchorManager Instance { get; private set; }
 
+        /// <summary>Raised once when the MRUK room scene has been loaded and the anchor transform is available.</summary>
         public event Action RoomReady;
 
+        /// <summary>True after the MRUK scene has loaded (even if no rooms were found).</summary>
         public bool IsRoomLoaded { get; private set; }
 
         private MRUK _mruk;

@@ -10,8 +10,7 @@
     "com.unity.collections": "2.4.3",
     "com.unity.mathematics": "1.3.2",
     "com.unity.render-pipelines.universal": "17.0.3",
-    "com.meta.xr.mrutilitykit": "85.0.0",
-    "org.nesnausk.gaussian-splatting": "https://github.com/arghyasur1991/UnityGaussianSplatting.git?path=package#main"
+    "com.meta.xr.mrutilitykit": "85.0.0"
   },
   "keywords": [
     "xr",
