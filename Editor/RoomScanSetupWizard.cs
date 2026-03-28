@@ -804,23 +804,25 @@ namespace Genesis.RoomScan.Editor
         {
             BeginSection("SHADER & MATERIAL WIRING");
 
-            StatusRow("DepthCapture compute shaders", _depthCaptureWired);
-            StatusRow("VolumeIntegrator compute shader", _volumeWired);
-            StatusRow("MeshExtractor scan material", _meshMatWired);
-            StatusRow("TriplanarCache bake compute", _triplanarWired);
-            StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired);
-            StatusRow("RefinedMesh shader (texture refine)", _refinedShaderWired);
-            StatusRow("AtlasBakeCompute (GPU bake)", _atlasBakeComputeWired);
-            StatusRow("UGS renderer shaders + compute", _ugsRendererWired);
-            StatusRow("UGS RenderFeature on URP Renderer", _ugsRenderFeatureAdded);
-            StatusRow("URP Deferred Rendering (req. by UGS)", _deferredRendering);
+            bool needsFix = false;
 
-            bool needsFix = !_depthCaptureWired || !_volumeWired ||
-                            !_meshMatWired || !_triplanarWired ||
-                            !_computeShaderWired || !_refinedShaderWired ||
-                            !_atlasBakeComputeWired ||
-                            !_ugsRendererWired || !_ugsRenderFeatureAdded ||
-                            !_deferredRendering;
+            // Core — always present
+            if (_depthCapture != null)   { StatusRow("DepthCapture compute shaders", _depthCaptureWired); needsFix |= !_depthCaptureWired; }
+            if (_volumeIntegrator != null){ StatusRow("VolumeIntegrator compute shader", _volumeWired);    needsFix |= !_volumeWired; }
+            if (_meshExtractor != null)  { StatusRow("MeshExtractor scan material", _meshMatWired);        needsFix |= !_meshMatWired; }
+            if (_meshExtractor != null)  { StatusRow("SurfaceNetsExtract compute shader", _computeShaderWired); needsFix |= !_computeShaderWired; }
+
+            // Optional — only show if the module is attached
+            if (_triplanarCache != null) { StatusRow("TriplanarCache bake compute", _triplanarWired);      needsFix |= !_triplanarWired; }
+
+            var textureRefine = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
+            if (textureRefine != null)   { StatusRow("RefinedMesh shader (texture refine)", _refinedShaderWired); needsFix |= !_refinedShaderWired; }
+            if (textureRefine != null)   { StatusRow("AtlasBakeCompute (GPU bake)", _atlasBakeComputeWired);      needsFix |= !_atlasBakeComputeWired; }
+
+            if (_ugsRenderer != null)    { StatusRow("UGS renderer shaders + compute", _ugsRendererWired);        needsFix |= !_ugsRendererWired; }
+            if (_ugsRenderer != null)    { StatusRow("UGS RenderFeature on URP Renderer", _ugsRenderFeatureAdded); needsFix |= !_ugsRenderFeatureAdded; }
+            if (_ugsRenderer != null)    { StatusRow("URP Deferred Rendering (req. by UGS)", _deferredRendering);  needsFix |= !_deferredRendering; }
+
             if (needsFix)
             {
                 GUILayout.Space(2);
