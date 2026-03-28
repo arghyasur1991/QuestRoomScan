@@ -3,7 +3,7 @@ using UnityEngine.UI;
 
 namespace Genesis.RoomScan
 {
-    public class DepthDebugOverlay : MonoBehaviour
+    internal class DepthDebugOverlay : MonoBehaviour
     {
         [SerializeField] private float canvasDistance = 1.5f;
         [SerializeField] private float canvasScale = 0.001f;

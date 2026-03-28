@@ -7,7 +7,7 @@ namespace Genesis.RoomScan
     /// Debug overlay that shows the passthrough camera feed and status on a world-space canvas.
     /// Attach to the RoomScanner GameObject or any GO with a PassthroughCameraProvider reference.
     /// </summary>
-    public class CameraDebugOverlay : MonoBehaviour
+    internal class CameraDebugOverlay : MonoBehaviour
     {
         [SerializeField] private float canvasDistance = 1.5f;
         [SerializeField] private float canvasScale = 0.001f;
