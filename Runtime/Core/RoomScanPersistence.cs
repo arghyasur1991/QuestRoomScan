@@ -450,7 +450,7 @@ namespace Genesis.RoomScan
                     TryDeleteFile(Path.Combine(pkgDir, "refined_atlas.raw"));
                     TryDeleteFile(Path.Combine(pkgDir, "simplified_mesh.bin"));
                     if (_activeAnchorData != null) _activeAnchorData.refinedMatrixAtCreate = null;
-                    UpdateManifestFlags(pkgId, ArtifactType.SimplifiedMesh, false);
+                    UpdateManifestFlags(ActivePackageId, ArtifactType.SimplifiedMesh, false);
                     break;
                 case ArtifactType.HQRefined:
                     TryDeleteFile(Path.Combine(pkgDir, "hq_atlas.png"));
