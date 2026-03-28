@@ -37,10 +37,6 @@
                     <ui:Label name="val-scanning" text="--" class="status-val" />
                 </ui:VisualElement>
                 <ui:VisualElement class="status-row">
-                    <ui:Label text="Mode" class="status-key" />
-                    <ui:Label name="val-mode" text="--" class="status-val" />
-                </ui:VisualElement>
-                <ui:VisualElement class="status-row">
                     <ui:Label text="Integrations" class="status-key" />
                     <ui:Label name="val-integrations" text="0" class="status-val" />
                 </ui:VisualElement>

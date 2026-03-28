@@ -9,17 +9,6 @@ using UnityEngine.Serialization;
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// Controls how depth integration is driven: continuously or for a bounded duration.
-    /// </summary>
-    public enum ScanMode
-    {
-        /// <summary>Continuous integration at the configured passive rate.</summary>
-        Passive,
-        /// <summary>Time-limited burst integration at the guided rate; reverts to Passive on timeout.</summary>
-        Guided
-    }
-
-    /// <summary>
     /// Visual style applied to the live scan mesh in the GPU renderer.
     /// </summary>
     public enum ScanVisualization
@@ -60,7 +49,6 @@ namespace Genesis.RoomScan
         public static RoomScanner Instance { get; private set; }
 
         [Header("Scan Settings")]
-        [SerializeField] private ScanMode mode = ScanMode.Passive;
         [SerializeField] private ScanVisualization visualization = ScanVisualization.VertexColored;
 
         [SerializeField, FormerlySerializedAs("autoStartOnLoad"), Tooltip(
@@ -69,22 +57,15 @@ namespace Genesis.RoomScan
             "avoids overwriting a restored scan and makes Load Scan easier to test.")]
         private bool startScanningAutomatically = false;
 
-        [Header("Passive Mode Rates")]
-        [SerializeField] private float passiveIntegrationHz = 30f;
-        [SerializeField] private float passiveMeshExtractionHz = 30f;
-
-        [Header("Guided Mode Rates")]
-        [SerializeField] private float guidedIntegrationHz = 30f;
-        [SerializeField] private float guidedMeshExtractionHz = 30f;
+        [Header("Scan Rates")]
+        [SerializeField] private float integrationHz = 30f;
+        [SerializeField] private float meshExtractionHz = 30f;
 
         [Header("Mesh Quality")]
         [SerializeField] private int minIntegrationsBeforeMesh = 5;
 
         [Header("Render Mode")]
         [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Mesh;
-
-        [Header("Guided Mode")]
-        [SerializeField] private float guidedTimeoutSeconds = 60f;
 
         [Header("Logging")]
         [SerializeField] private LogLevel logLevel = LogLevel.Info;
@@ -118,12 +99,6 @@ namespace Genesis.RoomScan
         //  Public read-only state
         // ─────────────────────────────────────────────────────────────
 
-        public ScanMode Mode
-        {
-            get => mode;
-            set => SetMode(value);
-        }
-
         public ScanVisualization Visualization
         {
             get => visualization;
@@ -150,7 +125,6 @@ namespace Genesis.RoomScan
         //  Events
         // ─────────────────────────────────────────────────────────────
 
-        public event Action<ScanMode> ModeChanged;
         public event Action ScanStarted;
         public event Action ScanStopped;
         public event Action<ScanRenderMode> RenderModeChanged;
@@ -172,7 +146,6 @@ namespace Genesis.RoomScan
 
         private float _lastIntegrationTime;
         private float _lastMeshTime;
-        private float _guidedStartTime;
         private bool _started;
         private bool _serverTrainingInProgress;
 
@@ -209,8 +182,8 @@ namespace Genesis.RoomScan
         /// </summary>
         internal Matrix4x4 KeyframeRelocation { get; set; } = Matrix4x4.identity;
 
-        private float IntegrationInterval => 1f / (mode == ScanMode.Guided ? guidedIntegrationHz : passiveIntegrationHz);
-        private float MeshInterval => 1f / (mode == ScanMode.Guided ? guidedMeshExtractionHz : passiveMeshExtractionHz);
+        private float IntegrationInterval => 1f / integrationHz;
+        private float MeshInterval => 1f / meshExtractionHz;
 
         // ─────────────────────────────────────────────────────────────
         //  Lifecycle
@@ -363,12 +336,9 @@ namespace Genesis.RoomScan
             if (t - _lastScannerLog >= 5f)
             {
                 _lastScannerLog = t;
-                Logger.Verbose($"Scanner: integrations={_integrateCount}, mode={mode}, " +
+                Logger.Verbose($"Scanner: integrations={_integrateCount}, " +
                     $"depthAvail={DepthCapture.DepthAvailable}");
             }
-
-            if (mode == ScanMode.Guided && t - _guidedStartTime >= guidedTimeoutSeconds)
-                SetMode(ScanMode.Passive);
         }
 
         // ═════════════════════════════════════════════════════════════
@@ -444,17 +414,6 @@ namespace Genesis.RoomScan
         {
             if (IsScanning) StopScanning();
             else StartScanning();
-        }
-
-        public void SetMode(ScanMode newMode)
-        {
-            if (mode == newMode) return;
-            mode = newMode;
-
-            if (mode == ScanMode.Guided)
-                _guidedStartTime = Time.time;
-
-            ModeChanged?.Invoke(mode);
         }
 
         public void SetVisualization(ScanVisualization vis)

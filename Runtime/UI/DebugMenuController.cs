@@ -25,7 +25,7 @@ namespace Genesis.RoomScan.UI
         private VisualElement[] _views;
 
         // Scan view elements
-        private Label _valScanning, _valMode, _valIntegrations, _valKeyframes, _valRender, _valPackage;
+        private Label _valScanning, _valIntegrations, _valKeyframes, _valRender, _valPackage;
         private Button _btnToggleScan, _btnRenderMode, _btnSaveScan, _btnDeleteArtifact;
 
         // Saved scans view
@@ -140,7 +140,7 @@ namespace Genesis.RoomScan.UI
 
             // Scan view
             _valScanning = _root.Q<Label>("val-scanning");
-            _valMode = _root.Q<Label>("val-mode");
+
             _valIntegrations = _root.Q<Label>("val-integrations");
             _valKeyframes = _root.Q<Label>("val-keyframes");
             _valRender = _root.Q<Label>("val-render");
@@ -418,7 +418,6 @@ namespace Genesis.RoomScan.UI
         private void RefreshScanView(RoomScanner scanner)
         {
             SetLabel(_valScanning, scanner.IsScanning ? "Active" : "Stopped");
-            SetLabel(_valMode, scanner.Mode.ToString());
             SetLabel(_valRender, scanner.CurrentRenderMode.ToString());
 
             var persistence = RoomScanPersistence.Instance;
