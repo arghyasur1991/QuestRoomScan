@@ -233,9 +233,20 @@ namespace Genesis.RoomScan
         public Texture2D HQAtlas => _hqAtlasTexture;
 
         /// <summary>
-        /// Shared UV mesh data used by persistence to save/restore refinement results.
+        /// The original (unsimplified) refined mesh data. Always preserved across re-refines.
+        /// Used as the source-of-truth for re-refinement and UV reconstruction.
         /// </summary>
         internal RefinedTextureResult? LastRefinedResult { get; set; }
+
+        /// <summary>
+        /// The post-bake simplified mesh (if simplification was applied). Null when
+        /// postBakeSimplificationRatio >= 1 or simplification hasn't run.
+        /// This is what gets rendered and saved, but re-refinement always uses LastRefinedResult.
+        /// </summary>
+        internal RefinedTextureResult? LastSimplifiedResult { get; private set; }
+
+        /// <summary>Whether a simplified version of the refined mesh exists.</summary>
+        public bool HasSimplifiedMesh => LastSimplifiedResult.HasValue;
 
         /// <summary>
         /// Relocation matrix from the last scan load. Transforms old-session world-space
@@ -540,6 +551,7 @@ namespace Genesis.RoomScan
                 HasHQRefinedTexture = false;
                 HasEnhancedMesh = false;
                 LastRefinedResult = null;
+                LastSimplifiedResult = null;
                 _cachedUnwrap = null;
                 _refinedMesh = null;
 
@@ -778,7 +790,7 @@ namespace Genesis.RoomScan
                 byte[] atlasPixels = await _textureRefinement.BakeAtlasAsync(
                     unwrap, keyframeDir, KeyframeRelocation);
 
-                var result = new RefinedTextureResult
+                var original = new RefinedTextureResult
                 {
                     Positions = unwrap.Positions,
                     Normals = unwrap.Normals,
@@ -789,17 +801,24 @@ namespace Genesis.RoomScan
                     AtlasHeight = unwrap.AtlasHeight
                 };
 
-                if (_textureRefinement.postBakeSimplificationRatio < 1f)
-                    result = await _textureRefinement.SimplifyRefinedMeshAsync(result);
+                LastRefinedResult = original;
+                LastSimplifiedResult = null;
 
-                ApplyRefinedAtlas(result);
-                LastRefinedResult = result;
+                var toRender = original;
+                if (_textureRefinement.postBakeSimplificationRatio < 1f)
+                {
+                    var simplified = await _textureRefinement.SimplifyRefinedMeshAsync(original);
+                    LastSimplifiedResult = simplified;
+                    toRender = simplified;
+                }
+
+                ApplyRefinedAtlas(toRender);
                 HasRefinedTexture = true;
                 RefinedMeshReady?.Invoke(_refinedMesh, _refinedAtlasTexture);
                 SetRenderMode(ScanRenderMode.Refined);
 
                 if (_persistence != null && _persistence.HasActivePackage)
-                    await _persistence.SaveArtifactAsync(ArtifactType.Refined, null, result);
+                    await _persistence.SaveArtifactAsync(ArtifactType.Refined, null, original);
 
                 Logger.Info("On-device texture refinement complete");
             }
@@ -1534,6 +1553,7 @@ namespace Genesis.RoomScan
                         _persistence.DeleteArtifactFromPackage(ArtifactType.Refined);
                         HasRefinedTexture = false;
                         LastRefinedResult = null;
+                        LastSimplifiedResult = null;
                         _cachedUnwrap = null;
                         _refinedMesh = null;
                         SetRenderMode(ScanRenderMode.Vertex);
@@ -1559,9 +1579,10 @@ namespace Genesis.RoomScan
             _persistence?.DeleteArtifactFromPackage(ArtifactType.EnhancedMesh);
             HasEnhancedMesh = false;
 
-            if (LastRefinedResult.HasValue)
+            var restore = LastSimplifiedResult ?? LastRefinedResult;
+            if (restore.HasValue)
             {
-                var r = LastRefinedResult.Value;
+                var r = restore.Value;
                 if (_refinedMesh != null)
                 {
                     _refinedMesh.Clear();
@@ -1574,7 +1595,8 @@ namespace Genesis.RoomScan
                 }
             }
 
-            Logger.Info("Enhanced mesh deleted, original restored");
+            Logger.Info("Enhanced mesh deleted, restored to " +
+                        (LastSimplifiedResult.HasValue ? "simplified" : "original refined"));
         }
 
         /// <summary>

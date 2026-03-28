@@ -108,6 +108,16 @@
                     <ui:Label name="val-mesh-enhance-status" text="Idle" class="status-val" />
                 </ui:VisualElement>
 
+                <ui:Label text="MESH STATS" class="view-subtitle" />
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Refined" class="status-key" />
+                    <ui:Label name="val-refined-mesh-stats" text="--" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Simplified" class="status-key" />
+                    <ui:Label name="val-simplified-mesh-stats" text="--" class="status-val" />
+                </ui:VisualElement>
+
                 <ui:VisualElement class="btn-group">
                     <ui:Button name="btn-refine-tex" text="Refine Textures" class="action-btn action-btn--primary" />
                     <ui:Button name="btn-hq-refine" text="HQ Refine (Server)" class="action-btn action-btn--primary" />

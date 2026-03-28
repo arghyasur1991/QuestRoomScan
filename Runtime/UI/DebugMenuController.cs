@@ -34,6 +34,7 @@ namespace Genesis.RoomScan.UI
 
         // Refine view
         private Label _valRefineStatus, _valHqStatus, _valMeshEnhanceStatus;
+        private Label _valRefinedMeshStats, _valSimplifiedMeshStats;
         private Button _btnRefineTex, _btnHqRefine, _btnMeshEnhance;
 
         // Training view
@@ -169,6 +170,8 @@ namespace Genesis.RoomScan.UI
             _valRefineStatus = _root.Q<Label>("val-refine-status");
             _valHqStatus = _root.Q<Label>("val-hq-status");
             _valMeshEnhanceStatus = _root.Q<Label>("val-mesh-enhance-status");
+            _valRefinedMeshStats = _root.Q<Label>("val-refined-mesh-stats");
+            _valSimplifiedMeshStats = _root.Q<Label>("val-simplified-mesh-stats");
             _btnRefineTex = _root.Q<Button>("btn-refine-tex");
             _btnHqRefine = _root.Q<Button>("btn-hq-refine");
             _btnMeshEnhance = _root.Q<Button>("btn-mesh-enhance");
@@ -556,6 +559,28 @@ namespace Genesis.RoomScan.UI
             }
             SetLabel(_valMeshEnhanceStatus, scanner.IsMeshEnhancing
                 ? (scanner.MeshEnhanceStatus ?? "Processing...") : "Idle");
+
+            if (scanner.LastRefinedResult.HasValue)
+            {
+                var r = scanner.LastRefinedResult.Value;
+                SetLabel(_valRefinedMeshStats,
+                    $"{r.Positions.Length / 1000f:F1}K verts, {r.Indices.Length / 3 / 1000f:F1}K tris");
+            }
+            else
+            {
+                SetLabel(_valRefinedMeshStats, "--");
+            }
+
+            if (scanner.LastSimplifiedResult.HasValue)
+            {
+                var s = scanner.LastSimplifiedResult.Value;
+                SetLabel(_valSimplifiedMeshStats,
+                    $"{s.Positions.Length / 1000f:F1}K verts, {s.Indices.Length / 3 / 1000f:F1}K tris");
+            }
+            else
+            {
+                SetLabel(_valSimplifiedMeshStats, "--");
+            }
         }
 
         private void RefreshTrainingStatus()
