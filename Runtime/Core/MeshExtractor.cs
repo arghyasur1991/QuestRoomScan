@@ -48,6 +48,11 @@ namespace Genesis.RoomScan
         internal GPUSurfaceNets GpuSurfaceNets => _gpuSurfaceNets;
         public bool IsInitialized => _gpuSurfaceNets != null;
 
+        /// <summary>Current GPU mesh vertex count (updated after each extraction via async readback).</summary>
+        public int LastVertexCount { get; private set; }
+        /// <summary>Current GPU mesh index count (updated after each extraction via async readback).</summary>
+        public int LastIndexCount { get; private set; }
+
         private VolumeIntegrator _volume;
 
         private void Awake()
@@ -118,6 +123,21 @@ namespace Genesis.RoomScan
 
             if (_gpuRenderer != null)
                 _gpuRenderer.UpdateBounds(_gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
+
+            var counters = _gpuSurfaceNets.CountersBuffer;
+            if (counters != null)
+            {
+                AsyncGPUReadback.Request(counters, (req) =>
+                {
+                    if (req.hasError) return;
+                    var data = req.GetData<uint>();
+                    if (data.Length >= 2)
+                    {
+                        LastVertexCount = (int)data[0];
+                        LastIndexCount = (int)data[1];
+                    }
+                });
+            }
         }
 
         /// <summary>

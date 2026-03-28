@@ -231,6 +231,38 @@ void UnfreezeInFrustum(uint3 id : SV_DispatchThreadID)
 }
 
 // ──────────────────────────────────────────────────────────────────
+//  CountSurfaceCoverage: periodically count surface/frozen/colored
+//  voxels for scan progress metrics. NOT dispatched every frame.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel CountSurfaceCoverage
+
+RWStructuredBuffer<uint> _CoverageCounters; // [0]=surface, [1]=frozen, [2]=colored
+
+Texture3D<float4> gsColorVolumeRead;
+
+[numthreads(4, 4, 4)]
+void CountSurfaceCoverage(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= gsVoxCount)) return;
+    float2 tsdf = gsVolumeRW[id];
+    float weight = tsdf.y;
+    bool isFrozen = weight < 0;
+    float absWeight = abs(weight);
+    bool isSurface = absWeight > PRUNE_WEIGHT && abs(tsdf.x) < 0.3;
+
+    if (isSurface)
+    {
+        InterlockedAdd(_CoverageCounters[0], 1);
+        if (isFrozen)
+            InterlockedAdd(_CoverageCounters[1], 1);
+        float4 color = gsColorVolumeRead[id];
+        if (color.a > 0.1)
+            InterlockedAdd(_CoverageCounters[2], 1);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
 //  BakeRelocation: resample TSDF+color from old grid into current
 //  identity grid so volumeToWorld can be reset to I after loading.
 // ──────────────────────────────────────────────────────────────────

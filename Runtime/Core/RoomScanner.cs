@@ -28,6 +28,57 @@ namespace Genesis.RoomScan
         Wireframe
     }
 
+    /// <summary>High-level phase of the scanning session.</summary>
+    public enum ScanPhase
+    {
+        /// <summary>Before <see cref="RoomScanner.StartScanning"/> is called.</summary>
+        NotStarted,
+        /// <summary>New geometry appearing rapidly — early scan.</summary>
+        Discovering,
+        /// <summary>Geometry mostly stable, color/frozen coverage still filling in.</summary>
+        Refining,
+        /// <summary>Both geometry and color have plateaued.</summary>
+        Stabilized,
+        /// <summary>Plateaued long enough to consider the scan ready for refinement.</summary>
+        Complete
+    }
+
+    /// <summary>Raw scan coverage metrics. Updated periodically during scanning.</summary>
+    public struct ScanCoverage
+    {
+        /// <summary>Total depth frames fused so far.</summary>
+        public int IntegrationCount;
+        /// <summary>Current GPU mesh vertex count.</summary>
+        public int MeshVertexCount;
+        /// <summary>Current GPU mesh triangle count (indices / 3).</summary>
+        public int MeshTriangleCount;
+        /// <summary>Voxels near the zero-crossing with sufficient weight.</summary>
+        public int SurfaceVoxelCount;
+        /// <summary>Frozen surface voxels (user-confirmed done areas).</summary>
+        public int FrozenSurfaceCount;
+        /// <summary>Surface voxels with camera RGB data.</summary>
+        public int ColoredSurfaceCount;
+        /// <summary>Colored / Surface ratio (0–1).</summary>
+        public float ColorCoverage;
+        /// <summary>Frozen / Surface ratio (0–1). Strongest "done" signal.</summary>
+        public float FrozenFraction;
+        /// <summary>Number of captured keyframes so far.</summary>
+        public int KeyframeCount;
+        /// <summary>True when mesh vertex count has plateaued for several cycles.</summary>
+        public bool IsStabilized;
+    }
+
+    /// <summary>High-level scan progress combining raw metrics into a single progress value and phase.</summary>
+    public struct ScanProgress
+    {
+        /// <summary>The underlying raw coverage metrics.</summary>
+        public ScanCoverage Coverage;
+        /// <summary>Blended 0–1 overall progress (frozen fraction weighted heaviest).</summary>
+        public float OverallProgress;
+        /// <summary>Current high-level scan phase.</summary>
+        public ScanPhase Phase;
+    }
+
     /// <summary>
     /// Top-level orchestrator for room scanning. All sibling components live on
     /// the same GameObject and are resolved automatically via GetComponent.
@@ -136,6 +187,17 @@ namespace Genesis.RoomScan
         private bool _serverTrainingInProgress;
         private bool _scanResourcesReleased;
 
+        // Plateau detection state
+        private int _prevVertexCount;
+        private int _stableVertexCycles;
+        private int _stableColorCycles;
+        private float _prevColorCoverage;
+        private float _stabilizedTime;
+        private const int StableThresholdCycles = 5;
+        private const float StabilizedHoldSeconds = 3f;
+        private const float VertexGrowthThreshold = 0.02f; // 2% change considered growth
+        private const float ColorGrowthThreshold = 0.01f;  // 1% change
+
         // ─────────────────────────────────────────────────────────────
         //  Texture refinement state
         // ─────────────────────────────────────────────────────────────
@@ -156,6 +218,11 @@ namespace Genesis.RoomScan
         public string RefineStatus { get; private set; }
         public string HQRefineStatus { get; private set; }
         public string MeshEnhanceStatus { get; private set; }
+
+        /// <summary>Current scan coverage metrics (updated periodically during scanning).</summary>
+        public ScanCoverage CurrentCoverage => BuildCoverage();
+        /// <summary>High-level scan progress with blended overall progress and phase.</summary>
+        public ScanProgress CurrentProgress => BuildProgress();
 
         /// <summary>The UV-unwrapped refined mesh (null until refinement completes or a refined package is loaded).</summary>
         public Mesh RefinedMesh => _refinedMesh;
@@ -304,6 +371,7 @@ namespace Genesis.RoomScan
                 {
                     _lastMeshTime = t;
                     _meshExtractor.Extract();
+                    UpdatePlateauDetection();
                     MeshExtracted?.Invoke();
                 }
             }
@@ -338,6 +406,12 @@ namespace Genesis.RoomScan
                 _meshExtractor.Reinitialize();
                 _scanResourcesReleased = false;
             }
+
+            _prevVertexCount = 0;
+            _stableVertexCycles = 0;
+            _stableColorCycles = 0;
+            _prevColorCoverage = 0f;
+            _stabilizedTime = 0f;
 
             if (_keyframeCollector != null)
             {
@@ -1194,6 +1268,93 @@ namespace Genesis.RoomScan
             {
                 Logger.Warning("No main camera found for head exclusion zone");
             }
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Coverage metrics & progress
+        // ─────────────────────────────────────────────────────────────
+
+        private ScanCoverage BuildCoverage()
+        {
+            int surfaceVoxels = _volumeIntegrator != null ? _volumeIntegrator.SurfaceVoxelCount : 0;
+            int frozenVoxels = _volumeIntegrator != null ? _volumeIntegrator.FrozenSurfaceCount : 0;
+            int coloredVoxels = _volumeIntegrator != null ? _volumeIntegrator.ColoredSurfaceCount : 0;
+            int vertCount = _meshExtractor != null ? _meshExtractor.LastVertexCount : 0;
+            int idxCount = _meshExtractor != null ? _meshExtractor.LastIndexCount : 0;
+
+            float colorCov = surfaceVoxels > 0 ? (float)coloredVoxels / surfaceVoxels : 0f;
+            float frozenFrac = surfaceVoxels > 0 ? (float)frozenVoxels / surfaceVoxels : 0f;
+
+            return new ScanCoverage
+            {
+                IntegrationCount = _volumeIntegrator != null ? _volumeIntegrator.IntegrationCount : 0,
+                MeshVertexCount = vertCount,
+                MeshTriangleCount = idxCount / 3,
+                SurfaceVoxelCount = surfaceVoxels,
+                FrozenSurfaceCount = frozenVoxels,
+                ColoredSurfaceCount = coloredVoxels,
+                ColorCoverage = colorCov,
+                FrozenFraction = frozenFrac,
+                KeyframeCount = _keyframeCollector != null ? _keyframeCollector.SavedCount : 0,
+                IsStabilized = _stableVertexCycles >= StableThresholdCycles
+            };
+        }
+
+        private ScanProgress BuildProgress()
+        {
+            var cov = BuildCoverage();
+            float geometryStability = cov.IsStabilized ? 1f : Mathf.Clamp01(_stableVertexCycles / (float)StableThresholdCycles);
+            float progress = cov.FrozenFraction * 0.5f + cov.ColorCoverage * 0.3f + geometryStability * 0.2f;
+
+            ScanPhase phase;
+            if (!IsScanning && _volumeIntegrator != null && _volumeIntegrator.IntegrationCount == 0)
+                phase = ScanPhase.NotStarted;
+            else if (_stableVertexCycles < 2)
+                phase = ScanPhase.Discovering;
+            else if (_stableColorCycles < StableThresholdCycles)
+                phase = ScanPhase.Refining;
+            else if (Time.time - _stabilizedTime < StabilizedHoldSeconds)
+                phase = ScanPhase.Stabilized;
+            else
+                phase = ScanPhase.Complete;
+
+            return new ScanProgress
+            {
+                Coverage = cov,
+                OverallProgress = Mathf.Clamp01(progress),
+                Phase = phase
+            };
+        }
+
+        private void UpdatePlateauDetection()
+        {
+            int curVerts = _meshExtractor != null ? _meshExtractor.LastVertexCount : 0;
+            if (_prevVertexCount > 0 && curVerts > 0)
+            {
+                float growth = Mathf.Abs(curVerts - _prevVertexCount) / (float)_prevVertexCount;
+                if (growth < VertexGrowthThreshold)
+                    _stableVertexCycles++;
+                else
+                    _stableVertexCycles = 0;
+            }
+            _prevVertexCount = curVerts;
+
+            float curColor = _volumeIntegrator != null && _volumeIntegrator.SurfaceVoxelCount > 0
+                ? (float)_volumeIntegrator.ColoredSurfaceCount / _volumeIntegrator.SurfaceVoxelCount
+                : 0f;
+            if (_prevColorCoverage > 0f)
+            {
+                float colorGrowth = Mathf.Abs(curColor - _prevColorCoverage);
+                if (colorGrowth < ColorGrowthThreshold)
+                    _stableColorCycles++;
+                else
+                    _stableColorCycles = 0;
+            }
+            _prevColorCoverage = curColor;
+
+            if (_stableVertexCycles >= StableThresholdCycles && _stableColorCycles >= StableThresholdCycles
+                && _stabilizedTime == 0f)
+                _stabilizedTime = Time.time;
         }
 
         private static readonly int NormalFallbackID = Shader.PropertyToID("_RSNormalFallback");
