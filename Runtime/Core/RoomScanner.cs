@@ -112,6 +112,8 @@ namespace Genesis.RoomScan
         public event Action ScanStarted;
         public event Action ScanStopped;
         public event Action<ScanRenderMode> RenderModeChanged;
+        /// <summary>Raised when a refined mesh + atlas becomes available (after refinement or package load).</summary>
+        public event Action<Mesh, Texture2D> RefinedMeshReady;
 
         /// <summary>
         /// Raised each frame a passthrough camera frame is fed to the volume integrator.
@@ -153,6 +155,13 @@ namespace Genesis.RoomScan
         public string RefineStatus { get; private set; }
         public string HQRefineStatus { get; private set; }
         public string MeshEnhanceStatus { get; private set; }
+
+        /// <summary>The UV-unwrapped refined mesh (null until refinement completes or a refined package is loaded).</summary>
+        public Mesh RefinedMesh => _refinedMesh;
+        /// <summary>The on-device baked texture atlas (null until refinement completes or a refined package is loaded).</summary>
+        public Texture2D RefinedAtlas => _refinedAtlasTexture;
+        /// <summary>The server-enhanced HQ atlas, or null if not available.</summary>
+        public Texture2D HQAtlas => _hqAtlasTexture;
 
         /// <summary>
         /// Shared UV mesh data used by persistence to save/restore refinement results.
@@ -661,6 +670,7 @@ namespace Genesis.RoomScan
                 ApplyRefinedAtlas(result);
                 LastRefinedResult = result;
                 HasRefinedTexture = true;
+                RefinedMeshReady?.Invoke(_refinedMesh, _refinedAtlasTexture);
                 SetRenderMode(ScanRenderMode.Refined);
 
                 if (_persistence != null && _persistence.HasActivePackage)
@@ -964,6 +974,7 @@ namespace Genesis.RoomScan
             _refinedMeshFilter.mesh = mesh;
             _refinedRenderer.material.mainTexture = atlas;
             HasRefinedTexture = true;
+            RefinedMeshReady?.Invoke(mesh, atlas);
         }
 
         internal void ApplyHQTexture(Texture2D atlas)
