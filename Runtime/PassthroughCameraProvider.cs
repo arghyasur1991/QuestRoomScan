@@ -22,6 +22,12 @@ namespace Genesis.RoomScan
 
         public bool IsReady => _pca != null && _pca.IsPlaying && _pca.IsUpdatedThisFrame;
 
+        /// <summary>
+        /// True when the camera subsystem is actively running (may not have a new frame every tick).
+        /// Use for camera availability checks; use IsReady for new-frame-this-tick checks.
+        /// </summary>
+        public bool IsPlaying => _pca != null && _pca.IsPlaying;
+
         public Texture CurrentFrame => _pca != null && _pca.IsPlaying ? _pca.GetTexture() : null;
 
         public Matrix4x4 CameraToWorld

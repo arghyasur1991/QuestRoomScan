@@ -49,10 +49,16 @@ namespace Genesis.RoomScan
             _bounds = bounds;
         }
 
+        private int _drawCount;
         private void LateUpdate()
         {
             if (!_ready || !_renderVisible || _surfaceNets == null || gpuMeshMaterial == null)
+            {
+                if (_drawCount == 0)
+                    Debug.Log($"[RoomScan] GPUMeshRenderer skip: ready={_ready}, visible={_renderVisible}, " +
+                              $"nets={_surfaceNets != null}, mat={gpuMeshMaterial != null}");
                 return;
+            }
 
             var vertBuf = _surfaceNets.VertexBuffer;
             var idxBuf = _surfaceNets.IndexBuffer;
@@ -74,6 +80,12 @@ namespace Genesis.RoomScan
             };
 
             Graphics.RenderPrimitivesIndirect(rp, MeshTopology.Triangles, argsBuf, 1);
+
+            _drawCount++;
+            if (_drawCount <= 3 || _drawCount % 500 == 0)
+                Debug.Log($"[RoomScan] GPUMeshRenderer draw #{_drawCount}: " +
+                          $"shader={gpuMeshMaterial.shader?.name ?? "NULL"}, " +
+                          $"normalFallback={Shader.GetGlobalFloat(Shader.PropertyToID("_RSNormalFallback"))}");
         }
 
         private void OnDisable()

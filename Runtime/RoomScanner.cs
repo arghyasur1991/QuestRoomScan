@@ -1106,19 +1106,32 @@ namespace Genesis.RoomScan
         private void ProvideColorFrame()
         {
             ICameraProvider provider = GetActiveCameraProvider();
+            var pcp = provider as PassthroughCameraProvider;
 
-            if (provider is PassthroughCameraProvider pcp && pcp.IsReady)
+            // Determine camera availability from IsPlaying (not IsReady which requires a new frame each tick).
+            // Camera at 30fps vs app at 72fps means IsReady is false on ~60% of frames — that's normal,
+            // not a reason to flip the normal fallback on/off.
+            bool cameraPlaying = pcp != null && pcp.IsPlaying;
+
+            if (cameraPlaying && !_cameraAvailable)
+            {
+                _cameraAvailable = true;
+                Shader.SetGlobalFloat(NormalFallbackID, 0f);
+                Debug.Log("[RoomScan] Camera playing — disabling normal fallback");
+            }
+            else if (!cameraPlaying && (_cameraAvailable || _colorFrameLog == 0))
+            {
+                _cameraAvailable = false;
+                Shader.SetGlobalFloat(NormalFallbackID, 1f);
+                Debug.Log("[RoomScan] Camera not playing — enabling normal fallback rendering");
+            }
+
+            // Integrate color data only when a new frame is available this tick
+            if (pcp != null && pcp.IsReady)
             {
                 Texture frame = pcp.CurrentFrame;
                 if (frame != null)
                 {
-                    if (!_cameraAvailable)
-                    {
-                        _cameraAvailable = true;
-                        Shader.SetGlobalFloat(NormalFallbackID, 0f);
-                        Debug.Log("[RoomScan] Camera available — disabling normal fallback");
-                    }
-
                     _depthCapture?.SetRGBGuide(frame);
 
                     Pose pose = pcp.CameraPose;
@@ -1154,19 +1167,11 @@ namespace Genesis.RoomScan
                 }
             }
 
-            if (_cameraAvailable || _colorFrameLog == 0)
-            {
-                _cameraAvailable = false;
-                Shader.SetGlobalFloat(NormalFallbackID, 1f);
-                Debug.Log("[RoomScan] Camera unavailable — enabling normal fallback rendering");
-            }
-
             _colorFrameLog++;
             if (_colorFrameLog <= 5)
-                Debug.Log($"[RoomScan] ColorFrame #{_colorFrameLog}: NO CAMERA " +
-                    $"provider={provider?.GetType().Name ?? "null"}, " +
-                    $"isPcp={provider is PassthroughCameraProvider}, " +
-                    $"isReady={((provider as PassthroughCameraProvider)?.IsReady ?? false)}");
+                Debug.Log($"[RoomScan] ColorFrame #{_colorFrameLog}: NO FRAME " +
+                    $"playing={cameraPlaying}, " +
+                    $"isReady={pcp?.IsReady ?? false}");
 
             _volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);
