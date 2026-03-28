@@ -780,6 +780,137 @@ namespace Genesis.RoomScan
             finally { IsLoading = false; }
         }
 
+        /// <summary>
+        /// Lightweight load path: reads only the refined mesh, atlas, optional HQ atlas, and anchor
+        /// from a saved package. Skips TSDF volume, triplanar, splat, and Surface Nets reconstruction.
+        /// Typical load time: &lt; 1 second. Ideal for game-mode sessions where the room was scanned
+        /// previously and only the baked mesh is needed.
+        /// </summary>
+        public async Task<bool> LoadRefinedOnlyAsync(string pkgId)
+        {
+            string pkgDir = Path.Combine(RoomScansRoot, pkgId);
+            string refinedMeshPath = Path.Combine(pkgDir, "refined_mesh.bin");
+            if (!File.Exists(refinedMeshPath))
+            {
+                Logger.Warning($"Package {pkgId} has no refined_mesh.bin — use LoadPackageAsync for full load");
+                return false;
+            }
+            if (IsLoading) { Logger.Warning("Load already in progress"); return false; }
+
+            IsLoading = true;
+            try
+            {
+                var unitySync = SynchronizationContext.Current;
+                string anchorJsonPath = Path.Combine(pkgDir, "anchor.json");
+                string enhancedMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
+                string refinedAtlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
+                string hqAtlasPath = Path.Combine(pkgDir, "hq_atlas.png");
+
+                RefinedTextureResult meshData = default;
+                RefinedTextureResult enhancedData = default;
+                byte[] atlasBytes = null;
+                byte[] hqBytes = null;
+                bool hasEnhanced = File.Exists(enhancedMeshPath);
+                bool hasAtlas = File.Exists(refinedAtlasPath);
+                bool hasHQ = File.Exists(hqAtlasPath);
+                PackageAnchorData anchorData = null;
+
+                await Task.Run(() =>
+                {
+                    meshData = ReadRefinedMesh(refinedMeshPath);
+                    if (hasAtlas) atlasBytes = File.ReadAllBytes(refinedAtlasPath);
+                    if (hasEnhanced) enhancedData = ReadRefinedMesh(enhancedMeshPath);
+                    if (hasHQ) hqBytes = File.ReadAllBytes(hqAtlasPath);
+                    anchorData = ReadAnchorData(anchorJsonPath);
+                });
+
+                await SwitchToUnityMainThreadAsync(unitySync);
+
+                // Resolve relocation from anchor
+                Matrix4x4 relocRefined = Matrix4x4.identity;
+                if (anchorData != null && !string.IsNullOrEmpty(anchorData.anchorUuid)
+                    && Guid.TryParse(anchorData.anchorUuid, out Guid uuid))
+                {
+                    var roomAnchor = RoomAnchorManager.Instance;
+                    if (roomAnchor != null)
+                    {
+                        var loadedMatrix = await roomAnchor.LoadSpatialAnchorAsync(uuid);
+                        await SwitchToUnityMainThreadAsync(unitySync);
+                        if (loadedMatrix.HasValue)
+                        {
+                            Matrix4x4 refinedMatrix = anchorData.refinedMatrixAtCreate != null
+                                ? FloatsToMatrix(anchorData.refinedMatrixAtCreate)
+                                : (anchorData.baseMatrixAtSave != null
+                                    ? FloatsToMatrix(anchorData.baseMatrixAtSave)
+                                    : Matrix4x4.identity);
+                            relocRefined = RoomAnchorManager.ComputeRelocationMatrix(loadedMatrix.Value, refinedMatrix);
+                        }
+                    }
+                }
+
+                if (relocRefined != Matrix4x4.identity)
+                {
+                    RelocateVertices(ref meshData, relocRefined);
+                    if (hasEnhanced) RelocateVertices(ref enhancedData, relocRefined);
+                }
+
+                var scanner = RoomScanner.Instance;
+                if (scanner != null)
+                {
+                    meshData.AtlasPixels = atlasBytes;
+                    scanner.LastRefinedResult = meshData;
+                    scanner.HasEnhancedMesh = hasEnhanced;
+
+                    var displayData = hasEnhanced ? enhancedData : meshData;
+
+                    if (atlasBytes != null)
+                    {
+                        var atlasTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
+                            TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                        atlasTex.SetPixelData(atlasBytes, 0);
+                        atlasTex.Apply();
+
+                        var mesh = new Mesh
+                        {
+                            name = hasEnhanced ? "EnhancedScanMesh" : "RefinedScanMesh",
+                            indexFormat = IndexFormat.UInt32
+                        };
+                        mesh.SetVertices(displayData.Positions);
+                        mesh.SetNormals(displayData.Normals);
+                        mesh.SetUVs(0, displayData.UVs);
+                        mesh.SetTriangles(displayData.Indices, 0);
+
+                        scanner.ApplyRefinedTexture(atlasTex, mesh);
+                    }
+
+                    if (hasHQ && hqBytes != null)
+                    {
+                        var hqTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
+                            { filterMode = FilterMode.Bilinear };
+                        if (ImageConversion.LoadImage(hqTex, hqBytes))
+                            scanner.ApplyHQTexture(hqTex);
+                        else
+                            UnityEngine.Object.Destroy(hqTex);
+                    }
+
+                    scanner.SetRenderMode(ScanRenderMode.Refined);
+                }
+
+                ActivePackageId = pkgId;
+                _activeAnchorData = anchorData ?? new PackageAnchorData();
+
+                Logger.Info($"Refined-only load complete: {pkgId} (enhanced={hasEnhanced}, hq={hasHQ})");
+                LoadCompleted?.Invoke();
+                return true;
+            }
+            catch (Exception e)
+            {
+                Logger.Error($"Refined-only load failed: {e.Message}\n{e.StackTrace}");
+                return false;
+            }
+            finally { IsLoading = false; }
+        }
+
         // ─────────────────────────────────────────────────────────────
         //  Delete package
         // ─────────────────────────────────────────────────────────────

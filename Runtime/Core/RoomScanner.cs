@@ -616,6 +616,17 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Lightweight load path: reads only the refined mesh + atlas from a saved package,
+        /// skipping TSDF reconstruction, Surface Nets, and triplanar data. Ideal for game-mode
+        /// sessions where only the baked mesh is needed. Typically completes in under 1 second.
+        /// </summary>
+        public async Task<bool> LoadRefinedOnlyAsync(string pkgId)
+        {
+            if (_persistence == null) return false;
+            return await _persistence.LoadRefinedOnlyAsync(pkgId);
+        }
+
+        /// <summary>
         /// Exports the current keyframe point cloud to disk via <see cref="PointCloudExporter"/>.
         /// </summary>
         public async Task ExportPointCloudAsync()
