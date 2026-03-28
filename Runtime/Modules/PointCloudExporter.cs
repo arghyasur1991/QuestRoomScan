@@ -13,44 +13,18 @@ namespace Genesis.RoomScan
     /// </summary>
     public class PointCloudExporter : MonoBehaviour
     {
-        [SerializeField, Tooltip("Seconds between automatic PLY exports (0 = manual only)")]
-        private float autoExportIntervalSeconds = 30f;
-
         private string _exportDir;
         private string _plyPath;
-        private float _lastExportTime;
         private bool _exporting;
 
         /// <summary>Absolute path of the exported PLY file on device.</summary>
         public string ExportPath => _plyPath;
-
-        /// <summary>
-        /// Resets the auto-export timer so a fresh PLY is written promptly
-        /// after the export directory is recreated.
-        /// </summary>
-        public void ResetTimer()
-        {
-            _lastExportTime = 0f;
-        }
 
         private void Start()
         {
             _exportDir = Path.Combine(Application.persistentDataPath, "GSExport");
             _plyPath = Path.Combine(_exportDir, "points3d.ply");
             Directory.CreateDirectory(_exportDir);
-            _lastExportTime = Time.time;
-        }
-
-        private void Update()
-        {
-            if (autoExportIntervalSeconds <= 0 || _exporting) return;
-            if (MeshExtractor.Instance == null) return;
-
-            if (Time.time - _lastExportTime >= autoExportIntervalSeconds)
-            {
-                _lastExportTime = Time.time;
-                _ = ExportAsync();
-            }
         }
 
         // GPUVertex layout must match the compute shader: float3 pos, float3 norm, uint packedColor, uint voxelFlatIdx

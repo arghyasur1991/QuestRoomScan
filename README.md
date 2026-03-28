@@ -101,7 +101,7 @@ Call `RoomScanner.Instance.StartScanning()` to begin (or use the debug menu). As
 2. **Mesh extraction**: GPU Surface Nets extracts a mesh from the volume every few frames (after a minimum number of integrations)
 3. **Texturing**: Camera RGB is baked into triplanar world-space textures for persistent surface color (with vertex color fallback)
 4. **Keyframe capture**: Motion-gated JPEG snapshots + camera poses are saved to `GSExport/` on disk — these are used later for Gaussian Splat training
-5. **Point cloud export**: GPU mesh vertices are auto-exported as `points3d.ply` every 30 seconds (configurable)
+5. **Point cloud export**: GPU mesh vertices exported as `points3d.ply` on demand (before GS training or via debug menu)
 
 **Tips for a good scan**: Move slowly around the room. Look at surfaces from multiple angles — repeated observations from different viewpoints improve mesh quality. Make sure to cover walls, floor, ceiling, and furniture from several directions before training.
 
@@ -235,7 +235,7 @@ QuestRoomScan captures keyframes and a dense point cloud during scanning, upload
 ### On-Device Capture (automatic during scanning)
 
 - **KeyframeCollector**: Motion-gated JPEG frames + camera poses saved to `GSExport/` on disk (`images/*.jpg`, `frames.jsonl`). Captures are triggered by camera movement — you get more keyframes by looking at the room from different angles.
-- **PointCloudExporter**: GPU mesh vertices exported as binary PLY (`points3d.ply`) via `AsyncGPUReadback`. Auto-exports every 30 seconds during scanning, or manually via the debug menu.
+- **PointCloudExporter**: GPU mesh vertices exported as binary PLY (`points3d.ply`) via `AsyncGPUReadback`. Exported on demand — automatically before GS training upload, or manually via the debug menu's Tools view.
 
 ### Server Training (via [RoomScan-GaussianSplatServer](https://github.com/arghyasur1991/RoomScan-GaussianSplatServer))
 

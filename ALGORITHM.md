@@ -593,12 +593,12 @@ Runs alongside scanning with no user interaction. Saves posed camera frames to `
 - **Deduplication**: Multiple pose entries per image ID may occur; the server keeps only the last pose per image
 - **Typical output**: 100-300 keyframes, 10-30MB total
 
-### 14.2 PointCloudExporter (Quest, periodic)
+### 14.2 PointCloudExporter (Quest, on-demand)
 Exports GPU mesh vertices as binary PLY to `GSExport/points3d.ply`:
 - Async GPU readback of the `GPUSurfaceNets` vertex buffer
 - Parses `GPUVertex` structs: position (float3), normal (float3), packedColor (uint) → RGB
 - Writes position, normal, color per vertex in Unity coordinates (left-handed Y-up)
-- Runs every 30s automatically
+- Exported on demand: automatically by `GSplatManager` before training upload, or manually via debug menu
 - Provides dense initialization for GS training (10-100x more points than SfM)
 
 ### 14.3 Server Training (RoomScan-GaussianSplatServer)

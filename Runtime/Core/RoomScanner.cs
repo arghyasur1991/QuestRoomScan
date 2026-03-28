@@ -428,8 +428,6 @@ namespace Genesis.RoomScan
             if (_keyframeCollector != null)
             {
                 _keyframeCollector.ClearInMemory();
-                if (_pointCloudExporter != null)
-                    _pointCloudExporter.ResetTimer();
                 string gsExportDir = Path.Combine(Application.persistentDataPath, "GSExport");
                 System.Threading.ThreadPool.QueueUserWorkItem(_ =>
                 {
