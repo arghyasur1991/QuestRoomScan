@@ -7,6 +7,11 @@ using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
 {
+    /// <summary>
+    /// Manages the GPU TSDF + color volume and dispatches compute-shader integration, pruning,
+    /// and freeze/unfreeze passes. Voxels are integrated from depth and optional camera color
+    /// each frame, with configurable convergence, exclusion zones, and warmup clearing.
+    /// </summary>
     public class VolumeIntegrator : MonoBehaviour
     {
         public static VolumeIntegrator Instance { get; private set; }
@@ -46,7 +51,10 @@ namespace Genesis.RoomScan
 
         private RenderTexture _volume;
         private RenderTexture _colorVolume;
+
+        /// <summary>3D RenderTexture (R8G8_SNorm) storing the truncated signed distance field.</summary>
         public RenderTexture Volume => _volume;
+        /// <summary>3D RenderTexture (RGBA8_UNorm) storing per-voxel accumulated color.</summary>
         public RenderTexture ColorVolume => _colorVolume;
         public int3 VoxelCount => voxelCount;
         public float VoxelSize => voxelSize;
@@ -98,13 +106,19 @@ namespace Genesis.RoomScan
         private bool _frustumReady;
         private float _lastPruneTime;
 
+        /// <summary>
+        /// Transforms whose positions define spherical exclusion zones; voxels near these are skipped during integration.
+        /// </summary>
         public readonly List<Transform> ExclusionZones = new();
         private readonly Vector4[] _exclusionPositions = new Vector4[64];
 
+        /// <summary>Total number of integration passes dispatched since startup or the last clear.</summary>
         public int IntegrationCount { get; private set; }
         public int WarmupIntegrations => warmupIntegrations;
 
+        /// <summary>Raised after each integration compute dispatch (before pruning).</summary>
         public event Action Integrated;
+        /// <summary>Raised after the volume is cleared.</summary>
         public event Action Cleared;
 
         private Texture _pendingCamFrame;
@@ -217,6 +231,9 @@ namespace Genesis.RoomScan
             Shader.SetGlobalTexture(ColorVolumeID, _colorVolume);
         }
 
+        /// <summary>
+        /// Zeros the TSDF and color volumes on the GPU.
+        /// </summary>
         public void Clear()
         {
             _clearKernel.Set(VolumeRWID, _volume);
@@ -383,6 +400,10 @@ namespace Genesis.RoomScan
             Graphics.Blit(_pendingCamFrame, _camFrameCopy);
         }
 
+        /// <summary>
+        /// Builds the frustum sample positions buffer used by the Integrate kernel.
+        /// Called lazily on first integration or after a volume clear/load.
+        /// </summary>
         public void SetupFrustumVolume()
         {
             if (!DepthCapture.DepthAvailable) return;
@@ -436,6 +457,10 @@ namespace Genesis.RoomScan
             _frustumReady = true;
         }
 
+        /// <summary>
+        /// Dispatches one TSDF + color integration pass from the current depth frame.
+        /// Handles frustum setup, exclusion zones, warmup clearing, and periodic pruning.
+        /// </summary>
         public void Integrate()
         {
             var dc = DepthCapture.Instance;

@@ -1,7 +1,6 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
-using Genesis.RoomScan.GSplat;
 using Genesis.RoomScan.UI;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -9,12 +8,20 @@ using UnityEngine.Serialization;
 
 namespace Genesis.RoomScan
 {
+    /// <summary>
+    /// Controls how depth integration is driven: continuously or for a bounded duration.
+    /// </summary>
     public enum ScanMode
     {
+        /// <summary>Continuous integration at the configured passive rate.</summary>
         Passive,
+        /// <summary>Time-limited burst integration at the guided rate; reverts to Passive on timeout.</summary>
         Guided
     }
 
+    /// <summary>
+    /// Visual style applied to the live scan mesh in the GPU renderer.
+    /// </summary>
     public enum ScanVisualization
     {
         VertexColored,
@@ -23,12 +30,21 @@ namespace Genesis.RoomScan
         Hidden
     }
 
+    /// <summary>
+    /// Which representation of the scan to display. Modes requiring server results
+    /// (HQRefined, Splat) are skipped by <see cref="RoomScanner.CycleRenderMode"/> when unavailable.
+    /// </summary>
     public enum ScanRenderMode
     {
+        /// <summary>Live GPU Surface Nets mesh with vertex colors.</summary>
         Mesh,
+        /// <summary>Live mesh with triplanar-projected camera textures.</summary>
         Textured,
+        /// <summary>UV-unwrapped mesh with on-device baked atlas.</summary>
         Refined,
+        /// <summary>UV-unwrapped mesh with server-enhanced high-resolution atlas.</summary>
         HQRefined,
+        /// <summary>Gaussian Splat point cloud rendered from server-trained PLY data.</summary>
         Splat
     }
 
@@ -38,9 +54,7 @@ namespace Genesis.RoomScan
     /// Input bindings are handled by <see cref="RoomScanInputHandler"/> (optional).
     /// </summary>
     [RequireComponent(typeof(DepthCapture), typeof(VolumeIntegrator), typeof(MeshExtractor))]
-    [RequireComponent(typeof(PassthroughCameraProvider), typeof(TriplanarCache), typeof(RoomScanPersistence))]
-    [RequireComponent(typeof(KeyframeCollector), typeof(PointCloudExporter), typeof(GSplatManager))]
-    [RequireComponent(typeof(GSplatServerClient), typeof(RoomAnchorManager))]
+    [RequireComponent(typeof(RoomScanPersistence), typeof(RoomAnchorManager))]
     public class RoomScanner : MonoBehaviour
     {
         public static RoomScanner Instance { get; private set; }
@@ -72,37 +86,12 @@ namespace Genesis.RoomScan
         [Header("Guided Mode")]
         [SerializeField] private float guidedTimeoutSeconds = 60f;
 
+        [Header("Logging")]
+        [SerializeField] private LogLevel logLevel = LogLevel.Info;
+
         [Header("Persistence")]
         [SerializeField, Tooltip("Auto-save scan data when the application quits")]
         private bool saveOnQuit = false;
-
-        [Header("Texture Refinement")]
-        [SerializeField] internal Shader refinedMeshShader;
-        [SerializeField] internal ComputeShader atlasBakeCompute;
-        [Tooltip("Force CPU bake path instead of GPU compute (for comparison)")]
-        [SerializeField] internal bool forceCpuBake = false;
-        [Tooltip("Skip denoise pass after baking (GPU bake has fewer speckles)")]
-        [SerializeField] internal bool skipDenoise = true;
-        [Tooltip("Multi-view blend: 2-pass GPU bake that blends top views per texel for smoother textures")]
-        [SerializeField] internal bool multiViewBlend = true;
-        [Tooltip("Unsharp mask strength to restore crispness after multi-view blending (0 = off)")]
-        [Range(0f, 2f)]
-        [SerializeField] internal float sharpenStrength = 0.8f;
-        [Tooltip("Server-side atlas super-resolution scale (1 = SR off, just inpaint)")]
-        [Range(1, 4)]
-        [SerializeField] internal int hqRefineScale = 2;
-
-        [Header("Unwrap Performance")]
-        [Tooltip("Simplify mesh before UV unwrap (0.1 = 10% of tris, 1.0 = no simplification). " +
-                 "Warning: values below 1.0 cause larger UV triangles which degrade GPU bake " +
-                 "performance (warp divergence) and texture alignment. Keep at 1.0 unless testing.")]
-        [Range(0.1f, 1f)]
-        [SerializeField] internal float decimationRatio = 1f;
-        [Tooltip("Align charts to 4x4 blocks for faster packing")]
-        [SerializeField] internal bool useBlockAlign = true;
-        [Tooltip("Chart growth cost limit — lower = more charts, faster unwrap")]
-        [Range(0.5f, 4f)]
-        [SerializeField] internal float xatlasMaxCost = 1.5f;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
@@ -111,16 +100,19 @@ namespace Genesis.RoomScan
         private DepthCapture _depthCapture;
         private VolumeIntegrator _volumeIntegrator;
         private MeshExtractor _meshExtractor;
+        private RoomScanPersistence _persistence;
+        private RoomAnchorManager _roomAnchor;
+
+        // Optional modules (discovered, not required)
         private PassthroughCameraProvider _cameraProvider;
         private TriplanarCache _triplanarCache;
-        private RoomScanPersistence _persistence;
         private KeyframeCollector _keyframeCollector;
         private PointCloudExporter _pointCloudExporter;
-        private GSplatManager _gsplatManager;
-        private GSplatServerClient _gsplatServerClient;
+        private IGSplatProvider _gsplatProvider;
+        private TextureRefinement _textureRefinement;
         private DebugMenuController _debugMenu;
         private ICameraProvider _customCameraProvider;
-        private RoomAnchorManager _roomAnchor;
+        private IRoomScanModule[] _modules;
 
         // ─────────────────────────────────────────────────────────────
         //  Public read-only state
@@ -143,6 +135,15 @@ namespace Genesis.RoomScan
         public bool IsGsTrainingInProgress => _serverTrainingInProgress;
         public DebugMenuController DebugMenu => _debugMenu;
 
+        /// <summary>The core volume integrator component.</summary>
+        public VolumeIntegrator VolumeIntegrator => _volumeIntegrator;
+        /// <summary>The core depth capture component.</summary>
+        public DepthCapture DepthCapture => _depthCapture;
+        /// <summary>The core mesh extractor component.</summary>
+        public MeshExtractor MeshExtractor => _meshExtractor;
+        /// <summary>The active camera provider (custom or passthrough).</summary>
+        public ICameraProvider ActiveCameraProvider => GetActiveCameraProvider();
+
         // ─────────────────────────────────────────────────────────────
         //  Events
         // ─────────────────────────────────────────────────────────────
@@ -151,6 +152,17 @@ namespace Genesis.RoomScan
         public event Action ScanStarted;
         public event Action ScanStopped;
         public event Action<ScanRenderMode> RenderModeChanged;
+
+        /// <summary>
+        /// Raised each frame a passthrough camera frame is fed to the volume integrator.
+        /// Parameters: frame texture, camera pose, focal length, principal point, sensor resolution, current resolution.
+        /// </summary>
+        public event Action<Texture, Pose, Vector2, Vector2, Vector2, Vector2> ColorFrameProvided;
+
+        /// <summary>Raised after each depth integration pass.</summary>
+        public event Action Integrated;
+        /// <summary>Raised after each mesh extraction pass.</summary>
+        public event Action MeshExtracted;
 
         // ─────────────────────────────────────────────────────────────
         //  Private state
@@ -205,12 +217,16 @@ namespace Genesis.RoomScan
         private void Awake()
         {
             Instance = this;
+            Logger.Level = logLevel;
             CacheComponents();
             SetSafeShaderDefaults();
         }
 
         private void Start()
         {
+            _modules = GetComponents<IRoomScanModule>();
+            foreach (var m in _modules) m.OnModuleInitialize(this);
+
             SetupHeadExclusion();
 
             if (_roomAnchor != null && _roomAnchor.enabled)
@@ -243,8 +259,8 @@ namespace Genesis.RoomScan
             _persistence = GetComponent<RoomScanPersistence>();
             _keyframeCollector = GetComponent<KeyframeCollector>();
             _pointCloudExporter = GetComponent<PointCloudExporter>();
-            _gsplatManager = GetComponent<GSplatManager>();
-            _gsplatServerClient = GetComponent<GSplatServerClient>();
+            _gsplatProvider = GetComponent<IGSplatProvider>();
+            _textureRefinement = GetComponent<TextureRefinement>();
             _debugMenu = GetComponentInChildren<DebugMenuController>();
             _roomAnchor = GetComponent<RoomAnchorManager>();
         }
@@ -261,9 +277,9 @@ namespace Genesis.RoomScan
                 StartScanning();
 
             _started = true;
-            Debug.Log(startScanningAutomatically
-                ? "[RoomScan] Room ready, scanning started automatically"
-                : "[RoomScan] Room ready, scanning paused — use debug menu Start Scanning");
+            Logger.Info(startScanningAutomatically
+                ? "Room ready, scanning started automatically"
+                : "Room ready, scanning paused — use debug menu Start Scanning");
         }
 
         private void OnEnable()
@@ -284,7 +300,7 @@ namespace Genesis.RoomScan
                 || _volumeIntegrator.IntegrationCount <= _volumeIntegrator.WarmupIntegrations) return;
             if (_persistence.IsSaving) return;
 
-            Debug.Log("[RoomScan] App quitting, saving scan...");
+            Logger.Info("App quitting, saving scan...");
             await _persistence.SaveToNewPackageAsync();
         }
 
@@ -305,7 +321,7 @@ namespace Genesis.RoomScan
 
                 if (_keyframeCollector != null)
                     _keyframeCollector.ReinitExportDir();
-                Debug.Log("[RoomScan] All scan + export data cleared");
+                Logger.Info("All scan + export data cleared");
                 if (startScanningAutomatically)
                     StartScanning();
                 _clearDoneCallback?.Invoke();
@@ -329,6 +345,7 @@ namespace Genesis.RoomScan
 
                 ProvideColorFrame();
                 _volumeIntegrator.Integrate();
+                Integrated?.Invoke();
                 _integrateCount++;
 
                 int effectiveCount = _volumeIntegrator.IntegrationCount - _volumeIntegrator.WarmupIntegrations;
@@ -337,13 +354,14 @@ namespace Genesis.RoomScan
                 {
                     _lastMeshTime = t;
                     _meshExtractor.Extract();
+                    MeshExtracted?.Invoke();
                 }
             }
 
             if (t - _lastScannerLog >= 5f)
             {
                 _lastScannerLog = t;
-                Debug.Log($"[RoomScan] Scanner: integrations={_integrateCount}, mode={mode}, " +
+                Logger.Verbose($"Scanner: integrations={_integrateCount}, mode={mode}, " +
                     $"depthAvail={DepthCapture.DepthAvailable}");
             }
 
@@ -355,6 +373,10 @@ namespace Genesis.RoomScan
         //  PUBLIC API — call from any client, input handler, or UI
         // ═════════════════════════════════════════════════════════════
 
+        /// <summary>
+        /// Begins depth integration and mesh extraction. Resets relocation state,
+        /// clears in-memory keyframes, and starts the active camera provider.
+        /// </summary>
         public void StartScanning()
         {
             if (IsScanning) return;
@@ -378,7 +400,7 @@ namespace Genesis.RoomScan
                     }
                     catch (Exception e)
                     {
-                        Debug.LogError($"[RoomScan] StartScanning clear error: {e.Message}");
+                        Logger.Error($"StartScanning clear error: {e.Message}");
                     }
                     finally
                     {
@@ -394,10 +416,15 @@ namespace Genesis.RoomScan
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StartCapture();
 
-            Debug.Log($"[RoomScan] StartScanning — integrationCount={_volumeIntegrator.IntegrationCount}");
+            Logger.Info($"StartScanning — integrationCount={_volumeIntegrator.IntegrationCount}");
             ScanStarted?.Invoke();
+            if (_modules != null)
+                foreach (var m in _modules) m.OnScanStarted();
         }
 
+        /// <summary>
+        /// Pauses depth integration and stops the camera provider.
+        /// </summary>
         public void StopScanning()
         {
             if (!IsScanning) return;
@@ -407,6 +434,8 @@ namespace Genesis.RoomScan
             provider?.StopCapture();
 
             ScanStopped?.Invoke();
+            if (_modules != null)
+                foreach (var m in _modules) m.OnScanStopped();
         }
 
         public void ToggleScanning()
@@ -432,6 +461,10 @@ namespace Genesis.RoomScan
             ApplyVisualization();
         }
 
+        /// <summary>
+        /// Clears the TSDF volume and reinitializes the GPU mesh pipeline.
+        /// Does not delete persisted files — use <see cref="ClearAllDataAsync"/> for a full wipe.
+        /// </summary>
         public void ClearScan()
         {
             _volumeIntegrator.Clear();
@@ -460,8 +493,8 @@ namespace Genesis.RoomScan
             {
                 StopScanning();
 
-                _gsplatManager?.ClearSplat();
-                _gsplatManager?.ResetSplatTransform();
+                _gsplatProvider?.ClearSplat();
+                _gsplatProvider?.ResetSplatTransform();
                 _downloadedPlyData = null;
                 HasRefinedTexture = false;
                 HasHQRefinedTexture = false;
@@ -482,7 +515,7 @@ namespace Genesis.RoomScan
             }
             catch (Exception e)
             {
-                Debug.LogError($"[RoomScan] ClearAllData sync error: {e.Message}\n{e.StackTrace}");
+                Logger.Error($"ClearAllData sync error: {e.Message}\n{e.StackTrace}");
                 _clearInProgress = false;
                 return;
             }
@@ -496,7 +529,7 @@ namespace Genesis.RoomScan
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError($"[RoomScan] ClearAllData I/O error: {e.Message}");
+                    Logger.Error($"ClearAllData I/O error: {e.Message}");
                 }
                 finally
                 {
@@ -511,14 +544,20 @@ namespace Genesis.RoomScan
         private volatile bool _reinitExportPending;
         private Action _clearDoneCallback;
 
+        /// <summary>
+        /// Switches the active render mode and updates mesh/splat visibility accordingly.
+        /// </summary>
         public void SetRenderMode(ScanRenderMode newMode)
         {
             renderMode = newMode;
             ApplyRenderMode();
             RenderModeChanged?.Invoke(renderMode);
-            Debug.Log($"[RoomScan] Render mode: {renderMode}");
+            Logger.Info($"Render mode: {renderMode}");
         }
 
+        /// <summary>
+        /// Advances to the next available render mode, skipping modes whose data hasn't been generated yet.
+        /// </summary>
         public void CycleRenderMode()
         {
             // Ordered cycle; skip modes whose data isn't available yet
@@ -536,7 +575,7 @@ namespace Genesis.RoomScan
                 if (candidate == ScanRenderMode.Refined && !HasRefinedTexture) continue;
                 if (candidate == ScanRenderMode.HQRefined && !HasHQRefinedTexture) continue;
 
-                if (candidate == ScanRenderMode.Splat && HasDownloadedSplat && !_gsplatManager.HasServerTrainedSplats)
+                if (candidate == ScanRenderMode.Splat && HasDownloadedSplat && (_gsplatProvider == null || !_gsplatProvider.HasServerTrainedSplats))
                 {
                     LoadDownloadedSplat();
                     return;
@@ -547,6 +586,9 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>
+        /// Freezes voxels currently visible in the camera frustum, preventing further integration updates.
+        /// </summary>
         public void FreezeInView()
         {
             if (_volumeIntegrator == null) return;
@@ -557,6 +599,9 @@ namespace Genesis.RoomScan
                 focal, principal, sensor, current);
         }
 
+        /// <summary>
+        /// Unfreezes previously frozen voxels in the current camera frustum, allowing integration to resume.
+        /// </summary>
         public void UnfreezeInView()
         {
             if (_volumeIntegrator == null) return;
@@ -567,24 +612,36 @@ namespace Genesis.RoomScan
                 focal, principal, sensor, current);
         }
 
+        /// <summary>
+        /// Persists the current scan (TSDF volume, keyframes, artifacts) to a new package on disk.
+        /// </summary>
         public async Task<bool> SaveScanAsync()
         {
             if (_persistence == null) return false;
             return await _persistence.SaveToNewPackageAsync();
         }
 
+        /// <summary>
+        /// Loads a previously saved scan package by ID, restoring volume data and artifacts.
+        /// </summary>
         public async Task<bool> LoadPackageAsync(string pkgId)
         {
             if (_persistence == null) return false;
             return await _persistence.LoadPackageAsync(pkgId);
         }
 
+        /// <summary>
+        /// Exports the current keyframe point cloud to disk via <see cref="PointCloudExporter"/>.
+        /// </summary>
         public async Task ExportPointCloudAsync()
         {
             if (_pointCloudExporter != null)
                 await _pointCloudExporter.ExportAsync();
         }
 
+        /// <summary>
+        /// Kicks off the server-side Gaussian Splat training pipeline. Downloads the trained PLY on completion.
+        /// </summary>
         public void StartServerTraining()
         {
             if (_serverTrainingInProgress) return;
@@ -604,12 +661,18 @@ namespace Genesis.RoomScan
             _customCameraProvider = provider;
         }
 
+        /// <summary>
+        /// Registers a transform as an exclusion zone; voxels near it are skipped during integration (e.g. the user's head).
+        /// </summary>
         public void AddExclusionZone(Transform t)
         {
             if (_volumeIntegrator != null)
                 _volumeIntegrator.ExclusionZones.Add(t);
         }
 
+        /// <summary>
+        /// Unregisters a previously added exclusion zone.
+        /// </summary>
         public void RemoveExclusionZone(Transform t)
         {
             if (_volumeIntegrator != null)
@@ -620,6 +683,10 @@ namespace Genesis.RoomScan
         //  Texture Refinement
         // ─────────────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Runs the on-device texture refinement pipeline: UV-unwraps the mesh via xatlas,
+        /// bakes a texture atlas from collected keyframes, and switches to Refined render mode.
+        /// </summary>
         public async void StartTextureRefinement()
         {
             if (IsRefining) return;
@@ -627,16 +694,19 @@ namespace Genesis.RoomScan
             RefineStatus = "Starting...";
 
             TextureRefinement.StatusChanged += s => RefineStatus = s;
-            TextureRefinement.EnableMultiViewBlend = multiViewBlend;
-            TextureRefinement.SharpenStrength = sharpenStrength;
+            if (_textureRefinement != null)
+            {
+                TextureRefinement.EnableMultiViewBlend = _textureRefinement.multiViewBlend;
+                TextureRefinement.SharpenStrength = _textureRefinement.sharpenStrength;
+            }
             try
             {
                 string keyframeDir = KeyframeDirectory;
                 var unwrap = await EnsureUnwrappedAsync();
                 byte[] atlasPixels = await TextureRefinement.BakeAtlasAsync(
                     unwrap, keyframeDir, KeyframeRelocation,
-                    forceCpuBake ? null : atlasBakeCompute,
-                    skipDenoise);
+                    _textureRefinement != null && !_textureRefinement.forceCpuBake ? _textureRefinement.atlasBakeCompute : null,
+                    _textureRefinement != null ? _textureRefinement.skipDenoise : true);
 
                 var result = new RefinedTextureResult
                 {
@@ -657,11 +727,11 @@ namespace Genesis.RoomScan
                 if (_persistence != null && _persistence.HasActivePackage)
                     await _persistence.SaveArtifactAsync(ArtifactType.Refined, null, result);
 
-                Debug.Log("[RoomScan] On-device texture refinement complete");
+                Logger.Info("On-device texture refinement complete");
             }
             catch (Exception e)
             {
-                Debug.LogError($"[RoomScan] Texture refinement failed: {e.Message}\n{e.StackTrace}");
+                Logger.Error($"Texture refinement failed: {e.Message}\n{e.StackTrace}");
                 RefineStatus = "Failed";
             }
             finally
@@ -671,6 +741,10 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>
+        /// Uploads the on-device atlas to the server for super-resolution enhancement.
+        /// Triggers on-device refinement first if it hasn't been run yet.
+        /// </summary>
         public async void StartHQRefinement()
         {
             if (IsHQRefining) return;
@@ -679,7 +753,7 @@ namespace Genesis.RoomScan
 
             try
             {
-                if (_gsplatServerClient == null)
+                if (_gsplatProvider == null)
                 {
                     HQRefineStatus = "No server configured";
                     return;
@@ -726,10 +800,11 @@ namespace Genesis.RoomScan
                     return;
                 }
 
-                Debug.Log($"[RoomScan] HQ refine: uploading {pngBytes.Length / 1024}KB atlas, scale={hqRefineScale}");
+                int scale = _textureRefinement != null ? _textureRefinement.hqRefineScale : 2;
+                Logger.Info($"HQ refine: uploading {pngBytes.Length / 1024}KB atlas, scale={scale}");
                 HQRefineStatus = $"Uploading ({pngBytes.Length / 1024}KB)...";
 
-                byte[] resultPng = await _gsplatServerClient.EnhanceAtlasAsync(pngBytes, hqRefineScale, inpaint: true);
+                byte[] resultPng = await _gsplatProvider.EnhanceAtlasAsync(pngBytes, scale, inpaint: true);
 
                 if (resultPng == null || resultPng.Length == 0)
                 {
@@ -750,7 +825,7 @@ namespace Genesis.RoomScan
                         await _persistence.SaveArtifactAsync(ArtifactType.HQRefined, resultPng);
 
                     HQRefineStatus = "Done";
-                    Debug.Log($"[RoomScan] HQ atlas enhancement complete: {tex.width}x{tex.height}");
+                    Logger.Info($"HQ atlas enhancement complete: {tex.width}x{tex.height}");
                 }
                 else
                 {
@@ -760,7 +835,7 @@ namespace Genesis.RoomScan
             }
             catch (Exception e)
             {
-                Debug.LogError($"[RoomScan] HQ refinement failed: {e.Message}\n{e.StackTrace}");
+                Logger.Error($"HQ refinement failed: {e.Message}\n{e.StackTrace}");
                 HQRefineStatus = "Failed";
             }
             finally
@@ -769,6 +844,10 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>
+        /// Uploads the refined mesh to the server for smoothing and plane-snapping enhancement.
+        /// Requires on-device refinement to have completed first.
+        /// </summary>
         public async void StartMeshEnhancement()
         {
             if (IsMeshEnhancing) return;
@@ -777,7 +856,7 @@ namespace Genesis.RoomScan
 
             try
             {
-                if (_gsplatServerClient == null)
+                if (_gsplatProvider == null)
                 {
                     MeshEnhanceStatus = "No server configured";
                     return;
@@ -792,10 +871,10 @@ namespace Genesis.RoomScan
                 MeshEnhanceStatus = "Serializing mesh...";
                 var r = LastRefinedResult.Value;
                 byte[] meshBin = await Task.Run(() => SerializeRefinedMesh(r));
-                Debug.Log($"[RoomScan] Mesh enhance: uploading {meshBin.Length / 1024}KB ({r.Positions.Length} verts)");
+                Logger.Info($"Mesh enhance: uploading {meshBin.Length / 1024}KB ({r.Positions.Length} verts)");
 
                 MeshEnhanceStatus = $"Uploading ({meshBin.Length / 1024}KB)...";
-                byte[] resultBin = await _gsplatServerClient.EnhanceMeshAsync(
+                byte[] resultBin = await _gsplatProvider.EnhanceMeshAsync(
                     meshBin, smoothIterations: 3, enablePlaneSnap: false);
 
                 if (resultBin == null || resultBin.Length == 0)
@@ -815,11 +894,11 @@ namespace Genesis.RoomScan
                     await _persistence.SaveArtifactAsync(ArtifactType.EnhancedMesh, null, enhanced);
 
                 MeshEnhanceStatus = "Done";
-                Debug.Log($"[RoomScan] Mesh enhancement complete: {enhanced.Positions.Length} verts");
+                Logger.Info($"Mesh enhancement complete: {enhanced.Positions.Length} verts");
             }
             catch (Exception e)
             {
-                Debug.LogError($"[RoomScan] Mesh enhancement failed: {e.Message}\n{e.StackTrace}");
+                Logger.Error($"Mesh enhancement failed: {e.Message}\n{e.StackTrace}");
                 MeshEnhanceStatus = "Failed";
             }
             finally
@@ -916,7 +995,7 @@ namespace Genesis.RoomScan
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
             _refinedAtlasTexture.Apply();
 
-            Debug.Log($"[RoomScan] Refined atlas applied: " +
+            Logger.Info($"Refined atlas applied: " +
                 $"{result.Positions.Length} verts, {result.Indices.Length / 3} tris, " +
                 $"atlas {result.AtlasWidth}x{result.AtlasHeight}");
 
@@ -952,7 +1031,7 @@ namespace Genesis.RoomScan
         {
             if (_cachedUnwrap.HasValue)
             {
-                Debug.Log("[RoomScan] Reusing cached UV-unwrapped mesh");
+                Logger.Info("Reusing cached UV-unwrapped mesh");
                 return _cachedUnwrap.Value;
             }
 
@@ -963,16 +1042,20 @@ namespace Genesis.RoomScan
                 var unwrap = ReconstructUnwrapFromResult(r);
                 _cachedUnwrap = unwrap;
                 EnsureRefinedMesh(unwrap);
-                Debug.Log("[RoomScan] Reconstructed UV mesh from persisted refined_mesh.bin (no xatlas needed)");
+                Logger.Info("Reconstructed UV mesh from persisted refined_mesh.bin (no xatlas needed)");
                 return unwrap;
             }
 
             string kfDir = KeyframeDirectory;
             var opts = XAtlasWrapper.UnwrapOptions.Default;
-            opts.MaxCost = xatlasMaxCost;
-            opts.BlockAlign = useBlockAlign;
+            if (_textureRefinement != null)
+            {
+                opts.MaxCost = _textureRefinement.xatlasMaxCost;
+                opts.BlockAlign = _textureRefinement.useBlockAlign;
+            }
+            float decRatio = _textureRefinement != null ? _textureRefinement.decimationRatio : 1f;
             var unwrap2 = await TextureRefinement.UnwrapMeshAsync(
-                kfDir, KeyframeRelocation, opts, decimationRatio);
+                kfDir, KeyframeRelocation, opts, decRatio);
             _cachedUnwrap = unwrap2;
 
             EnsureRefinedMesh(unwrap2);
@@ -1042,11 +1125,11 @@ namespace Genesis.RoomScan
             _refinedMeshFilter = go.AddComponent<MeshFilter>();
             _refinedRenderer = go.AddComponent<MeshRenderer>();
 
-            var shader = refinedMeshShader;
+            var shader = _textureRefinement != null ? _textureRefinement.refinedMeshShader : null;
             if (shader == null) shader = Shader.Find("Genesis/RefinedMesh");
             if (shader == null)
             {
-                Debug.LogWarning("[RoomScan] Genesis/RefinedMesh shader not found, using URP/Unlit");
+                Logger.Warning("Genesis/RefinedMesh shader not found, using URP/Unlit");
                 shader = Shader.Find("Universal Render Pipeline/Unlit");
             }
             _refinedRenderer.material = new Material(shader);
@@ -1100,11 +1183,11 @@ namespace Genesis.RoomScan
             if (cam != null)
             {
                 AddExclusionZone(cam.transform);
-                Debug.Log($"[RoomScan] Head exclusion zone added: {cam.gameObject.name}");
+                Logger.Info($"Head exclusion zone added: {cam.gameObject.name}");
             }
             else
             {
-                Debug.LogWarning("[RoomScan] No main camera found for head exclusion zone");
+                Logger.Warning("No main camera found for head exclusion zone");
             }
         }
 
@@ -1132,13 +1215,13 @@ namespace Genesis.RoomScan
             {
                 _cameraAvailable = true;
                 Shader.SetGlobalFloat(NormalFallbackID, 0f);
-                Debug.Log("[RoomScan] Camera playing — disabling normal fallback");
+                Logger.Info("Camera playing — disabling normal fallback");
             }
             else if (!cameraPlaying && (_cameraAvailable || _colorFrameLog == 0))
             {
                 _cameraAvailable = false;
                 Shader.SetGlobalFloat(NormalFallbackID, 1f);
-                Debug.Log("[RoomScan] Camera not playing — enabling normal fallback rendering");
+                Logger.Info("Camera not playing — enabling normal fallback rendering");
             }
 
             // Integrate color data only when a new frame is available this tick
@@ -1161,22 +1244,13 @@ namespace Genesis.RoomScan
                         frame, pose.position, pose.rotation,
                         focal, principal, sensor, current);
 
-                    _keyframeCollector.TrySaveKeyframe(frame, pose.position, pose.rotation,
-                        focal, principal, sensor, current);
-
-                    if (_triplanarCache != null)
-                    {
-                        _triplanarCache.DispatchBake(frame, pose.position, pose.rotation,
-                            focal, principal, sensor, current,
-                            _volumeIntegrator.CameraExposure,
-                            _volumeIntegrator.ExclusionZones);
-                    }
+                    var framePose = new Pose(pose.position, pose.rotation);
+                    ColorFrameProvided?.Invoke(frame, framePose, focal, principal, sensor, current);
 
                     _colorFrameLog++;
                     if (_colorFrameLog <= 3 || _colorFrameLog % 50 == 0)
-                        Debug.Log($"[RoomScan] ColorFrame #{_colorFrameLog}: " +
-                            $"frame={frame.width}x{frame.height}, " +
-                            $"triCache={_triplanarCache != null}");
+                        Logger.Verbose($"ColorFrame #{_colorFrameLog}: " +
+                            $"frame={frame.width}x{frame.height}");
 
                     return;
                 }
@@ -1184,7 +1258,7 @@ namespace Genesis.RoomScan
 
             _colorFrameLog++;
             if (_colorFrameLog <= 5)
-                Debug.Log($"[RoomScan] ColorFrame #{_colorFrameLog}: NO FRAME " +
+                Logger.Verbose($"ColorFrame #{_colorFrameLog}: NO FRAME " +
                     $"playing={cameraPlaying}, " +
                     $"isReady={pcp?.IsReady ?? false}");
 
@@ -1203,8 +1277,8 @@ namespace Genesis.RoomScan
 
             if (gpuRenderer != null)
                 gpuRenderer.RenderVisible = gpuMeshVisible;
-            if (_gsplatManager != null)
-                _gsplatManager.RenderVisible = renderMode == ScanRenderMode.Splat;
+            if (_gsplatProvider != null)
+                _gsplatProvider.RenderVisible = renderMode == ScanRenderMode.Splat;
 
             // Show/hide the UV-mapped refined mesh renderer
             if (_refinedRenderer != null)
@@ -1267,7 +1341,7 @@ namespace Genesis.RoomScan
             {
                 case ScanRenderMode.Splat:
                     _persistence.DeleteArtifactFromPackage(ArtifactType.Splat);
-                    _gsplatManager?.ClearSplat();
+                    _gsplatProvider?.ClearSplat();
                     _downloadedPlyData = null;
                     SetRenderMode(ScanRenderMode.Mesh);
                     break;
@@ -1322,7 +1396,7 @@ namespace Genesis.RoomScan
                 }
             }
 
-            Debug.Log("[RoomScan] Enhanced mesh deleted, original restored");
+            Logger.Info("Enhanced mesh deleted, original restored");
         }
 
         /// <summary>
@@ -1333,12 +1407,12 @@ namespace Genesis.RoomScan
         {
             if (_downloadedPlyData == null || _downloadedPlyData.Length == 0)
             {
-                Debug.LogWarning("[RoomScan] No downloaded splat data to load");
+                Logger.Warning("No downloaded splat data to load");
                 return;
             }
-            _gsplatManager.LoadTrainedPly(_downloadedPlyData);
+            _gsplatProvider?.LoadTrainedPly(_downloadedPlyData);
             SetRenderMode(ScanRenderMode.Splat);
-            Debug.Log("[RoomScan] Trained Gaussians loaded and rendering");
+            Logger.Info("Trained Gaussians loaded and rendering");
         }
 
         private async void RunServerTrainingAsync()
@@ -1348,25 +1422,17 @@ namespace Genesis.RoomScan
 
             try
             {
-                Debug.Log("[RoomScan] Starting server-side GS training pipeline...");
+                if (_gsplatProvider == null)
+                {
+                    Logger.Error("No GSplat provider available");
+                    return;
+                }
 
-                Debug.Log("[RoomScan] Exporting point cloud...");
-                await _pointCloudExporter.ExportAsync();
-
-                Debug.Log("[RoomScan] Uploading training data to PC server...");
-                bool uploaded = await _gsplatServerClient.UploadTrainingData(KeyframeRelocation);
-                if (!uploaded) { Debug.LogError("[RoomScan] Upload failed"); return; }
-
-                Debug.Log("[RoomScan] Waiting for server training to complete...");
-                bool success = await _gsplatServerClient.PollUntilDone();
-                if (!success) { Debug.LogError("[RoomScan] Server training failed"); return; }
-
-                Debug.Log("[RoomScan] Downloading trained Gaussians...");
-                byte[] plyData = await _gsplatServerClient.DownloadResult();
-                if (plyData == null || plyData.Length == 0) { Debug.LogError("[RoomScan] Download empty"); return; }
+                Logger.Info("Starting server-side GS training pipeline...");
+                byte[] plyData = await _gsplatProvider.RunServerTrainingAsync(KeyframeDirectory, KeyframeRelocation);
+                if (plyData == null || plyData.Length == 0) return;
 
                 _downloadedPlyData = plyData;
-                Debug.Log($"[RoomScan] Trained splat downloaded ({plyData.Length / (1024 * 1024f):F1}MB)");
 
                 if (_persistence != null && _persistence.HasActivePackage)
                     await _persistence.SaveArtifactAsync(ArtifactType.Splat, plyData);
@@ -1375,7 +1441,7 @@ namespace Genesis.RoomScan
             }
             catch (Exception e)
             {
-                Debug.LogError($"[RoomScan] Server training pipeline error: {e.Message}\n{e.StackTrace}");
+                Logger.Error($"Server training pipeline error: {e.Message}\n{e.StackTrace}");
             }
             finally
             {

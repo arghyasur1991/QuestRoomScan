@@ -11,6 +11,11 @@ using UnityEngine.Android;
 
 namespace Genesis.RoomScan
 {
+    /// <summary>
+    /// Captures stereo depth from the AR occlusion subsystem, computes world-space normals,
+    /// runs optional bilateral filtering guided by the passthrough RGB feed, and produces
+    /// dilated depth textures consumed by <see cref="VolumeIntegrator"/> for TSDF integration.
+    /// </summary>
     [DefaultExecutionOrder(-40)]
     public class DepthCapture : MonoBehaviour
     {
@@ -39,10 +44,15 @@ namespace Genesis.RoomScan
         private readonly Matrix4x4[] _viewInv = new Matrix4x4[2];
         private Vector2 _planes;
 
+        /// <summary>Per-eye projection matrices derived from the depth frame's FOV and near/far planes.</summary>
         public Matrix4x4[] Proj => _proj;
+        /// <summary>Inverse projection matrices (per-eye).</summary>
         public Matrix4x4[] ProjInv => _projInv;
+        /// <summary>Per-eye view matrices (tracking-space to depth-camera-space).</summary>
         public Matrix4x4[] View => _view;
+        /// <summary>Inverse view matrices (per-eye), mapping depth-camera-space back to tracking-space.</summary>
         public Matrix4x4[] ViewInv => _viewInv;
+        /// <summary>Near and far clip distances (x = near, y = far) for the current depth frame.</summary>
         public Vector2 Planes => _planes;
 
         // Shader property IDs
@@ -75,6 +85,7 @@ namespace Genesis.RoomScan
         private static readonly int BilSigmaDepthID = Shader.PropertyToID("_SigmaDepth");
         private static readonly int BilFilterRadiusID = Shader.PropertyToID("_FilterRadius");
 
+        /// <summary>True once a valid depth frame has been received from the AR occlusion subsystem.</summary>
         public static bool DepthAvailable { get; private set; }
 
         private ComputeKernelHelper _normKernel;
@@ -85,13 +96,16 @@ namespace Genesis.RoomScan
         private bool _hasBilateralKernel;
 
         private Texture _depthTex;
+        /// <summary>The current depth texture (raw or bilateral-filtered), as a stereo Tex2DArray.</summary>
         public Texture DepthTex => _depthTex;
 
         private RenderTexture _normTex;
+        /// <summary>World-space normals computed from the depth texture via the DepthNorm compute shader.</summary>
         public RenderTexture NormTex => _normTex;
 
         private RenderTexture _dilationA, _dilationB;
         private RenderTexture _dilatedDepth;
+        /// <summary>Depth texture after jump-flood dilation, used by the integrator to fill holes near voxel boundaries.</summary>
         public RenderTexture DilatedDepthTex => _dilatedDepth;
 
         private RenderTexture _simulatedDepthTex;
@@ -111,6 +125,7 @@ namespace Genesis.RoomScan
 
         private const string ScenePermission = "com.oculus.permission.USE_SCENE";
 
+        /// <summary>Raised after each depth frame is processed (filtering, normals computed, globals set).</summary>
         public event Action Updated;
 
         /// <summary>
