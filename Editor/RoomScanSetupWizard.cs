@@ -753,11 +753,10 @@ namespace Genesis.RoomScan.Editor
         }
 
         /// <summary>
-        /// Sets up EventSystem, OVRInputModule, PanelInputConfiguration,
-        /// VRDocumentRaycaster, and ControllerRayDriver so that VR controller
-        /// rays can interact with world-space UI Toolkit panels.
+        /// Static entry point for ensuring VR input infrastructure exists.
+        /// Called by <see cref="RoomScannerEditor"/> when adding the Debug Menu module.
         /// </summary>
-        void EnsureVRInputInfrastructure()
+        internal static void EnsureVRInput()
         {
             // EventSystem
             var es = FindAny<EventSystem>();
@@ -768,17 +767,13 @@ namespace Genesis.RoomScan.Editor
                 es = Undo.AddComponent<EventSystem>(esGo);
             }
 
-            // OVRInputModule (replaces StandaloneInputModule for VR)
             if (es.GetComponent<OVRInputModule>() == null)
             {
-                // Remove StandaloneInputModule if present — only one input module should be active
                 var standalone = es.GetComponent<StandaloneInputModule>();
                 if (standalone != null) Undo.DestroyObjectImmediate(standalone);
-
                 Undo.AddComponent<OVRInputModule>(es.gameObject);
             }
 
-            // PanelInputConfiguration (auto-creates PanelEventHandler per panel)
             if (es.GetComponent<PanelInputConfiguration>() == null)
             {
                 var pic = Undo.AddComponent<PanelInputConfiguration>(es.gameObject);
@@ -789,14 +784,13 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(pic);
             }
 
-            // VRDocumentRaycaster (overrides GetWorldRay for controller rays)
             if (es.GetComponent<VRDocumentRaycaster>() == null)
                 Undo.AddComponent<VRDocumentRaycaster>(es.gameObject);
-
-            // ControllerRayDriver (laser visual + auto-picks active controller)
             if (es.GetComponent<ControllerRayDriver>() == null)
                 Undo.AddComponent<ControllerRayDriver>(es.gameObject);
         }
+
+        void EnsureVRInputInfrastructure() => EnsureVRInput();
 
         static void SetBool(SerializedObject so, string fieldName, bool value)
         {
@@ -1615,7 +1609,7 @@ namespace Genesis.RoomScan.Editor
             }
         }
 
-        static void EnsureDebugMenuAssets()
+        internal static void EnsureDebugMenuAssets()
         {
             var ctrl = FindAny<DebugMenuController>();
             if (ctrl == null) return;

@@ -1,8 +1,11 @@
 using System;
 using System.IO;
 using System.Linq;
+using Genesis.RoomScan.UI;
+using Meta.XR;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.UIElements;
 
 namespace Genesis.RoomScan.Editor
 {
@@ -15,7 +18,7 @@ namespace Genesis.RoomScan.Editor
     {
         static readonly (string label, Type type, Type[] extraDeps, bool triggerXAtlasBuild)[] ModuleOptions =
         {
-            ("Passthrough Camera", typeof(PassthroughCameraProvider), null, false),
+            ("Passthrough Camera", typeof(PassthroughCameraProvider), new[] { typeof(PassthroughCameraAccess) }, false),
             ("Triplanar Cache", typeof(TriplanarCache), null, false),
             ("Texture Refinement", typeof(TextureRefinement), null, true),
             ("Point Cloud Export", typeof(PointCloudExporter), null, false),
@@ -109,6 +112,28 @@ namespace Genesis.RoomScan.Editor
                         EditorUtility.SetDirty(scanner.gameObject);
                     });
             }
+
+            // Debug Menu — lives on a child GameObject with UIDocument
+            bool hasDebugMenu = scanner.GetComponentInChildren<DebugMenuController>(true) != null;
+            if (hasDebugMenu)
+                menu.AddDisabledItem(new GUIContent("Debug Menu (attached)"));
+            else
+                menu.AddItem(new GUIContent("Debug Menu"), false, () =>
+                {
+                    Undo.RegisterCompleteObjectUndo(scanner.gameObject, "Add Debug Menu");
+
+                    var debugGo = new GameObject("DebugMenu");
+                    debugGo.transform.SetParent(scanner.transform);
+                    Undo.RegisterCreatedObjectUndo(debugGo, "Create DebugMenu");
+
+                    Undo.AddComponent<UIDocument>(debugGo);
+                    Undo.AddComponent<DebugMenuController>(debugGo);
+
+                    RoomScanSetupWizard.EnsureDebugMenuAssets();
+                    RoomScanSetupWizard.EnsureVRInput();
+
+                    EditorUtility.SetDirty(scanner.gameObject);
+                });
 
             menu.ShowAsContext();
         }
