@@ -6,7 +6,7 @@ namespace Genesis.RoomScan
     /// Lightweight wrapper around a compute shader kernel to reduce boilerplate
     /// when setting properties and dispatching.
     /// </summary>
-    public struct ComputeKernelHelper
+    internal struct ComputeKernelHelper
     {
         public readonly ComputeShader Shader;
         public readonly int KernelIndex;
