@@ -45,7 +45,7 @@ namespace Genesis.RoomScan
         [SerializeField] private float meshExtractionHz = 30f;
 
         [Header("Render Mode")]
-        [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Wireframe;
+        [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Vertex;
 
         [SerializeField, Range(0.2f, 5f), Tooltip("Wireframe line thickness multiplier")]
         private float wireThickness = 1.5f;
