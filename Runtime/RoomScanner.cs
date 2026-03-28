@@ -1064,16 +1064,31 @@ namespace Genesis.RoomScan
             focal = principal = sensor = current = default;
 
             ICameraProvider provider = GetActiveCameraProvider();
-            if (provider is not PassthroughCameraProvider pcp || !pcp.IsReady)
-                return false;
+            if (provider is PassthroughCameraProvider pcp && pcp.IsReady)
+            {
+                pose = pcp.CameraPose;
+                if (_depthCapture != null)
+                    pose = _depthCapture.TrackingToWorld(pose);
+                focal = pcp.FocalLength;
+                principal = pcp.PrincipalPoint;
+                sensor = pcp.SensorResolution;
+                current = pcp.CurrentResolution;
+                return true;
+            }
 
-            pose = pcp.CameraPose;
-            if (_depthCapture != null)
-                pose = _depthCapture.TrackingToWorld(pose);
-            focal = pcp.FocalLength;
-            principal = pcp.PrincipalPoint;
-            sensor = pcp.SensorResolution;
-            current = pcp.CurrentResolution;
+            var cam = Camera.main;
+            if (cam == null) return false;
+
+            var ct = cam.transform;
+            pose = new Pose(ct.position, ct.rotation);
+            float w = cam.pixelWidth;
+            float h = cam.pixelHeight;
+            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
+            float fy = h / (2f * Mathf.Tan(vFovRad * 0.5f));
+            focal = new Vector2(fy, fy);
+            principal = new Vector2(w * 0.5f, h * 0.5f);
+            sensor = new Vector2(w, h);
+            current = new Vector2(w, h);
             return true;
         }
 

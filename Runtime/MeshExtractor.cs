@@ -107,8 +107,6 @@ namespace Genesis.RoomScan
         /// Run one GPU mesh extraction pass from the current TSDF volume state.
         /// Called by RoomScanner at the configured mesh extraction rate.
         /// </summary>
-        private readonly uint[] _counterReadback = new uint[2];
-
         public void Extract()
         {
             if (_gpuSurfaceNets == null) return;
@@ -120,21 +118,6 @@ namespace Genesis.RoomScan
 
             if (_gpuRenderer != null)
                 _gpuRenderer.UpdateBounds(_gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
-
-            if (_extractCount <= 3 || _extractCount % 50 == 0)
-            {
-                var counters = _gpuSurfaceNets.CountersBuffer;
-                if (counters != null)
-                {
-                    counters.GetData(_counterReadback);
-                    Debug.Log($"[RoomScan] GPU extraction #{_extractCount}: " +
-                              $"verts={_counterReadback[0]}, indices={_counterReadback[1]}");
-                }
-                else
-                {
-                    Debug.Log($"[RoomScan] GPU extraction #{_extractCount}");
-                }
-            }
         }
 
         /// <summary>
