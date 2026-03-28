@@ -44,9 +44,6 @@ namespace Genesis.RoomScan
         [SerializeField] private float integrationHz = 30f;
         [SerializeField] private float meshExtractionHz = 30f;
 
-        [Header("Mesh Quality")]
-        [SerializeField] private int minIntegrationsBeforeMesh = 5;
-
         [Header("Render Mode")]
         [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Vertex;
 
@@ -283,9 +280,7 @@ namespace Genesis.RoomScan
                 Integrated?.Invoke();
                 _integrateCount++;
 
-                int effectiveCount = _volumeIntegrator.IntegrationCount - _volumeIntegrator.WarmupIntegrations;
-                if (effectiveCount >= minIntegrationsBeforeMesh
-                    && t - _lastMeshTime >= MeshInterval)
+                if (t - _lastMeshTime >= MeshInterval)
                 {
                     _lastMeshTime = t;
                     _meshExtractor.Extract();
