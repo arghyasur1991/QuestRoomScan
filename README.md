@@ -22,11 +22,12 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
-- **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Training, Tools) and right detail views. Includes scan browser with load/delete per package, context-sensitive artifact deletion, and dynamic button disabled states.
-- **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, and GPU unsharp-mask sharpening. Produces sharp, seamless textures from captured keyframes.
+- **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools) and right detail views. Includes scan browser with load/delete per package, context-sensitive artifact deletion, and dynamic button disabled states. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
+- **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, and GPU unsharp-mask sharpening. Produces sharp, seamless textures from captured keyframes. `TextureRefinement` is an instance-based MonoBehaviour module — all configuration (xatlas options, bake settings, sharpen/seam parameters) is via inspector fields on the component.
 - **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
-- **Render Mode Switching** — Cycle between Mesh, Textured, Refined, HQRefined, and Splat views at runtime via debug menu or controller binding (default: A/X button)
+- **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, HQRefined, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Splat requires trained data).
+- **Freeze Tint Toggle** — Independent toggle (not tied to render mode) shows/hides a blue tint overlay on frozen voxels in live mesh modes (Vertex, Triplanar, Wireframe). Bindable via `RoomScanInputHandler`.
 
 ## Requirements
 
@@ -84,7 +85,7 @@ For Gaussian Splat support, also add the optional dependency:
 1. Create a new blank URP scene
 2. Add a **Camera Rig** and **Passthrough** from Meta's Building Blocks (`Menu > Meta > Building Blocks`). The Camera Rig provides `OVRCameraRig` and the Passthrough block enables the passthrough layer — both are required before running the wizard.
 3. Open the setup wizard: **RoomScan > Setup Scene**
-4. The wizard checks prerequisites (AR Session, AROcclusionManager), configures project settings (boundaryless manifest, cleartext HTTP for LAN server), and adds all required components — including `GaussianSplatRenderer` with UGS shaders, the URP render feature, VR input handlers, and debug menu
+4. The wizard checks prerequisites (AR Session, AROcclusionManager), configures project settings (boundaryless manifest, cleartext HTTP for LAN server), and adds all required core components plus VR input handlers and the debug menu. Optional modules (TriplanarCache, TextureRefinement, GSplat, etc.) are added via the inspector's **Add Module** dropdown on the RoomScanner component
 5. Build and deploy to Quest 3
 6. The room mesh appears as you look around — surfaces solidify with repeated observations
 
@@ -124,7 +125,7 @@ Once the room is well-scanned:
    - The debug menu shows live training status: state, progress bar, iteration count, elapsed time, backend
    - When training completes, the trained PLY is downloaded back to the Quest
 4. Press **Render Mode** to cycle to Splat view — the downloaded PLY is loaded into `GaussianSplatRenderer` and rendered on-device
-5. Cycle through Mesh → Splat → Both → Mesh to compare views
+5. Cycle through render modes (Wireframe → Vertex → Triplanar → Refined → HQRefined → Splat → None) to compare views — modes whose data is not present are skipped automatically
 
 Scanning continues during training — you can keep refining the mesh while waiting.
 
@@ -135,7 +136,6 @@ After scanning, you can produce a sharper UV-mapped texture atlas from the captu
 1. Open the debug menu
 2. Press **Refine Textures** — this runs the full on-device pipeline:
    - **GPU readback**: Reads the current mesh from the GPU Surface Nets buffers
-   - **Mesh simplification** (optional): meshoptimizer reduces triangle count (default 50%) to speed up unwrapping
    - **UV unwrapping**: xatlas (native C++ via P/Invoke) generates a UV atlas with seam-aware parameterization, with tunable chart/pack options for speed vs quality
    - **GPU atlas baking**: A compute shader (`AtlasBakeCompute.compute`) processes each keyframe — two-pass multi-view blending selects and blends the top-scoring views per texel with occlusion-aware depth testing (~5-10s for 300 keyframes)
    - **GPU seam blending**: Gaussian-weighted blend across UV chart boundaries reduces color discontinuities
@@ -155,6 +155,8 @@ For further quality improvement, the on-device atlas can be enhanced via a serve
 4. Enhanced atlas is downloaded and applied
 
 The SR scale is configurable in the inspector. Requires a server running at the configured URL.
+
+> **Note:** An earlier differentiable-rendering-based HQ path is non-functional and not exposed. The Real-ESRGAN + LaMa pipeline described above is the working path.
 
 ### Mesh Enhancement
 
@@ -259,7 +261,7 @@ Trained splats are rendered using a [fork of Unity Gaussian Splatting](https://g
 - **Coordinate conversion**: COLMAP (right-handed Y-down) → Unity (left-handed Y-up)
 - **Quest 3 stereo**: Per-eye VP matrices for correct VR covariance projection, shared compute between eyes
 - **Performance**: Reduced-resolution rendering (0.5x), optimized compute shaders, partial radix sort, contribution-based culling
-- **Render mode switching**: Mesh, Splat, or Both — cycled via debug menu or controller binding without releasing GPU resources
+- **Render mode switching**: Cycled via debug menu or controller binding without releasing GPU resources. Available modes: Wireframe, Vertex, Triplanar, Refined, HQRefined, Splat, None — unavailable modes are skipped
 
 ### Supported Training Backends
 
@@ -281,31 +283,34 @@ Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. 
 |  DEBUG           |                                             |
 |                  |                                             |
 | [*] Scan         |  (Scan View / Saved Scans / Refine /       |
-| [ ] Saved Scans  |   Training / Tools)                         |
+| [ ] Saved Scans  |   Gaussian Splat / Tools)                    |
 | [ ] Refine       |                                             |
-| [ ] Training     |                                             |
+| [ ] Gaussian Splat|                                             |
 | [ ] Tools        |                                             |
 |                  |                                             |
 | 72 FPS           |                                             |
 +------------------+---------------------------------------------+
 ```
 
+> **Module-gated tabs:** The Refine and Gaussian Splat navigation tabs are automatically disabled (dimmed and non-clickable) when `TextureRefinement` or `GSplatManager` modules are not attached to the RoomScanner.
+
 ### Views
 
 **Scan** (default) — Live status rows (Scanning, Mode, Integrations, Keyframes, Render, Package) and action buttons:
 - **Start/Stop Scanning**: Toggle depth integration
-- **Render Mode**: Cycle through Mesh → Textured → Refined → HQRefined → Splat
+- **Render Mode**: Cycle through Wireframe → Vertex → Triplanar → Refined → HQRefined → Splat → None (unavailable modes skipped)
+- **Freeze Tint**: Toggle blue tint overlay on frozen voxels (works in Vertex, Triplanar, and Wireframe modes)
 - **Save Scan**: Create a new package with current scan data
 - **Delete Artifact**: Context-sensitive — deletes Splat/Refined/HQ atlas from active package based on current render mode
 
-**Saved Scans** — Scrollable list of saved packages sorted newest-first. Each entry shows display name, date, artifact badges (KF, Splat, Refined, HQ, Enh), and Load/Delete buttons. Badge count shown on the nav button.
+**Saved Scans** — Scrollable list of saved packages sorted newest-first. Each entry shows display name, date, artifact badges (KF, Tri, Splat, Refined, HQ, Enh), and Load/Delete buttons. Badge count shown on the nav button.
 
-**Refine** — On-device and server refinement status + action buttons:
+**Refine** — On-device and server refinement status + action buttons. Tab is disabled when `TextureRefinement` module is not attached.
 - **Refine Textures**: On-device GPU atlas bake from keyframes (multi-view blend + sharpen)
 - **HQ Refine (Server)**: Upload atlas for server-side super-resolution + inpainting
 - **Enhance Mesh (Server)**: Upload mesh for server-side bilateral smooth + plane snap
 
-**Training** — GS training with server URL field, live progress, and Start/Cancel buttons.
+**Gaussian Splat** — GS training with server URL field, live progress, and Start/Cancel buttons. Tab is disabled when `GSplatManager` module is not attached.
 
 **Tools** — Export Point Cloud, Clear All Data.
 
@@ -329,6 +334,8 @@ Buttons are dynamically enabled/disabled based on app context:
 | Two (X/A) | Unfreeze In View |
 | Three (A/X) | Cycle Render Mode |
 | Four (B/Y) | Start Server Training (disabled by default) |
+
+Additional bindable actions (not mapped by default): `ToggleFreezeTint`, `ToggleScanning`, `SaveScan`, `LoadScan`, `ClearAllData`, `ExportPointCloud`.
 
 All bindings are configurable via `RoomScanInputHandler` — add, remove, or remap any `ScanAction` to any `OVRInput.Button`.
 
@@ -378,7 +385,7 @@ The TSDF volume integration and Surface Nets meshing approach draws inspiration 
 The texture refinement pipeline uses two open-source native C++ libraries:
 
 - **[xatlas](https://github.com/jpcy/xatlas)** by Jonathan Young (MIT) — automatic UV atlas generation with seam-aware chart parameterization and efficient packing. Used for UV unwrapping the GPU Surface Nets mesh prior to atlas baking.
-- **[meshoptimizer](https://github.com/zeux/meshoptimizer)** v1.0 by Arseny Kapoulkine (MIT) — mesh optimization toolkit. The `meshopt_simplify` function is used for optional mesh decimation before UV unwrapping, reducing triangle count while preserving topology to speed up the xatlas charting and packing phases.
+- **[meshoptimizer](https://github.com/zeux/meshoptimizer)** v1.0 by Arseny Kapoulkine (MIT) — mesh optimization toolkit. The `meshopt_simplify` function is available for optional mesh decimation before UV unwrapping. **Note:** Mesh decimation is currently disabled by default — it degrades atlas baking quality and performance. The decimation ratio defaults to 1.0 (no simplification).
 
 Both libraries are compiled into a single native shared library (`libxatlas.so` / `libxatlas.bundle`) and invoked via P/Invoke from C#.
 

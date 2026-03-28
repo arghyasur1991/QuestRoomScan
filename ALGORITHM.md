@@ -19,9 +19,9 @@ MeshExtractor → GPUSurfaceNets (compute shader: classify → compact → smoot
        ├── PlaneDetector (periodic RANSAC on background thread → persistent plane list)
        ├── TriplanarCache (bake camera → 3 world-space textures + depth maps,
        │                    forward-splat relocation on load)
-       └── KeyframeStore (ring buffer of camera frames, live quality)
-                │
-ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → keyframes → triplanar → vertex color)
+       └── KeyframeCollector (motion-gated JPEG keyframes to disk for refinement/splat)
+               │
+ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → triplanar → vertex color → wireframe)
 ```
 
 ## 1. Volume Layout
@@ -30,10 +30,10 @@ ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → keyframes → tri
 - **Format:** `R8G8_SNorm` — 2 bytes per voxel
   - **R channel:** Signed distance to surface, normalized by truncation distance. Range [-1, 1]. Negative = inside surface, positive = outside.
   - **G channel:** Confidence weight [0, 1]. Tracks how many quality observations support this voxel's value.
-- **Dimensions:** 160 × 128 × 160 voxels (default)
+- **Dimensions:** 256 × 256 × 256 voxels (default)
 - **Voxel size:** 0.05 m
-- **World coverage:** 8m × 6.4m × 8m, centered at origin
-- **Memory:** ~6.5 MB
+- **World coverage:** 12.8m × 12.8m × 12.8m, centered at origin
+- **Memory:** ~32 MB
 - **Empty marker:** R = `sbyte.MinValue` (-128), G = 0
 
 ### Color Volume
@@ -41,7 +41,7 @@ ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → keyframes → tri
   - **RGB:** Accumulated camera color (exposure-boosted, quality-weighted running average)
   - **A:** Coverage weight [0, 1]. Tracks color confidence.
 - **Dimensions:** Same as TSDF
-- **Memory:** ~13 MB
+- **Memory:** ~64 MB
 
 ### Coordinate System
 - The volume is always axis-aligned at the world origin — there is no `volumeToWorld` matrix.
@@ -222,25 +222,16 @@ For each vertex (dispatched indirectly), finds the best-matching detected plane:
 
 ## 7. Camera Projection & Persistent Texturing
 
-Three layers of texturing, in priority order:
+Two layers of live texturing, in priority order:
 
-### Layer 1: Keyframe Ring Buffer (live, pixel-level, runtime-only)
-`KeyframeStore` maintains a ring buffer of N camera frames (default 8) in a `Texture2DArray`:
-- **Slot 0**: Always the latest camera frame, updated every integration frame
-- **Slots 1–7**: Historical keyframes, inserted when camera moves >0.3m or rotates >20°
-- **Eviction**: Oldest historical slot is overwritten when buffer is full
-- **Shader**: Fragment shader iterates all keyframes, projects via pinhole model, picks best match by `dot(viewDir, surfaceNormal)`, samples from the Texture2DArray
-- **Memory**: 8 × 1280 × 960 × 4 bytes ≈ 40MB
-- **NOT persisted**: Keyframes are lost on save/load
-
-### Layer 2: Triplanar World-Space Textures (persistent, ~8mm/texel, saveable)
-`TriplanarCache` maintains 3 axis-aligned 2D color textures (1024×1024 RGBA8 each) plus 3 auxiliary depth textures (1024×1024 R8 each):
+### Layer 1: Triplanar World-Space Textures (persistent, ~8mm/texel, saveable)
+`TriplanarCache` maintains 3 axis-aligned 2D color textures (4096×4096 RGBA8 each) plus 3 auxiliary depth textures (4096×4096 R8 each):
 - **XZ texture**: For Y-dominant normals (floors, ceilings)
 - **XY texture**: For Z-dominant normals (front/back walls)
 - **YZ texture**: For X-dominant normals (side walls)
 - **Depth textures**: Store the "missing axis" value per texel (XZ→Y, XY→Z, YZ→X). Required for exact 3D reconstruction during relocation (see §9c).
 - **Sign-aware UV**: Each texture split in half by normal sign (upper = positive, lower = negative) to prevent opposite walls sharing texels
-- **Memory**: Color 3 × 1024 × 1024 × 4 bytes ≈ 12MB, Depth 3 × 1024 × 1024 × 1 byte ≈ 3MB
+- **Memory**: Color 3 × 4096 × 4096 × 4 bytes ≈ 192MB, Depth 3 × 4096 × 4096 × 1 byte ≈ 48MB
 - **Baking**: `TriplanarBake.compute` runs at integration rate, iterating over depth pixels:
   1. Unproject depth pixel to world position
   2. Sample surface normal from depth normals
@@ -252,15 +243,22 @@ Three layers of texturing, in priority order:
 - **Shader**: Fragment shader samples all 3 textures using triplanar blending, weighted by `abs(normal)`
 - **Persisted**: Save/load as raw RGBA8 color files + R8 depth files
 
-### Layer 3: Vertex Colors (fallback, ~5cm/voxel)
+### Layer 2: Vertex Colors (fallback, ~5cm/voxel)
 Camera colors accumulated into the 3D color volume during TSDF integration. Sampled per-vertex during mesh extraction.
 
 ### Fragment Shader Priority Chain
 ```
-_DEBUG_SOLID → _SHOW_NORMALS → _TRIPLANAR_ONLY check →
-  Keyframe match (pixel-level) → Triplanar color (~4mm) → Vertex colors (~5cm)
+1. Base color selection:
+   _RSTriAvailable → Triplanar sample (with vertex color fallback where no data)
+   _RSNormalFallback → Normal-as-color (sensor warmup, no camera data yet)
+   else → Vertex colors (~5cm)
+
+2. Freeze tint: applies blue overlay on frozen voxels (unless _RSNoFreezeTint)
+
+3. Wireframe: if _RSWireframe, discard interior fragments, render edges
+   blending from white at edge midpoints to vertex color at vertices
 ```
-The `_TRIPLANAR_ONLY` toggle skips keyframes to evaluate persistence quality in isolation.
+Triplanar textures and vertex colors are the two live texturing layers. `KeyframeCollector` saves JPEG keyframes to disk for post-scan refinement and Gaussian Splat training — they are not used in the live shader.
 
 ### Pinhole Projection Model (shared by all layers)
 ```
@@ -291,7 +289,7 @@ Temporal blending on the GPU provides implicit convergence-based stability (see 
     splat.ply                      # Auto-saved when GS training completes
     refined_mesh.bin               # Auto-saved when refinement completes
     refined_atlas.raw              # On-device refined atlas (RGBA32)
-    hq_atlas.raw                   # Server-side HQ refined atlas (RGBA32)
+    hq_atlas.png                   # Server-side HQ refined atlas (PNG)
 ```
 
 ### anchor.json — Per-Artifact Creation Matrices
@@ -456,7 +454,7 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Volume
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `voxelCount` | 160×128×160 | Volume resolution |
+| `voxelCount` | 256×256×256 | Volume resolution |
 | `voxelSize` | 0.05m | Voxel edge length |
 | `voxelDistance` | 0.15m | TSDF truncation distance |
 | `voxelMin` | 0.1m | Min distance for integration band |
@@ -515,17 +513,14 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Scan Rates
 | Mode | Integration | Mesh Extraction |
 |------|-------------|-----------------|
-| Passive | 30 Hz | 30 Hz |
-| Guided | 30 Hz | 30 Hz |
+| Active | 30 Hz | 30 Hz |
 
 ### Texture Persistence
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `textureResolution` | 1024 | Triplanar texture resolution (per plane, applies to both color and depth) |
-| `maxKeyframes` | 8 | Ring buffer size (slot 0 = live, rest historical) |
-| `moveThreshold` | 0.3m | Min camera displacement for new keyframe |
-| `rotateThresholdDeg` | 20° | Min camera rotation for new keyframe |
-| `exposure` (KeyframeStore) | 3.0 | Keyframe display exposure boost |
+| `textureResolution` | 4096 | Triplanar texture resolution (per plane, applies to both color and depth) |
+| `moveThreshold` | 0.3m | Min camera displacement for new keyframe (KeyframeCollector) |
+| `rotateThresholdDeg` | 20° | Min camera rotation for new keyframe (KeyframeCollector) |
 
 ### Room Anchoring & Relocation
 | Parameter | Default | Description |
@@ -539,17 +534,17 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 ### Memory Budget (Quest 3)
 | Component | Memory |
 |-----------|--------|
-| TSDF volume (160x128x160 RG8) | ~6.5 MB |
-| Color volume (160x128x160 RGBA8) | ~13 MB |
-| GPU Surface Nets — coord vertex map (int per voxel) | ~12.5 MB |
-| GPU Surface Nets — vertex buffer (163K × 32B) | ~5 MB |
-| GPU Surface Nets — index buffer (2.9M × 4B) | ~11 MB |
-| GPU Surface Nets — smooth ping-pong (2 × 163K × 12B) | ~4 MB |
-| GPU Surface Nets — temporal state (160³ × 16B, RWTexture3D RGBA32F) | ~50 MB |
-| Triplanar color textures (3x 1024x1024 RGBA8) | ~12 MB |
-| Triplanar depth textures (3x 1024x1024 R8) | ~3 MB |
-| Keyframe array (8x 1280x960 RGBA8) | ~40 MB |
-| **Total GPU** | **~158 MB** |
+| TSDF volume (256³ RG8_SNorm) | ~32 MB |
+| Color volume (256³ RGBA8_UNorm) | ~64 MB |
+| GPU Surface Nets — coord vertex map (256³ × 4B) | ~64 MB |
+| GPU Surface Nets — vertex buffer (838K × 32B at 5% budget) | ~26 MB |
+| GPU Surface Nets — index buffer (838K × 18 × 4B) | ~58 MB |
+| GPU Surface Nets — smooth ping-pong (2 × 838K × 12B) | ~19 MB |
+| GPU Surface Nets — temporal state (256³ × 16B, RWTexture3D RGBA32F) | ~256 MB |
+| Triplanar color textures (3 × 4096² RGBA8) | ~192 MB |
+| Triplanar depth textures (3 × 4096² R8) | ~48 MB |
+| **Total GPU (with triplanar)** | **~759 MB** |
+| **Total GPU (without triplanar)** | **~519 MB** |
 | **Persistence on disk** | **~34 MB** |
 
 ## 13. Gaussian Splat Pipeline
@@ -642,7 +637,7 @@ The UGS fork includes several Quest 3-specific optimizations:
 - **Fragment shader**: Uses `clip()` instead of `discard` for better Adreno TBDR performance
 
 #### Visibility Control
-`GaussianSplatRenderer.renderVisible` boolean — checked in `GatherSplatsForCamera()` — allows toggling rendering without disabling the component or releasing GPU resources. Used by `GSplatManager.RenderVisible` → `RoomScanner.ApplyRenderMode()` for Mesh/Splat/Both switching.
+`GaussianSplatRenderer.renderVisible` boolean — checked in `GatherSplatsForCamera()` — allows toggling rendering without disabling the component or releasing GPU resources. Used by `GSplatManager.RenderVisible` → `RoomScanner.ApplyRenderMode()` for render mode switching. The `ScanRenderMode` enum controls which representation is active: `Wireframe`, `Vertex`, `Triplanar`, `Refined`, `HQRefined`, `Splat`, or `None`. `CycleRenderMode()` skips modes whose backing data or module is not present (e.g., Triplanar requires `TriplanarCache`, Splat requires trained data).
 
 ### 13.5 Coordinate Conversion Detail
 Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-trip:
@@ -660,15 +655,16 @@ Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-tri
 
 Post-processing pipeline that produces a sharp UV-mapped texture atlas from saved keyframes, replacing the blurry triplanar vertex-color texturing. Uses the same keyframes collected for Gaussian Splat training (§13.1).
 
-### 14.1 Mesh Simplification (optional, meshoptimizer)
+### 14.1 Mesh Simplification (optional, meshoptimizer — currently disabled)
 
 Before UV unwrapping, the GPU Surface Nets mesh can be optionally decimated using [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplify`):
 
 - **Input**: Original mesh positions + index buffer from GPU readback
 - **Operation**: Quadric error metric simplification — removes triangles while preserving mesh topology and surface shape. Only the index buffer changes; vertex positions are untouched.
-- **Target**: Configurable ratio (default 0.5 = 50% triangle reduction). Inspector slider `decimationRatio ∈ [0.1, 1.0]`.
+- **Target**: Configurable ratio, inspector slider `decimationRatio ∈ [0.1, 1.0]`.
 - **Performance**: <5ms even for 100k triangles on ARM64
-- **Purpose**: Reduces xatlas charting/packing time roughly proportionally to triangle reduction. Since the atlas resolution (2048²) is the detail bottleneck — not mesh density — moderate decimation has negligible visual impact on the baked texture.
+
+> **Status: Disabled by default** (`decimationRatio = 1.0`). Mesh decimation degrades atlas baking quality and performance — the simplified index buffer produces poor UV charts and misaligned projections during atlas baking. Until the interaction between meshoptimizer simplification and the atlas bake pipeline is resolved, decimation should remain off.
 
 ### 14.2 UV Unwrapping (xatlas)
 
@@ -723,18 +719,28 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
 
 ### 14.4 Render Modes
 
-Two additional render modes after refinement:
+`ScanRenderMode` controls which representation of the scan is displayed. `CycleRenderMode()` steps through in the order below, automatically skipping modes whose backing data or module is not present.
 
-- **Refined**: On-device atlas applied to a `Mesh` object with `RefinedMesh.shader` (standard unlit UV-mapped rendering). Available immediately after on-device refinement.
-- **HQRefined**: Server-refined atlas (same mesh, different texture). Available after server-side differentiable refinement. **Currently broken** — on-device refinement is recommended.
+| Mode | Renderer | Availability | Description |
+|------|----------|-------------|-------------|
+| **Wireframe** | GPU mesh (`ScanMeshVertexColor.shader`) | Always | Transparent mesh with white edges blending to vertex colors at vertices. Barycentric edge detection with configurable thickness (`_RSWireThickness`). Interior fragments discarded. |
+| **Vertex** | GPU mesh (`ScanMeshVertexColor.shader`) | Always (default) | Live GPU mesh with vertex colors only (~5cm resolution). Triplanar texturing forced off. |
+| **Triplanar** | GPU mesh (`ScanMeshVertexColor.shader`) | `TriplanarCache` attached | Live GPU mesh with triplanar-projected camera textures (~8mm/texel) with vertex color fallback where data is missing. |
+| **Refined** | `Mesh` object + `RefinedMesh.shader` | After on-device refinement | UV-unwrapped mesh with on-device baked atlas. Standard unlit UV-mapped rendering. |
+| **HQRefined** | `Mesh` object + `RefinedMesh.shader` | After server HQ refinement | Same mesh as Refined, with server-enhanced atlas (Real-ESRGAN + LaMa). |
+| **Splat** | `GaussianSplatRenderer` (UGS) | After GS training completes | Gaussian Splat point cloud rendered from server-trained PLY data. |
+| **None** | — | Always | All scan rendering disabled (GPU mesh hidden, splat hidden, refined hidden). |
 
-Both atlases and mesh data persist to disk via `RoomScanPersistence` and survive app restarts / scan reloads.
+The **Freeze Tint** toggle (`ShowFreezeTint`) is independent of render mode — it applies a blue overlay on frozen voxels in Vertex, Triplanar, and Wireframe modes via the `_RSNoFreezeTint` shader global.
 
-### 14.5 Server-Side HQ Refinement (experimental, currently broken)
+Both refined atlases and mesh data persist to disk via `RoomScanPersistence` and survive app restarts / scan reloads.
 
-Optional server-side path using differentiable rendering for texture optimization:
-1. Client uploads UV mesh binary (`refined_mesh.bin`) + keyframe ZIP to `gs-server`
-2. Server computes UV-to-pixel correspondences and runs gradient-based texture optimization
-3. Client polls `/refine-texture/status`, downloads result atlas
+### 14.5 Server-Side HQ Refinement
 
-Uses pure PyTorch tensor operations (no nvdiffrast), supporting MPS (Metal), CUDA, and CPU backends. This path is currently non-functional and is not recommended for use.
+Server-side atlas enhancement via Real-ESRGAN super-resolution + LaMa inpainting:
+1. Client uploads the on-device refined atlas as PNG to `{serverUrl}/refine-texture/upload`
+2. Server applies Real-ESRGAN (2x or 4x, configurable via `hqRefineScale`) for super-resolution
+3. Server applies LaMa inpainting to fill gaps in the upscaled atlas
+4. Client downloads the enhanced atlas (`hq_atlas.png`)
+
+> **Note:** An earlier differentiable-rendering-based HQ path (PyTorch gradient-based texture optimization) is non-functional and not exposed. The Real-ESRGAN + LaMa pipeline described above is the working path.

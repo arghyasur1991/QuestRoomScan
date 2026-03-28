@@ -3,7 +3,6 @@ using System.IO;
 using System.Threading.Tasks;
 using Genesis.RoomScan.UI;
 using UnityEngine;
-using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan
 {
