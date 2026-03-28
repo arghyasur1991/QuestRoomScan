@@ -7,9 +7,8 @@ using UnityEngine.Android;
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// Camera provider using Meta's PassthroughCameraAccess (MRUK).
-    /// Provides proper intrinsics, extrinsics, and timestamps from the Quest 3 cameras.
-    /// Replaces the deprecated WebCamTexture approach.
+    /// Camera provider backed by Meta's PassthroughCameraAccess (Quest 3+).
+    /// Provides intrinsics, extrinsics, and RGB frames from the headset cameras.
     /// </summary>
     public class PassthroughCameraProvider : MonoBehaviour, ICameraProvider
     {
@@ -20,88 +19,38 @@ namespace Genesis.RoomScan
 
         private PassthroughCameraAccess _pca;
 
-        /// <summary>True when the camera subsystem is running and delivered a new frame this tick.</summary>
+        /// <inheritdoc />
         public bool IsReady => _pca != null && _pca.IsPlaying && _pca.IsUpdatedThisFrame;
 
-        /// <summary>
-        /// True when the camera subsystem is actively running (may not have a new frame every tick).
-        /// Use for camera availability checks; use IsReady for new-frame-this-tick checks.
-        /// </summary>
+        /// <inheritdoc />
         public bool IsPlaying => _pca != null && _pca.IsPlaying;
 
-        /// <summary>The latest passthrough camera RGB texture, or null if not playing.</summary>
+        /// <inheritdoc />
         public Texture CurrentFrame => _pca != null && _pca.IsPlaying ? _pca.GetTexture() : null;
 
-        /// <summary>Camera-to-world matrix derived from the passthrough camera pose.</summary>
-        public Matrix4x4 CameraToWorld
-        {
-            get
-            {
-                if (_pca == null || !_pca.IsPlaying) return Matrix4x4.identity;
-                Pose pose = _pca.GetCameraPose();
-                return Matrix4x4.TRS(pose.position, pose.rotation, Vector3.one);
-            }
-        }
+        /// <inheritdoc />
+        public Pose CameraPose =>
+            _pca != null && _pca.IsPlaying ? _pca.GetCameraPose() : Pose.identity;
 
-        /// <summary>World-space pose of the passthrough camera this frame.</summary>
-        public Pose CameraPose
-        {
-            get
-            {
-                if (_pca == null || !_pca.IsPlaying) return Pose.identity;
-                return _pca.GetCameraPose();
-            }
-        }
-
-        /// <summary>Camera intrinsic focal length in pixels (fx, fy).</summary>
+        /// <inheritdoc />
         public Vector2 FocalLength =>
             _pca != null && _pca.IsPlaying ? _pca.Intrinsics.FocalLength : Vector2.one;
 
-        /// <summary>Camera intrinsic principal point in pixels (cx, cy).</summary>
+        /// <inheritdoc />
         public Vector2 PrincipalPoint =>
             _pca != null && _pca.IsPlaying ? _pca.Intrinsics.PrincipalPoint : Vector2.zero;
 
-        /// <summary>Native sensor resolution in pixels.</summary>
+        /// <inheritdoc />
         public Vector2 SensorResolution =>
             _pca != null && _pca.IsPlaying ? _pca.Intrinsics.SensorResolution : new Vector2(1280, 960);
 
-        /// <summary>Actual delivered frame resolution (may differ from sensor resolution).</summary>
+        /// <inheritdoc />
         public Vector2 CurrentResolution =>
             _pca != null && _pca.IsPlaying
                 ? new Vector2(_pca.CurrentResolution.x, _pca.CurrentResolution.y)
                 : new Vector2(1280, 960);
 
-        /// <summary>OpenGL-style projection matrix built from camera intrinsics.</summary>
-        public Matrix4x4 ProjectionMatrix
-        {
-            get
-            {
-                if (_pca == null || !_pca.IsPlaying) return Matrix4x4.identity;
-
-                var intrinsics = _pca.Intrinsics;
-                float fx = intrinsics.FocalLength.x;
-                float fy = intrinsics.FocalLength.y;
-                float cx = intrinsics.PrincipalPoint.x;
-                float cy = intrinsics.PrincipalPoint.y;
-                float w = intrinsics.SensorResolution.x;
-                float h = intrinsics.SensorResolution.y;
-
-                const float near = 0.1f;
-                const float far = 100f;
-
-                Matrix4x4 proj = Matrix4x4.zero;
-                proj.m00 = 2f * fx / w;
-                proj.m11 = 2f * fy / h;
-                proj.m02 = 1f - 2f * cx / w;
-                proj.m12 = 2f * cy / h - 1f;
-                proj.m22 = -(far + near) / (far - near);
-                proj.m23 = -2f * far * near / (far - near);
-                proj.m32 = -1f;
-                return proj;
-            }
-        }
-
-        /// <summary>Requests headset camera permission (Android) and starts the passthrough camera subsystem.</summary>
+        /// <inheritdoc />
         public void StartCapture()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -125,14 +74,12 @@ namespace Genesis.RoomScan
             _pca.enabled = true;
         }
 
-        /// <summary>Disables the passthrough camera subsystem.</summary>
+        /// <inheritdoc />
         public void StopCapture()
         {
             if (_pca != null)
                 _pca.enabled = false;
         }
-
-        private void Update() { }
 
         private void OnDestroy()
         {

@@ -1077,18 +1077,19 @@ namespace Genesis.RoomScan
             focal = principal = sensor = current = default;
 
             ICameraProvider provider = GetActiveCameraProvider();
-            if (provider is PassthroughCameraProvider pcp && pcp.IsReady)
+            if (provider != null && provider.IsReady)
             {
-                pose = pcp.CameraPose;
+                pose = provider.CameraPose;
                 if (_depthCapture != null)
                     pose = _depthCapture.TrackingToWorld(pose);
-                focal = pcp.FocalLength;
-                principal = pcp.PrincipalPoint;
-                sensor = pcp.SensorResolution;
-                current = pcp.CurrentResolution;
+                focal = provider.FocalLength;
+                principal = provider.PrincipalPoint;
+                sensor = provider.SensorResolution;
+                current = provider.CurrentResolution;
                 return true;
             }
 
+            // Fallback to main camera intrinsics when no provider is available
             var cam = Camera.main;
             if (cam == null) return false;
 
@@ -1136,12 +1137,10 @@ namespace Genesis.RoomScan
         private void ProvideColorFrame()
         {
             ICameraProvider provider = GetActiveCameraProvider();
-            var pcp = provider as PassthroughCameraProvider;
 
-            // Determine camera availability from IsPlaying (not IsReady which requires a new frame each tick).
-            // Camera at 30fps vs app at 72fps means IsReady is false on ~60% of frames — that's normal,
-            // not a reason to flip the normal fallback on/off.
-            bool cameraPlaying = pcp != null && pcp.IsPlaying;
+            // IsPlaying = camera subsystem running (stable signal).
+            // IsReady = new frame available this tick (toggles at camera fps < app fps).
+            bool cameraPlaying = provider != null && provider.IsPlaying;
 
             if (cameraPlaying && !_cameraAvailable)
             {
@@ -1156,28 +1155,27 @@ namespace Genesis.RoomScan
                 Logger.Info("Camera not playing — enabling normal fallback rendering");
             }
 
-            // Integrate color data only when a new frame is available this tick
-            if (pcp != null && pcp.IsReady)
+            if (provider != null && provider.IsReady)
             {
-                Texture frame = pcp.CurrentFrame;
+                Texture frame = provider.CurrentFrame;
                 if (frame != null)
                 {
                     _depthCapture?.SetRGBGuide(frame);
 
-                    Pose pose = pcp.CameraPose;
+                    Pose pose = provider.CameraPose;
                     if (_depthCapture != null)
                         pose = _depthCapture.TrackingToWorld(pose);
-                    Vector2 focal = pcp.FocalLength;
-                    Vector2 principal = pcp.PrincipalPoint;
-                    Vector2 sensor = pcp.SensorResolution;
-                    Vector2 current = pcp.CurrentResolution;
+                    Vector2 focal = provider.FocalLength;
+                    Vector2 principal = provider.PrincipalPoint;
+                    Vector2 sensor = provider.SensorResolution;
+                    Vector2 current = provider.CurrentResolution;
 
                     _volumeIntegrator.SetCameraData(
                         frame, pose.position, pose.rotation,
                         focal, principal, sensor, current);
 
-                    var framePose = new Pose(pose.position, pose.rotation);
-                    ColorFrameProvided?.Invoke(frame, framePose, focal, principal, sensor, current);
+                    ColorFrameProvided?.Invoke(frame, new Pose(pose.position, pose.rotation),
+                        focal, principal, sensor, current);
 
                     _colorFrameLog++;
                     if (_colorFrameLog <= 3 || _colorFrameLog % 50 == 0)
@@ -1192,7 +1190,7 @@ namespace Genesis.RoomScan
             if (_colorFrameLog <= 5)
                 Logger.Verbose($"ColorFrame #{_colorFrameLog}: NO FRAME " +
                     $"playing={cameraPlaying}, " +
-                    $"isReady={pcp?.IsReady ?? false}");
+                    $"isReady={provider?.IsReady ?? false}");
 
             _volumeIntegrator.SetCameraData(null, Vector3.zero, Quaternion.identity,
                 Vector2.one, Vector2.zero, Vector2.one, Vector2.one);

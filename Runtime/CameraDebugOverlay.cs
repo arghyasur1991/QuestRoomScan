@@ -26,12 +26,7 @@ namespace Genesis.RoomScan
 
             var scanner = RoomScanner.Instance;
             if (scanner != null)
-            {
-                var field = typeof(RoomScanner).GetField("cameraProvider",
-                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (field != null)
-                    _provider = field.GetValue(scanner) as ICameraProvider;
-            }
+                _provider = scanner.ActiveCameraProvider;
 
             if (_provider == null)
                 _provider = FindFirstObjectByType<PassthroughCameraProvider>();
