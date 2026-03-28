@@ -455,6 +455,7 @@ namespace Genesis.RoomScan
 
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StartCapture();
+            _depthCapture.StartDepthCapture();
 
             Logger.Info($"StartScanning — integrationCount={_volumeIntegrator.IntegrationCount}");
             ScanStarted?.Invoke();
@@ -472,6 +473,7 @@ namespace Genesis.RoomScan
 
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StopCapture();
+            _depthCapture.StopDepthCapture();
 
             ScanStopped?.Invoke();
             if (_modules != null)

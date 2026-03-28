@@ -88,6 +88,18 @@ namespace Genesis.RoomScan
         /// <summary>True once a valid depth frame has been received from the AR occlusion subsystem.</summary>
         public static bool DepthAvailable { get; private set; }
 
+        /// <summary>
+        /// True after USE_SCENE permission is confirmed and the initial subsystem check passes.
+        /// Until this is set, <see cref="StartDepthCapture"/> is a no-op.
+        /// </summary>
+        private bool _permissionReady;
+
+        /// <summary>
+        /// Tracks whether the caller (RoomScanner) wants depth capture active.
+        /// Persists across app pause/resume so the subsystem is re-enabled correctly.
+        /// </summary>
+        private bool _captureActive;
+
         private ComputeKernelHelper _normKernel;
         private ComputeKernelHelper _monoConvertKernel;
         private ComputeKernelHelper _initDilateKernel;
@@ -250,21 +262,18 @@ namespace Genesis.RoomScan
         {
             if (_arOcclusionManager == null) return;
 
-            Logger.Info("Enabling AROcclusionManager...");
+            Logger.Info("Verifying AROcclusionManager subsystem...");
 
-            // Unsubscribe first to avoid double subscription
             _arOcclusionManager.frameReceived -= OnDepthFrame;
             _arOcclusionManager.enabled = false;
 
-            // Wait a frame before re-enabling (same pattern as lasertag reference)
             await Awaitable.NextFrameAsync();
             await Awaitable.NextFrameAsync();
 
             if (_arOcclusionManager == null) return;
 
+            // Briefly enable to verify the subsystem is functional
             _arOcclusionManager.enabled = true;
-            _arOcclusionManager.frameReceived += OnDepthFrame;
-            _subscribed = true;
 
             await Awaitable.NextFrameAsync();
             await Awaitable.NextFrameAsync();
@@ -272,6 +281,58 @@ namespace Genesis.RoomScan
             if (_arOcclusionManager == null) return;
             var sub = _arOcclusionManager.subsystem;
             Logger.Info($"Occlusion subsystem: {(sub != null ? sub.GetType().Name : "null")}, running={sub?.running}");
+
+            _permissionReady = true;
+
+            if (_captureActive)
+            {
+                _arOcclusionManager.frameReceived += OnDepthFrame;
+                _subscribed = true;
+                Logger.Info("DepthCapture: subsystem left running (scan already active)");
+            }
+            else
+            {
+                _arOcclusionManager.enabled = false;
+                Logger.Info("DepthCapture: subsystem disabled (no active scan)");
+            }
+        }
+
+        /// <summary>
+        /// Enables the AROcclusionManager and subscribes to depth frames.
+        /// Called by RoomScanner when scanning starts.
+        /// </summary>
+        public void StartDepthCapture()
+        {
+            _captureActive = true;
+            if (!_permissionReady || _arOcclusionManager == null) return;
+            if (!_arOcclusionManager.enabled)
+                _arOcclusionManager.enabled = true;
+            if (!_subscribed)
+            {
+                _arOcclusionManager.frameReceived += OnDepthFrame;
+                _subscribed = true;
+            }
+            Logger.Info("DepthCapture: subsystem started");
+        }
+
+        /// <summary>
+        /// Unsubscribes from depth frames and disables the AROcclusionManager,
+        /// stopping the depth sensor and neural inference pipeline on Quest.
+        /// Called by RoomScanner when scanning stops.
+        /// </summary>
+        public void StopDepthCapture()
+        {
+            _captureActive = false;
+            if (_arOcclusionManager != null)
+            {
+                if (_subscribed)
+                {
+                    _arOcclusionManager.frameReceived -= OnDepthFrame;
+                    _subscribed = false;
+                }
+                _arOcclusionManager.enabled = false;
+            }
+            DepthAvailable = false;
         }
 
         private void OnApplicationPause(bool paused)
@@ -287,7 +348,7 @@ namespace Genesis.RoomScan
                     _subscribed = false;
                 }
             }
-            else
+            else if (_captureActive)
             {
                 CheckPermissionAndEnable();
             }
