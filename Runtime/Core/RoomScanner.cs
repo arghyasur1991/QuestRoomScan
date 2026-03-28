@@ -4,7 +4,6 @@ using System.Threading.Tasks;
 using Genesis.RoomScan.UI;
 using UnityEngine;
 using UnityEngine.Rendering;
-using UnityEngine.Serialization;
 
 namespace Genesis.RoomScan
 {
@@ -41,13 +40,6 @@ namespace Genesis.RoomScan
     {
         public static RoomScanner Instance { get; private set; }
 
-        [Header("Scan Settings")]
-        [SerializeField, FormerlySerializedAs("autoStartOnLoad"), Tooltip(
-            "When enabled, depth/color integration starts as soon as the scene loads. " +
-            "When disabled (default), scanning stays paused until you tap Start Scanning in the debug menu — " +
-            "avoids overwriting a restored scan and makes Load Scan easier to test.")]
-        private bool startScanningAutomatically = false;
-
         [Header("Scan Rates")]
         [SerializeField] private float integrationHz = 30f;
         [SerializeField] private float meshExtractionHz = 30f;
@@ -63,10 +55,6 @@ namespace Genesis.RoomScan
 
         [Header("Logging")]
         [SerializeField] private LogLevel logLevel = LogLevel.Info;
-
-        [Header("Persistence")]
-        [SerializeField, Tooltip("Auto-save scan data when the application quits")]
-        private bool saveOnQuit = false;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
@@ -242,36 +230,13 @@ namespace Genesis.RoomScan
         {
             if (_started)
                 return;
-
-            if (startScanningAutomatically)
-                StartScanning();
-
             _started = true;
-            Logger.Info(startScanningAutomatically
-                ? "Room ready, scanning started automatically"
-                : "Room ready, scanning paused — use debug menu Start Scanning");
-        }
-
-        private void OnEnable()
-        {
-            if (_started && startScanningAutomatically && !IsScanning)
-                StartScanning();
+            Logger.Info("Room ready — call StartScanning() to begin");
         }
 
         private void OnDisable()
         {
             StopScanning();
-        }
-
-        private async void OnApplicationQuit()
-        {
-            if (!saveOnQuit || _persistence == null || !_started) return;
-            if (_volumeIntegrator == null
-                || _volumeIntegrator.IntegrationCount <= _volumeIntegrator.WarmupIntegrations) return;
-            if (_persistence.IsSaving) return;
-
-            Logger.Info("App quitting, saving scan...");
-            await _persistence.SaveToNewPackageAsync();
         }
 
         private float _lastScannerLog;
@@ -292,8 +257,6 @@ namespace Genesis.RoomScan
                 if (_keyframeCollector != null)
                     _keyframeCollector.ReinitExportDir();
                 Logger.Info("All scan + export data cleared");
-                if (startScanningAutomatically)
-                    StartScanning();
                 _clearDoneCallback?.Invoke();
                 _clearDoneCallback = null;
             }

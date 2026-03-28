@@ -92,7 +92,7 @@ For Gaussian Splat support, also add the optional dependency:
 
 ### Scanning
 
-Scanning starts automatically on launch (configurable via `autoStartOnLoad`). As you look around:
+Call `RoomScanner.Instance.StartScanning()` to begin (or use the debug menu). As you look around:
 
 1. **Depth integration**: Each depth frame is fused into the TSDF volume with color from the passthrough camera
 2. **Mesh extraction**: GPU Surface Nets extracts a mesh from the volume every few frames (after a minimum number of integrations)

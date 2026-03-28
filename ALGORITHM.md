@@ -531,7 +531,6 @@ Voxels inside any exclusion cylinder are skipped during integration, preventing 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `RoomAnchorManager` | enabled | Disable to skip MRUK + spatial anchor (identity volume placement) |
-| `saveOnQuit` | false | Auto-save scan on application quit |
 | Relocation dilation passes | 4 | Compute dilation passes after forward-splat (fills coverage gaps) |
 | Spatial anchor creation timeout | 5s | Max wait for `OVRSpatialAnchor.Created` |
 | Spatial anchor localize timeout | 10s | Max wait for `LocalizeAsync` completion |
