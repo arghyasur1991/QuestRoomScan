@@ -560,24 +560,20 @@ namespace Genesis.RoomScan.UI
             SetLabel(_valMeshEnhanceStatus, scanner.IsMeshEnhancing
                 ? (scanner.MeshEnhanceStatus ?? "Processing...") : "Idle");
 
-            var refined = scanner.LastRefinedResult;
-            if (refined.HasValue)
+            if (scanner.LastRefinedResult.HasValue)
             {
-                var r = refined.Value;
+                var r = scanner.LastRefinedResult.Value;
                 SetLabel(_valRefinedMeshStats,
                     $"{r.Positions.Length / 1000f:F1}K verts, {r.Indices.Length / 3 / 1000f:F1}K tris");
             }
             else
             {
-                SetLabel(_valRefinedMeshStats, scanner.RefinedMesh != null
-                    ? $"{scanner.RefinedMesh.vertexCount / 1000f:F1}K verts, {scanner.RefinedMesh.triangles.Length / 3 / 1000f:F1}K tris"
-                    : "--");
+                SetLabel(_valRefinedMeshStats, "--");
             }
 
-            var simplified = scanner.LastSimplifiedResult;
-            if (simplified.HasValue)
+            if (scanner.LastSimplifiedResult.HasValue)
             {
-                var s = simplified.Value;
+                var s = scanner.LastSimplifiedResult.Value;
                 SetLabel(_valSimplifiedMeshStats,
                     $"{s.Positions.Length / 1000f:F1}K verts, {s.Indices.Length / 3 / 1000f:F1}K tris");
             }
