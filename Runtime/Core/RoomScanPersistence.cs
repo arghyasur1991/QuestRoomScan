@@ -299,12 +299,13 @@ namespace Genesis.RoomScan
                 tsdfBytes = null;
                 colorBytes = null;
 
-                // Write anchor.json
-                var anchorData = new PackageAnchorData
-                {
-                    anchorUuid = anchorUuidStr,
-                    baseMatrixAtSave = MatrixToFloats(anchorMatrix)
-                };
+                // Merge base anchor into existing anchor data (preserves per-artifact matrices
+                // written by SaveArtifactAsync during the tmp phase)
+                if (_activeAnchorData == null)
+                    _activeAnchorData = new PackageAnchorData();
+                _activeAnchorData.anchorUuid = anchorUuidStr;
+                _activeAnchorData.baseMatrixAtSave = MatrixToFloats(anchorMatrix);
+                var anchorData = _activeAnchorData;
                 string anchorJsonPath = Path.Combine(pkgDir, "anchor.json");
                 await Task.Run(() => WriteAnchorData(anchorJsonPath, anchorData));
 
@@ -316,7 +317,7 @@ namespace Genesis.RoomScan
                     await SaveTriplanarOneAtATime(tc, triDir);
                 }
 
-                // Update manifest (keyframes are already in-place from scanning)
+                // Update manifest — detect artifacts already on disk from tmp auto-saves
                 var manifest = ReadManifest();
                 string kfDir = Path.Combine(pkgDir, "keyframes");
                 bool hasKf = Directory.Exists(kfDir) &&
@@ -328,7 +329,12 @@ namespace Genesis.RoomScan
                     timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                     anchorUuid = anchorUuidStr,
                     hasTriplanar = triRes > 0,
-                    hasKeyframes = hasKf
+                    hasKeyframes = hasKf,
+                    hasSplat = File.Exists(Path.Combine(pkgDir, "splat.ply")),
+                    hasRefined = File.Exists(Path.Combine(pkgDir, "refined_mesh.bin")),
+                    hasHQRefined = File.Exists(Path.Combine(pkgDir, "hq_atlas.png")),
+                    hasEnhancedMesh = File.Exists(Path.Combine(pkgDir, "enhanced_mesh.bin")),
+                    hasSimplifiedMesh = File.Exists(Path.Combine(pkgDir, "simplified_mesh.bin"))
                 });
                 WriteManifest(manifest);
 
@@ -1033,7 +1039,7 @@ namespace Genesis.RoomScan
             string tmpDir = Path.Combine(RoomScansRoot, TmpPkgId);
             Directory.CreateDirectory(Path.Combine(tmpDir, "keyframes", "images"));
             ActivePackageId = TmpPkgId;
-            _activeAnchorData = null;
+            _activeAnchorData = new PackageAnchorData();
             Logger.Info($"Tmp package created: {tmpDir}");
         }
 
