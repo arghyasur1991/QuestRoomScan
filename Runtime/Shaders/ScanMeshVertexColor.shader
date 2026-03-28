@@ -148,6 +148,7 @@ Shader "Genesis/ScanMeshVertexColor"
             }
 
             float _RSNoFreezeTint;
+            float _RSNormalFallback;
 
             half3 ApplyFreezeTint(half3 color, float3 worldPos)
             {
@@ -181,7 +182,11 @@ Shader "Genesis/ScanMeshVertexColor"
                     if (tri.r >= 0) return half4(ApplyFreezeTint(tri, IN.positionWS), 1);
                 }
 
-                // Priority 2: Vertex colors
+                // Priority 2: Normal-colored fallback when camera is unavailable
+                if (_RSNormalFallback > 0.5)
+                    return half4(ApplyFreezeTint(half3(normal * 0.5 + 0.5), IN.positionWS), 1);
+
+                // Priority 3: Vertex colors
                 return half4(ApplyFreezeTint(IN.color.rgb, IN.positionWS), 1);
             }
             ENDHLSL

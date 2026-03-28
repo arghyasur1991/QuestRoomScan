@@ -1093,12 +1093,16 @@ namespace Genesis.RoomScan
             }
         }
 
+        private static readonly int NormalFallbackID = Shader.PropertyToID("_RSNormalFallback");
+
         private void SetSafeShaderDefaults()
         {
             Shader.SetGlobalFloat(Shader.PropertyToID("_RSTriAvailable"), 0f);
+            Shader.SetGlobalFloat(NormalFallbackID, 0f);
         }
 
         private int _colorFrameLog;
+        private bool _cameraAvailable;
         private void ProvideColorFrame()
         {
             ICameraProvider provider = GetActiveCameraProvider();
@@ -1108,6 +1112,13 @@ namespace Genesis.RoomScan
                 Texture frame = pcp.CurrentFrame;
                 if (frame != null)
                 {
+                    if (!_cameraAvailable)
+                    {
+                        _cameraAvailable = true;
+                        Shader.SetGlobalFloat(NormalFallbackID, 0f);
+                        Debug.Log("[RoomScan] Camera available — disabling normal fallback");
+                    }
+
                     _depthCapture?.SetRGBGuide(frame);
 
                     Pose pose = pcp.CameraPose;
@@ -1141,6 +1152,13 @@ namespace Genesis.RoomScan
 
                     return;
                 }
+            }
+
+            if (_cameraAvailable || _colorFrameLog == 0)
+            {
+                _cameraAvailable = false;
+                Shader.SetGlobalFloat(NormalFallbackID, 1f);
+                Debug.Log("[RoomScan] Camera unavailable — enabling normal fallback rendering");
             }
 
             _colorFrameLog++;
