@@ -40,6 +40,8 @@ namespace Genesis.RoomScan
                 UnityEngine.Debug.LogWarning($"[RoomScan] {msg}");
         }
 
+        internal static void Warn(string msg) => Warning(msg);
+
         internal static void Error(string msg)
         {
             if (Level <= LogLevel.Error)
