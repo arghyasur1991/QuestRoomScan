@@ -123,7 +123,7 @@ namespace Genesis.RoomScan
         // ─────────────────────────────────────────────────────────────
 
         /// <summary>Reads and deserializes the package manifest from disk. Returns an empty manifest on failure.</summary>
-        public ScanPackageManifest ReadManifest()
+        internal ScanPackageManifest ReadManifest()
         {
             if (!File.Exists(ManifestPath))
                 return new ScanPackageManifest();
@@ -147,7 +147,7 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>Returns all saved scan packages sorted newest-first.</summary>
-        public List<ScanPackageEntry> ListPackages()
+        internal List<ScanPackageEntry> ListPackages()
         {
             var manifest = ReadManifest();
             manifest.packages.Sort((a, b) => b.timestamp.CompareTo(a.timestamp));
@@ -342,7 +342,7 @@ namespace Genesis.RoomScan
         /// Persists an artifact (splat, refined mesh, HQ atlas, enhanced mesh) to the active package.
         /// Updates anchor.json with the current anchor matrix and the manifest flags.
         /// </summary>
-        public async Task<bool> SaveArtifactAsync(ArtifactType type, byte[] data,
+        internal async Task<bool> SaveArtifactAsync(ArtifactType type, byte[] data,
             RefinedTextureResult? refinedResult = null)
         {
             if (!HasActivePackage)
@@ -422,7 +422,7 @@ namespace Genesis.RoomScan
         /// <summary>
         /// Deletes a specific artifact from the active package on disk and in memory.
         /// </summary>
-        public void DeleteArtifactFromPackage(ArtifactType type)
+        internal void DeleteArtifactFromPackage(ArtifactType type)
         {
             if (!HasActivePackage) return;
             string pkgDir = ActivePackageDirectory;

@@ -94,7 +94,7 @@ namespace Genesis.RoomScan
         //  UV UNWRAP (shared prerequisite for both on-device and HQ refine)
         // ═══════════════════════════════════════════════════════════════
 
-        public static Task<UnwrappedMeshResult> UnwrapMeshAsync(
+        internal static Task<UnwrappedMeshResult> UnwrapMeshAsync(
             string keyframeDir, Matrix4x4 keyframeRelocation, int atlasResolution = 2048)
         {
             var opts = XAtlasWrapper.UnwrapOptions.Default;
@@ -102,7 +102,7 @@ namespace Genesis.RoomScan
             return UnwrapMeshAsync(keyframeDir, keyframeRelocation, opts);
         }
 
-        public static async Task<UnwrappedMeshResult> UnwrapMeshAsync(
+        internal static async Task<UnwrappedMeshResult> UnwrapMeshAsync(
             string keyframeDir, Matrix4x4 keyframeRelocation,
             XAtlasWrapper.UnwrapOptions opts, float decimationRatio = 1f)
         {
@@ -483,7 +483,7 @@ namespace Genesis.RoomScan
         /// on StructuredBuffers — no texture UV ambiguity, no framebuffer orientation issues.
         /// Falls back to CPU path if the compute shader is unavailable.
         /// </summary>
-        public static async Task<byte[]> BakeAtlasAsync(
+        internal static async Task<byte[]> BakeAtlasAsync(
             UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation,
             ComputeShader compute = null, bool skipDenoise = false)
         {

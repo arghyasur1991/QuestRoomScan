@@ -182,5 +182,31 @@ namespace Genesis.RoomScan.GSplat
             if (_serverClient == null) return false;
             return await _serverClient.UploadTrainingData(keyframeRelocation);
         }
+
+        // ── IGSplatProvider: server / training status ──
+
+        public string ServerUrl
+        {
+            get => _serverClient != null ? _serverClient.ServerUrl : "";
+            set { if (_serverClient != null) _serverClient.ServerUrl = value; }
+        }
+
+        public bool IsUploading => _serverClient != null && _serverClient.IsUploading;
+        public bool IsDownloading => _serverClient != null && _serverClient.IsDownloading;
+        public bool IsPolling => _serverClient != null && _serverClient.IsPolling;
+
+        public async Task CancelTraining()
+        {
+            if (_serverClient != null)
+                await _serverClient.CancelTraining();
+        }
+
+        public string TrainingState => _serverClient?.LastStatus?.state ?? "idle";
+        public float TrainingProgress => _serverClient?.LastStatus?.progress ?? 0f;
+        public string TrainingMessage => _serverClient?.LastStatus?.message;
+        public string TrainingBackend => _serverClient?.LastStatus?.backend;
+        public int CurrentIteration => _serverClient?.LastStatus?.current_iteration ?? 0;
+        public int TotalIterations => _serverClient?.LastStatus?.total_iterations ?? 0;
+        public float ElapsedSeconds => _serverClient?.LastStatus?.elapsed_seconds ?? 0f;
     }
 }

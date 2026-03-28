@@ -1,5 +1,6 @@
 using System;
 using System.Threading.Tasks;
+using UnityEngine;
 
 namespace Genesis.RoomScan
 {
@@ -29,5 +30,21 @@ namespace Genesis.RoomScan
 
         /// <summary>Uploads training data to the server.</summary>
         Task<bool> UploadTrainingDataAsync(Matrix4x4 keyframeRelocation);
+
+        // ── Server / training status (used by debug UI) ──
+
+        /// <summary>Server URL for GS training.</summary>
+        string ServerUrl { get; set; }
+        bool IsUploading { get; }
+        bool IsDownloading { get; }
+        bool IsPolling { get; }
+        Task CancelTraining();
+        string TrainingState { get; }
+        float TrainingProgress { get; }
+        string TrainingMessage { get; }
+        string TrainingBackend { get; }
+        int CurrentIteration { get; }
+        int TotalIterations { get; }
+        float ElapsedSeconds { get; }
     }
 }

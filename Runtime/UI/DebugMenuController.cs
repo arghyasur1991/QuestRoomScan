@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using Genesis.RoomScan.GSplat;
 using UnityEngine;
 using UnityEngine.UIElements;
 
@@ -51,7 +50,7 @@ namespace Genesis.RoomScan.UI
         private Label _valFps;
 
         // Cached state
-        private GSplatServerClient _cachedClient;
+        private IGSplatProvider _cachedGSplat;
         private float _fpsTimer;
         private int _fpsFrames;
         private float _currentFps;
@@ -231,9 +230,8 @@ namespace Genesis.RoomScan.UI
             // Training
             _fieldServerUrl?.RegisterValueChangedCallback(evt =>
             {
-                if (_cachedClient == null)
-                    _cachedClient = FindAnyObjectByType<GSplatServerClient>();
-                if (_cachedClient != null) _cachedClient.ServerUrl = evt.newValue;
+                EnsureGSplat();
+                if (_cachedGSplat != null) _cachedGSplat.ServerUrl = evt.newValue;
             });
 
             _btnGsTrain?.RegisterCallback<ClickEvent>(_ =>
@@ -241,9 +239,8 @@ namespace Genesis.RoomScan.UI
 
             _btnCancelTrain?.RegisterCallback<ClickEvent>(_ =>
             {
-                if (_cachedClient == null)
-                    _cachedClient = FindAnyObjectByType<GSplatServerClient>();
-                if (_cachedClient == null) return;
+                EnsureGSplat();
+                if (_cachedGSplat == null) return;
                 SetButtonBusy(_btnCancelTrain, "Cancelling...");
                 CancelAndResetButton();
             });
@@ -522,36 +519,35 @@ namespace Genesis.RoomScan.UI
 
         private void RefreshTrainingStatus()
         {
-            if (_cachedClient == null)
-                _cachedClient = FindAnyObjectByType<GSplatServerClient>();
-            if (_cachedClient == null) return;
+            EnsureGSplat();
+            if (_cachedGSplat == null) return;
 
-            if (_fieldServerUrl != null && _fieldServerUrl.value != _cachedClient.ServerUrl)
-                _fieldServerUrl.SetValueWithoutNotify(_cachedClient.ServerUrl);
+            if (_fieldServerUrl != null && _fieldServerUrl.value != _cachedGSplat.ServerUrl)
+                _fieldServerUrl.SetValueWithoutNotify(_cachedGSplat.ServerUrl);
 
-            var ts = _cachedClient.LastStatus;
-            if (ts == null)
+            string state = _cachedGSplat.TrainingState;
+            if (string.IsNullOrEmpty(state))
             {
                 SetLabel(_valTrainState, "No data");
                 return;
             }
 
-            string stateDisplay = ts.state ?? "--";
-            if (_cachedClient.IsUploading) stateDisplay = "Uploading...";
-            else if (_cachedClient.IsDownloading) stateDisplay = "Downloading...";
-            else if (_cachedClient.IsPolling && ts.state == "training") stateDisplay = "Training (polling)";
+            string stateDisplay = state;
+            if (_cachedGSplat.IsUploading) stateDisplay = "Uploading...";
+            else if (_cachedGSplat.IsDownloading) stateDisplay = "Downloading...";
+            else if (_cachedGSplat.IsPolling && state == "training") stateDisplay = "Training (polling)";
             SetLabel(_valTrainState, stateDisplay);
 
-            float pct = ts.progress * 100f;
+            float pct = _cachedGSplat.TrainingProgress * 100f;
             if (_progressFill != null)
                 _progressFill.style.width = new Length(pct, LengthUnit.Percent);
             SetLabel(_valTrainProgress, $"{pct:F0}%");
 
-            SetLabel(_valTrainIter, ts.total_iterations > 0
-                ? $"{ts.current_iteration} / {ts.total_iterations}" : "--");
-            SetLabel(_valTrainElapsed, ts.elapsed_seconds > 0 ? FormatElapsed(ts.elapsed_seconds) : "--");
-            SetLabel(_valTrainBackend, string.IsNullOrEmpty(ts.backend) ? "--" : ts.backend);
-            SetLabel(_valTrainMessage, string.IsNullOrEmpty(ts.message) ? "--" : ts.message);
+            SetLabel(_valTrainIter, _cachedGSplat.TotalIterations > 0
+                ? $"{_cachedGSplat.CurrentIteration} / {_cachedGSplat.TotalIterations}" : "--");
+            SetLabel(_valTrainElapsed, _cachedGSplat.ElapsedSeconds > 0 ? FormatElapsed(_cachedGSplat.ElapsedSeconds) : "--");
+            SetLabel(_valTrainBackend, string.IsNullOrEmpty(_cachedGSplat.TrainingBackend) ? "--" : _cachedGSplat.TrainingBackend);
+            SetLabel(_valTrainMessage, string.IsNullOrEmpty(_cachedGSplat.TrainingMessage) ? "--" : _cachedGSplat.TrainingMessage);
         }
 
         private void RefreshDisabledStates(RoomScanner scanner)
@@ -573,7 +569,7 @@ namespace Genesis.RoomScan.UI
             }
 
             // Cancel Training
-            bool isTraining = _cachedClient?.LastStatus?.state == "training";
+            bool isTraining = _cachedGSplat?.TrainingState == "training";
             if (_btnCancelTrain != null && !_btnCancelTrain.text.Contains("..."))
                 _btnCancelTrain.SetEnabled(isTraining);
 
@@ -583,15 +579,15 @@ namespace Genesis.RoomScan.UI
 
             if (_btnHqRefine != null && !scanner.IsHQRefining)
             {
-                bool hasServer = _cachedClient != null &&
-                    !string.IsNullOrEmpty(_cachedClient.ServerUrl);
+                bool hasServer = _cachedGSplat != null &&
+                    !string.IsNullOrEmpty(_cachedGSplat.ServerUrl);
                 _btnHqRefine.SetEnabled((hasVolume || hasActivePackage) && hasServer);
             }
 
             if (_btnMeshEnhance != null && !scanner.IsMeshEnhancing)
             {
-                bool hasServer = _cachedClient != null &&
-                    !string.IsNullOrEmpty(_cachedClient.ServerUrl);
+                bool hasServer = _cachedGSplat != null &&
+                    !string.IsNullOrEmpty(_cachedGSplat.ServerUrl);
                 bool hasRefined = scanner.HasRefinedTexture || scanner.LastRefinedResult.HasValue;
                 _btnMeshEnhance.SetEnabled(hasRefined && hasServer);
             }
@@ -634,9 +630,24 @@ namespace Genesis.RoomScan.UI
 
         private async void CancelAndResetButton()
         {
-            if (_cachedClient != null)
-                await _cachedClient.CancelTraining();
+            if (_cachedGSplat != null)
+                await _cachedGSplat.CancelTraining();
             SetButtonReady(_btnCancelTrain, "Cancel Training");
+        }
+
+        private void EnsureGSplat()
+        {
+            if (_cachedGSplat != null) return;
+            var scanner = RoomScanner.Instance;
+            if (scanner == null) return;
+            foreach (var c in scanner.GetComponents<MonoBehaviour>())
+            {
+                if (c is IGSplatProvider provider)
+                {
+                    _cachedGSplat = provider;
+                    return;
+                }
+            }
         }
 
         private static void SetButtonBusy(Button btn, string text)
