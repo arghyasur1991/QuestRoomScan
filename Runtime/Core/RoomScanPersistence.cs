@@ -14,7 +14,7 @@ namespace Genesis.RoomScan
     // ─────────────────────────────────────────────────────────────
 
     [Serializable]
-    public class ScanPackageEntry
+    internal class ScanPackageEntry
     {
         public string id;
         public string displayName;
@@ -28,13 +28,13 @@ namespace Genesis.RoomScan
     }
 
     [Serializable]
-    public class ScanPackageManifest
+    internal class ScanPackageManifest
     {
         public int version = 1;
         public List<ScanPackageEntry> packages = new();
     }
 
-    public enum ArtifactType { Splat, Refined, HQRefined, EnhancedMesh }
+    internal enum ArtifactType { Splat, Refined, HQRefined, EnhancedMesh }
 
     /// <summary>
     /// Per-artifact anchor matrices. All matrices are from localizing the same
@@ -42,7 +42,7 @@ namespace Genesis.RoomScan
     /// localToWorldMatrix at the time it was created / saved to disk.
     /// </summary>
     [Serializable]
-    public class PackageAnchorData
+    internal class PackageAnchorData
     {
         public string anchorUuid;
         public float[] baseMatrixAtSave;
@@ -53,9 +53,13 @@ namespace Genesis.RoomScan
 
     // ─────────────────────────────────────────────────────────────
 
-    public class RoomScanPersistence : MonoBehaviour
+    public class RoomScanPersistence : MonoBehaviour, IRoomScanModule
     {
         public static RoomScanPersistence Instance { get; private set; }
+
+        public string ModuleName => "Room Persistence";
+
+        public void OnModuleInitialize(RoomScanner scanner) { }
 
         private const uint Magic = 0x48534D52; // "RMSH"
         private const int FormatVersion = 1;
