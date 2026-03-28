@@ -38,10 +38,10 @@ namespace Genesis.RoomScan
             if (shader != null)
                 _depthMat = new Material(shader);
             else
-                Debug.LogWarning("[RoomScan] DepthDebugOverlay: Genesis/DepthVisualize shader not found");
+                Logger.Warning("DepthDebugOverlay: Genesis/DepthVisualize shader not found");
 
             CreateCanvas();
-            Debug.Log($"[RoomScan] DepthDebugOverlay: depthCapture={DepthCapture.Instance != null}, mat={_depthMat != null}");
+            Logger.Info($"DepthDebugOverlay: depthCapture={DepthCapture.Instance != null}, mat={_depthMat != null}");
         }
 
         private void CreateCanvas()

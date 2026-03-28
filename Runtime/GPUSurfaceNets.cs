@@ -146,7 +146,7 @@ namespace Genesis.RoomScan
                             + 2 * 4 + 3 * 4 + 5 * 4
                             + (long)_maxVertices * Float3Stride * 2
                             + (long)totalVoxels * 16;
-            Debug.Log($"[GPUSurfaceNets] Allocated buffers: vox={voxCount}, " +
+            Logger.Info($"[GPUSurfaceNets] Allocated buffers: vox={voxCount}, " +
                       $"maxVerts={_maxVertices}, maxIdx={_maxIndices}, " +
                       $"totalGPU={totalBytes / (1024 * 1024)}MB");
         }

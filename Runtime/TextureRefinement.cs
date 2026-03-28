@@ -86,7 +86,7 @@ namespace Genesis.RoomScan
             if (positions == null || positions.Length == 0)
                 throw new InvalidOperationException("Mesh readback returned no vertices");
 
-            Debug.Log($"[TextureRefine] Readback: {positions.Length} verts, {indices.Length / 3} tris");
+            Logger.Info($"[TextureRefine] Readback: {positions.Length} verts, {indices.Length / 3} tris");
 
             Vector3[] inPos = positions;
             Vector3[] inNorm = normals;
@@ -111,7 +111,7 @@ namespace Genesis.RoomScan
                     for (int i = 0; i < sr.IndexCount; i++)
                         inIdx[i] = (int)sr.Indices[i];
                 });
-                Debug.Log($"[TextureRefine] Simplified: {inIdx.Length / 3} tris (was {indices.Length / 3})");
+                Logger.Info($"[TextureRefine] Simplified: {inIdx.Length / 3} tris (was {indices.Length / 3})");
             }
 
             ReportStatus("UV unwrapping...");
@@ -139,7 +139,7 @@ namespace Genesis.RoomScan
 
             int atlasW = uvResult.AtlasWidth;
             int atlasH = uvResult.AtlasHeight;
-            Debug.Log($"[TextureRefine] xatlas: {uvResult.VertexCount} verts, " +
+            Logger.Info($"[TextureRefine] xatlas: {uvResult.VertexCount} verts, " +
                       $"{uvResult.IndexCount / 3} tris, atlas {atlasW}x{atlasH}");
 
             Vector3[] outPos = new Vector3[uvResult.VertexCount];
@@ -193,43 +193,43 @@ namespace Genesis.RoomScan
             var gpuSN = MeshExtractor.Instance?.GpuSurfaceNets;
             if (gpuSN == null || gpuSN.VertexBuffer == null || gpuSN.IndexBuffer == null)
             {
-                Debug.LogError("[TextureRefine] GpuSurfaceNets or its buffers are null");
+                Logger.Error("[TextureRefine] GpuSurfaceNets or its buffers are null");
                 return (null, null, null, null);
             }
 
-            Debug.Log("[TextureRefine] Starting GPU readback...");
+            Logger.Info("[TextureRefine] Starting GPU readback...");
 
             // Read all three buffers using callback-based readback
             // (copies NativeArray to managed array immediately in callback frame)
             byte[] counterBytes = await ReadbackBytesAsync(gpuSN.CountersBuffer);
             if (counterBytes == null)
             {
-                Debug.LogError("[TextureRefine] Counter readback failed");
+                Logger.Error("[TextureRefine] Counter readback failed");
                 return (null, null, null, null);
             }
 
             int vertCount = BitConverter.ToInt32(counterBytes, 0);
             int idxCount = counterBytes.Length >= 8 ? BitConverter.ToInt32(counterBytes, 4) : 0;
 
-            Debug.Log($"[TextureRefine] Counters: verts={vertCount}, idx={idxCount}");
+            Logger.Info($"[TextureRefine] Counters: verts={vertCount}, idx={idxCount}");
 
             if (vertCount <= 0 || idxCount <= 0)
             {
-                Debug.LogWarning($"[TextureRefine] No mesh data: verts={vertCount}, idx={idxCount}");
+                Logger.Warning($"[TextureRefine] No mesh data: verts={vertCount}, idx={idxCount}");
                 return (null, null, null, null);
             }
 
             byte[] vertData = await ReadbackBytesAsync(gpuSN.VertexBuffer);
             if (vertData == null)
             {
-                Debug.LogError("[TextureRefine] Vertex readback failed");
+                Logger.Error("[TextureRefine] Vertex readback failed");
                 return (null, null, null, null);
             }
 
             byte[] idxData = await ReadbackBytesAsync(gpuSN.IndexBuffer);
             if (idxData == null)
             {
-                Debug.LogError("[TextureRefine] Index readback failed");
+                Logger.Error("[TextureRefine] Index readback failed");
                 return (null, null, null, null);
             }
 
@@ -267,7 +267,7 @@ namespace Genesis.RoomScan
                     255);
             }
 
-            Debug.Log($"[TextureRefine] Readback complete: {vertCount} verts, {idxCount / 3} tris");
+            Logger.Info($"[TextureRefine] Readback complete: {vertCount} verts, {idxCount / 3} tris");
             return (positions, normals, colors, indices);
         }
 
@@ -396,7 +396,7 @@ namespace Genesis.RoomScan
                 }
                 catch (Exception e)
                 {
-                    Debug.LogWarning($"[TextureRefine] Skip keyframe: {e.Message}");
+                    Logger.Warning($"[TextureRefine] Skip keyframe: {e.Message}");
                 }
             }
             return metaList;
@@ -464,7 +464,7 @@ namespace Genesis.RoomScan
         {
             if (compute == null)
             {
-                Debug.LogWarning("[TextureRefine] No compute shader, falling back to CPU bake");
+                Logger.Warning("[TextureRefine] No compute shader, falling back to CPU bake");
                 return await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation, skipDenoise);
             }
 
@@ -474,7 +474,7 @@ namespace Genesis.RoomScan
                 throw new InvalidOperationException("No keyframes available for baking");
 
             int total = metaList.Count;
-            Debug.Log($"[TextureRefine] GPU compute bake: {total} keyframes" +
+            Logger.Info($"[TextureRefine] GPU compute bake: {total} keyframes" +
                 (keyframeRelocation != Matrix4x4.identity ? " (relocated)" : ""));
 
             int atlasW = mesh.AtlasWidth;
@@ -601,13 +601,13 @@ namespace Genesis.RoomScan
                 if (bakeCount % 20 == 0 || bakeCount < 3)
                 {
                     ReportStatus($"Baking (GPU)... {bakeCount}/{total}");
-                    Debug.Log($"[TextureRefine] GPU baked keyframe {bakeCount}/{total}");
+                    Logger.Info($"[TextureRefine] GPU baked keyframe {bakeCount}/{total}");
                 }
 
                 await Task.Yield();
             }
 
-            Debug.Log($"[TextureRefine] GPU baked {bakeCount} keyframes total (pass 1)");
+            Logger.Info($"[TextureRefine] GPU baked {bakeCount} keyframes total (pass 1)");
 
             // ── Pass 2: Multi-view blend accumulation (optional) ──
             // Re-iterates keyframes, accumulating score-weighted colors from all
@@ -703,13 +703,13 @@ namespace Genesis.RoomScan
                     if (blendCount % 20 == 0 || blendCount < 3)
                     {
                         ReportStatus($"Multi-view blend... {blendCount}/{total}");
-                        Debug.Log($"[TextureRefine] Blend pass keyframe {blendCount}/{total}");
+                        Logger.Info($"[TextureRefine] Blend pass keyframe {blendCount}/{total}");
                     }
 
                     await Task.Yield();
                 }
 
-                Debug.Log($"[TextureRefine] Blend pass 2 complete: {blendCount} keyframes");
+                Logger.Info($"[TextureRefine] Blend pass 2 complete: {blendCount} keyframes");
 
                 // Resolve: divide accumulated colors by weights → final atlas
                 compute.SetBuffer(kResolve, "_AccumRIn", accumR);
@@ -721,7 +721,7 @@ namespace Genesis.RoomScan
 
                 accumR.Release(); accumG.Release();
                 accumB.Release(); accumW.Release();
-                Debug.Log("[TextureRefine] Multi-view blend resolved");
+                Logger.Info("[TextureRefine] Multi-view blend resolved");
             }
 
             // ── Sharpening pass (GPU unsharp mask) ──
@@ -746,7 +746,7 @@ namespace Genesis.RoomScan
                 compute.Dispatch(kSharpen, groupsX, groupsY, 1);
 
                 sharpenSrcBuf.Release();
-                Debug.Log($"[TextureRefine] Sharpening complete (strength={SharpenStrength}, radius={SharpenRadius})");
+                Logger.Info($"[TextureRefine] Sharpening complete (strength={SharpenStrength}, radius={SharpenRadius})");
             }
 
             // ── Seam blending pass (GPU) ──
@@ -773,7 +773,7 @@ namespace Genesis.RoomScan
                 compute.Dispatch(kSeam, groupsX, groupsY, 1);
 
                 seamSrcBuf.Release();
-                Debug.Log("[TextureRefine] Seam blending complete");
+                Logger.Info("[TextureRefine] Seam blending complete");
             }
 
             // Readback atlas buffer
@@ -785,7 +785,7 @@ namespace Genesis.RoomScan
                 int filled = 0;
                 for (int i = 0; i < texelCount; i++)
                     if (atlasPixels[i * 4 + 3] != 0) filled++;
-                Debug.Log($"[TextureRefine] GPU bake pre-dilation: {filled}/{texelCount} texels filled " +
+                Logger.Info($"[TextureRefine] GPU bake pre-dilation: {filled}/{texelCount} texels filled " +
                     $"({100f * filled / texelCount:F1}%)");
             }
 
@@ -806,7 +806,7 @@ namespace Genesis.RoomScan
             depthBuf?.Release(); kfPixelBuf?.Release();
 
             ReportStatus("Done");
-            Debug.Log($"[TextureRefine] GPU compute bake complete: {atlasW}x{atlasH} atlas");
+            Logger.Info($"[TextureRefine] GPU compute bake complete: {atlasW}x{atlasH} atlas");
 
             return atlasPixels;
         }
@@ -831,7 +831,7 @@ namespace Genesis.RoomScan
             {
                 if (request.hasError)
                 {
-                    Debug.LogError("[TextureRefine] Compute buffer readback failed");
+                    Logger.Error("[TextureRefine] Compute buffer readback failed");
                     tcs.SetResult(new byte[elementCount * 4]);
                     return;
                 }
@@ -860,7 +860,7 @@ namespace Genesis.RoomScan
             if (metaList.Count == 0)
                 throw new InvalidOperationException("No keyframes available for baking");
 
-            Debug.Log($"[TextureRefine] Found {metaList.Count} keyframes" +
+            Logger.Info($"[TextureRefine] Found {metaList.Count} keyframes" +
                 (keyframeRelocation != Matrix4x4.identity ? " (relocated)" : ""));
 
             ReportStatus("Baking textures...");
@@ -913,7 +913,7 @@ namespace Genesis.RoomScan
 
                 if (ki == 0)
                 {
-                    Debug.Log($"[TextureRefine] KF0: pos={kf.Position}, rot={kf.Rotation}, " +
+                    Logger.Info($"[TextureRefine] KF0: pos={kf.Position}, rot={kf.Rotation}, " +
                         $"fx={kf.Fx}, fy={kf.Fy}, cx={kf.Cx}, cy={kf.Cy}, " +
                         $"imgSize={kf.Width}x{kf.Height}, pixLen={kf.Pixels.Length}");
                 }
@@ -929,7 +929,7 @@ namespace Genesis.RoomScan
                 if (ki % 20 == 0 || ki < 3 || ki == metaList.Count - 1)
                 {
                     ReportStatus($"Baking... {ki + 1}/{metaList.Count}");
-                    Debug.Log($"[TextureRefine] Baked keyframe {ki + 1}/{metaList.Count}");
+                    Logger.Info($"[TextureRefine] Baked keyframe {ki + 1}/{metaList.Count}");
                 }
             }
 
@@ -937,7 +937,7 @@ namespace Genesis.RoomScan
                 int filled = 0;
                 for (int i = 0; i < texelCount; i++)
                     if (atlasPixels[i * 4 + 3] != 0) filled++;
-                Debug.Log($"[TextureRefine] Pre-dilation: {filled}/{texelCount} texels filled " +
+                Logger.Info($"[TextureRefine] Pre-dilation: {filled}/{texelCount} texels filled " +
                     $"({100f * filled / texelCount:F1}%)");
             }
 
@@ -951,7 +951,7 @@ namespace Genesis.RoomScan
             await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
 
             ReportStatus("Done");
-            Debug.Log($"[TextureRefine] Complete: {atlasW}x{atlasH} atlas");
+            Logger.Info($"[TextureRefine] Complete: {atlasW}x{atlasH} atlas");
 
             return atlasPixels;
         }
@@ -1244,7 +1244,7 @@ namespace Genesis.RoomScan
             }
 
             Buffer.BlockCopy(clean, 0, atlas, 0, atlas.Length);
-            Debug.Log($"[TextureRefine] Denoise: replaced {replaced} outlier texels (threshold={threshold})");
+            Logger.Info($"[TextureRefine] Denoise: replaced {replaced} outlier texels (threshold={threshold})");
         }
 
         // ═══════════════════════════════════════════════════════════════

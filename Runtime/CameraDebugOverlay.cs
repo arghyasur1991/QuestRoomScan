@@ -37,7 +37,7 @@ namespace Genesis.RoomScan
                 _provider = FindFirstObjectByType<PassthroughCameraProvider>();
 
             CreateCanvas();
-            Debug.Log($"[RoomScan] CameraDebugOverlay: provider={(_provider != null ? _provider.GetType().Name : "NULL")}");
+            Logger.Info($"CameraDebugOverlay: provider={(_provider != null ? _provider.GetType().Name : "NULL")}");
         }
 
         private void CreateCanvas()

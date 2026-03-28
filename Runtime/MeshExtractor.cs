@@ -65,7 +65,7 @@ namespace Genesis.RoomScan
                 throw new Exception("[RoomScan] surfaceNetsCompute not assigned on MeshExtractor");
 
             var rpAsset = GraphicsSettings.currentRenderPipeline;
-            Debug.Log($"[RoomScan] MeshExtractor Start: mat={scanMeshMaterial?.name ?? "NULL"}, " +
+            Logger.Info($"MeshExtractor Start: mat={scanMeshMaterial?.name ?? "NULL"}, " +
                 $"shader={scanMeshMaterial?.shader?.name ?? "NULL"}, " +
                 $"rp={rpAsset?.name ?? "NULL"}, " +
                 $"stereoMode={UnityEngine.XR.XRSettings.stereoRenderingMode}");
@@ -99,7 +99,7 @@ namespace Genesis.RoomScan
             _gpuRenderer.GpuMeshMaterial = scanMeshMaterial;
             _gpuRenderer.Initialize(_gpuSurfaceNets, _gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
 
-            Debug.Log($"[RoomScan] GPU Surface Nets initialized: voxels={_volume.VoxelCount}, " +
+            Logger.Info($"GPU Surface Nets initialized: voxels={_volume.VoxelCount}, " +
                       $"voxSize={_volume.VoxelSize}");
         }
 

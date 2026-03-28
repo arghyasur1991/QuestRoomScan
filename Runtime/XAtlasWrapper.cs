@@ -133,7 +133,7 @@ namespace Genesis.RoomScan
 
                 if (err != 0)
                 {
-                    Debug.LogError($"[XAtlas] AddMesh failed with error code {err}");
+                    Logger.Error($"[XAtlas] AddMesh failed with error code {err}");
                     return default;
                 }
 
@@ -161,7 +161,7 @@ namespace Genesis.RoomScan
 
                 if (err != 0)
                 {
-                    Debug.LogError($"[XAtlas] AddMesh failed with error code {err}");
+                    Logger.Error($"[XAtlas] AddMesh failed with error code {err}");
                     return default;
                 }
 
@@ -248,7 +248,7 @@ namespace Genesis.RoomScan
 
             if (resultCount <= 0)
             {
-                Debug.LogWarning("[MeshOpt] Simplification produced 0 indices, using original mesh");
+                Logger.Warning("[MeshOpt] Simplification produced 0 indices, using original mesh");
                 return new SimplifyResult { Indices = uIndices, IndexCount = indexCount, ResultError = 0f };
             }
 

@@ -82,7 +82,7 @@ namespace Genesis.RoomScan.GSplat
             }
             catch
             {
-                Debug.LogWarning("[GSplatManager] Could not copy renderer settings; run Setup Wizard to re-wire shaders");
+                Logger.Warning("Could not copy renderer settings; run Setup Wizard to re-wire shaders");
             }
         }
 
@@ -96,12 +96,12 @@ namespace Genesis.RoomScan.GSplat
 
             if (_ugsRenderer == null)
             {
-                Debug.LogError("[GSplatManager] No GaussianSplatRenderer component found");
+                Logger.Error("No GaussianSplatRenderer component found");
                 return;
             }
 
             GaussianSplatPlyLoader.LoadFromPlyBytes(_ugsRenderer, plyData, colmapToUnity: true);
-            Debug.Log($"[GSplatManager] Loaded trained splat via UGS ({_ugsRenderer.splatCount} Gaussians)");
+            Logger.Info($"Loaded trained splat via UGS ({_ugsRenderer.splatCount} Gaussians)");
         }
 
         /// <summary>Release all GPU resources for the loaded splat.</summary>

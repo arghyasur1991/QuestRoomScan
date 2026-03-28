@@ -115,7 +115,7 @@ namespace Genesis.RoomScan
 
         private static void ExecuteAction(RoomScanner scanner, ScanAction action)
         {
-            Debug.Log($"[RoomScan] InputHandler: {action}");
+            Logger.Info($"InputHandler: {action}");
             switch (action)
             {
                 case ScanAction.ToggleScanning:

@@ -54,7 +54,7 @@ namespace Genesis.RoomScan
 
             yield return null;
             _ = _mruk.LoadSceneFromDevice();
-            Debug.Log("[RoomAnchor] MRUK LoadSceneFromDevice started (awaiting SceneLoadedEvent)...");
+            Logger.Info("MRUK LoadSceneFromDevice started (awaiting SceneLoadedEvent)...");
         }
 
         private void OnDestroy()
@@ -72,7 +72,7 @@ namespace Genesis.RoomScan
 
             if (_mruk.Rooms == null || _mruk.Rooms.Count == 0)
             {
-                Debug.LogWarning("[RoomAnchor] MRUK loaded but no rooms found");
+                Logger.Warning("MRUK loaded but no rooms found");
                 IsRoomLoaded = true;
                 RoomReady?.Invoke();
                 return;
@@ -87,20 +87,20 @@ namespace Genesis.RoomScan
             _anchorTransform = floorAnchor != null ? floorAnchor.transform : room.transform;
             if (_anchorTransform == null)
             {
-                Debug.LogWarning("[RoomAnchor] No anchor transform");
+                Logger.Warning("No anchor transform");
                 IsRoomLoaded = true;
                 RoomReady?.Invoke();
                 return;
             }
 
             if (floorAnchor != null)
-                Debug.Log($"[RoomAnchor] Using floor MRUKAnchor '{floorAnchor.name}' " +
+                Logger.Info($"Using floor MRUKAnchor '{floorAnchor.name}' " +
                           $"(label={floorAnchor.Label}) pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
             else
-                Debug.LogWarning($"[RoomAnchor] No FloorAnchors — falling back to MRUKRoom.transform (pos={_anchorTransform.position})");
+                Logger.Warning($"No FloorAnchors — falling back to MRUKRoom.transform (pos={_anchorTransform.position})");
 
             IsRoomLoaded = true;
-            Debug.Log($"[RoomAnchor] Room ready — anchor pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
+            Logger.Info($"Room ready — anchor pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
             RoomReady?.Invoke();
         }
 
@@ -123,7 +123,7 @@ namespace Genesis.RoomScan
         public static Matrix4x4 ComputeRelocationMatrix(Matrix4x4 anchorNow, Matrix4x4 anchorAtSave)
         {
             Matrix4x4 reloc = anchorNow * anchorAtSave.inverse;
-            Debug.Log($"[RoomAnchor] ComputeRelocation: R = A_now * Inv(A_save)\n" +
+            Logger.Info($"ComputeRelocation: R = A_now * Inv(A_save)\n" +
                       $"  A_save col3(pos): {anchorAtSave.GetColumn(3)}\n" +
                       $"  A_now  col3(pos): {anchorNow.GetColumn(3)}\n" +
                       $"  R      col3(pos): {reloc.GetColumn(3)}");
@@ -187,22 +187,22 @@ namespace Genesis.RoomScan
 
             if (!anchor.Created)
             {
-                Debug.LogError("[RoomAnchor] Spatial anchor creation timed out");
+                Logger.Error("Spatial anchor creation timed out");
                 Destroy(go);
                 return null;
             }
 
-            Debug.Log($"[RoomAnchor] Spatial anchor created: {anchor.Uuid}, pos={position}");
+            Logger.Info($"Spatial anchor created: {anchor.Uuid}, pos={position}");
 
             var saveResult = await anchor.SaveAnchorAsync();
             if (!saveResult.Success)
             {
-                Debug.LogError($"[RoomAnchor] Spatial anchor save failed: {saveResult.Status}");
+                Logger.Error($"Spatial anchor save failed: {saveResult.Status}");
                 Destroy(go);
                 return null;
             }
 
-            Debug.Log($"[RoomAnchor] Spatial anchor persisted: {anchor.Uuid}");
+            Logger.Info($"Spatial anchor persisted: {anchor.Uuid}");
 
             // Wait a few frames for transform to stabilize
             await StabilizeAnchorTransform(anchor.transform);
@@ -222,14 +222,14 @@ namespace Genesis.RoomScan
         /// </summary>
         public async Task<Matrix4x4?> LoadSpatialAnchorAsync(Guid uuid)
         {
-            Debug.Log($"[RoomAnchor] Loading spatial anchor {uuid}...");
+            Logger.Info($"Loading spatial anchor {uuid}...");
 
             var loadResult = await OVRSpatialAnchor.LoadUnboundAnchorsAsync(
                 new[] { uuid }, _unboundAnchors);
 
             if (!loadResult.Success || _unboundAnchors.Count == 0)
             {
-                Debug.LogWarning($"[RoomAnchor] Spatial anchor load failed: {loadResult.Status}, " +
+                Logger.Warning($"Spatial anchor load failed: {loadResult.Status}, " +
                                  $"count={_unboundAnchors.Count}. Falling back to MRUK.");
                 return null;
             }
@@ -249,7 +249,7 @@ namespace Genesis.RoomScan
                 }
                 if (!unbound.Localized)
                 {
-                    Debug.LogWarning("[RoomAnchor] Spatial anchor localization timed out. Falling back to MRUK.");
+                    Logger.Warning("Spatial anchor localization timed out. Falling back to MRUK.");
                     return null;
                 }
             }
@@ -259,7 +259,7 @@ namespace Genesis.RoomScan
             var anchor = go.AddComponent<OVRSpatialAnchor>();
             unbound.BindTo(anchor);
 
-            Debug.Log($"[RoomAnchor] Spatial anchor localized: {uuid}, pos={anchor.transform.position}");
+            Logger.Info($"Spatial anchor localized: {uuid}, pos={anchor.transform.position}");
 
             await StabilizeAnchorTransform(anchor.transform);
 
@@ -276,14 +276,14 @@ namespace Genesis.RoomScan
         /// </summary>
         public async Task<bool> EraseSpatialAnchorAsync(Guid uuid)
         {
-            Debug.Log($"[RoomAnchor] Erasing spatial anchor {uuid}...");
+            Logger.Info($"Erasing spatial anchor {uuid}...");
             var result = await OVRSpatialAnchor.EraseAnchorsAsync(
                 null, new[] { uuid });
 
             if (result.Success)
-                Debug.Log($"[RoomAnchor] Spatial anchor erased: {uuid}");
+                Logger.Info($"Spatial anchor erased: {uuid}");
             else
-                Debug.LogWarning($"[RoomAnchor] Spatial anchor erase failed: {result.Status}");
+                Logger.Warning($"Spatial anchor erase failed: {result.Status}");
 
             return result.Success;
         }

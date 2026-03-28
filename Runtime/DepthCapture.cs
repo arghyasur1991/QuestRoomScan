@@ -182,7 +182,7 @@ namespace Genesis.RoomScan
             if (ovrRig != null && ovrRig.trackingSpace != null)
             {
                 _trackingSpaceTransform = ovrRig.trackingSpace;
-                Debug.Log($"[RoomScan] DepthCapture: using OVRCameraRig.trackingSpace '{_trackingSpaceTransform.name}'");
+                Logger.Info($"DepthCapture: using OVRCameraRig.trackingSpace '{_trackingSpaceTransform.name}'");
                 return;
             }
 
@@ -190,13 +190,13 @@ namespace Genesis.RoomScan
             if (_xrOrigin != null && _xrOrigin.CameraFloorOffsetObject != null)
             {
                 _trackingSpaceTransform = _xrOrigin.CameraFloorOffsetObject.transform;
-                Debug.Log($"[RoomScan] DepthCapture: using XROrigin.CameraFloorOffsetObject '{_trackingSpaceTransform.name}'");
+                Logger.Info($"DepthCapture: using XROrigin.CameraFloorOffsetObject '{_trackingSpaceTransform.name}'");
                 return;
             }
 
             // Last resort: XROrigin root (pre-fix behaviour)
             _trackingSpaceTransform = _xrOrigin != null ? _xrOrigin.transform : null;
-            Debug.LogWarning("[RoomScan] DepthCapture: no TrackingSpace found, falling back to XROrigin root");
+            Logger.Warning("DepthCapture: no TrackingSpace found, falling back to XROrigin root");
         }
 
         private void EnsureARSession()
@@ -205,7 +205,7 @@ namespace Genesis.RoomScan
             {
                 var go = new GameObject("[AR Session]");
                 go.AddComponent<ARSession>();
-                Debug.Log("[RoomScan] Created ARSession (was missing from scene)");
+                Logger.Info("Created ARSession (was missing from scene)");
             }
         }
 
@@ -218,10 +218,10 @@ namespace Genesis.RoomScan
             }
             else
             {
-                Debug.Log("[RoomScan] Requesting USE_SCENE permission...");
+                Logger.Info("Requesting USE_SCENE permission...");
                 var callbacks = new PermissionCallbacks();
                 callbacks.PermissionGranted += _ => EnableOcclusion();
-                callbacks.PermissionDenied += _ => Debug.LogError("[RoomScan] USE_SCENE permission denied — depth will not work");
+                callbacks.PermissionDenied += _ => Logger.Error("USE_SCENE permission denied — depth will not work");
                 Permission.RequestUserPermission(ScenePermission, callbacks);
             }
 #else
@@ -235,7 +235,7 @@ namespace Genesis.RoomScan
         {
             if (_arOcclusionManager == null) return;
 
-            Debug.Log("[RoomScan] Enabling AROcclusionManager...");
+            Logger.Info("Enabling AROcclusionManager...");
 
             // Unsubscribe first to avoid double subscription
             _arOcclusionManager.frameReceived -= OnDepthFrame;
@@ -256,7 +256,7 @@ namespace Genesis.RoomScan
 
             if (_arOcclusionManager == null) return;
             var sub = _arOcclusionManager.subsystem;
-            Debug.Log($"[RoomScan] Occlusion subsystem: {(sub != null ? sub.GetType().Name : "null")}, running={sub?.running}");
+            Logger.Info($"Occlusion subsystem: {(sub != null ? sub.GetType().Name : "null")}, running={sub?.running}");
         }
 
         private void OnApplicationPause(bool paused)
@@ -303,7 +303,7 @@ namespace Genesis.RoomScan
             {
                 _lastLogTime = t;
                 var sub = _arOcclusionManager != null ? _arOcclusionManager.subsystem : null;
-                Debug.Log($"[RoomScan] DepthCapture: frames={_frameCount}, depthAvail={DepthAvailable}, " +
+                Logger.Info($"DepthCapture: frames={_frameCount}, depthAvail={DepthAvailable}, " +
                           $"occMgr.enabled={_arOcclusionManager?.enabled}, sub={sub?.GetType().Name ?? "null"}, " +
                           $"running={sub?.running}");
             }
@@ -313,7 +313,7 @@ namespace Genesis.RoomScan
         {
             _frameCount++;
             if (_frameCount <= 3 || _frameCount % 100 == 0)
-                Debug.Log($"[RoomScan] OnDepthFrame #{_frameCount}, textures={args.externalTextures.Count}");
+                Logger.Info($"OnDepthFrame #{_frameCount}, textures={args.externalTextures.Count}");
 
             if (Application.isEditor)
                 HandleEditorSimulation(args);
@@ -428,7 +428,7 @@ namespace Genesis.RoomScan
                 if (!_loggedBilateralSkip && enableBilateralFilter && _hasBilateralKernel && _rgbGuide == null)
                 {
                     _loggedBilateralSkip = true;
-                    Debug.Log("[RoomScan] Bilateral depth filter skipped — no RGB guide (camera unavailable). " +
+                    Logger.Info("Bilateral depth filter skipped — no RGB guide (camera unavailable). " +
                               "Depth will be noisier at edges.");
                 }
                 return;

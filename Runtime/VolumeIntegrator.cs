@@ -169,8 +169,8 @@ namespace Genesis.RoomScan
         {
             long tsdfBytes = (long)voxelCount.x * voxelCount.y * voxelCount.z * 2;
             long colorBytes = (long)voxelCount.x * voxelCount.y * voxelCount.z * 4;
-            Debug.Log($"[RoomScan] TSDF volume: {voxelCount} RG8_SNorm = {tsdfBytes / (1024 * 1024)}MB");
-            Debug.Log($"[RoomScan] Color volume: {voxelCount} RGBA8_UNorm = {colorBytes / (1024 * 1024)}MB");
+            Logger.Info($"TSDF volume: {voxelCount} RG8_SNorm = {tsdfBytes / (1024 * 1024)}MB");
+            Logger.Info($"Color volume: {voxelCount} RGBA8_UNorm = {colorBytes / (1024 * 1024)}MB");
 
             _volume = new RenderTexture(voxelCount.x, voxelCount.y, 0, GraphicsFormat.R8G8_SNorm, 0)
             {
@@ -286,7 +286,7 @@ namespace Genesis.RoomScan
             // Rebind per-kernel UAV references so subsequent integrations/clears use new textures
             RebindVolumeTextures();
 
-            Debug.Log($"[RoomScan] BakeRelocation complete — resampled {vc} voxels, " +
+            Logger.Info($"BakeRelocation complete — resampled {vc} voxels, " +
                       $"reloc row0={relocationMatrix.GetRow(0)}, inv row0={invRelocation.GetRow(0)}");
         }
 
@@ -315,7 +315,7 @@ namespace Genesis.RoomScan
                 focalLen, principalPt, sensorRes, currentRes);
             _freezeKernel.Set(VolumeRWID, _volume);
             _freezeKernel.DispatchFit(_volume);
-            Debug.Log("[RoomScan] FreezeInView dispatched");
+            Logger.Info("FreezeInView dispatched");
         }
 
         /// <summary>
@@ -328,7 +328,7 @@ namespace Genesis.RoomScan
                 focalLen, principalPt, sensorRes, currentRes);
             _unfreezeKernel.Set(VolumeRWID, _volume);
             _unfreezeKernel.DispatchFit(_volume);
-            Debug.Log("[RoomScan] UnfreezeInView dispatched");
+            Logger.Info("UnfreezeInView dispatched");
         }
 
         private void SetFrustumCameraUniforms(ComputeKernelHelper kernel, Vector3 camPos,
@@ -427,7 +427,7 @@ namespace Genesis.RoomScan
 
             if (positions.Count == 0) return;
 
-            Debug.Log($"[RoomScan] Frustum volume: {positions.Count} positions ({positions.Count * 12 / 1024}KB)");
+            Logger.Info($"Frustum volume: {positions.Count} positions ({positions.Count * 12 / 1024}KB)");
 
             _frustumVolume?.Release();
             _frustumVolume = new ComputeBuffer(positions.Count, sizeof(float) * 3);
@@ -494,7 +494,7 @@ namespace Genesis.RoomScan
 
             if (warmupIntegrations > 0 && IntegrationCount == warmupIntegrations)
             {
-                Debug.Log($"[RoomScan] Warmup complete ({warmupIntegrations} frames), clearing volume to discard sensor startup noise");
+                Logger.Info($"Warmup complete ({warmupIntegrations} frames), clearing volume to discard sensor startup noise");
                 Clear();
             }
 
@@ -519,7 +519,7 @@ namespace Genesis.RoomScan
         {
             if (_volume == null || _colorVolume == null)
             {
-                Debug.LogError("[RoomScan] Cannot load volumes: textures not created");
+                Logger.Error("Cannot load volumes: textures not created");
                 return false;
             }
 
@@ -529,12 +529,12 @@ namespace Genesis.RoomScan
 
             if (tsdfBytes.Length != expectedTsdf)
             {
-                Debug.LogError($"[RoomScan] TSDF size mismatch: got {tsdfBytes.Length}, expected {expectedTsdf}");
+                Logger.Error($"TSDF size mismatch: got {tsdfBytes.Length}, expected {expectedTsdf}");
                 return false;
             }
             if (colorBytes.Length != expectedColor)
             {
-                Debug.LogError($"[RoomScan] Color volume size mismatch: got {colorBytes.Length}, expected {expectedColor}");
+                Logger.Error($"Color volume size mismatch: got {colorBytes.Length}, expected {expectedColor}");
                 return false;
             }
 
@@ -556,7 +556,7 @@ namespace Genesis.RoomScan
             IntegrationCount = integrationCount;
             _frustumReady = false;
 
-            Debug.Log($"[RoomScan] Volumes loaded: {s}, integrationCount={integrationCount}");
+            Logger.Info($"Volumes loaded: {s}, integrationCount={integrationCount}");
             return true;
         }
     }

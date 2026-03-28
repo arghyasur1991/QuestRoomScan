@@ -63,7 +63,7 @@ namespace Genesis.RoomScan.GSplat
 
             if (IsUploading)
             {
-                Debug.LogWarning("[GSplatServerClient] Upload already in progress");
+                Logger.Warning("Upload already in progress");
                 return false;
             }
 
@@ -73,7 +73,7 @@ namespace Genesis.RoomScan.GSplat
                 string exportDir = Path.Combine(Application.persistentDataPath, "GSExport");
                 if (!Directory.Exists(exportDir))
                 {
-                    Debug.LogError("[GSplatServerClient] GSExport directory not found");
+                    Logger.Error("GSExport directory not found");
                     Error?.Invoke("GSExport directory not found");
                     return false;
                 }
@@ -81,18 +81,18 @@ namespace Genesis.RoomScan.GSplat
                 string framesFile = Path.Combine(exportDir, "frames.jsonl");
                 if (!File.Exists(framesFile))
                 {
-                    Debug.LogError("[GSplatServerClient] frames.jsonl not found");
+                    Logger.Error("frames.jsonl not found");
                     Error?.Invoke("frames.jsonl not found — no keyframes collected");
                     return false;
                 }
 
                 var reloc = keyframeRelocation;
-                Debug.Log($"[GSplatServerClient] Creating ZIP from GSExport...{(reloc != Matrix4x4.identity ? " (relocating poses)" : "")}");
+                Logger.Info($"Creating ZIP from GSExport...{(reloc != Matrix4x4.identity ? " (relocating poses)" : "")}");
                 byte[] zipData = await Task.Run(() => CreateZip(exportDir, reloc));
-                Debug.Log($"[GSplatServerClient] ZIP created: {zipData.Length / (1024 * 1024)}MB");
+                Logger.Info($"ZIP created: {zipData.Length / (1024 * 1024)}MB");
 
                 string url = $"{serverUrl}/upload?iterations={trainingIterations}";
-                Debug.Log($"[GSplatServerClient] Uploading to {url} ({trainingIterations} iters)...");
+                Logger.Info($"Uploading to {url} ({trainingIterations} iters)...");
 
                 using var request = new UnityWebRequest(url, "POST");
                 request.uploadHandler = new UploadHandlerRaw(zipData);
@@ -107,17 +107,17 @@ namespace Genesis.RoomScan.GSplat
                 if (request.result != UnityWebRequest.Result.Success)
                 {
                     string err = $"Upload failed: {request.error} (HTTP {request.responseCode})";
-                    Debug.LogError($"[GSplatServerClient] {err}");
+                    Logger.Error(err);
                     Error?.Invoke(err);
                     return false;
                 }
 
-                Debug.Log("[GSplatServerClient] Upload successful, training started on server");
+                Logger.Info("Upload successful, training started on server");
                 return true;
             }
             catch (Exception e)
             {
-                Debug.LogError($"[GSplatServerClient] Upload error: {e.Message}");
+                Logger.Error($"Upload error: {e.Message}");
                 Error?.Invoke(e.Message);
                 return false;
             }
@@ -144,7 +144,7 @@ namespace Genesis.RoomScan.GSplat
 
                 if (request.result != UnityWebRequest.Result.Success)
                 {
-                    Debug.LogWarning($"[GSplatServerClient] Status poll failed: {request.error}");
+                    Logger.Warning($"Status poll failed: {request.error}");
                     return null;
                 }
 
@@ -155,7 +155,7 @@ namespace Genesis.RoomScan.GSplat
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[GSplatServerClient] Status poll error: {e.Message}");
+                Logger.Warning($"Status poll error: {e.Message}");
                 return null;
             }
         }
@@ -180,7 +180,7 @@ namespace Genesis.RoomScan.GSplat
                         continue;
                     }
 
-                    Debug.Log($"[GSplatServerClient] Training: {status.state} ({status.progress:P0}) - {status.message}");
+                    Logger.Info($"Training: {status.state} ({status.progress:P0}) - {status.message}");
 
                     if (status.state == "done") return true;
                     if (status.state == "error")
@@ -207,7 +207,7 @@ namespace Genesis.RoomScan.GSplat
         {
             if (IsDownloading)
             {
-                Debug.LogWarning("[GSplatServerClient] Download already in progress");
+                Logger.Warning("Download already in progress");
                 return null;
             }
 
@@ -215,7 +215,7 @@ namespace Genesis.RoomScan.GSplat
             try
             {
                 string url = $"{serverUrl}/download";
-                Debug.Log($"[GSplatServerClient] Downloading from {url}...");
+                Logger.Info($"Downloading from {url}...");
 
                 using var request = UnityWebRequest.Get(url);
                 request.timeout = 120;
@@ -227,18 +227,18 @@ namespace Genesis.RoomScan.GSplat
                 if (request.result != UnityWebRequest.Result.Success)
                 {
                     string err = $"Download failed: {request.error} (HTTP {request.responseCode})";
-                    Debug.LogError($"[GSplatServerClient] {err}");
+                    Logger.Error(err);
                     Error?.Invoke(err);
                     return null;
                 }
 
                 byte[] data = request.downloadHandler.data;
-                Debug.Log($"[GSplatServerClient] Downloaded {data.Length / (1024 * 1024f):F1}MB PLY");
+                Logger.Info($"Downloaded {data.Length / (1024 * 1024f):F1}MB PLY");
                 return data;
             }
             catch (Exception e)
             {
-                Debug.LogError($"[GSplatServerClient] Download error: {e.Message}");
+                Logger.Error($"Download error: {e.Message}");
                 Error?.Invoke(e.Message);
                 return null;
             }
@@ -257,7 +257,7 @@ namespace Genesis.RoomScan.GSplat
             try
             {
                 string url = $"{serverUrl}/enhance-atlas?scale={scale}&inpaint={inpaint.ToString().ToLower()}";
-                Debug.Log($"[GSplatServerClient] Uploading atlas for enhancement ({atlasPng.Length / 1024}KB, x{scale}, inpaint={inpaint})...");
+                Logger.Info($"Uploading atlas for enhancement ({atlasPng.Length / 1024}KB, x{scale}, inpaint={inpaint})...");
 
                 using var request = new UnityWebRequest(url, "POST");
                 request.uploadHandler = new UploadHandlerRaw(atlasPng);
@@ -272,18 +272,18 @@ namespace Genesis.RoomScan.GSplat
                 if (request.result != UnityWebRequest.Result.Success)
                 {
                     string err = $"Atlas enhance failed: {request.error} (HTTP {request.responseCode})";
-                    Debug.LogError($"[GSplatServerClient] {err}");
+                    Logger.Error(err);
                     Error?.Invoke(err);
                     return null;
                 }
 
                 byte[] result = request.downloadHandler.data;
-                Debug.Log($"[GSplatServerClient] Enhanced atlas received: {result.Length / 1024}KB");
+                Logger.Info($"Enhanced atlas received: {result.Length / 1024}KB");
                 return result;
             }
             catch (Exception e)
             {
-                Debug.LogError($"[GSplatServerClient] Atlas enhance error: {e.Message}");
+                Logger.Error($"Atlas enhance error: {e.Message}");
                 Error?.Invoke(e.Message);
                 return null;
             }
@@ -301,7 +301,7 @@ namespace Genesis.RoomScan.GSplat
             {
                 string url = $"{serverUrl}/enhance-mesh?smooth_iterations={smoothIterations}" +
                              $"&smooth_method={smoothMethod}&enable_plane_snap={enablePlaneSnap.ToString().ToLower()}";
-                Debug.Log($"[GSplatServerClient] Uploading mesh for enhancement ({meshBin.Length / 1024}KB)...");
+                Logger.Info($"Uploading mesh for enhancement ({meshBin.Length / 1024}KB)...");
 
                 using var request = new UnityWebRequest(url, "POST");
                 request.uploadHandler = new UploadHandlerRaw(meshBin);
@@ -316,18 +316,18 @@ namespace Genesis.RoomScan.GSplat
                 if (request.result != UnityWebRequest.Result.Success)
                 {
                     string err = $"Mesh enhance failed: {request.error} (HTTP {request.responseCode})";
-                    Debug.LogError($"[GSplatServerClient] {err}");
+                    Logger.Error(err);
                     Error?.Invoke(err);
                     return null;
                 }
 
                 byte[] result = request.downloadHandler.data;
-                Debug.Log($"[GSplatServerClient] Enhanced mesh received: {result.Length / 1024}KB");
+                Logger.Info($"Enhanced mesh received: {result.Length / 1024}KB");
                 return result;
             }
             catch (Exception e)
             {
-                Debug.LogError($"[GSplatServerClient] Mesh enhance error: {e.Message}");
+                Logger.Error($"Mesh enhance error: {e.Message}");
                 Error?.Invoke(e.Message);
                 return null;
             }
@@ -349,11 +349,11 @@ namespace Genesis.RoomScan.GSplat
                 while (!op.isDone)
                     await Task.Yield();
 
-                Debug.Log("[GSplatServerClient] Cancel request sent");
+                Logger.Info("Cancel request sent");
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[GSplatServerClient] Cancel error: {e.Message}");
+                Logger.Warning($"Cancel error: {e.Message}");
             }
         }
 

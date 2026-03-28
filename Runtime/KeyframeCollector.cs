@@ -58,7 +58,7 @@ namespace Genesis.RoomScan
             _prevRotTime = Time.time;
             _initialized = true;
 
-            Debug.Log($"[RoomScan] KeyframeCollector: export dir={_exportDir}");
+            Logger.Info($"KeyframeCollector: export dir={_exportDir}");
         }
 
         /// <summary>
@@ -123,7 +123,7 @@ namespace Genesis.RoomScan
             _pendingWrites--;
             if (req.hasError)
             {
-                Debug.LogWarning($"[RoomScan] KeyframeCollector: readback error for frame {id}");
+                Logger.Warning($"KeyframeCollector: readback error for frame {id}");
                 return;
             }
 
@@ -141,7 +141,7 @@ namespace Genesis.RoomScan
             }
             catch (Exception e)
             {
-                Debug.LogError($"[RoomScan] KeyframeCollector: encode error frame {id}: {e.Message}");
+                Logger.Error($"KeyframeCollector: encode error frame {id}: {e.Message}");
             }
         }
 
@@ -182,11 +182,11 @@ namespace Genesis.RoomScan
                     }
 
                     if (id < 5 || id % 50 == 0)
-                        Debug.Log($"[RoomScan] KeyframeCollector: saved frame {id} ({jpgBytes.Length / 1024}KB)");
+                        Logger.Info($"KeyframeCollector: saved frame {id} ({jpgBytes.Length / 1024}KB)");
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError($"[RoomScan] KeyframeCollector: write error frame {id}: {e.Message}");
+                    Logger.Error($"KeyframeCollector: write error frame {id}: {e.Message}");
                 }
             });
         }
@@ -208,7 +208,7 @@ namespace Genesis.RoomScan
         public void ReinitExportDir()
         {
             Directory.CreateDirectory(_imagesDir);
-            Debug.Log("[RoomScan] KeyframeCollector: export cleared");
+            Logger.Info("KeyframeCollector: export cleared");
         }
 
         /// <summary>
@@ -221,7 +221,7 @@ namespace Genesis.RoomScan
                 Directory.Delete(_exportDir, true);
             Directory.CreateDirectory(_imagesDir);
             ClearInMemory();
-            Debug.Log("[RoomScan] KeyframeCollector: export cleared");
+            Logger.Info("KeyframeCollector: export cleared");
         }
     }
 }

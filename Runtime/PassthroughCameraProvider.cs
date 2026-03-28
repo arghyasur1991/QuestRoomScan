@@ -98,7 +98,7 @@ namespace Genesis.RoomScan
             const string headsetCameraPerm = "horizonos.permission.HEADSET_CAMERA";
             if (!Permission.HasUserAuthorizedPermission(headsetCameraPerm))
             {
-                Debug.Log("[RoomScan] Requesting HEADSET_CAMERA permission");
+                Logger.Info("Requesting HEADSET_CAMERA permission");
                 Permission.RequestUserPermission(headsetCameraPerm);
             }
 #endif

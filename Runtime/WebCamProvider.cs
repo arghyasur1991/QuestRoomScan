@@ -67,7 +67,7 @@ namespace Genesis.RoomScan
             WebCamDevice[] devices = WebCamTexture.devices;
             if (devices.Length == 0)
             {
-                Debug.LogWarning("[RoomScan] No webcam devices found");
+                Logger.Warning("No webcam devices found");
                 return;
             }
 

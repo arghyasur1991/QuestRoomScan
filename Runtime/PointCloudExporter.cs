@@ -86,7 +86,7 @@ namespace Genesis.RoomScan
                 var req = await AsyncGPUReadback.RequestAsync(vertBuf);
                 if (req.hasError)
                 {
-                    Debug.LogWarning("[RoomScan] PointCloudExporter: GPU readback error");
+                    Logger.Warning("PointCloudExporter: GPU readback error");
                     _exporting = false;
                     return;
                 }
@@ -101,7 +101,7 @@ namespace Genesis.RoomScan
 
                 if (vertCount == 0)
                 {
-                    Debug.Log("[RoomScan] PointCloudExporter: no vertices to export");
+                    Logger.Info("PointCloudExporter: no vertices to export");
                     _exporting = false;
                     return;
                 }
@@ -112,12 +112,12 @@ namespace Genesis.RoomScan
 
                 await Task.Run(() => WritePly(path, data, vertCount));
 
-                Debug.Log($"[RoomScan] PointCloudExporter: saved {vertCount} vertices " +
+                Logger.Info($"PointCloudExporter: saved {vertCount} vertices " +
                           $"(buffer capacity: {bufferCapacity}) to {path} ({new FileInfo(path).Length / 1024}KB)");
             }
             catch (Exception e)
             {
-                Debug.LogError($"[RoomScan] PointCloudExporter: export error: {e.Message}");
+                Logger.Error($"PointCloudExporter: export error: {e.Message}");
             }
             finally
             {

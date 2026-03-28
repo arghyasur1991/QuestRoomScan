@@ -66,7 +66,7 @@ namespace Genesis.RoomScan
             if (!enableTriplanar)
             {
                 Shader.SetGlobalFloat(TriAvailableID, 0f);
-                Debug.Log("[RoomScan] Triplanar disabled — using vertex colors");
+                Logger.Info("Triplanar disabled — using vertex colors");
                 return;
             }
 
@@ -83,9 +83,9 @@ namespace Genesis.RoomScan
             long bytes = (long)textureResolution * textureResolution * 4 * 3;
             long mb = bytes / (1024 * 1024);
             int splatR = splatRadiusOverride > 0 ? splatRadiusOverride : Mathf.Max(1, textureResolution / 2048);
-            Debug.Log($"[RoomScan] Triplanar cache: 3x {textureResolution}x{textureResolution} RGBA8 = {mb}MB, splatR={splatR}");
+            Logger.Info($"Triplanar cache: 3x {textureResolution}x{textureResolution} RGBA8 = {mb}MB, splatR={splatR}");
             if (mb > 300)
-                Debug.LogWarning($"[RoomScan] Triplanar memory {mb}MB is very high! Consider reducing textureResolution (4096 = 192MB).");
+                Logger.Warning($"Triplanar memory {mb}MB is very high! Consider reducing textureResolution (4096 = 192MB).");
         }
 
         private void OnDestroy()
@@ -289,7 +289,7 @@ namespace Genesis.RoomScan
                 _clearKernel.Set(TriYZRWID, _triYZ);
             }
 
-            Debug.Log($"[RoomScan] Triplanar relocation complete (all compute) — " +
+            Logger.Info($"Triplanar relocation complete (all compute) — " +
                       $"3x {res}x{res}, 3 splat + {dilationPasses}x3 dilate dispatches");
         }
 
@@ -312,14 +312,14 @@ namespace Genesis.RoomScan
         {
             if (!enableTriplanar || !_kernelsReady || camFrame == null)
             {
-                if (_bakeCount < 3) Debug.Log($"[RoomScan] TriBake skip: kernels={_kernelsReady}, frame={camFrame != null}");
+                if (_bakeCount < 3) Logger.Info($"TriBake skip: kernels={_kernelsReady}, frame={camFrame != null}");
                 return;
             }
 
             var dc = DepthCapture.Instance;
             if (dc == null || !DepthCapture.DepthAvailable || dc.DepthTex == null)
             {
-                if (_bakeCount < 3) Debug.Log($"[RoomScan] TriBake skip: dc={dc != null}, depthAvail={DepthCapture.DepthAvailable}, depthTex={dc?.DepthTex != null}");
+                if (_bakeCount < 3) Logger.Info($"TriBake skip: dc={dc != null}, depthAvail={DepthCapture.DepthAvailable}, depthTex={dc?.DepthTex != null}");
                 return;
             }
 
@@ -378,7 +378,7 @@ namespace Genesis.RoomScan
 
             _bakeCount++;
             if (_bakeCount <= 3 || _bakeCount % 100 == 0)
-                Debug.Log($"[RoomScan] TriBake #{_bakeCount}: depth={dc.DepthTex.width}x{dc.DepthTex.height}, " +
+                Logger.Info($"TriBake #{_bakeCount}: depth={dc.DepthTex.width}x{dc.DepthTex.height}, " +
                     $"cam={camFrame.width}x{camFrame.height}, triAvail=1");
         }
 
@@ -404,7 +404,7 @@ namespace Genesis.RoomScan
             SaveDepthRT(_depthXZ, Path.Combine(directory, "depth_xz.raw"));
             SaveDepthRT(_depthXY, Path.Combine(directory, "depth_xy.raw"));
             SaveDepthRT(_depthYZ, Path.Combine(directory, "depth_yz.raw"));
-            Debug.Log($"[RoomScan] Triplanar textures + depth saved to {directory}");
+            Logger.Info($"Triplanar textures + depth saved to {directory}");
         }
 
         /// <summary>
@@ -451,7 +451,7 @@ namespace Genesis.RoomScan
             LoadRT(_triXY, Path.Combine(directory, "tri_xy.raw"));
             LoadRT(_triYZ, Path.Combine(directory, "tri_yz.raw"));
             UpdateShaderGlobals();
-            Debug.Log($"[RoomScan] Triplanar textures loaded from {directory}");
+            Logger.Info($"Triplanar textures loaded from {directory}");
         }
 
         public void LoadDepth(string directory)
@@ -460,7 +460,7 @@ namespace Genesis.RoomScan
             LoadDepthRT(_depthXZ, Path.Combine(directory, "depth_xz.raw"));
             LoadDepthRT(_depthXY, Path.Combine(directory, "depth_xy.raw"));
             LoadDepthRT(_depthYZ, Path.Combine(directory, "depth_yz.raw"));
-            Debug.Log($"[RoomScan] Triplanar depth textures loaded from {directory}");
+            Logger.Info($"Triplanar depth textures loaded from {directory}");
         }
 
         private static void SaveRT(RenderTexture rt, string path)
@@ -498,7 +498,7 @@ namespace Genesis.RoomScan
             int expected = rt.width * rt.height * 4;
             if (data.Length != expected)
             {
-                Debug.LogWarning($"[RoomScan] Triplanar {path}: size {data.Length} != expected {expected} " +
+                Logger.Warning($"Triplanar {path}: size {data.Length} != expected {expected} " +
                     $"(RT {rt.width}x{rt.height}). Skipping plane.");
                 return;
             }
@@ -514,14 +514,14 @@ namespace Genesis.RoomScan
         {
             if (!File.Exists(path))
             {
-                Debug.LogWarning($"[RoomScan] Depth texture not found: {path}");
+                Logger.Warning($"Depth texture not found: {path}");
                 return;
             }
             byte[] data = File.ReadAllBytes(path);
             int expected = rt.width * rt.height * 1;
             if (data.Length != expected)
             {
-                Debug.LogWarning($"[RoomScan] Depth {path}: size {data.Length} != expected {expected}. Skipping.");
+                Logger.Warning($"Depth {path}: size {data.Length} != expected {expected}. Skipping.");
                 return;
             }
 
