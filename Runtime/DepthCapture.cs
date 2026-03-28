@@ -420,10 +420,19 @@ namespace Genesis.RoomScan
             _planes = new Vector2(depthPlanes.nearZ, depthPlanes.farZ);
         }
 
+        private bool _loggedBilateralSkip;
         private void ApplyBilateralFilter()
         {
             if (!enableBilateralFilter || !_hasBilateralKernel || _rgbGuide == null || _depthTex == null)
+            {
+                if (!_loggedBilateralSkip && enableBilateralFilter && _hasBilateralKernel && _rgbGuide == null)
+                {
+                    _loggedBilateralSkip = true;
+                    Debug.Log("[RoomScan] Bilateral depth filter skipped — no RGB guide (camera unavailable). " +
+                              "Depth will be noisier at edges.");
+                }
                 return;
+            }
 
             int w = _depthTex.width;
             int h = _depthTex.height;
