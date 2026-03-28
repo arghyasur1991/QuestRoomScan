@@ -624,32 +624,6 @@ namespace Genesis.RoomScan.Editor
 
             // ── Debug Preset ──
             DrawDebugPreset();
-
-            // ── VR Input Infrastructure ──
-            BeginSection("VR INPUT INFRASTRUCTURE");
-            StatusRow("EventSystem + OVRInputModule", _eventSystem != null && _ovrInputModule != null);
-            StatusRow("VRDocumentRaycaster (UI pointer)", _vrRaycaster != null);
-            StatusRow("ControllerRayDriver (laser)", _rayDriver != null);
-            StatusRow("PanelInputConfiguration", _panelInputConfig != null);
-
-            bool inputMissing = _eventSystem == null || _ovrInputModule == null ||
-                                _vrRaycaster == null || _rayDriver == null ||
-                                _panelInputConfig == null;
-            if (inputMissing)
-            {
-                GUILayout.Space(2);
-                EditorGUILayout.BeginHorizontal();
-                GUILayout.FlexibleSpace();
-                if (GUILayout.Button("Setup VR Input", GUILayout.Width(160)))
-                {
-                    EnsureVRInputInfrastructure();
-                    MarkDirty();
-                    Refresh();
-                }
-                EditorGUILayout.EndHorizontal();
-            }
-
-            EndSection();
         }
 
         GameObject FindOrCreateRoot()
@@ -826,7 +800,8 @@ namespace Genesis.RoomScan.Editor
         {
             BeginSection("DEBUG PRESET");
             EditorGUILayout.HelpBox(
-                "Development tools: debug HUD, input handler, and camera/depth overlays. " +
+                "Development tools: debug HUD, input handler, camera/depth overlays, " +
+                "and VR input pipeline for interacting with the debug menu. " +
                 "Overlays are added disabled by default.",
                 MessageType.Info);
 
@@ -840,7 +815,17 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("CameraDebugOverlay (disabled)", hasCamOverlay);
             StatusRowOptional("DepthDebugOverlay (disabled)", hasDepthOverlay);
 
-            bool debugMissing = !hasInput || !hasDebug || !hasCamOverlay || !hasDepthOverlay;
+            GUILayout.Space(4);
+            EditorGUILayout.LabelField("VR Input (for debug menu buttons)", EditorStyles.miniLabel);
+            StatusRowOptional("EventSystem + OVRInputModule", _eventSystem != null && _ovrInputModule != null);
+            StatusRowOptional("VRDocumentRaycaster (UI pointer)", _vrRaycaster != null);
+            StatusRowOptional("ControllerRayDriver (laser + cursor)", _rayDriver != null);
+            StatusRowOptional("PanelInputConfiguration", _panelInputConfig != null);
+
+            bool debugMissing = !hasInput || !hasDebug || !hasCamOverlay || !hasDepthOverlay
+                                || _eventSystem == null || _ovrInputModule == null
+                                || _vrRaycaster == null || _rayDriver == null
+                                || _panelInputConfig == null;
             if (debugMissing)
             {
                 GUILayout.Space(2);
