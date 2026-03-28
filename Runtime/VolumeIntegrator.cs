@@ -433,7 +433,7 @@ namespace Genesis.RoomScan
         public void Integrate()
         {
             var dc = DepthCapture.Instance;
-            if (dc == null || !DepthCapture.DepthAvailable) return;
+            if (dc == null || !DepthCapture.DepthAvailable || dc.DepthTex == null) return;
             if (!_frustumReady) SetupFrustumVolume();
             if (!_frustumReady) return;
 
