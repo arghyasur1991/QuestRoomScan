@@ -715,9 +715,9 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Exports the current GPU mesh as a PLY point cloud to disk via <see cref="PointCloudExporter"/>.
+        /// Exports the current GPU mesh as a PLY point cloud to the active keyframe directory.
         /// </summary>
-        public Task ExportPointCloudAsync() => PointCloudExporter.ExportAsync();
+        public Task ExportPointCloudAsync() => PointCloudExporter.ExportAsync(KeyframeDirectory);
 
         /// <summary>
         /// Kicks off the server-side Gaussian Splat training pipeline. Downloads the trained PLY on completion.

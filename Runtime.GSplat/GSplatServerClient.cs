@@ -53,11 +53,11 @@ namespace Genesis.RoomScan.GSplat
         }
 
         /// <summary>
-        /// Packages the GSExport directory into a ZIP and uploads to the training server.
+        /// Packages the keyframe directory into a ZIP and uploads to the training server.
         /// If keyframeRelocation is non-identity, camera poses in frames.jsonl are
         /// transformed to match the relocated mesh coordinate frame.
         /// </summary>
-        public async Task<bool> UploadTrainingData(Matrix4x4 keyframeRelocation = default)
+        public async Task<bool> UploadTrainingData(string sourceDir, Matrix4x4 keyframeRelocation = default)
         {
             if (keyframeRelocation == default) keyframeRelocation = Matrix4x4.identity;
 
@@ -70,15 +70,14 @@ namespace Genesis.RoomScan.GSplat
             IsUploading = true;
             try
             {
-                string exportDir = Path.Combine(Application.persistentDataPath, "GSExport");
-                if (!Directory.Exists(exportDir))
+                if (!Directory.Exists(sourceDir))
                 {
-                    Logger.Error("GSExport directory not found");
-                    Error?.Invoke("GSExport directory not found");
+                    Logger.Error($"Source directory not found: {sourceDir}");
+                    Error?.Invoke("Keyframe directory not found");
                     return false;
                 }
 
-                string framesFile = Path.Combine(exportDir, "frames.jsonl");
+                string framesFile = Path.Combine(sourceDir, "frames.jsonl");
                 if (!File.Exists(framesFile))
                 {
                     Logger.Error("frames.jsonl not found");
@@ -87,8 +86,8 @@ namespace Genesis.RoomScan.GSplat
                 }
 
                 var reloc = keyframeRelocation;
-                Logger.Info($"Creating ZIP from GSExport...{(reloc != Matrix4x4.identity ? " (relocating poses)" : "")}");
-                byte[] zipData = await Task.Run(() => CreateZip(exportDir, reloc));
+                Logger.Info($"Creating ZIP from {sourceDir}...{(reloc != Matrix4x4.identity ? " (relocating poses)" : "")}");
+                byte[] zipData = await Task.Run(() => CreateZip(sourceDir, reloc));
                 Logger.Info($"ZIP created: {zipData.Length / (1024 * 1024)}MB");
 
                 string url = $"{serverUrl}/upload?iterations={trainingIterations}";

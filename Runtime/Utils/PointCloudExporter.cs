@@ -13,19 +13,16 @@ namespace Genesis.RoomScan
     /// </summary>
     internal static class PointCloudExporter
     {
-        // GPUVertex layout must match the compute shader: float3 pos, float3 norm, uint packedColor, uint voxelFlatIdx
-        private const int GpuVertexStride = 32;
+        private const int GpuVertexStride = 32; // float3 pos, float3 norm, uint packedColor, uint voxelFlatIdx
+        private const string PlyFileName = "points3d.ply";
 
         private static bool _exporting;
 
-        /// <summary>Absolute path of the exported PLY file on device.</summary>
-        public static string ExportPath =>
-            Path.Combine(Application.persistentDataPath, "GSExport", "points3d.ply");
-
         /// <summary>
-        /// Reads the GPU vertex buffer via async readback and writes a binary PLY point cloud to disk.
+        /// Reads the GPU vertex buffer via async readback and writes a binary PLY to disk.
+        /// Writes to <paramref name="outputDir"/> if specified, otherwise to GSExport/.
         /// </summary>
-        public static async Task ExportAsync()
+        public static async Task ExportAsync(string outputDir = null)
         {
             if (_exporting) return;
             _exporting = true;
@@ -76,8 +73,11 @@ namespace Genesis.RoomScan
 
                 byte[] data = new byte[raw.Length];
                 NativeArray<byte>.Copy(raw, data, raw.Length);
-                string path = ExportPath;
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+                if (outputDir == null)
+                    outputDir = Path.Combine(Application.persistentDataPath, "GSExport");
+                Directory.CreateDirectory(outputDir);
+                string path = Path.Combine(outputDir, PlyFileName);
 
                 await Task.Run(() => WritePly(path, data, vertCount));
 
@@ -93,6 +93,10 @@ namespace Genesis.RoomScan
                 _exporting = false;
             }
         }
+
+        /// <summary>Returns true if a PLY file exists in the given directory.</summary>
+        public static bool ExistsIn(string dir) =>
+            dir != null && File.Exists(Path.Combine(dir, PlyFileName));
 
         private static void WritePly(string path, byte[] vertexData, int vertCount)
         {

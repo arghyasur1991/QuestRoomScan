@@ -153,11 +153,18 @@ namespace Genesis.RoomScan.GSplat
         {
             if (_serverClient == null) return null;
 
-            Logger.Info("Exporting point cloud...");
-            await PointCloudExporter.ExportAsync();
+            if (PointCloudExporter.ExistsIn(keyframeDir))
+            {
+                Logger.Info("Reusing existing point cloud from package");
+            }
+            else
+            {
+                Logger.Info("Exporting point cloud...");
+                await PointCloudExporter.ExportAsync(keyframeDir);
+            }
 
             Logger.Info("Uploading training data to PC server...");
-            bool uploaded = await _serverClient.UploadTrainingData(keyframeRelocation);
+            bool uploaded = await _serverClient.UploadTrainingData(keyframeDir, keyframeRelocation);
             if (!uploaded) { Logger.Error("Upload failed"); return null; }
 
             Logger.Info("Waiting for server training to complete...");
