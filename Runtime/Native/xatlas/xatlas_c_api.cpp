@@ -155,4 +155,24 @@ XATLAS_EXPORT int meshopt_simplify_mesh(
         0, outError);
 }
 
+XATLAS_EXPORT int meshopt_simplify_with_attrs(
+    unsigned int* destination,
+    const unsigned int* indices, int indexCount,
+    const float* vertexPositions, int vertexCount, int vertexPositionsStride,
+    const float* vertexAttributes, int vertexAttributesStride,
+    const float* attributeWeights, int attributeCount,
+    int targetIndexCount, float targetError,
+    unsigned int options, float* resultError)
+{
+    return (int)meshopt_simplifyWithAttributes(
+        destination,
+        indices, (size_t)indexCount,
+        vertexPositions, (size_t)vertexCount, (size_t)vertexPositionsStride,
+        vertexAttributes, (size_t)vertexAttributesStride,
+        attributeWeights, (size_t)attributeCount,
+        nullptr, // vertex_lock — not used, LockBorder option handles seam preservation
+        (size_t)targetIndexCount, targetError,
+        options, resultError);
+}
+
 } // extern "C"

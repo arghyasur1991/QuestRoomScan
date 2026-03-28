@@ -60,6 +60,12 @@ namespace Genesis.RoomScan
             int targetIndexCount, float targetError,
             uint options, out float resultError);
 
+        [DllImport(LIB)] private static extern int meshopt_simplify_mesh(
+            float[] positions, int vertexCount, int positionStride,
+            uint[] indices, int indexCount,
+            int targetIndexCount, float targetError,
+            uint[] outIndices, out float outError);
+
         public struct UnwrapOptions
         {
             // ChartOptions
@@ -222,10 +228,10 @@ namespace Genesis.RoomScan
         private const uint MeshoptSimplifyLockBorder = 1;
 
         /// <summary>
-        /// Post-bake UV-preserving mesh simplification via meshopt_simplifyWithAttributes.
-        /// UVs are passed as vertex attributes so the optimizer penalizes UV-distorting collapses,
-        /// and LockBorder prevents UV seam tearing. Returns a new <see cref="RefinedTextureResult"/>
-        /// with compacted vertex/index arrays (atlas pixels are NOT copied — caller must set them).
+        /// Post-bake mesh simplification. Tries UV-preserving path (meshopt_simplifyWithAttributes)
+        /// first; falls back to position-only (meshopt_simplify) if the native export is missing.
+        /// Returns a new <see cref="RefinedTextureResult"/> with compacted vertex/index arrays
+        /// (atlas pixels are NOT copied — caller must set them).
         /// </summary>
         public static RefinedTextureResult SimplifyWithUVs(
             Vector3[] positions, Vector3[] normals, Vector2[] uvs,
@@ -237,35 +243,53 @@ namespace Genesis.RoomScan
             targetIndexCount = (targetIndexCount / 3) * 3;
 
             float[] flatPos = new float[vertexCount * 3];
-            float[] flatAttrs = new float[vertexCount * 2]; // UV as attribute
             for (int i = 0; i < vertexCount; i++)
             {
                 flatPos[i * 3]     = positions[i].x;
                 flatPos[i * 3 + 1] = positions[i].y;
                 flatPos[i * 3 + 2] = positions[i].z;
-                flatAttrs[i * 2]     = uvs[i].x;
-                flatAttrs[i * 2 + 1] = uvs[i].y;
             }
 
             uint[] uIndices = new uint[indexCount];
             for (int i = 0; i < indexCount; i++)
                 uIndices[i] = (uint)indices[i];
 
-            float[] attrWeights = { 1f, 1f }; // equal weight for U and V
-
             uint[] outIndices = new uint[indexCount];
-            int resultCount = meshopt_simplify_with_attrs(
-                outIndices,
-                uIndices, indexCount,
-                flatPos, vertexCount, 12,
-                flatAttrs, 8,
-                attrWeights, 2,
-                targetIndexCount, targetError,
-                MeshoptSimplifyLockBorder, out _);
+            int resultCount;
+
+            try
+            {
+                float[] flatAttrs = new float[vertexCount * 2];
+                for (int i = 0; i < vertexCount; i++)
+                {
+                    flatAttrs[i * 2]     = uvs[i].x;
+                    flatAttrs[i * 2 + 1] = uvs[i].y;
+                }
+                float[] attrWeights = { 1f, 1f };
+
+                resultCount = meshopt_simplify_with_attrs(
+                    outIndices,
+                    uIndices, indexCount,
+                    flatPos, vertexCount, 12,
+                    flatAttrs, 8,
+                    attrWeights, 2,
+                    targetIndexCount, targetError,
+                    MeshoptSimplifyLockBorder, out _);
+            }
+            catch (EntryPointNotFoundException)
+            {
+                Logger.Warning("[MeshOpt] meshopt_simplify_with_attrs not found in native lib, " +
+                               "falling back to position-only simplification. Rebuild libxatlas to enable UV-aware path.");
+                resultCount = meshopt_simplify_mesh(
+                    flatPos, vertexCount, 12,
+                    uIndices, indexCount,
+                    targetIndexCount, targetError,
+                    outIndices, out _);
+            }
 
             if (resultCount <= 0)
             {
-                Logger.Warning("[MeshOpt] UV-preserving simplification produced 0 indices, using original");
+                Logger.Warning("[MeshOpt] Simplification produced 0 indices, using original mesh");
                 return new RefinedTextureResult
                 {
                     Positions = positions,
@@ -275,7 +299,6 @@ namespace Genesis.RoomScan
                 };
             }
 
-            // Compact: collect only referenced vertices
             bool[] used = new bool[vertexCount];
             for (int i = 0; i < resultCount; i++)
                 used[outIndices[i]] = true;
@@ -300,6 +323,9 @@ namespace Genesis.RoomScan
             int[] outIdx = new int[resultCount];
             for (int i = 0; i < resultCount; i++)
                 outIdx[i] = remap[outIndices[i]];
+
+            Logger.Info($"[MeshOpt] Simplified {indexCount / 3} -> {resultCount / 3} tris " +
+                        $"({vertexCount} -> {newCount} verts)");
 
             return new RefinedTextureResult
             {
