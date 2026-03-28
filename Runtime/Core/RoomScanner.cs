@@ -1099,11 +1099,21 @@ namespace Genesis.RoomScan
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
             _refinedAtlasTexture.Apply();
 
-            Logger.Info($"Refined atlas applied: " +
+            if (_refinedMesh == null)
+                _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
+
+            _refinedMesh.Clear();
+            _refinedMesh.SetVertices(result.Positions);
+            _refinedMesh.SetNormals(result.Normals);
+            _refinedMesh.SetUVs(0, result.UVs);
+            _refinedMesh.SetTriangles(result.Indices, 0);
+
+            Logger.Info($"Refined mesh applied: " +
                 $"{result.Positions.Length} verts, {result.Indices.Length / 3} tris, " +
                 $"atlas {result.AtlasWidth}x{result.AtlasHeight}");
 
             EnsureRefinedRenderer();
+            _refinedMeshFilter.mesh = _refinedMesh;
             _refinedRenderer.material.mainTexture = _refinedAtlasTexture;
         }
 
@@ -1119,6 +1129,37 @@ namespace Genesis.RoomScan
             _refinedRenderer.material.mainTexture = atlas;
             HasRefinedTexture = true;
             RefinedMeshReady?.Invoke(mesh, atlas);
+        }
+
+        /// <summary>
+        /// Runs post-bake simplification on the loaded refined mesh if applicable.
+        /// Called from persistence after load when no enhanced mesh overlay is present.
+        /// </summary>
+        internal async Task ApplyPostLoadSimplificationAsync()
+        {
+            if (_textureRefinement == null || !LastRefinedResult.HasValue) return;
+            if (_textureRefinement.postBakeSimplificationRatio >= 1f) return;
+
+            try
+            {
+                var simplified = await _textureRefinement.SimplifyRefinedMeshAsync(LastRefinedResult.Value);
+                LastSimplifiedResult = simplified;
+
+                if (_refinedMesh != null)
+                {
+                    _refinedMesh.Clear();
+                    _refinedMesh.SetVertices(simplified.Positions);
+                    _refinedMesh.SetNormals(simplified.Normals);
+                    _refinedMesh.SetUVs(0, simplified.UVs);
+                    _refinedMesh.SetTriangles(simplified.Indices, 0);
+                }
+                Logger.Info($"Post-load simplification applied: {simplified.Positions.Length} verts, " +
+                            $"{simplified.Indices.Length / 3} tris");
+            }
+            catch (Exception e)
+            {
+                Logger.Warning($"Post-load simplification skipped: {e.Message}");
+            }
         }
 
         internal void ApplyHQTexture(Texture2D atlas)

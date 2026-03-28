@@ -725,6 +725,9 @@ namespace Genesis.RoomScan
                                 scanner.ApplyRefinedTexture(atlasTex, mesh);
                                 Logger.Info($"Refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})" +
                                           (loadedEnhanced ? " [enhanced mesh]" : ""));
+
+                                if (!loadedEnhanced)
+                                    await scanner.ApplyPostLoadSimplificationAsync();
                             }
                         }
                     }
@@ -881,6 +884,9 @@ namespace Genesis.RoomScan
                         mesh.SetTriangles(displayData.Indices, 0);
 
                         scanner.ApplyRefinedTexture(atlasTex, mesh);
+
+                        if (!hasEnhanced)
+                            await scanner.ApplyPostLoadSimplificationAsync();
                     }
 
                     if (hasHQ && hqBytes != null)
