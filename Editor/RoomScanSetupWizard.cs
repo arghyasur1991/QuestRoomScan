@@ -552,6 +552,7 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("KeyframeCollector", _keyframeCollector != null);
             DrawGSplatOptionalStatus();
             StatusRowOptional("TextureRefinement", _roomScanner != null && _roomScanner.GetComponent<TextureRefinement>() != null);
+            StatusRowOptional("RoomUnderstanding (MRUK bridge)", _roomScanner != null && _roomScanner.GetComponent<RoomUnderstanding>() != null);
             StatusRowOptional("CameraDebugOverlay", _cameraDebug != null);
             StatusRowOptional("DepthDebugOverlay", _depthDebug != null);
             StatusRowOptional("RoomScanInputHandler", _inputHandler != null);
@@ -636,6 +637,8 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<TriplanarCache>(root);
             if (root.GetComponent<TextureRefinement>() == null)
                 Undo.AddComponent<TextureRefinement>(root);
+            if (root.GetComponent<RoomUnderstanding>() == null)
+                Undo.AddComponent<RoomUnderstanding>(root);
             SetupGSplatIfAvailable(root);
 
             // Optional components not covered by RequireComponent
@@ -699,9 +702,12 @@ namespace Genesis.RoomScan.Editor
             bool hasPCAProvider = _cameraProvider != null;
             bool hasRefinement = _textureRefinement != null;
 
+            bool hasRoomUnderstanding = _roomScanner != null && _roomScanner.GetComponent<RoomUnderstanding>() != null;
+
             StatusRowOptional("PassthroughCameraAccess (camera RGB)", hasPCA);
             StatusRowOptional("PassthroughCameraProvider", hasPCAProvider);
             StatusRowOptional("TextureRefinement (atlas baking)", hasRefinement);
+            StatusRowOptional("RoomUnderstanding (MRUK bridge)", hasRoomUnderstanding);
 
             if (hasRefinement)
             {
@@ -732,7 +738,7 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
             }
 
-            bool gameReadyMissing = !hasPCA || !hasPCAProvider || !hasRefinement;
+            bool gameReadyMissing = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding;
             if (gameReadyMissing)
             {
                 GUILayout.Space(2);
@@ -803,6 +809,8 @@ namespace Genesis.RoomScan.Editor
 
             if (root.GetComponent<TextureRefinement>() == null)
                 Undo.AddComponent<TextureRefinement>(root);
+            if (root.GetComponent<RoomUnderstanding>() == null)
+                Undo.AddComponent<RoomUnderstanding>(root);
 
             var tr = root.GetComponent<TextureRefinement>();
             if (tr != null)

@@ -1531,6 +1531,8 @@ namespace Genesis.RoomScan
                         var atlas = _hqAtlasTexture != null ? _hqAtlasTexture : _refinedAtlasTexture;
                         if (atlas != null)
                             _transformMaterial.mainTexture = atlas;
+                        if (themePack != null)
+                            themePack.ApplyToMaterial(_transformMaterial);
                         _transformMaterial.SetFloat("_TransformGlobal", _transformProgress);
                         _refinedRenderer.material = _transformMaterial;
                     }
