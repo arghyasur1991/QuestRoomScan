@@ -131,6 +131,7 @@ namespace Genesis.RoomScan
         private KeyframeCollector _keyframeCollector;
         private IGSplatProvider _gsplatProvider;
         private TextureRefinement _textureRefinement;
+        private RoomUnderstanding _roomUnderstanding;
         private DebugMenuController _debugMenu;
         private ICameraProvider _customCameraProvider;
         private IRoomScanModule[] _modules;
@@ -217,6 +218,7 @@ namespace Genesis.RoomScan
         private Material _transformMaterial;
         private Texture2D _refinedAtlasTexture;
         private Texture2D _hqAtlasTexture;
+        private Texture2D _normalMapTexture;
         private Mesh _refinedMesh;
         private UnwrappedMeshResult? _cachedUnwrap;
 
@@ -349,6 +351,7 @@ namespace Genesis.RoomScan
             _keyframeCollector = GetComponent<KeyframeCollector>();
             _gsplatProvider = GetComponent<IGSplatProvider>();
             _textureRefinement = GetComponent<TextureRefinement>();
+            _roomUnderstanding = GetComponent<RoomUnderstanding>();
             _debugMenu = GetComponentInChildren<DebugMenuController>();
             _roomAnchor = GetComponent<RoomAnchorManager>();
         }
@@ -568,6 +571,11 @@ namespace Genesis.RoomScan
                 LastSimplifiedResult = null;
                 _cachedUnwrap = null;
                 _refinedMesh = null;
+                if (_normalMapTexture != null)
+                {
+                    Destroy(_normalMapTexture);
+                    _normalMapTexture = null;
+                }
 
                 _meshExtractor.DisposeOnly();
                 _volumeIntegrator.Clear();
@@ -798,7 +806,7 @@ namespace Genesis.RoomScan
             {
                 string keyframeDir = KeyframeDirectory;
                 var unwrap = await EnsureUnwrappedAsync();
-                byte[] atlasPixels = await _textureRefinement.BakeAtlasAsync(
+                var (atlasPixels, normalPixels) = await _textureRefinement.BakeAtlasAsync(
                     unwrap, keyframeDir, KeyframeRelocation);
 
                 var original = new RefinedTextureResult
@@ -808,6 +816,7 @@ namespace Genesis.RoomScan
                     UVs = unwrap.UVs,
                     Indices = unwrap.Indices,
                     AtlasPixels = atlasPixels,
+                    NormalPixels = normalPixels,
                     AtlasWidth = unwrap.AtlasWidth,
                     AtlasHeight = unwrap.AtlasHeight
                 };
@@ -1117,6 +1126,17 @@ namespace Genesis.RoomScan
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
             _refinedAtlasTexture.Apply();
 
+            if (_normalMapTexture != null)
+                Destroy(_normalMapTexture);
+            _normalMapTexture = null;
+            if (result.NormalPixels != null)
+            {
+                _normalMapTexture = new Texture2D(result.AtlasWidth, result.AtlasHeight,
+                    TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                _normalMapTexture.SetPixelData(result.NormalPixels, 0);
+                _normalMapTexture.Apply();
+            }
+
             if (_refinedMesh == null)
                 _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
 
@@ -1125,26 +1145,49 @@ namespace Genesis.RoomScan
             _refinedMesh.SetNormals(result.Normals);
             _refinedMesh.SetUVs(0, result.UVs);
             _refinedMesh.SetTriangles(result.Indices, 0);
+            _refinedMesh.RecalculateTangents();
+
+            // Encode per-vertex surface type into vertex colors (R channel)
+            if (_roomUnderstanding != null)
+            {
+                var surfaceTypes = _roomUnderstanding.GetPerVertexSurfaceTypes(_refinedMesh);
+                if (surfaceTypes != null)
+                {
+                    var colors = new Color32[result.Positions.Length];
+                    for (int i = 0; i < colors.Length; i++)
+                        colors[i] = new Color32(surfaceTypes[i], 0, 0, 255);
+                    _refinedMesh.colors32 = colors;
+                }
+            }
 
             Logger.Info($"Refined mesh applied: " +
                 $"{result.Positions.Length} verts, {result.Indices.Length / 3} tris, " +
-                $"atlas {result.AtlasWidth}x{result.AtlasHeight}");
+                $"atlas {result.AtlasWidth}x{result.AtlasHeight}" +
+                (result.NormalPixels != null ? " +normal" : ""));
 
             EnsureRefinedRenderer();
             _refinedMeshFilter.mesh = _refinedMesh;
             _refinedRenderer.material.mainTexture = _refinedAtlasTexture;
+            if (_normalMapTexture != null)
+                _refinedRenderer.material.SetTexture("_BumpMap", _normalMapTexture);
         }
 
         /// <summary>
         /// Applies pre-loaded atlas and mesh data (called from persistence load).
         /// </summary>
-        internal void ApplyRefinedTexture(Texture2D atlas, Mesh mesh)
+        internal void ApplyRefinedTexture(Texture2D atlas, Mesh mesh, Texture2D normalMap = null)
         {
             _refinedAtlasTexture = atlas;
             _refinedMesh = mesh;
+            if (_normalMapTexture != null)
+                Destroy(_normalMapTexture);
+            _normalMapTexture = normalMap;
+
             EnsureRefinedRenderer();
             _refinedMeshFilter.mesh = mesh;
             _refinedRenderer.material.mainTexture = atlas;
+            if (_normalMapTexture != null)
+                _refinedRenderer.material.SetTexture("_BumpMap", _normalMapTexture);
             HasRefinedTexture = true;
             RefinedMeshReady?.Invoke(mesh, atlas);
         }
@@ -1531,6 +1574,8 @@ namespace Genesis.RoomScan
                         var atlas = _hqAtlasTexture != null ? _hqAtlasTexture : _refinedAtlasTexture;
                         if (atlas != null)
                             _transformMaterial.mainTexture = atlas;
+                        if (_normalMapTexture != null)
+                            _transformMaterial.SetTexture("_BumpMap", _normalMapTexture);
                         if (themePack != null)
                             themePack.ApplyToMaterial(_transformMaterial);
                         _transformMaterial.SetFloat("_TransformGlobal", _transformProgress);
@@ -1544,6 +1589,8 @@ namespace Genesis.RoomScan
                             : _refinedAtlasTexture;
                         if (tex != null)
                             _refinedMaterial.mainTexture = tex;
+                        if (_normalMapTexture != null)
+                            _refinedMaterial.SetTexture("_BumpMap", _normalMapTexture);
                     }
                 }
             }

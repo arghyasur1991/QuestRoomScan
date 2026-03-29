@@ -5,6 +5,7 @@
 #pragma kernel BlendAccum
 #pragma kernel ResolveBlend
 #pragma kernel SharpenAtlas
+#pragma kernel SobelNormalMap
 
 // ── Shared uniforms ──────────────────────────────────────────
 float4x4 _ViewMat;
@@ -508,4 +509,64 @@ void SharpenAtlas(uint3 id : SV_DispatchThreadID)
     uint g = (uint)round(sharpened.y);
     uint b = (uint)round(sharpened.z);
     _AtlasBuf[idx] = r | (g << 8) | (b << 16) | (255u << 24);
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Kernel 7: Sobel Normal Map
+//  Derives a tangent-space normal map from atlas luminance.
+//  Reads from _AtlasBufSrc (snapshot), writes to _NormalBuf.
+//  Preserves alpha=0 for empty texels so dilation can fill them.
+// ═════════════════════════════════════════════════════════════
+
+float _NormalStrength;
+RWStructuredBuffer<uint> _NormalBuf;
+
+uint SobelLum(int x, int y)
+{
+    x = clamp(x, 0, _AtlasW - 1);
+    y = clamp(y, 0, _AtlasH - 1);
+    uint packed = _AtlasBufSrc[y * _AtlasW + x];
+    if ((packed >> 24) == 0) return 128;
+    uint cr = packed & 0xFF;
+    uint cg = (packed >> 8) & 0xFF;
+    uint cb = (packed >> 16) & 0xFF;
+    return (cr * 77 + cg * 150 + cb * 29) >> 8;
+}
+
+[numthreads(8, 8, 1)]
+void SobelNormalMap(uint3 id : SV_DispatchThreadID)
+{
+    int x = (int)id.x, y = (int)id.y;
+    if (x >= _AtlasW || y >= _AtlasH) return;
+
+    int idx = y * _AtlasW + x;
+    uint centerPacked = _AtlasBufSrc[idx];
+    uint centerAlpha = centerPacked >> 24;
+    if (centerAlpha == 0)
+    {
+        _NormalBuf[idx] = 0;
+        return;
+    }
+
+    // 3x3 Sobel
+    float tl = (float)SobelLum(x-1, y+1);
+    float t  = (float)SobelLum(x,   y+1);
+    float tr = (float)SobelLum(x+1, y+1);
+    float l  = (float)SobelLum(x-1, y);
+    float r  = (float)SobelLum(x+1, y);
+    float bl = (float)SobelLum(x-1, y-1);
+    float b  = (float)SobelLum(x,   y-1);
+    float br = (float)SobelLum(x+1, y-1);
+
+    float dx = ((tr + 2.0*r + br) - (tl + 2.0*l + bl)) / 255.0;
+    float dy = ((tl + 2.0*t + tr) - (bl + 2.0*b + br)) / 255.0;
+
+    dx *= _NormalStrength;
+    dy *= _NormalStrength;
+
+    uint nx = (uint)clamp(round(dx * 127.5 + 127.5), 0, 255);
+    uint ny = (uint)clamp(round(dy * 127.5 + 127.5), 0, 255);
+    uint nz = 255;
+
+    _NormalBuf[idx] = nx | (ny << 8) | (nz << 16) | (255u << 24);
 }

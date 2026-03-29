@@ -66,10 +66,23 @@ namespace Genesis.RoomScan
             Progress[vertexIndex] = Mathf.Clamp01(value);
         }
 
+        /// <summary>Per-surface spread rate multipliers (indexed by SurfaceType).</summary>
+        private float[] _surfaceSpreadRates;
+
+        /// <summary>
+        /// Set per-surface spread rate multipliers from a ThemePack.
+        /// </summary>
+        public void SetSurfaceSpreadRates(float[] rates)
+        {
+            _surfaceSpreadRates = rates;
+        }
+
         /// <summary>
         /// Run one tick of adjacency-based spread.  Vertices above
         /// <paramref name="threshold"/> influence their neighbours.
         /// Call once per frame or at a fixed rate.
+        /// When surface types are populated and spread rates are configured,
+        /// the rate is scaled per-vertex by the surface type multiplier.
         /// </summary>
         public void SpreadTick(float deltaTime, float threshold = -1f, float rate = -1f)
         {
@@ -89,7 +102,14 @@ namespace Genesis.RoomScan
                     int nb = neighbors[n];
                     if (Progress[nb] < Progress[v])
                     {
-                        float push = (Progress[v] - Progress[nb]) * rate * deltaTime;
+                        float surfaceRate = rate;
+                        if (_surfaceSpreadRates != null && SurfaceTypes != null && nb < SurfaceTypes.Length)
+                        {
+                            int st = SurfaceTypes[nb];
+                            if (st >= 0 && st < _surfaceSpreadRates.Length)
+                                surfaceRate *= _surfaceSpreadRates[st];
+                        }
+                        float push = (Progress[v] - Progress[nb]) * surfaceRate * deltaTime;
                         delta[nb] = Mathf.Max(delta[nb], push);
                     }
                 }

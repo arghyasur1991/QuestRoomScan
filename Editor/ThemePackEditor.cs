@@ -20,13 +20,21 @@ namespace Genesis.RoomScan.Editor
                 themeColor: new Color(0.1f, 0.6f, 0.9f, 1f),
                 emissiveColor: new Color(0.2f, 0.8f, 1.0f, 1f),
                 darkenBrights: 0.5f, edgeGlow: 20f,
-                boundaryGlow: 1.2f, noiseScale: 2.5f);
+                boundaryGlow: 1.2f, noiseScale: 2.5f,
+                pulseFreq: 1.5f, pulseAmp: 0.25f,
+                desaturation: 0.15f, hueShift: new Color(0.7f, 0.85f, 1.0f, 1f),
+                scanlineIntensity: 0.3f, chromaticAberration: 0.002f,
+                fresnelIntensity: 0.8f);
 
             CreateThemePack("Corruption",
                 themeColor: new Color(0.4f, 0.05f, 0.05f, 1f),
                 emissiveColor: new Color(0.8f, 0.1f, 0.0f, 1f),
                 darkenBrights: 1.6f, edgeGlow: 30f,
-                boundaryGlow: 2.2f, noiseScale: 1.5f);
+                boundaryGlow: 2.2f, noiseScale: 1.5f,
+                pulseFreq: 0.7f, pulseAmp: 0.5f,
+                desaturation: 0.6f, hueShift: new Color(0.6f, 0.3f, 0.3f, 1f),
+                scanlineIntensity: 0f, chromaticAberration: 0.004f,
+                fresnelIntensity: 1.2f);
 
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
@@ -35,7 +43,11 @@ namespace Genesis.RoomScan.Editor
 
         static void CreateThemePack(string name, Color themeColor, Color emissiveColor,
             float darkenBrights = 0.8f, float edgeGlow = 15f,
-            float boundaryGlow = 1.5f, float noiseScale = 2f)
+            float boundaryGlow = 1.5f, float noiseScale = 2f,
+            float pulseFreq = 0f, float pulseAmp = 0.3f,
+            float desaturation = 0f, Color? hueShift = null,
+            float scanlineIntensity = 0f, float chromaticAberration = 0f,
+            float fresnelIntensity = 0f)
         {
             string path = $"{ThemePath}/{name}.asset";
             var existing = AssetDatabase.LoadAssetAtPath<ThemePack>(path);
@@ -53,6 +65,13 @@ namespace Genesis.RoomScan.Editor
             pack.edgeGlow = edgeGlow;
             pack.boundaryGlow = boundaryGlow;
             pack.transitionNoiseScale = noiseScale;
+            pack.pulseFrequency = pulseFreq;
+            pack.pulseAmplitude = pulseAmp;
+            pack.desaturation = desaturation;
+            pack.hueShift = hueShift ?? Color.white;
+            pack.scanlineIntensity = scanlineIntensity;
+            pack.chromaticAberration = chromaticAberration;
+            pack.fresnelIntensity = fresnelIntensity;
 
             AssetDatabase.CreateAsset(pack, path);
             Debug.Log($"[ThemePackEditor] Created {name} at {path}");

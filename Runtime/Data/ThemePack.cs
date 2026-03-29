@@ -1,7 +1,30 @@
+using System;
 using UnityEngine;
 
 namespace Genesis.RoomScan
 {
+    /// <summary>Per-surface override for transformation parameters.</summary>
+    [Serializable]
+    public struct SurfaceOverride
+    {
+        [Tooltip("Multiplier on transition noise scale for this surface type")]
+        public float noiseScaleMultiplier;
+        [Tooltip("Emissive multiplier for this surface type")]
+        public float emissiveMultiplier;
+        [Tooltip("Spread rate multiplier (higher = spreads faster on this surface)")]
+        public float spreadRateMultiplier;
+        [Tooltip("Triplanar texture scale override")]
+        public float triplanarScaleMultiplier;
+
+        public static SurfaceOverride Default => new SurfaceOverride
+        {
+            noiseScaleMultiplier = 1f,
+            emissiveMultiplier = 1f,
+            spreadRateMultiplier = 1f,
+            triplanarScaleMultiplier = 1f,
+        };
+    }
+
     /// <summary>
     /// Pluggable theme definition for room transformation.  Swap the ThemePack
     /// and the entire room changes character.  Texture fields may be left null —
@@ -38,6 +61,47 @@ namespace Genesis.RoomScan
         [Range(0, 3)] public float boundaryGlow = 1.5f;
         [Tooltip("Scale of world-space noise driving the organic transition boundary (smaller = larger patches)")]
         public float transitionNoiseScale = 2f;
+
+        [Header("Effects")]
+        [Tooltip("Animated emissive pulse frequency (Hz). 0 = off.")]
+        [Range(0, 8)] public float pulseFrequency = 0f;
+        [Tooltip("Pulse amplitude — how strong the brightness oscillation is.")]
+        [Range(0, 1)] public float pulseAmplitude = 0.3f;
+        [Tooltip("Desaturation factor in transformed regions (0 = full color, 1 = greyscale)")]
+        [Range(0, 1)] public float desaturation = 0f;
+        [Tooltip("Hue tint applied to desaturated colour in transformed areas")]
+        public Color hueShift = Color.white;
+        [Tooltip("Horizontal scanline / holographic intensity (0 = off)")]
+        [Range(0, 1)] public float scanlineIntensity = 0f;
+        [Tooltip("Chromatic aberration at transformation boundary (0 = off)")]
+        [Range(0, 0.01f)] public float chromaticAberration = 0f;
+        [Tooltip("Fresnel edge highlight intensity (0 = off)")]
+        [Range(0, 3)] public float fresnelIntensity = 0f;
+
+        [Header("Surface Overrides (Floor, Ceiling, Wall, Furniture)")]
+        [Tooltip("Per-surface parameter multipliers. Index 0=Floor, 1=Ceiling, 2=Wall, 3=Furniture")]
+        public SurfaceOverride[] surfaceOverrides = new SurfaceOverride[]
+        {
+            SurfaceOverride.Default, // Floor
+            SurfaceOverride.Default, // Ceiling
+            SurfaceOverride.Default, // Wall
+            SurfaceOverride.Default, // Furniture
+        };
+
+        /// <summary>Get the override for a given surface type (returns Default for Unknown).</summary>
+        public SurfaceOverride GetSurfaceOverride(SurfaceType type)
+        {
+            int idx = type switch
+            {
+                SurfaceType.Floor     => 0,
+                SurfaceType.Ceiling   => 1,
+                SurfaceType.Wall      => 2,
+                SurfaceType.Furniture => 3,
+                _ => -1
+            };
+            if (idx >= 0 && idx < surfaceOverrides.Length) return surfaceOverrides[idx];
+            return SurfaceOverride.Default;
+        }
 
         [Header("VFX / Audio (optional)")]
         public GameObject particlePrefab;
@@ -89,6 +153,13 @@ namespace Genesis.RoomScan
             mat.SetFloat("_EdgeGlow",        edgeGlow);
             mat.SetFloat("_BoundaryGlow",    boundaryGlow);
             mat.SetFloat("_NoiseScale",      transitionNoiseScale);
+            mat.SetFloat("_PulseFreq",       pulseFrequency);
+            mat.SetFloat("_PulseAmp",        pulseAmplitude);
+            mat.SetFloat("_Desaturation",    desaturation);
+            mat.SetColor("_HueShift",        hueShift);
+            mat.SetFloat("_ScanlineIntensity", scanlineIntensity);
+            mat.SetFloat("_ChromaticAberration", chromaticAberration);
+            mat.SetFloat("_FresnelIntensity", fresnelIntensity);
         }
 
         private void OnDestroy()

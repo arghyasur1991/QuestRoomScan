@@ -114,6 +114,7 @@ namespace Genesis.RoomScan
         private string PkgSplatPath => Path.Combine(ActivePackageDirectory, "splat.ply");
         private string PkgRefinedMeshPath => Path.Combine(ActivePackageDirectory, "refined_mesh.bin");
         private string PkgRefinedAtlasPath => Path.Combine(ActivePackageDirectory, "refined_atlas.raw");
+        private string PkgRefinedNormalPath => Path.Combine(ActivePackageDirectory, "refined_normal.raw");
         private string PkgHQAtlasPath => Path.Combine(ActivePackageDirectory, "hq_atlas.png");
 
         // Legacy single-slot paths (for backward compat references in RoomScanner.ClearAllDataAsync)
@@ -398,6 +399,11 @@ namespace Genesis.RoomScan
                                 string atlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
                                 await Task.Run(() => File.WriteAllBytes(atlasPath, r.AtlasPixels));
                             }
+                            if (r.NormalPixels != null)
+                            {
+                                string normalPath = Path.Combine(pkgDir, "refined_normal.raw");
+                                await Task.Run(() => File.WriteAllBytes(normalPath, r.NormalPixels));
+                            }
                         }
                         if (_activeAnchorData != null)
                             _activeAnchorData.refinedMatrixAtCreate = MatrixToFloats(currentMatrix);
@@ -466,6 +472,7 @@ namespace Genesis.RoomScan
                 case ArtifactType.Refined:
                     TryDeleteFile(Path.Combine(pkgDir, "refined_mesh.bin"));
                     TryDeleteFile(Path.Combine(pkgDir, "refined_atlas.raw"));
+                    TryDeleteFile(Path.Combine(pkgDir, "refined_normal.raw"));
                     TryDeleteFile(Path.Combine(pkgDir, "simplified_mesh.bin"));
                     if (_activeAnchorData != null) _activeAnchorData.refinedMatrixAtCreate = null;
                     UpdateManifestFlags(ActivePackageId, ArtifactType.SimplifiedMesh, false);
@@ -697,11 +704,13 @@ namespace Genesis.RoomScan
                 string enhancedMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
                 string simplifiedMeshPath = Path.Combine(pkgDir, "simplified_mesh.bin");
                 string refinedAtlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
+                string refinedNormalPath = Path.Combine(pkgDir, "refined_normal.raw");
                 string hqAtlasPath = Path.Combine(pkgDir, "hq_atlas.png");
                 bool hasMesh = File.Exists(refinedMeshPath);
                 bool hasEnhanced = File.Exists(enhancedMeshPath);
                 bool hasSimplified = File.Exists(simplifiedMeshPath);
                 bool hasAtlas = File.Exists(refinedAtlasPath);
+                bool hasNormal = File.Exists(refinedNormalPath);
                 bool hasHQ = File.Exists(hqAtlasPath);
 
                 if (hasMesh)
@@ -712,12 +721,14 @@ namespace Genesis.RoomScan
                         RefinedTextureResult enhancedData = default;
                         RefinedTextureResult simplifiedData = default;
                         byte[] atlasBytes = null;
+                        byte[] normalBytes = null;
                         bool loadedEnhanced = false;
                         bool loadedSimplified = false;
                         await Task.Run(() =>
                         {
                             meshData = ReadRefinedMesh(refinedMeshPath);
                             if (hasAtlas) atlasBytes = File.ReadAllBytes(refinedAtlasPath);
+                            if (hasNormal) normalBytes = File.ReadAllBytes(refinedNormalPath);
                             if (hasEnhanced)
                             {
                                 enhancedData = ReadRefinedMesh(enhancedMeshPath);
@@ -742,12 +753,14 @@ namespace Genesis.RoomScan
                         if (scanner != null)
                         {
                             meshData.AtlasPixels = atlasBytes;
+                            meshData.NormalPixels = normalBytes;
                             scanner.LastRefinedResult = meshData;
                             scanner.HasEnhancedMesh = loadedEnhanced;
 
                             if (loadedSimplified)
                             {
                                 simplifiedData.AtlasPixels = atlasBytes;
+                                simplifiedData.NormalPixels = normalBytes;
                                 simplifiedData.AtlasWidth = meshData.AtlasWidth;
                                 simplifiedData.AtlasHeight = meshData.AtlasHeight;
                                 scanner.LastSimplifiedResult = simplifiedData;
@@ -765,6 +778,15 @@ namespace Genesis.RoomScan
                                 atlasTex.SetPixelData(atlasBytes, 0);
                                 atlasTex.Apply();
 
+                                Texture2D normalTex = null;
+                                if (normalBytes != null)
+                                {
+                                    normalTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
+                                        TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                                    normalTex.SetPixelData(normalBytes, 0);
+                                    normalTex.Apply();
+                                }
+
                                 var mesh = new Mesh
                                 {
                                     name = loadedEnhanced ? "EnhancedScanMesh" : "RefinedScanMesh",
@@ -774,8 +796,9 @@ namespace Genesis.RoomScan
                                 mesh.SetNormals(displayData.Normals);
                                 mesh.SetUVs(0, displayData.UVs);
                                 mesh.SetTriangles(displayData.Indices, 0);
+                                mesh.RecalculateTangents();
 
-                                scanner.ApplyRefinedTexture(atlasTex, mesh);
+                                scanner.ApplyRefinedTexture(atlasTex, mesh, normalTex);
                                 Logger.Info($"Refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})" +
                                           (loadedEnhanced ? " [enhanced mesh]" :
                                            loadedSimplified ? " [simplified mesh]" : ""));
@@ -859,16 +882,19 @@ namespace Genesis.RoomScan
                 string enhancedMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
                 string simplifiedMeshPath = Path.Combine(pkgDir, "simplified_mesh.bin");
                 string refinedAtlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
+                string refinedNormalPath = Path.Combine(pkgDir, "refined_normal.raw");
                 string hqAtlasPath = Path.Combine(pkgDir, "hq_atlas.png");
 
                 RefinedTextureResult meshData = default;
                 RefinedTextureResult enhancedData = default;
                 RefinedTextureResult simplifiedData = default;
                 byte[] atlasBytes = null;
+                byte[] normalBytes = null;
                 byte[] hqBytes = null;
                 bool hasEnhanced = File.Exists(enhancedMeshPath);
                 bool hasSimplified = File.Exists(simplifiedMeshPath);
                 bool hasAtlas = File.Exists(refinedAtlasPath);
+                bool hasNormal = File.Exists(refinedNormalPath);
                 bool hasHQ = File.Exists(hqAtlasPath);
                 PackageAnchorData anchorData = null;
 
@@ -876,6 +902,7 @@ namespace Genesis.RoomScan
                 {
                     meshData = ReadRefinedMesh(refinedMeshPath);
                     if (hasAtlas) atlasBytes = File.ReadAllBytes(refinedAtlasPath);
+                    if (hasNormal) normalBytes = File.ReadAllBytes(refinedNormalPath);
                     if (hasEnhanced) enhancedData = ReadRefinedMesh(enhancedMeshPath);
                     if (hasSimplified) simplifiedData = ReadRefinedMesh(simplifiedMeshPath);
                     if (hasHQ) hqBytes = File.ReadAllBytes(hqAtlasPath);
@@ -917,12 +944,14 @@ namespace Genesis.RoomScan
                 if (scanner != null)
                 {
                     meshData.AtlasPixels = atlasBytes;
+                    meshData.NormalPixels = normalBytes;
                     scanner.LastRefinedResult = meshData;
                     scanner.HasEnhancedMesh = hasEnhanced;
 
                     if (hasSimplified)
                     {
                         simplifiedData.AtlasPixels = atlasBytes;
+                        simplifiedData.NormalPixels = normalBytes;
                         simplifiedData.AtlasWidth = meshData.AtlasWidth;
                         simplifiedData.AtlasHeight = meshData.AtlasHeight;
                         scanner.LastSimplifiedResult = simplifiedData;
@@ -939,6 +968,15 @@ namespace Genesis.RoomScan
                         atlasTex.SetPixelData(atlasBytes, 0);
                         atlasTex.Apply();
 
+                        Texture2D normalTex = null;
+                        if (normalBytes != null)
+                        {
+                            normalTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
+                                TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                            normalTex.SetPixelData(normalBytes, 0);
+                            normalTex.Apply();
+                        }
+
                         var mesh = new Mesh
                         {
                             name = hasEnhanced ? "EnhancedScanMesh" : "RefinedScanMesh",
@@ -948,8 +986,9 @@ namespace Genesis.RoomScan
                         mesh.SetNormals(displayData.Normals);
                         mesh.SetUVs(0, displayData.UVs);
                         mesh.SetTriangles(displayData.Indices, 0);
+                        mesh.RecalculateTangents();
 
-                        scanner.ApplyRefinedTexture(atlasTex, mesh);
+                        scanner.ApplyRefinedTexture(atlasTex, mesh, normalTex);
                     }
 
                     if (hasHQ && hqBytes != null)
