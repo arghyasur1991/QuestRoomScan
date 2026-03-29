@@ -13,8 +13,8 @@ Shader "Genesis/OcclusionMesh"
             Tags { "LightMode"="SRPDefaultUnlit" }
             ZWrite On
             ZTest LEqual
-            ColorMask 0
             Cull Off
+            Blend Zero One, Zero One
 
             HLSLPROGRAM
             #pragma vertex vert
