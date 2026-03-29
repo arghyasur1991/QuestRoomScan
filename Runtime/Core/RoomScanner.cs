@@ -108,6 +108,10 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Show blue tint overlay on frozen voxels (Vertex/Triplanar/Wireframe modes)")]
         private bool showFreezeTint = true;
 
+        [Header("Room Transform")]
+        [SerializeField, Tooltip("Active ThemePack for the Transformed render mode")]
+        private ThemePack themePack;
+
         [Header("Logging")]
         [SerializeField] private LogLevel logLevel = LogLevel.Info;
 
@@ -217,7 +221,6 @@ namespace Genesis.RoomScan
         private UnwrappedMeshResult? _cachedUnwrap;
 
         // Room transformation
-        private ThemePack _activeThemePack;
         private float _transformProgress;
 
         public bool HasRefinedTexture { get; private set; }
@@ -242,13 +245,13 @@ namespace Genesis.RoomScan
         /// <summary>The server-enhanced HQ atlas, or null if not available.</summary>
         public Texture2D HQAtlas => _hqAtlasTexture;
 
-        /// <summary>Active ThemePack for the Transformed render mode. Set via debug menu or game code.</summary>
+        /// <summary>Active ThemePack for the Transformed render mode. Assign in Inspector or set at runtime.</summary>
         public ThemePack ActiveThemePack
         {
-            get => _activeThemePack;
+            get => themePack;
             set
             {
-                _activeThemePack = value;
+                themePack = value;
                 if (_transformMaterial != null && value != null)
                     value.ApplyToMaterial(_transformMaterial);
                 if (renderMode == ScanRenderMode.Transformed) ApplyRenderMode();
@@ -654,7 +657,7 @@ namespace Genesis.RoomScan
                 ScanRenderMode.Refined => HasRefinedTexture,
                 ScanRenderMode.HQRefined => HasHQRefinedTexture,
                 ScanRenderMode.Occlusion => HasRefinedTexture && _occlusionMaterial != null,
-                ScanRenderMode.Transformed => HasRefinedTexture && _transformMaterial != null && _activeThemePack != null,
+                ScanRenderMode.Transformed => HasRefinedTexture && _transformMaterial != null && themePack != null,
                 ScanRenderMode.Splat => (_gsplatProvider != null && _gsplatProvider.HasServerTrainedSplats) || HasDownloadedSplat,
                 _ => false
             };
@@ -1270,8 +1273,8 @@ namespace Genesis.RoomScan
             {
                 _transformMaterial = new Material(txShader);
                 _transformMaterial.SetFloat("_TransformGlobal", _transformProgress);
-                if (_activeThemePack != null)
-                    _activeThemePack.ApplyToMaterial(_transformMaterial);
+                if (themePack != null)
+                    themePack.ApplyToMaterial(_transformMaterial);
             }
         }
 
