@@ -29,6 +29,16 @@ namespace Genesis.RoomScan
         public Color themeColor = Color.white;
         public Color emissiveColor = Color.black;
 
+        [Header("Blending")]
+        [Tooltip("How much bright areas in the real room dim (0 = none, 1.5+ = horror darkness)")]
+        [Range(0, 2)] public float darkenBrights = 0.8f;
+        [Tooltip("Strength of emissive glow on structural edges detected from the room texture")]
+        [Range(0, 50)] public float edgeGlow = 15f;
+        [Tooltip("Intensity of the glowing frontier at the advancing edge of transformation")]
+        [Range(0, 3)] public float boundaryGlow = 1.5f;
+        [Tooltip("Scale of world-space noise driving the organic transition boundary (smaller = larger patches)")]
+        public float transitionNoiseScale = 2f;
+
         [Header("VFX / Audio (optional)")]
         public GameObject particlePrefab;
         public AudioClip ambientAudio;
@@ -75,6 +85,10 @@ namespace Genesis.RoomScan
             mat.SetTexture("_ThemeEmissive", GetEmissiveMap());
             mat.SetColor("_ThemeColor",      themeColor);
             mat.SetColor("_EmissiveColor",   emissiveColor);
+            mat.SetFloat("_DarkenBrights",   darkenBrights);
+            mat.SetFloat("_EdgeGlow",        edgeGlow);
+            mat.SetFloat("_BoundaryGlow",    boundaryGlow);
+            mat.SetFloat("_NoiseScale",      transitionNoiseScale);
         }
 
         private void OnDestroy()
