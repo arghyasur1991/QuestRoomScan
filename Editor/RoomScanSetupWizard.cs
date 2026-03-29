@@ -48,7 +48,7 @@ namespace Genesis.RoomScan.Editor
         TextureRefinement _textureRefinement;
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
-        bool _refinedShaderWired, _atlasBakeComputeWired;
+        bool _refinedShaderWired, _occlusionShaderWired, _atlasBakeComputeWired;
         bool _boundarylessManifest;
         bool _cleartextAllowed;
         bool _insecureHttpAllowed;
@@ -137,6 +137,8 @@ namespace Genesis.RoomScan.Editor
                 "surfaceNetsCompute");
             _refinedShaderWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "refinedMeshShader");
+            _occlusionShaderWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
+                "occlusionMeshShader");
             _atlasBakeComputeWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "atlasBakeCompute");
             RefreshGSplat();
@@ -925,6 +927,7 @@ namespace Genesis.RoomScan.Editor
             if (_triplanarCache != null) { StatusRow("TriplanarCache bake compute", _triplanarWired);      needsFix |= !_triplanarWired; }
 
             if (_textureRefinement != null)   { StatusRow("RefinedMesh shader (texture refine)", _refinedShaderWired); needsFix |= !_refinedShaderWired; }
+            if (_textureRefinement != null)   { StatusRow("OcclusionMesh shader (MR occluder)", _occlusionShaderWired); needsFix |= !_occlusionShaderWired; }
             if (_textureRefinement != null)   { StatusRow("AtlasBakeCompute (GPU bake)", _atlasBakeComputeWired);      needsFix |= !_atlasBakeComputeWired; }
             DrawGSplatShaderStatus(ref needsFix);
 
@@ -1090,6 +1093,7 @@ namespace Genesis.RoomScan.Editor
                 {
                     var so = new SerializedObject(tr);
                     AssignAsset<Shader>(so, "refinedMeshShader", PKG_SHADERS + "RefinedMesh.shader");
+                    AssignAsset<Shader>(so, "occlusionMeshShader", PKG_SHADERS + "OcclusionMesh.shader");
                     AssignAsset<ComputeShader>(so, "atlasBakeCompute", PKG_SHADERS + "AtlasBakeCompute.compute");
                     so.ApplyModifiedProperties();
                     EditorUtility.SetDirty(tr);

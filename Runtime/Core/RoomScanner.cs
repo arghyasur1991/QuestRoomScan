@@ -21,6 +21,8 @@ namespace Genesis.RoomScan
         Refined,
         /// <summary>UV-unwrapped mesh with server-enhanced high-resolution atlas.</summary>
         HQRefined,
+        /// <summary>Refined mesh rendered as invisible depth-only occluder for MR.</summary>
+        Occlusion,
         /// <summary>Gaussian Splat point cloud rendered from server-trained PLY data.</summary>
         Splat,
         /// <summary>All scan rendering disabled.</summary>
@@ -204,6 +206,8 @@ namespace Genesis.RoomScan
 
         private MeshFilter _refinedMeshFilter;
         private MeshRenderer _refinedRenderer;
+        private Material _refinedMaterial;
+        private Material _occlusionMaterial;
         private Texture2D _refinedAtlasTexture;
         private Texture2D _hqAtlasTexture;
         private Mesh _refinedMesh;
@@ -579,7 +583,7 @@ namespace Genesis.RoomScan
             ScanRenderMode[] order =
             {
                 ScanRenderMode.Wireframe, ScanRenderMode.Vertex, ScanRenderMode.Triplanar,
-                ScanRenderMode.Refined, ScanRenderMode.HQRefined,
+                ScanRenderMode.Refined, ScanRenderMode.HQRefined, ScanRenderMode.Occlusion,
                 ScanRenderMode.Splat, ScanRenderMode.None
             };
 
@@ -616,6 +620,7 @@ namespace Genesis.RoomScan
                 ScanRenderMode.Triplanar => !_scanResourcesReleased && _triplanarCache != null,
                 ScanRenderMode.Refined => HasRefinedTexture,
                 ScanRenderMode.HQRefined => HasHQRefinedTexture,
+                ScanRenderMode.Occlusion => HasRefinedTexture && _occlusionMaterial != null,
                 ScanRenderMode.Splat => (_gsplatProvider != null && _gsplatProvider.HasServerTrainedSplats) || HasDownloadedSplat,
                 _ => false
             };
@@ -1216,8 +1221,14 @@ namespace Genesis.RoomScan
                 Logger.Warning("Genesis/RefinedMesh shader not found, using URP/Unlit");
                 shader = Shader.Find("Universal Render Pipeline/Unlit");
             }
-            _refinedRenderer.material = new Material(shader);
+            _refinedMaterial = new Material(shader);
+            _refinedRenderer.material = _refinedMaterial;
             _refinedRenderer.enabled = false;
+
+            var occShader = _textureRefinement != null ? _textureRefinement.occlusionMeshShader : null;
+            if (occShader == null) occShader = Shader.Find("Genesis/OcclusionMesh");
+            if (occShader != null)
+                _occlusionMaterial = new Material(occShader);
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -1451,7 +1462,8 @@ namespace Genesis.RoomScan
                                || renderMode == ScanRenderMode.Triplanar
                                || renderMode == ScanRenderMode.Wireframe;
             bool refinedVisible = renderMode == ScanRenderMode.Refined
-                               || renderMode == ScanRenderMode.HQRefined;
+                               || renderMode == ScanRenderMode.HQRefined
+                               || renderMode == ScanRenderMode.Occlusion;
 
             if (gpuRenderer != null)
                 gpuRenderer.RenderVisible = gpuMeshVisible;
@@ -1462,11 +1474,19 @@ namespace Genesis.RoomScan
                 _refinedRenderer.enabled = refinedVisible;
                 if (refinedVisible)
                 {
-                    var tex = renderMode == ScanRenderMode.HQRefined && _hqAtlasTexture != null
-                        ? _hqAtlasTexture
-                        : _refinedAtlasTexture;
-                    if (tex != null)
-                        _refinedRenderer.material.mainTexture = tex;
+                    if (renderMode == ScanRenderMode.Occlusion && _occlusionMaterial != null)
+                    {
+                        _refinedRenderer.material = _occlusionMaterial;
+                    }
+                    else
+                    {
+                        _refinedRenderer.material = _refinedMaterial;
+                        var tex = renderMode == ScanRenderMode.HQRefined && _hqAtlasTexture != null
+                            ? _hqAtlasTexture
+                            : _refinedAtlasTexture;
+                        if (tex != null)
+                            _refinedMaterial.mainTexture = tex;
+                    }
                 }
             }
 
