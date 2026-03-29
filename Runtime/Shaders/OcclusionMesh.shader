@@ -14,7 +14,6 @@ Shader "Genesis/OcclusionMesh"
             ZWrite On
             ZTest LEqual
             Cull Off
-            Blend Zero One, Zero One
 
             HLSLPROGRAM
             #pragma vertex vert
