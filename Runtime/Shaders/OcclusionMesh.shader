@@ -1,14 +1,16 @@
+// Depth-only occluder for MR — writes depth, produces no visible output.
+// Mirrors RefinedMesh.shader structure (SRPDefaultUnlit + DepthOnly) which is
+// proven to write depth correctly in this project's URP Deferred config.
 Shader "Genesis/OcclusionMesh"
 {
     SubShader
     {
         Tags { "RenderType"="Opaque" "RenderPipeline"="UniversalPipeline" "Queue"="Geometry-1" }
 
-        // Depth-normals prepass — runs before GBuffer in Deferred mode.
         Pass
         {
-            Name "DepthNormals"
-            Tags { "LightMode"="DepthNormals" }
+            Name "OccluderUnlit"
+            Tags { "LightMode"="SRPDefaultUnlit" }
             ZWrite On
             ZTest LEqual
             ColorMask 0
@@ -46,7 +48,6 @@ Shader "Genesis/OcclusionMesh"
             ENDHLSL
         }
 
-        // Depth-only prepass — runs before opaques in Forward / Forward+ mode.
         Pass
         {
             Name "DepthOnly"
@@ -88,15 +89,14 @@ Shader "Genesis/OcclusionMesh"
             ENDHLSL
         }
 
-        // Main forward pass — invisible color output; depth already written by prepass.
         Pass
         {
-            Name "ForwardLit"
-            Tags { "LightMode"="UniversalForward" }
-            ZWrite Off
+            Name "DepthNormals"
+            Tags { "LightMode"="DepthNormals" }
+            ZWrite On
             ZTest LEqual
+            ColorMask 0
             Cull Off
-            Blend Zero One, Zero One
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -126,11 +126,7 @@ Shader "Genesis/OcclusionMesh"
                 return o;
             }
 
-            half4 frag(Varyings i) : SV_Target
-            {
-                UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(i);
-                return half4(0, 0, 0, 0);
-            }
+            half4 frag(Varyings i) : SV_Target { return 0; }
             ENDHLSL
         }
     }
