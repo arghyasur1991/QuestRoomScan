@@ -241,8 +241,8 @@ Shader "Genesis/RoomTransform"
 
                 // ── Half-lambert directional light ──────────────────────
                 float3 lightDir = normalize(_LightDir.xyz);
-                half NdotL = dot(worldNormal, lightDir);
-                half halfLambert = NdotL * 0.5 + 0.5;
+                half NdotL = abs(dot(worldNormal, lightDir));
+                half lighting = NdotL * 0.4 + 0.6;
 
                 // ── Chromatic aberration at boundary ─────────────────────
                 // Shift UV reads for R and B channels near the frontier
@@ -260,7 +260,7 @@ Shader "Genesis/RoomTransform"
                 half3 blended = OverlayBlend(chromaReal, themeColor);
 
                 half3 color = lerp(chromaReal, blended, mask);
-                color *= halfLambert;
+                color *= lighting;
 
                 // ── Desaturation + hue tint ─────────────────────────────
                 if (_Desaturation > 0.001)

@@ -81,10 +81,10 @@ Shader "Genesis/RefinedMesh"
                 float3 worldNormal = normalize(T * tn.x + B * tn.y + N * tn.z);
 
                 float3 lightDir = normalize(_LightDir.xyz);
-                half NdotL = dot(worldNormal, lightDir);
-                half halfLambert = NdotL * 0.5 + 0.5;
+                half NdotL = abs(dot(worldNormal, lightDir));
+                half lighting = NdotL * 0.4 + 0.6;
 
-                col.rgb *= halfLambert;
+                col.rgb *= lighting;
                 return col;
             }
             ENDHLSL
