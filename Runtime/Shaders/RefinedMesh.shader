@@ -4,7 +4,7 @@ Shader "Genesis/RefinedMesh"
     {
         _MainTex ("Atlas", 2D) = "white" {}
         _BumpMap ("Normal Map", 2D) = "bump" {}
-        _NormalStrength ("Normal Strength", Float) = 1.0
+        _NormalStrength ("Normal Strength", Float) = 0.0
         _LightDir ("Light Direction", Vector) = (0.3, 1.0, 0.2, 0)
     }
     SubShader

@@ -195,16 +195,9 @@ Shader "Genesis/RoomTransform"
                 half3 realColor = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, i.uv).rgb;
                 float realLum = dot(realColor, half3(0.2126, 0.7152, 0.0722));
 
-                // ── Atlas normal map (TBN) ──────────────────────────────
-                half4 nSample = SAMPLE_TEXTURE2D(_BumpMap, sampler_BumpMap, i.uv);
-                half3 tn;
-                tn.xy = (nSample.rg * 2.0 - 1.0) * _NormalStrength;
-                tn.z = sqrt(saturate(1.0 - dot(tn.xy, tn.xy)));
-
                 float3 N = normalize(i.worldNml);
                 float3 T = normalize(i.worldTan);
                 float3 B = normalize(i.worldBit);
-                float3 realNormal = normalize(T * tn.x + B * tn.y + N * tn.z);
 
                 // ── Noise-driven transition mask ────────────────────────
                 float noise = ValueNoise(i.worldPos * _NoiseScale);
@@ -217,8 +210,7 @@ Shader "Genesis/RoomTransform"
                 half3 adjustedReal = realColor * darken;
 
                 // ── Theme triplanar ─────────────────────────────────────
-                half3 nml = N;
-                half3 weights = TriplanarWeights(nml, _TriplanarSharpness);
+                half3 weights = TriplanarWeights(N, _TriplanarSharpness);
                 half3 themeColor = TriplanarSample(
                     TEXTURE2D_ARGS(_ThemeTexTop, sampler_ThemeTexTop),
                     TEXTURE2D_ARGS(_ThemeTexSide, sampler_ThemeTexSide),
@@ -229,20 +221,30 @@ Shader "Genesis/RoomTransform"
                     TEXTURE2D_ARGS(_ThemeEmissive, sampler_ThemeEmissive),
                     i.worldPos, weights, _TriplanarScale);
 
-                // ── Theme height-derived normal perturbation ────────────
+                // ── Normal perturbation (transformed regions only) ──────
+                // Atlas bump + theme height normals are mask-gated:
+                // untransformed regions use flat mesh normal, transformed
+                // regions get amplified bump to accentuate the effect.
+                half4 nSample = SAMPLE_TEXTURE2D(_BumpMap, sampler_BumpMap, i.uv);
+                half3 tn;
+                float ampStrength = _NormalStrength * 2.0 * mask;
+                tn.xy = (nSample.rg * 2.0 - 1.0) * ampStrength;
+                tn.z = sqrt(saturate(1.0 - dot(tn.xy, tn.xy)));
+                float3 bumpNormal = normalize(T * tn.x + B * tn.y + N * tn.z);
+
                 float themeLum = dot(themeColor, half3(0.2126, 0.7152, 0.0722));
                 float tdx = ddx(themeLum);
                 float tdy = ddy(themeLum);
-                float3 themeNormal = normalize(float3(-tdx * 4.0, -tdy * 4.0, 0.15));
+                float3 themeNormal = normalize(float3(-tdx * 6.0, -tdy * 6.0, 0.12));
                 themeNormal = normalize(T * themeNormal.x + B * themeNormal.y + N * themeNormal.z);
 
-                // Blend between real room normal and theme-derived normal
-                float3 worldNormal = normalize(lerp(realNormal, themeNormal, mask));
+                float3 worldNormal = normalize(lerp(bumpNormal, themeNormal, mask * 0.6));
 
-                // ── Half-lambert directional light ──────────────────────
+                // ── Directional light (transformed only) ────────────────
                 float3 lightDir = normalize(_LightDir.xyz);
                 half NdotL = abs(dot(worldNormal, lightDir));
-                half lighting = NdotL * 0.4 + 0.6;
+                half transformLighting = NdotL * 0.5 + 0.5;
+                half lighting = lerp(1.0, transformLighting, mask);
 
                 // ── Chromatic aberration at boundary ─────────────────────
                 // Shift UV reads for R and B channels near the frontier
