@@ -9,7 +9,7 @@ namespace Genesis.RoomScan
     /// <see cref="GetEmissiveMap"/> will return procedural placeholders based on
     /// the configured colours.
     /// </summary>
-    [CreateAssetMenu(fileName = "NewThemePack", menuName = "Genesis/ThemePack")]
+    [CreateAssetMenu(fileName = "NewThemePack", menuName = "RoomScan/ThemePack")]
     public class ThemePack : ScriptableObject
     {
         [Header("Identity")]

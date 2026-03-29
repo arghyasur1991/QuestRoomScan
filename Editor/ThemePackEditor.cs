@@ -7,7 +7,7 @@ namespace Genesis.RoomScan.Editor
     {
         private const string ThemePath = "Assets/Game/Themes";
 
-        [MenuItem("Genesis/Create Test ThemePacks")]
+        [MenuItem("RoomScan/Create Test ThemePacks")]
         static void CreateTestThemePacks()
         {
             if (!AssetDatabase.IsValidFolder(ThemePath))
