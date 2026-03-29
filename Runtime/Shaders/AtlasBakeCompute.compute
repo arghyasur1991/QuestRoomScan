@@ -573,8 +573,14 @@ void SobelNormalMap(uint3 id : SV_DispatchThreadID)
     float gx = ((tr + 2.0*r + br) - (tl + 2.0*l + bl)) / 255.0;
     float gy = ((tl + 2.0*t + tr) - (bl + 2.0*b + br)) / 255.0;
 
-    gx *= _NormalStrength;
-    gy *= _NormalStrength;
+    // Dead zone: suppress gradients below ~3% luminance difference per texel.
+    // Kills subtle bake seams from multi-view color mismatch while keeping
+    // real texture edges (tile grout, wood grain, etc.)
+    float mag = sqrt(gx * gx + gy * gy);
+    float threshold = 0.03;
+    float scale = saturate((mag - threshold) / max(mag, 0.001));
+    gx *= scale * _NormalStrength;
+    gy *= scale * _NormalStrength;
 
     uint nx = (uint)clamp(round(gx * 127.5 + 127.5), 0, 255);
     uint ny = (uint)clamp(round(gy * 127.5 + 127.5), 0, 255);
