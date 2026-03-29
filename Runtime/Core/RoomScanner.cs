@@ -1155,7 +1155,7 @@ namespace Genesis.RoomScan
                 {
                     var colors = new Color32[result.Positions.Length];
                     for (int i = 0; i < colors.Length; i++)
-                        colors[i] = new Color32(surfaceTypes[i], 0, 0, 255);
+                        colors[i] = new Color32((byte)surfaceTypes[i], 0, 0, 255);
                     _refinedMesh.colors32 = colors;
                 }
             }
