@@ -521,16 +521,23 @@ void SharpenAtlas(uint3 id : SV_DispatchThreadID)
 float _NormalStrength;
 RWStructuredBuffer<uint> _NormalBuf;
 
-uint SobelLum(int x, int y)
+// Returns luminance of a texel, or fallback if the texel is empty (alpha=0).
+// Using the center's own luminance as fallback means UV island seams produce
+// zero gradient instead of a false edge.
+uint PackedToLum(uint packed, uint fallback)
 {
-    x = clamp(x, 0, _AtlasW - 1);
-    y = clamp(y, 0, _AtlasH - 1);
-    uint packed = _AtlasBufSrc[y * _AtlasW + x];
-    if ((packed >> 24) == 0) return 128;
+    if ((packed >> 24) == 0) return fallback;
     uint cr = packed & 0xFF;
     uint cg = (packed >> 8) & 0xFF;
     uint cb = (packed >> 16) & 0xFF;
     return (cr * 77 + cg * 150 + cb * 29) >> 8;
+}
+
+uint SampleLum(int x, int y, uint centerLum)
+{
+    x = clamp(x, 0, _AtlasW - 1);
+    y = clamp(y, 0, _AtlasH - 1);
+    return PackedToLum(_AtlasBufSrc[y * _AtlasW + x], centerLum);
 }
 
 [numthreads(8, 8, 1)]
@@ -548,24 +555,29 @@ void SobelNormalMap(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // 3x3 Sobel
-    float tl = (float)SobelLum(x-1, y+1);
-    float t  = (float)SobelLum(x,   y+1);
-    float tr = (float)SobelLum(x+1, y+1);
-    float l  = (float)SobelLum(x-1, y);
-    float r  = (float)SobelLum(x+1, y);
-    float bl = (float)SobelLum(x-1, y-1);
-    float b  = (float)SobelLum(x,   y-1);
-    float br = (float)SobelLum(x+1, y-1);
+    uint cR = centerPacked & 0xFF;
+    uint cG = (centerPacked >> 8) & 0xFF;
+    uint cB = (centerPacked >> 16) & 0xFF;
+    uint cLum = (cR * 77 + cG * 150 + cB * 29) >> 8;
 
-    float dx = ((tr + 2.0*r + br) - (tl + 2.0*l + bl)) / 255.0;
-    float dy = ((tl + 2.0*t + tr) - (bl + 2.0*b + br)) / 255.0;
+    // 3x3 Sobel — empty neighbors fall back to center luminance (no false edge)
+    float tl = (float)SampleLum(x-1, y+1, cLum);
+    float t  = (float)SampleLum(x,   y+1, cLum);
+    float tr = (float)SampleLum(x+1, y+1, cLum);
+    float l  = (float)SampleLum(x-1, y,   cLum);
+    float r  = (float)SampleLum(x+1, y,   cLum);
+    float bl = (float)SampleLum(x-1, y-1, cLum);
+    float b  = (float)SampleLum(x,   y-1, cLum);
+    float br = (float)SampleLum(x+1, y-1, cLum);
 
-    dx *= _NormalStrength;
-    dy *= _NormalStrength;
+    float gx = ((tr + 2.0*r + br) - (tl + 2.0*l + bl)) / 255.0;
+    float gy = ((tl + 2.0*t + tr) - (bl + 2.0*b + br)) / 255.0;
 
-    uint nx = (uint)clamp(round(dx * 127.5 + 127.5), 0, 255);
-    uint ny = (uint)clamp(round(dy * 127.5 + 127.5), 0, 255);
+    gx *= _NormalStrength;
+    gy *= _NormalStrength;
+
+    uint nx = (uint)clamp(round(gx * 127.5 + 127.5), 0, 255);
+    uint ny = (uint)clamp(round(gy * 127.5 + 127.5), 0, 255);
     uint nz = 255;
 
     _NormalBuf[idx] = nx | (ny << 8) | (nz << 16) | (255u << 24);
