@@ -683,7 +683,7 @@ The UGS fork includes several Quest 3-specific optimizations:
 - **Fragment shader**: Uses `clip()` instead of `discard` for better Adreno TBDR performance
 
 #### Visibility Control
-`GaussianSplatRenderer.renderVisible` boolean — checked in `GatherSplatsForCamera()` — allows toggling rendering without disabling the component or releasing GPU resources. Used by `GSplatManager.RenderVisible` → `RoomScanner.ApplyRenderMode()` for render mode switching. The `ScanRenderMode` enum controls which representation is active: `Wireframe`, `Vertex`, `Triplanar`, `Refined`, `HQRefined`, `Splat`, or `None`. `CycleRenderMode()` skips modes whose backing data or module is not present (e.g., Triplanar requires `TriplanarCache`, Splat requires trained data).
+`GaussianSplatRenderer.renderVisible` boolean — checked in `GatherSplatsForCamera()` — allows toggling rendering without disabling the component or releasing GPU resources. Used by `GSplatManager.RenderVisible` → `RoomScanner.ApplyRenderMode()` for render mode switching. The `ScanRenderMode` enum controls which representation is active: `Wireframe`, `Vertex`, `Triplanar`, `Refined`, `HQRefined`, `Occlusion`, `Splat`, or `None`. `CycleRenderMode()` skips modes whose backing data or module is not present (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
 
 ### 14.5 Coordinate Conversion Detail
 Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-trip:
@@ -775,6 +775,7 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
 | **Triplanar** | GPU mesh (`ScanMeshVertexColor.shader`) | `TriplanarCache` attached | Live GPU mesh with triplanar-projected camera textures (~8mm/texel) with vertex color fallback where data is missing. |
 | **Refined** | `Mesh` object + `RefinedMesh.shader` | After on-device refinement | UV-unwrapped mesh with on-device baked atlas. Standard unlit UV-mapped rendering. |
 | **HQRefined** | `Mesh` object + `RefinedMesh.shader` | After server HQ refinement | Same mesh as Refined, with server-enhanced atlas (Real-ESRGAN + LaMa). |
+| **Occlusion** | `Mesh` object + `OcclusionMesh.shader` | After on-device refinement | Refined mesh as invisible depth-only occluder for MR. Writes depth via `SRPDefaultUnlit` pass (fragment returns `half4(0,0,0,0)` — Quest compositor shows passthrough via alpha=0). `DepthOnly`/`DepthNormals` passes provide prepass depth for Forward/Deferred URP modes. `Queue=Geometry-1` ensures virtual objects render behind the room mesh. Note: Adreno GPUs skip depth writes with `ColorMask 0` or `Blend Zero One` — the main pass must use default opaque blend with zero-alpha output. |
 | **Splat** | `GaussianSplatRenderer` (UGS) | After GS training completes | Gaussian Splat point cloud rendered from server-trained PLY data. |
 | **None** | — | Always | All scan rendering disabled (GPU mesh hidden, splat hidden, refined hidden). |
 

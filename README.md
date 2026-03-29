@@ -51,7 +51,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, and GPU unsharp-mask sharpening. Produces sharp, seamless textures from captured keyframes. `TextureRefinement` is an instance-based MonoBehaviour module — all configuration (xatlas options, bake settings, sharpen/seam parameters) is via inspector fields on the component.
 - **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
-- **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, HQRefined, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Splat requires trained data).
+- **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, HQRefined, Occlusion, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
 - **Freeze Tint Toggle** — Independent toggle (not tied to render mode) shows/hides a blue tint overlay on frozen voxels in live mesh modes (Vertex, Triplanar, Wireframe). Bindable via `RoomScanInputHandler`.
 - **Game Integration APIs** — `RoomScanSession` provides a high-level facade: `StartScan()` → `await FinalizeScanAsync()` → `ScanResult` with mesh + atlas. `LoadLatestAsync()` for instant game-mode loading. For finer control: `LoadRefinedOnlyAsync()`, `ReleaseScanResources()`, public `RefinedMesh`/`RefinedAtlas` properties, `RefinedMeshReady` event, and `ScanCoverage`/`ScanProgress` metrics for guided UX.
 - **Post-Bake Mesh Simplification** — UV-preserving mesh simplification via `meshopt_simplifyWithAttributes` runs after atlas baking (configurable ratio), preserving texture quality. Replaces the old broken pre-bake decimation.
@@ -152,7 +152,7 @@ Once the room is well-scanned:
    - The debug menu shows live training status: state, progress bar, iteration count, elapsed time, backend
    - When training completes, the trained PLY is downloaded back to the Quest
 4. Press **Render Mode** to cycle to Splat view — the downloaded PLY is loaded into `GaussianSplatRenderer` and rendered on-device
-5. Cycle through render modes (Wireframe → Vertex → Triplanar → Refined → HQRefined → Splat → None) to compare views — modes whose data is not present are skipped automatically
+5. Cycle through render modes (Wireframe → Vertex → Triplanar → Refined → HQRefined → Occlusion → Splat → None) to compare views — modes whose data is not present are skipped automatically
 
 Scanning continues during training — you can keep refining the mesh while waiting.
 
@@ -291,7 +291,7 @@ Trained splats are rendered using a [fork of Unity Gaussian Splatting](https://g
 - **Coordinate conversion**: COLMAP (right-handed Y-down) → Unity (left-handed Y-up)
 - **Quest 3 stereo**: Per-eye VP matrices for correct VR covariance projection, shared compute between eyes
 - **Performance**: Reduced-resolution rendering (0.5x), optimized compute shaders, partial radix sort, contribution-based culling
-- **Render mode switching**: Cycled via debug menu or controller binding without releasing GPU resources. Available modes: Wireframe, Vertex, Triplanar, Refined, HQRefined, Splat, None — unavailable modes are skipped
+- **Render mode switching**: Cycled via debug menu or controller binding without releasing GPU resources. Available modes: Wireframe, Vertex, Triplanar, Refined, HQRefined, Occlusion, Splat, None — unavailable modes are skipped
 
 ### Supported Training Backends
 
@@ -328,7 +328,7 @@ Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. 
 
 **Scan** (default) — Live status rows (Scanning, Mode, Integrations, Keyframes, Render, Package) plus coverage metrics (Progress, Phase, Color Coverage, Frozen, Mesh Stats) and action buttons:
 - **Start/Stop Scanning**: Toggle depth integration
-- **Render Mode**: Cycle through Wireframe → Vertex → Triplanar → Refined → HQRefined → Splat → None (unavailable modes skipped)
+- **Render Mode**: Cycle through Wireframe → Vertex → Triplanar → Refined → HQRefined → Occlusion → Splat → None (unavailable modes skipped)
 - **Freeze Tint**: Toggle blue tint overlay on frozen voxels (works in Vertex, Triplanar, and Wireframe modes)
 - **Save Scan**: Create a new package with current scan data
 - **Delete Artifact**: Context-sensitive — deletes Splat/Refined/HQ atlas from active package based on current render mode
