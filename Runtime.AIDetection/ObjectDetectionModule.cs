@@ -34,6 +34,16 @@ namespace Genesis.RoomScan.AIDetection
         [Tooltip("Max input resolution for YOLO. 640 = full quality, 320 = faster/less VRAM. 0 = use model default.")]
         [SerializeField] private int maxInputResolution = 640;
 
+        [Header("Filtering")]
+        [Tooltip("Skip detections whose bbox covers more than this fraction of frame (large objects = unreliable projection)")]
+        [SerializeField, Range(0f, 1f)] private float maxBboxFrameFraction = 0.6f;
+        [Tooltip("Max depth distance for a valid detection (meters). Beyond this, depth likely hit a wall behind the object.")]
+        [SerializeField] private float maxDetectionDepthM = 5f;
+        [Tooltip("Max unique AI objects per label. Prevents the same class spawning many times at different locations.")]
+        [SerializeField] private int maxObjectsPerLabel = 2;
+        [Tooltip("Skip AI detection for labels already present in MRUK (e.g. bed, couch)")]
+        [SerializeField] private bool skipLabelsInMruk = true;
+
         [Header("Deduplication")]
         [Tooltip("Detections closer than this distance to an existing object of the same class are merged")]
         [SerializeField] private float mergeDistanceM = 0.8f;
@@ -52,6 +62,8 @@ namespace Genesis.RoomScan.AIDetection
         private CameraSnapshot _latestSnapshot;
 
         private readonly Dictionary<string, int> _observationCounts = new();
+        private readonly Dictionary<string, int> _labelObjectCounts = new();
+        private readonly HashSet<string> _mrukLabels = new(StringComparer.OrdinalIgnoreCase);
 
         // GPU depth projection buffers
         private const int MaxDetections = 64;
@@ -193,7 +205,8 @@ namespace Genesis.RoomScan.AIDetection
                 var registry = _scanner?.SceneObjectRegistry;
                 if (registry == null) return;
 
-                // Filter by confidence and compute world-space ray directions (CPU, trivial pinhole math)
+                RefreshMrukLabels(registry);
+
                 var cropData = ComputeCropData(cam);
                 var validDetections = new List<Detection>();
                 int rayCount = 0;
@@ -202,6 +215,16 @@ namespace Genesis.RoomScan.AIDetection
                 {
                     if (d.confidence < minConfidence) continue;
                     if (rayCount >= MaxDetections) break;
+
+                    // Skip labels already covered by MRUK
+                    if (skipLabelsInMruk && _mrukLabels.Contains(d.label))
+                        continue;
+
+                    // Skip detections that fill too much of the frame (unreliable projection)
+                    float bboxFractionW = d.boundingBox.width / cam.currentRes.x;
+                    float bboxFractionH = d.boundingBox.height / cam.currentRes.y;
+                    if (bboxFractionW > maxBboxFrameFraction || bboxFractionH > maxBboxFrameFraction)
+                        continue;
 
                     var dir = BboxToWorldRay(d.boundingBox, cam, cropData);
                     if (!dir.HasValue) continue;
@@ -213,17 +236,19 @@ namespace Genesis.RoomScan.AIDetection
 
                 if (rayCount == 0) return;
 
-                // GPU depth projection — same pipeline as VolumeIntegration.compute
                 var worldPositions = await ProjectRaysViaDepth(cam.pose.position, rayCount);
                 if (worldPositions == null) return;
 
                 for (int i = 0; i < validDetections.Count; i++)
                 {
                     var wp = worldPositions[i];
-                    if (wp.w < 0.5f) continue; // invalid depth sample
+                    if (wp.w < 0.5f) continue;
 
                     var worldPos = new Vector3(wp.x, wp.y, wp.z);
                     var d = validDetections[i];
+
+                    float depthDist = Vector3.Distance(worldPos, cam.pose.position);
+                    if (depthDist > maxDetectionDepthM) continue;
 
                     var existing = FindExisting(registry, d.label, worldPos);
                     if (existing != null)
@@ -231,6 +256,10 @@ namespace Genesis.RoomScan.AIDetection
                         UpdateExisting(registry, existing, worldPos, d);
                         continue;
                     }
+
+                    // Cap unique objects per label
+                    _labelObjectCounts.TryGetValue(d.label, out int labelCount);
+                    if (labelCount >= maxObjectsPerLabel) continue;
 
                     var worldScale = EstimateWorldScale(d.boundingBox, worldPos, cam, cropData);
 
@@ -250,6 +279,7 @@ namespace Genesis.RoomScan.AIDetection
 
                     _detectionCount++;
                     _observationCounts[obj.id] = 1;
+                    _labelObjectCounts[d.label] = labelCount + 1;
                     registry.Add(obj);
                     OnObjectDetected?.Invoke(obj);
                 }
@@ -261,6 +291,16 @@ namespace Genesis.RoomScan.AIDetection
             finally
             {
                 _busy = false;
+            }
+        }
+
+        private void RefreshMrukLabels(SceneObjectRegistry registry)
+        {
+            _mrukLabels.Clear();
+            foreach (var obj in registry.AllObjects)
+            {
+                if (obj.source == SceneObjectSource.MRUK)
+                    _mrukLabels.Add(obj.label);
             }
         }
 

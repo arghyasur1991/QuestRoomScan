@@ -26,6 +26,7 @@ namespace Genesis.RoomScan.UI
         // Scan view elements
         private Label _valScanning, _valIntegrations, _valKeyframes, _valRender, _valPackage;
         private Label _valProgress, _valPhase, _valColorCoverage, _valFrozen, _valMeshStats;
+        private Label _valSceneObjectList;
         private Button _btnToggleScan, _btnRenderMode, _btnFreezeTint, _btnSceneObjects, _btnSaveScan, _btnDeleteArtifact;
 
         // Saved scans view
@@ -167,6 +168,7 @@ namespace Genesis.RoomScan.UI
             _btnRenderMode = _root.Q<Button>("btn-render-mode");
             _btnFreezeTint = _root.Q<Button>("btn-freeze-tint");
             _btnSceneObjects = _root.Q<Button>("btn-scene-objects");
+            _valSceneObjectList = _root.Q<Label>("val-scene-object-list");
             _btnSaveScan = _root.Q<Button>("btn-save-scan");
             _btnDeleteArtifact = _root.Q<Button>("btn-delete-artifact");
 
@@ -530,6 +532,14 @@ namespace Genesis.RoomScan.UI
                 _btnSceneObjects.text = scanner.ShowSceneObjects
                     ? $"Objects: ON ({reg?.MrukCount ?? 0}M + {reg?.AiCount ?? 0}AI)"
                     : "Objects: OFF";
+
+                if (_valSceneObjectList != null)
+                {
+                    bool show = scanner.ShowSceneObjects && reg != null && reg.Count > 0;
+                    _valSceneObjectList.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+                    if (show)
+                        _valSceneObjectList.text = BuildSceneObjectListing(reg);
+                }
             }
 
             var vi = VolumeIntegrator.Instance;
@@ -770,6 +780,34 @@ namespace Genesis.RoomScan.UI
                 _fpsFrames = 0;
                 _fpsTimer = 0f;
             }
+        }
+
+        private static string BuildSceneObjectListing(SceneObjectRegistry reg)
+        {
+            var sb = new System.Text.StringBuilder(512);
+            sb.Append("<b>MRUK:</b> ");
+            bool any = false;
+            foreach (var obj in reg.AllObjects)
+            {
+                if (obj.source != SceneObjectSource.MRUK) continue;
+                if (any) sb.Append(", ");
+                sb.Append(obj.label);
+                any = true;
+            }
+            if (!any) sb.Append("(none)");
+
+            sb.Append("\n<b>AI:</b> ");
+            any = false;
+            foreach (var obj in reg.AllObjects)
+            {
+                if (obj.source != SceneObjectSource.AIDetection) continue;
+                if (any) sb.Append(", ");
+                sb.Append($"{obj.label}({obj.confidence:F2})");
+                any = true;
+            }
+            if (!any) sb.Append("(none)");
+
+            return sb.ToString();
         }
 
         private static void SetLabel(Label label, string text)
