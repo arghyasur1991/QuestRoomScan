@@ -113,6 +113,26 @@ namespace Genesis.RoomScan.Editor
             }
 #endif
 
+#if HAS_AI_INFERENCE
+            var aiDetType = AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
+                .FirstOrDefault(t => t.Name == "ObjectDetectionModule" && typeof(IRoomScanModule).IsAssignableFrom(t));
+
+            if (aiDetType != null)
+            {
+                bool hasAI = scanner.GetComponent(aiDetType) != null;
+                if (hasAI)
+                    menu.AddDisabledItem(new GUIContent("AI Object Detection (attached)"));
+                else
+                    menu.AddItem(new GUIContent("AI Object Detection"), false, () =>
+                    {
+                        Undo.RegisterCompleteObjectUndo(scanner.gameObject, "Add AI Object Detection");
+                        RoomScanSetupWizard.SetupAIDetectionModule(scanner.gameObject);
+                        EditorUtility.SetDirty(scanner.gameObject);
+                    });
+            }
+#endif
+
             // Debug Menu — lives on a child GameObject with UIDocument
             bool hasDebugMenu = scanner.GetComponentInChildren<DebugMenuController>(true) != null;
             if (hasDebugMenu)
