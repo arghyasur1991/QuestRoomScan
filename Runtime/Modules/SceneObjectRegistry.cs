@@ -150,6 +150,22 @@ namespace Genesis.RoomScan
             return result;
         }
 
+        /// <summary>
+        /// Applies a relocation matrix to all objects from a given source.
+        /// Used to transform saved AI detections from the original session's
+        /// coordinate frame into the current tracking space.
+        /// </summary>
+        public void Relocate(Matrix4x4 relocation, SceneObjectSource source)
+        {
+            if (relocation == Matrix4x4.identity) return;
+            foreach (var obj in _objects)
+            {
+                if (obj.source != source) continue;
+                obj.position = relocation.MultiplyPoint3x4(obj.position);
+                obj.rotation = relocation.rotation * obj.rotation;
+            }
+        }
+
         /// <summary>Remove all objects from a specific source (e.g. stale MRUK data on reload).</summary>
         public void RemoveBySource(SceneObjectSource source)
         {

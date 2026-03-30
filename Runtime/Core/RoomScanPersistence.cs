@@ -896,10 +896,13 @@ namespace Genesis.RoomScan
                     baseMatrixAtSave = MatrixToFloats(anchorAtSave)
                 };
 
-                // Load scene objects if present
+                // Load scene objects if present — relocate AI detections to current tracking space
                 var sceneObjects = LoadSceneObjects(pkgDir);
                 if (sceneObjects.Count > 0 && scanner != null)
+                {
+                    sceneObjects.Relocate(relocVolume, SceneObjectSource.AIDetection);
                     scanner.SetSceneObjectRegistry(sceneObjects);
+                }
 
                 Logger.Info($"Package loaded: {pkgId} (integ={savedIntCount}, " +
                           $"splat={File.Exists(splatPath)}, refined={hasMesh}, hq={hasHQ}" +
@@ -1065,10 +1068,13 @@ namespace Genesis.RoomScan
                 ActivePackageId = pkgId;
                 _activeAnchorData = anchorData ?? new PackageAnchorData();
 
-                // Load scene objects if present
+                // Load scene objects if present — relocate AI detections to current tracking space
                 var sceneObjects = LoadSceneObjects(Path.Combine(RoomScansRoot, pkgId));
                 if (sceneObjects.Count > 0 && scanner != null)
+                {
+                    sceneObjects.Relocate(relocRefined, SceneObjectSource.AIDetection);
                     scanner.SetSceneObjectRegistry(sceneObjects);
+                }
 
                 Logger.Info($"Refined-only load complete: {pkgId} (enhanced={hasEnhanced}, hq={hasHQ}" +
                           $", sceneObjects={sceneObjects.Count})");
