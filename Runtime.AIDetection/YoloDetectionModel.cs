@@ -25,6 +25,7 @@ namespace Genesis.RoomScan.AIDetection
         private readonly int _layersPerFrame;
         private readonly float _scoreThreshold;
         private readonly float _iouThreshold;
+        private readonly int _maxInputResolution;
         private const int MaxKeptBoxes = 200;
 
         private Model _rawModel;
@@ -56,8 +57,8 @@ namespace Genesis.RoomScan.AIDetection
             bool splitOverFrames = true,
             int layersPerFrame = 22,
             float scoreThreshold = 0.5f,
-            int maxDetections = 100,
-            float iouThreshold = 0.5f)
+            float iouThreshold = 0.5f,
+            int maxInputResolution = 0)
         {
             _modelAsset = modelAsset;
             _classLabelsAsset = classLabelsAsset;
@@ -67,6 +68,7 @@ namespace Genesis.RoomScan.AIDetection
             _layersPerFrame = layersPerFrame;
             _scoreThreshold = scoreThreshold;
             _iouThreshold = iouThreshold;
+            _maxInputResolution = maxInputResolution;
         }
 
         public async Task LoadAsync()
@@ -81,14 +83,11 @@ namespace Genesis.RoomScan.AIDetection
             _inputH = inputShape.Get(2) > 0 ? inputShape.Get(2) : 640;
             _inputW = inputShape.Get(3) > 0 ? inputShape.Get(3) : 640;
 
-#if UNITY_ANDROID && !UNITY_EDITOR
-            const int maxDim = 320;
-            if (_inputH > maxDim || _inputW > maxDim)
+            if (_maxInputResolution > 0)
             {
-                _inputH = maxDim;
-                _inputW = maxDim;
+                _inputH = Mathf.Min(_inputH, _maxInputResolution);
+                _inputW = Mathf.Min(_inputW, _maxInputResolution);
             }
-#endif
 
             _labels = _classLabelsAsset != null
                 ? _classLabelsAsset.text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)

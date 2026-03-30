@@ -26,6 +26,8 @@ namespace Genesis.RoomScan.AIDetection
         [SerializeField] private BackendType backend = BackendType.GPUCompute;
         [SerializeField] private bool splitOverFrames = true;
         [SerializeField, Range(1, 100)] private int layersPerFrame = 22;
+        [Tooltip("Max input resolution for YOLO. 640 = full quality, 320 = faster/less VRAM. 0 = use model default.")]
+        [SerializeField] private int maxInputResolution = 640;
 
         [Header("Deduplication")]
         [Tooltip("Detections closer than this distance to an existing object of the same class are merged")]
@@ -84,7 +86,8 @@ namespace Genesis.RoomScan.AIDetection
             {
                 _model = new YoloDetectionModel(
                     modelAsset, classLabels, nmsComputeShader,
-                    backend, splitOverFrames, layersPerFrame, minConfidence);
+                    backend, splitOverFrames, layersPerFrame, minConfidence,
+                    maxInputResolution: maxInputResolution);
                 try
                 {
                     await _model.LoadAsync();
