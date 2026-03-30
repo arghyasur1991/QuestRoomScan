@@ -1,5 +1,6 @@
 #if HAS_AI_INFERENCE
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Unity.InferenceEngine;
@@ -9,8 +10,10 @@ namespace Genesis.RoomScan.AIDetection
 {
     /// <summary>
     /// YOLO-based object detection via Unity Inference Engine.
-    /// Compiles a model graph with built-in GPU NMS (matching Unity's official reference),
-    /// runs time-sliced inference to avoid VR frame drops, and returns Detection[] results.
+    /// Following Meta's Quest-proven pattern: compile the model graph WITHOUT NMS,
+    /// output raw tensors, then do lightweight CPU NMS after readback.
+    /// This avoids Functional.NMS inflating intermediate GPU buffers beyond
+    /// Quest 3's 128MB compute buffer limit.
     /// </summary>
     public class YoloDetectionModel : IDetectionModel
     {
@@ -57,7 +60,6 @@ namespace Genesis.RoomScan.AIDetection
             if (_modelAsset == null)
                 throw new InvalidOperationException("No model asset assigned");
 
-            // Step 1: Parse the ONNX model (heavy — ~100-300ms on Quest)
             _rawModel = ModelLoader.Load(_modelAsset);
             await Task.Yield();
 
@@ -65,8 +67,6 @@ namespace Genesis.RoomScan.AIDetection
             _inputH = inputShape.Get(2) > 0 ? inputShape.Get(2) : 640;
             _inputW = inputShape.Get(3) > 0 ? inputShape.Get(3) : 640;
 
-            // Quest 3 has a 128MB max compute buffer — YOLO at 640x640 exceeds it.
-            // Cap to 320x320 on Android (reduces intermediate buffers by ~4x).
 #if UNITY_ANDROID && !UNITY_EDITOR
             const int maxDim = 320;
             if (_inputH > maxDim || _inputW > maxDim)
@@ -80,8 +80,6 @@ namespace Genesis.RoomScan.AIDetection
                 ? _classLabelsAsset.text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
                 : Array.Empty<string>();
 
-            // Step 2: Build the functional graph with NMS (moderate cost).
-            // Use explicit input shape (may differ from model default on Quest).
             _centersToCorners = new Tensor<float>(new TensorShape(4, 4), new float[]
             {
                 1, 0, 1, 0,
@@ -90,26 +88,26 @@ namespace Genesis.RoomScan.AIDetection
                 0, -0.5f, 0, 0.5f
             });
 
+            // Build graph WITHOUT NMS — output raw tensors for CPU post-processing.
+            // This avoids Functional.NMS creating oversized intermediate buffers on Quest.
             var graph = new FunctionalGraph();
             var input = graph.AddInput(DataType.Float,
                 new DynamicTensorShape(1, 3, _inputH, _inputW));
             var modelOutput = Functional.Forward(_rawModel, new[] { input })[0];
-            var boxCoords = modelOutput[0, 0..4, ..].Transpose(0, 1);
-            var allScores = modelOutput[0, 4.., ..];
-            var scores = Functional.ReduceMax(allScores, 0);
-            var classIDs = Functional.ArgMax(allScores, 0);
-            var boxCorners = Functional.MatMul(boxCoords, Functional.Constant(_centersToCorners));
-            var indices = Functional.NMS(boxCorners, scores, _iouThreshold, _scoreThreshold);
-            var coords = Functional.IndexSelect(boxCoords, 0, indices);
-            var labelIDs = Functional.IndexSelect(classIDs, 0, indices);
+            var boxCoords = modelOutput[0, 0..4, ..].Transpose(0, 1);  // (N, 4) cx,cy,w,h
+            var allScores = modelOutput[0, 4.., ..];                    // (classes, N)
+            var scores = Functional.ReduceMax(allScores, 0);            // (N)
+            var classIDs = Functional.ArgMax(allScores, 0);             // (N)
             await Task.Yield();
 
-            // Step 3: Compile graph + create worker (heavy — GPU shader compilation)
-            var compiled = graph.Compile(coords, labelIDs);
+            var compiled = graph.Compile(boxCoords, classIDs, scores);
             await Task.Yield();
 
             _worker = new Worker(compiled, _backend);
             await Task.Yield();
+
+            Logger.Info($"[YoloDetectionModel] Loaded — input={_inputW}x{_inputH}, " +
+                        $"labels={_labels.Length}, backend={_backend}");
         }
 
         public async Task<Detection[]> DetectAsync(Texture src, CancellationToken ct = default)
@@ -134,40 +132,78 @@ namespace Genesis.RoomScan.AIDetection
                 _worker.Schedule(input);
             }
 
-            // Read post-NMS outputs: coords (N, 4) and labelIDs (N)
+            // Read raw outputs (no NMS yet)
             using var coordsCpu = await (_worker.PeekOutput("output_0") as Tensor<float>).ReadbackAndCloneAsync();
-            using var labelsCpu = await (_worker.PeekOutput("output_1") as Tensor<int>).ReadbackAndCloneAsync();
+            using var classIdsCpu = await (_worker.PeekOutput("output_1") as Tensor<int>).ReadbackAndCloneAsync();
+            using var scoresCpu = await (_worker.PeekOutput("output_2") as Tensor<float>).ReadbackAndCloneAsync();
             ct.ThrowIfCancellationRequested();
 
+            int numBoxes = coordsCpu.shape[0];
             float scaleX = (float)src.width / _inputW;
             float scaleY = (float)src.height / _inputH;
 
-            int count = coordsCpu.shape[0];
-            var results = new Detection[Mathf.Min(count, 200)];
-
-            for (int n = 0; n < results.Length; n++)
+            // Score filter + build candidate list
+            var candidates = new List<(Rect box, int classId, float score)>();
+            for (int i = 0; i < numBoxes; i++)
             {
-                float cx = coordsCpu[n, 0];
-                float cy = coordsCpu[n, 1];
-                float w = coordsCpu[n, 2];
-                float h = coordsCpu[n, 3];
-                int classId = labelsCpu[n];
+                float score = scoresCpu[i];
+                if (score < _scoreThreshold) continue;
 
-                results[n] = new Detection
+                float cx = coordsCpu[i, 0];
+                float cy = coordsCpu[i, 1];
+                float w = coordsCpu[i, 2];
+                float h = coordsCpu[i, 3];
+
+                candidates.Add((
+                    new Rect((cx - w * 0.5f) * scaleX, (cy - h * 0.5f) * scaleY,
+                             w * scaleX, h * scaleY),
+                    classIdsCpu[i],
+                    score
+                ));
+            }
+
+            // CPU NMS — fast enough for ≤2100 candidates at 320x320
+            candidates.Sort((a, b) => b.score.CompareTo(a.score));
+            var kept = new List<Detection>();
+            var suppressed = new bool[candidates.Count];
+
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (suppressed[i]) continue;
+                var (box, classId, score) = candidates[i];
+
+                kept.Add(new Detection
                 {
-                    boundingBox = new Rect(
-                        (cx - w * 0.5f) * scaleX,
-                        (cy - h * 0.5f) * scaleY,
-                        w * scaleX,
-                        h * scaleY),
+                    boundingBox = box,
                     classId = classId,
                     label = classId >= 0 && classId < _labels.Length
                         ? _labels[classId] : $"cls_{classId}",
-                    confidence = 1f
-                };
+                    confidence = score
+                });
+
+                if (kept.Count >= 200) break;
+
+                for (int j = i + 1; j < candidates.Count; j++)
+                {
+                    if (suppressed[j]) continue;
+                    if (IoU(box, candidates[j].box) > _iouThreshold)
+                        suppressed[j] = true;
+                }
             }
 
-            return results;
+            return kept.ToArray();
+        }
+
+        private static float IoU(Rect a, Rect b)
+        {
+            float x1 = Mathf.Max(a.xMin, b.xMin);
+            float y1 = Mathf.Max(a.yMin, b.yMin);
+            float x2 = Mathf.Min(a.xMax, b.xMax);
+            float y2 = Mathf.Min(a.yMax, b.yMax);
+
+            float intersection = Mathf.Max(0, x2 - x1) * Mathf.Max(0, y2 - y1);
+            float union = a.width * a.height + b.width * b.height - intersection;
+            return union > 0 ? intersection / union : 0;
         }
 
         public void Dispose()
