@@ -153,6 +153,50 @@ namespace Genesis.RoomScan
             return tex;
         }
 
+        /// <summary>
+        /// Water stains / mold damage pattern. Irregular dark patches on a clean
+        /// background — good for horror/decay themes.
+        /// </summary>
+        public static Texture2D GenerateWaterStains(Color clean, Color stain)
+        {
+            var tex = Create();
+            var px = new Color[Size * Size];
+            float scale1 = 3.5f, scale2 = 8f, scale3 = 15f;
+            float ox1 = 211.7f, oy1 = 167.3f;
+            float ox2 = 53.1f, oy2 = 97.8f;
+            float ox3 = 301.4f, oy3 = 412.9f;
+
+            for (int y = 0; y < Size; y++)
+            for (int x = 0; x < Size; x++)
+            {
+                float u = x / (float)Size;
+                float v = y / (float)Size;
+
+                // Large blotchy shapes
+                float n1 = Mathf.PerlinNoise(u * scale1 + ox1, v * scale1 + oy1);
+                // Medium detail
+                float n2 = Mathf.PerlinNoise(u * scale2 + ox2, v * scale2 + oy2);
+                // Fine grain
+                float n3 = Mathf.PerlinNoise(u * scale3 + ox3, v * scale3 + oy3);
+
+                float combined = n1 * 0.5f + n2 * 0.3f + n3 * 0.2f;
+
+                // Threshold into irregular patches with soft edges
+                float stainMask = Mathf.Clamp01((combined - 0.38f) * 4f);
+                // Add drip streaks (vertical bias)
+                float drip = Mathf.PerlinNoise(u * 20f + 77f, v * 3f + 33f);
+                drip = Mathf.Clamp01((drip - 0.55f) * 6f) * 0.4f;
+
+                float totalMask = Mathf.Clamp01(stainMask + drip);
+                px[y * Size + x] = Color.Lerp(clean, stain, totalMask);
+            }
+
+            tex.SetPixels(px);
+            tex.Apply(true);
+            tex.wrapMode = TextureWrapMode.Repeat;
+            return tex;
+        }
+
         private static Texture2D Create()
         {
             return new Texture2D(Size, Size, TextureFormat.RGBA32, true)

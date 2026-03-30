@@ -21,6 +21,12 @@
   "precompiledReferences": [],
   "autoReferenced": true,
   "defineConstraints": [],
-  "versionDefines": [],
+  "versionDefines": [
+    {
+      "name": "com.unity.ai.inference",
+      "expression": "",
+      "define": "HAS_AI_INFERENCE"
+    }
+  ],
   "noEngineReferences": false
 }

@@ -147,6 +147,27 @@ namespace Genesis.RoomScan
             set { showFreezeTint = value; Shader.SetGlobalFloat(NoFreezeTintID, value ? 0f : 1f); }
         }
 
+        /// <summary>The unified scene object registry (MRUK + AI detections).</summary>
+        public SceneObjectRegistry SceneObjectRegistry => _sceneObjectRegistry;
+
+        [SerializeField, Tooltip("Show scene object annotations overlay (wireframe boxes + labels)")]
+        private bool showSceneObjects;
+
+        /// <summary>Toggle scene object annotation overlay on any render mode.</summary>
+        public bool ShowSceneObjects
+        {
+            get => showSceneObjects;
+            set
+            {
+                showSceneObjects = value;
+                var viz = GetComponent<SceneObjectVisualizer>();
+                if (value && viz != null)
+                    viz.Show(_sceneObjectRegistry);
+                else
+                    viz?.Hide();
+            }
+        }
+
         public bool IsScanning { get; private set; }
         public ScanRenderMode CurrentRenderMode => renderMode;
         public bool IsGsTrainingInProgress => _serverTrainingInProgress;
@@ -224,6 +245,9 @@ namespace Genesis.RoomScan
 
         // Room transformation
         private float _transformProgress;
+
+        // Scene object registry
+        private SceneObjectRegistry _sceneObjectRegistry;
 
         public bool HasRefinedTexture { get; private set; }
         public bool HasHQRefinedTexture { get; private set; }
@@ -712,6 +736,8 @@ namespace Genesis.RoomScan
             bool ok = await _persistence.SaveToNewPackageAsync();
             if (ok && _keyframeCollector != null)
                 _keyframeCollector.SetExportDirectory(KeyframeDirectory);
+            if (ok && _sceneObjectRegistry != null && _sceneObjectRegistry.Count > 0)
+                await _persistence.SaveSceneObjectsAsync(_sceneObjectRegistry);
             return ok;
         }
 
@@ -1189,9 +1215,26 @@ namespace Genesis.RoomScan
             if (_normalMapTexture != null)
                 _refinedRenderer.material.SetTexture("_BumpMap", _normalMapTexture);
             HasRefinedTexture = true;
+            PopulateSceneObjectRegistry();
             RefinedMeshReady?.Invoke(mesh, atlas);
         }
 
+        /// <summary>Sets the SceneObjectRegistry (used by persistence load).</summary>
+        internal void SetSceneObjectRegistry(SceneObjectRegistry registry)
+        {
+            _sceneObjectRegistry = registry;
+        }
+
+        /// <summary>
+        /// Populates the SceneObjectRegistry from MRUK anchors (and loaded data).
+        /// Called after a refined mesh is available.
+        /// </summary>
+        private void PopulateSceneObjectRegistry()
+        {
+            _sceneObjectRegistry ??= new SceneObjectRegistry();
+            if (_roomUnderstanding != null && _sceneObjectRegistry.MrukCount == 0)
+                _roomUnderstanding.PopulateRegistry(_sceneObjectRegistry);
+        }
 
         internal void ApplyHQTexture(Texture2D atlas)
         {

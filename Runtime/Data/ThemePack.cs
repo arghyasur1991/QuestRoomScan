@@ -1,8 +1,50 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace Genesis.RoomScan
 {
+    /// <summary>How transformation progress is interpreted by the shader.</summary>
+    public enum ProgressionMode
+    {
+        /// <summary>Noise-mask driven spatial spread — transformation "grows" across the room.</summary>
+        SpatialSpread = 0,
+        /// <summary>Uniform global intensity — everything transforms at once, depth increases with progress.</summary>
+        GlobalIntensity = 1
+    }
+
+    /// <summary>Placement rule for 3D prop spawning.</summary>
+    public enum PropPlacementRule
+    {
+        OnSurface,
+        NearObject,
+        AtCorner,
+        OnCeiling,
+        Random
+    }
+
+    /// <summary>Defines a prop type that can be spawned by RoomPropSpawner.</summary>
+    [Serializable]
+    public class PropDefinition
+    {
+        public GameObject prefab;
+        public PropPlacementRule placementRule;
+        [Tooltip("Object label to spawn near (for NearObject rule)")]
+        public string targetLabel;
+        [Range(0, 1)] public float progressThreshold = 0.3f;
+        public int maxInstances = 3;
+    }
+
+    /// <summary>Audio trigger that fires at a specific progress threshold.</summary>
+    [Serializable]
+    public class ProgressAudioTrigger
+    {
+        public AudioClip clip;
+        [Range(0, 1)] public float progressThreshold = 0.5f;
+        public bool spatial;
+        public string anchorLabel;
+    }
+
     /// <summary>Per-surface override for transformation parameters.</summary>
     [Serializable]
     public struct SurfaceOverride
@@ -103,10 +145,55 @@ namespace Genesis.RoomScan
             return SurfaceOverride.Default;
         }
 
-        [Header("VFX / Audio (optional)")]
-        public GameObject particlePrefab;
+        [Header("Flicker")]
+        [Tooltip("Irregular brightness stutter intensity (0 = off)")]
+        [Range(0, 1)] public float flickerIntensity = 0f;
+        [Tooltip("Flicker speed — higher = faster stutter")]
+        [Range(0, 20)] public float flickerSpeed = 3f;
+
+        [Header("Fog")]
+        [Tooltip("Exponential distance fog density (0 = off)")]
+        [Range(0, 2)] public float fogDensity = 0f;
+        [Tooltip("Fog color (usually very dark)")]
+        public Color fogColor = new Color(0.02f, 0.02f, 0.05f, 1f);
+
+        [Header("Progression")]
+        [Tooltip("How transformation progress is interpreted")]
+        public ProgressionMode progressionMode = ProgressionMode.SpatialSpread;
+
+        [Header("Lighting")]
+        [Tooltip("Global ambient dimming curve (X=progress, Y=dim factor 0-1)")]
+        public AnimationCurve lightDimCurve = AnimationCurve.Linear(0, 1, 1, 0.1f);
+        [Tooltip("Color temperature shift from warm to cold (0=warm, 1=cold)")]
+        [Range(0, 1)] public float colorTemperatureShift = 0f;
+
+        [Header("Particles")]
+        public GameObject fogPrefab;
+        public GameObject dustPrefab;
+        public List<GameObject> contextualVFXPrefabs = new();
+
+        [Header("3D Props")]
+        public List<PropDefinition> propDefinitions = new();
+
+        [Header("Audio")]
         public AudioClip ambientAudio;
         public AudioClip transformSound;
+        public List<ProgressAudioTrigger> progressTriggers = new();
+
+        [Header("Per-Layer Activation")]
+        [Tooltip("Shader layer activation curve (X=global progress, Y=layer intensity)")]
+        public AnimationCurve shaderCurve = AnimationCurve.Linear(0, 0, 1, 1);
+        [Tooltip("Lighting layer activation curve")]
+        public AnimationCurve lightingCurve = AnimationCurve.Linear(0, 0, 1, 1);
+        [Tooltip("Particle layer activation curve")]
+        public AnimationCurve particleCurve = AnimationCurve.Linear(0, 0, 1, 1);
+        [Tooltip("Prop layer activation curve")]
+        public AnimationCurve propCurve = AnimationCurve.Linear(0, 0, 1, 1);
+        [Tooltip("Audio layer activation curve")]
+        public AnimationCurve audioCurve = AnimationCurve.Linear(0, 0, 1, 1);
+
+        [Header("Legacy VFX (optional)")]
+        public GameObject particlePrefab;
 
         // Runtime-generated fallback textures (not serialized)
         [System.NonSerialized] private Texture2D _fallbackTop;
@@ -160,6 +247,11 @@ namespace Genesis.RoomScan
             mat.SetFloat("_ScanlineIntensity", scanlineIntensity);
             mat.SetFloat("_ChromaticAberration", chromaticAberration);
             mat.SetFloat("_FresnelIntensity", fresnelIntensity);
+            mat.SetFloat("_FlickerIntensity", flickerIntensity);
+            mat.SetFloat("_FlickerSpeed", flickerSpeed);
+            mat.SetFloat("_FogDensity", fogDensity);
+            mat.SetColor("_FogColor", fogColor);
+            mat.SetFloat("_ProgressionMode", (float)progressionMode);
         }
 
         private void OnDestroy()

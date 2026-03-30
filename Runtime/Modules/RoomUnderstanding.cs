@@ -132,6 +132,68 @@ namespace Genesis.RoomScan
         }
 
         // ─────────────────────────────────────────────────────────────
+        //  Scene Object Registry population
+        // ─────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Captures all MRUK anchors as SceneObjects and adds them to the registry.
+        /// Each anchor gets a unique ID, full label, pose, bounds, and surface type.
+        /// </summary>
+        public void PopulateRegistry(SceneObjectRegistry registry)
+        {
+            if (registry == null) return;
+            EnsureRoom();
+            if (_room == null || _room.Anchors == null) return;
+
+            for (int a = 0; a < _room.Anchors.Count; a++)
+            {
+                var anchor = _room.Anchors[a];
+                var t = anchor.transform;
+                var surfType = ClassifyAnchor(anchor);
+                string label = GetAnchorLabel(anchor);
+
+                var size = Vector3.one;
+                if (anchor.VolumeBounds.HasValue)
+                    size = anchor.VolumeBounds.Value.size;
+                else if (anchor.PlaneRect.HasValue)
+                {
+                    var r = anchor.PlaneRect.Value;
+                    size = new Vector3(r.width, 0.05f, r.height);
+                }
+
+                registry.Add(new SceneObject
+                {
+                    id = $"mruk_{a}_{label}",
+                    label = label,
+                    source = SceneObjectSource.MRUK,
+                    surfaceType = surfType,
+                    confidence = 1f,
+                    position = t.position,
+                    rotation = t.rotation,
+                    size = size,
+                    mrukLabel = anchor.Label.ToString(),
+                    anchorUuid = anchor.Anchor != null ? anchor.Anchor.Uuid.ToString() : ""
+                });
+            }
+        }
+
+        private static string GetAnchorLabel(MRUKAnchor anchor)
+        {
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.FLOOR)) return "floor";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.CEILING)) return "ceiling";
+            if (anchor.HasAnyLabel(WallLabels)) return "wall";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.TABLE)) return "table";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.COUCH)) return "couch";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.BED)) return "bed";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.LAMP)) return "lamp";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.STORAGE)) return "storage";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN)) return "screen";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.PLANT)) return "plant";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.OTHER)) return "other";
+            return "unknown";
+        }
+
+        // ─────────────────────────────────────────────────────────────
         //  Internals
         // ─────────────────────────────────────────────────────────────
 

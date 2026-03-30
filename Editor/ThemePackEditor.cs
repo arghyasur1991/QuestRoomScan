@@ -36,9 +36,23 @@ namespace Genesis.RoomScan.Editor
                 scanlineIntensity: 0f, chromaticAberration: 0.004f,
                 fresnelIntensity: 1.2f);
 
+            CreateThemePack("Haunted",
+                themeColor: new Color(0.25f, 0.25f, 0.3f, 1f),
+                emissiveColor: new Color(0.15f, 0.2f, 0.3f, 1f),
+                darkenBrights: 0.9f, edgeGlow: 8f,
+                boundaryGlow: 0f, noiseScale: 2f,
+                pulseFreq: 0.3f, pulseAmp: 0.15f,
+                desaturation: 0.8f, hueShift: new Color(0.6f, 0.65f, 0.8f, 1f),
+                scanlineIntensity: 0f, chromaticAberration: 0.001f,
+                fresnelIntensity: 0.3f,
+                flickerIntensity: 0.15f, flickerSpeed: 3f,
+                fogDensity: 0.3f, fogColor: new Color(0.02f, 0.02f, 0.05f, 1f),
+                progressionMode: ProgressionMode.GlobalIntensity,
+                colorTemperatureShift: 0.8f);
+
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
-            Debug.Log("[ThemePackEditor] Created Xenotech + Corruption test ThemePacks");
+            Debug.Log("[ThemePackEditor] Created Xenotech + Corruption + Haunted test ThemePacks");
         }
 
         static void CreateThemePack(string name, Color themeColor, Color emissiveColor,
@@ -47,7 +61,11 @@ namespace Genesis.RoomScan.Editor
             float pulseFreq = 0f, float pulseAmp = 0.3f,
             float desaturation = 0f, Color? hueShift = null,
             float scanlineIntensity = 0f, float chromaticAberration = 0f,
-            float fresnelIntensity = 0f)
+            float fresnelIntensity = 0f,
+            float flickerIntensity = 0f, float flickerSpeed = 3f,
+            float fogDensity = 0f, Color? fogColor = null,
+            ProgressionMode progressionMode = ProgressionMode.SpatialSpread,
+            float colorTemperatureShift = 0f)
         {
             string path = $"{ThemePath}/{name}.asset";
             var existing = AssetDatabase.LoadAssetAtPath<ThemePack>(path);
@@ -72,6 +90,12 @@ namespace Genesis.RoomScan.Editor
             pack.scanlineIntensity = scanlineIntensity;
             pack.chromaticAberration = chromaticAberration;
             pack.fresnelIntensity = fresnelIntensity;
+            pack.flickerIntensity = flickerIntensity;
+            pack.flickerSpeed = flickerSpeed;
+            pack.fogDensity = fogDensity;
+            pack.fogColor = fogColor ?? new Color(0.02f, 0.02f, 0.05f, 1f);
+            pack.progressionMode = progressionMode;
+            pack.colorTemperatureShift = colorTemperatureShift;
 
             AssetDatabase.CreateAsset(pack, path);
             Debug.Log($"[ThemePackEditor] Created {name} at {path}");

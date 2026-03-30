@@ -26,7 +26,7 @@ namespace Genesis.RoomScan.UI
         // Scan view elements
         private Label _valScanning, _valIntegrations, _valKeyframes, _valRender, _valPackage;
         private Label _valProgress, _valPhase, _valColorCoverage, _valFrozen, _valMeshStats;
-        private Button _btnToggleScan, _btnRenderMode, _btnFreezeTint, _btnSaveScan, _btnDeleteArtifact;
+        private Button _btnToggleScan, _btnRenderMode, _btnFreezeTint, _btnSceneObjects, _btnSaveScan, _btnDeleteArtifact;
 
         // Saved scans view
         private ScrollView _scanList;
@@ -166,6 +166,7 @@ namespace Genesis.RoomScan.UI
             _btnToggleScan = _root.Q<Button>("btn-toggle-scan");
             _btnRenderMode = _root.Q<Button>("btn-render-mode");
             _btnFreezeTint = _root.Q<Button>("btn-freeze-tint");
+            _btnSceneObjects = _root.Q<Button>("btn-scene-objects");
             _btnSaveScan = _root.Q<Button>("btn-save-scan");
             _btnDeleteArtifact = _root.Q<Button>("btn-delete-artifact");
 
@@ -232,6 +233,12 @@ namespace Genesis.RoomScan.UI
             {
                 var s = RoomScanner.Instance;
                 if (s != null) s.ShowFreezeTint = !s.ShowFreezeTint;
+            });
+
+            _btnSceneObjects?.RegisterCallback<ClickEvent>(_ =>
+            {
+                var s = RoomScanner.Instance;
+                if (s != null) s.ShowSceneObjects = !s.ShowSceneObjects;
             });
 
             _btnSaveScan?.RegisterCallback<ClickEvent>(async _ =>
@@ -516,6 +523,14 @@ namespace Genesis.RoomScan.UI
 
             if (_btnFreezeTint != null)
                 _btnFreezeTint.text = scanner.ShowFreezeTint ? "Freeze Tint: ON" : "Freeze Tint: OFF";
+
+            if (_btnSceneObjects != null)
+            {
+                var reg = scanner.SceneObjectRegistry;
+                _btnSceneObjects.text = scanner.ShowSceneObjects
+                    ? $"Objects: ON ({reg?.MrukCount ?? 0}M + {reg?.AiCount ?? 0}AI)"
+                    : "Objects: OFF";
+            }
 
             var vi = VolumeIntegrator.Instance;
             if (vi != null) SetLabel(_valIntegrations, vi.IntegrationCount.ToString());

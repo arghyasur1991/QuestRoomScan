@@ -27,6 +27,7 @@ namespace Genesis.RoomScan
         public bool hasEnhancedMesh;
         public bool hasSimplifiedMesh;
         public bool hasKeyframes;
+        public bool hasSceneObjects;
     }
 
     [Serializable]
@@ -116,6 +117,7 @@ namespace Genesis.RoomScan
         private string PkgRefinedAtlasPath => Path.Combine(ActivePackageDirectory, "refined_atlas.raw");
         private string PkgRefinedNormalPath => Path.Combine(ActivePackageDirectory, "refined_normal.raw");
         private string PkgHQAtlasPath => Path.Combine(ActivePackageDirectory, "hq_atlas.png");
+        private string PkgSceneObjectsPath => Path.Combine(ActivePackageDirectory, "scene_objects.json");
 
         // Legacy single-slot paths (for backward compat references in RoomScanner.ClearAllDataAsync)
         [Obsolete("Use package-based paths")] public string SaveFilePath => PkgScanBin;
@@ -335,7 +337,8 @@ namespace Genesis.RoomScan
                     hasRefined = File.Exists(Path.Combine(pkgDir, "refined_mesh.bin")),
                     hasHQRefined = File.Exists(Path.Combine(pkgDir, "hq_atlas.png")),
                     hasEnhancedMesh = File.Exists(Path.Combine(pkgDir, "enhanced_mesh.bin")),
-                    hasSimplifiedMesh = File.Exists(Path.Combine(pkgDir, "simplified_mesh.bin"))
+                    hasSimplifiedMesh = File.Exists(Path.Combine(pkgDir, "simplified_mesh.bin")),
+                    hasSceneObjects = File.Exists(Path.Combine(pkgDir, "scene_objects.json"))
                 });
                 WriteManifest(manifest);
 
@@ -493,6 +496,55 @@ namespace Genesis.RoomScan
                 WriteAnchorData(Path.Combine(pkgDir, "anchor.json"), _activeAnchorData);
             UpdateManifestFlags(ActivePackageId, type, false);
             Logger.Info($"Artifact {type} deleted from {ActivePackageId}");
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Scene Object Registry persistence
+        // ─────────────────────────────────────────────────────────────
+
+        /// <summary>Saves a SceneObjectRegistry to the active package as JSON.</summary>
+        public async Task<bool> SaveSceneObjectsAsync(SceneObjectRegistry registry)
+        {
+            if (!HasActivePackage || registry == null || registry.Count == 0) return false;
+            try
+            {
+                string json = registry.ToJson();
+                string path = PkgSceneObjectsPath;
+                await Task.Run(() => File.WriteAllText(path, json));
+
+                var manifest = ReadManifest();
+                var entry = manifest.packages.Find(p => p.id == ActivePackageId);
+                if (entry != null) { entry.hasSceneObjects = true; WriteManifest(manifest); }
+
+                Logger.Info($"Scene objects saved ({registry.Count} objects)");
+                return true;
+            }
+            catch (Exception e)
+            {
+                Logger.Error($"Scene objects save failed: {e.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>Loads a SceneObjectRegistry from a package directory.</summary>
+        public SceneObjectRegistry LoadSceneObjects(string pkgDir = null)
+        {
+            pkgDir ??= ActivePackageDirectory;
+            if (string.IsNullOrEmpty(pkgDir)) return new SceneObjectRegistry();
+            string path = Path.Combine(pkgDir, "scene_objects.json");
+            if (!File.Exists(path)) return new SceneObjectRegistry();
+            try
+            {
+                string json = File.ReadAllText(path);
+                var registry = SceneObjectRegistry.FromJson(json);
+                Logger.Info($"Scene objects loaded ({registry.Count} objects)");
+                return registry;
+            }
+            catch (Exception e)
+            {
+                Logger.Warning($"Scene objects load failed: {e.Message}");
+                return new SceneObjectRegistry();
+            }
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -844,8 +896,14 @@ namespace Genesis.RoomScan
                     baseMatrixAtSave = MatrixToFloats(anchorAtSave)
                 };
 
+                // Load scene objects if present
+                var sceneObjects = LoadSceneObjects(pkgDir);
+                if (sceneObjects.Count > 0 && scanner != null)
+                    scanner.SetSceneObjectRegistry(sceneObjects);
+
                 Logger.Info($"Package loaded: {pkgId} (integ={savedIntCount}, " +
-                          $"splat={File.Exists(splatPath)}, refined={hasMesh}, hq={hasHQ})");
+                          $"splat={File.Exists(splatPath)}, refined={hasMesh}, hq={hasHQ}" +
+                          $", sceneObjects={sceneObjects.Count})");
                 LoadCompleted?.Invoke();
                 return true;
             }
@@ -1007,7 +1065,13 @@ namespace Genesis.RoomScan
                 ActivePackageId = pkgId;
                 _activeAnchorData = anchorData ?? new PackageAnchorData();
 
-                Logger.Info($"Refined-only load complete: {pkgId} (enhanced={hasEnhanced}, hq={hasHQ})");
+                // Load scene objects if present
+                var sceneObjects = LoadSceneObjects(Path.Combine(RoomScansRoot, pkgId));
+                if (sceneObjects.Count > 0 && scanner != null)
+                    scanner.SetSceneObjectRegistry(sceneObjects);
+
+                Logger.Info($"Refined-only load complete: {pkgId} (enhanced={hasEnhanced}, hq={hasHQ}" +
+                          $", sceneObjects={sceneObjects.Count})");
                 LoadCompleted?.Invoke();
                 return true;
             }

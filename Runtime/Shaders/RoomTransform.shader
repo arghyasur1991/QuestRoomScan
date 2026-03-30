@@ -38,6 +38,15 @@ Shader "Genesis/RoomTransform"
         _ScanlineIntensity  ("Scanline Intensity",   Range(0,1)) = 0
         _ChromaticAberration("Chromatic Aberration", Range(0,0.01)) = 0
         _FresnelIntensity   ("Fresnel Intensity",    Range(0,3)) = 0
+
+        [Header(Flicker and Fog)]
+        _FlickerIntensity   ("Flicker Intensity",    Range(0,1))  = 0
+        _FlickerSpeed       ("Flicker Speed",        Range(0,20)) = 3
+        _FogDensity         ("Fog Density",          Range(0,2))  = 0
+        _FogColor           ("Fog Color",        Color)           = (0.02, 0.02, 0.05, 1)
+
+        [Header(Progression)]
+        _ProgressionMode    ("Progression Mode (0=Spatial, 1=Global)", Float) = 0
     }
     SubShader
     {
@@ -105,6 +114,11 @@ Shader "Genesis/RoomTransform"
                 half   _ScanlineIntensity;
                 half   _ChromaticAberration;
                 half   _FresnelIntensity;
+                half   _FlickerIntensity;
+                half   _FlickerSpeed;
+                half   _FogDensity;
+                half4  _FogColor;
+                half   _ProgressionMode;
             CBUFFER_END
 
             // ── Noise (ALU only, no texture fetch) ──────────────────────
@@ -199,11 +213,12 @@ Shader "Genesis/RoomTransform"
                 float3 T = normalize(i.worldTan);
                 float3 B = normalize(i.worldBit);
 
-                // ── Noise-driven transition mask ────────────────────────
+                // ── Transition mask (spatial spread or global intensity) ──
                 float noise = ValueNoise(i.worldPos * _NoiseScale);
                 float threshold = progress * 1.4 - 0.2;
-                float mask = 1.0 - smoothstep(threshold - 0.12, threshold + 0.08, noise);
-                mask = saturate(mask * step(0.001, progress));
+                float spatialMask = 1.0 - smoothstep(threshold - 0.12, threshold + 0.08, noise);
+                spatialMask = saturate(spatialMask * step(0.001, progress));
+                float mask = _ProgressionMode > 0.5 ? progress : spatialMask;
 
                 // ── Luminance darkening ─────────────────────────────────
                 float darken = lerp(1.0, saturate(1.0 - realLum * _DarkenBrights), mask);
@@ -306,19 +321,41 @@ Shader "Genesis/RoomTransform"
                     color = lerp(color, color * (1.0 - _ScanlineIntensity * 0.5), scanline * mask);
                 }
 
-                // ── Boundary glow ───────────────────────────────────────
+                // ── Boundary glow (spatial spread mode only) ────────────
                 float distToBoundary = abs(noise - threshold);
                 float boundary = exp(-distToBoundary * 25.0)
                                * _BoundaryGlow
-                               * step(0.01, progress) * step(progress, 0.99);
+                               * step(0.01, progress) * step(progress, 0.99)
+                               * step(_ProgressionMode, 0.5);
                 color += _EmissiveColor.rgb * boundary;
 
                 // ── Precursor shadow (dark band ahead of frontier) ──────
+                // Only for spatial spread mode
                 float aheadDist = noise - threshold;
                 float precursor = smoothstep(0.0, 0.2, aheadDist)
                                 * smoothstep(0.4, 0.2, aheadDist)
-                                * step(0.01, progress) * step(progress, 0.99);
+                                * step(0.01, progress) * step(progress, 0.99)
+                                * step(_ProgressionMode, 0.5);
                 color *= lerp(1.0, 0.7, precursor);
+
+                // ── Flicker (irregular brightness stutter) ──────────
+                if (_FlickerIntensity > 0.001)
+                {
+                    float t = _Time.y * _FlickerSpeed;
+                    float flicker = frac(sin(t * 43.1389) * 17.531)
+                                  * frac(sin(t * 2.7183 + 7.91) * 31.17);
+                    flicker = lerp(1.0, 1.0 - flicker * _FlickerIntensity, mask);
+                    color *= flicker;
+                }
+
+                // ── Distance fog (exponential, transformed regions) ──
+                if (_FogDensity > 0.001)
+                {
+                    float dist = length(i.worldPos - _WorldSpaceCameraPos);
+                    float fogFactor = 1.0 - exp(-_FogDensity * dist * dist);
+                    fogFactor *= mask;
+                    color = lerp(color, _FogColor.rgb, saturate(fogFactor));
+                }
 
                 return half4(color, 1);
             }
