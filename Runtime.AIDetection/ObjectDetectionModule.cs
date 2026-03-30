@@ -8,10 +8,10 @@ using UnityEngine;
 namespace Genesis.RoomScan.AIDetection
 {
     /// <summary>
-    /// Scan-time object detection orchestrator. Runs inference on passthrough camera
-    /// frames, projects 2D detections to 3D world space using ICameraProvider + raycasting,
-    /// and feeds results into SceneObjectRegistry.
-    /// Discovered automatically by RoomScanner via <see cref="IRoomScanModule"/>.
+    /// Scan-time object detection orchestrator. Subscribes to RoomScanner.ColorFrameProvided
+    /// to receive camera frames with the exact same world-space pose and intrinsics used by
+    /// the TSDF pipeline. Projects 2D YOLO detections to 3D via the same pinhole model
+    /// (including crop correction) and feeds results into SceneObjectRegistry.
     /// </summary>
     public class ObjectDetectionModule : MonoBehaviour, IRoomScanModule
     {
@@ -37,12 +37,15 @@ namespace Genesis.RoomScan.AIDetection
 
         private IDetectionModel _model;
         private RoomScanner _scanner;
-        private ICameraProvider _camera;
         private bool _running;
         private bool _busy;
         private int _detectionCount;
+        private int _framesSinceLastDetect;
 
-        // Track observation counts per object for weighted averaging
+        // Latest camera frame snapshot from ColorFrameProvided
+        private Texture _latestFrame;
+        private CameraSnapshot _latestSnapshot;
+
         private readonly Dictionary<string, int> _observationCounts = new();
 
         public string ModuleName => "Object Detection";
@@ -51,17 +54,25 @@ namespace Genesis.RoomScan.AIDetection
 
         public event Action<SceneObject> OnObjectDetected;
 
+        /// <summary>
+        /// All camera params frozen at frame capture time, matching the TSDF pipeline exactly.
+        /// </summary>
+        private struct CameraSnapshot
+        {
+            public Pose pose;          // world-space (already TrackingToWorld'd)
+            public Vector2 focal;      // sensor-space focal length
+            public Vector2 principal;  // sensor-space principal point
+            public Vector2 sensorRes;  // native sensor resolution
+            public Vector2 currentRes; // delivered frame resolution
+        }
+
         // ── IRoomScanModule lifecycle ────────────────────────────────
 
         public void OnModuleInitialize(RoomScanner scanner)
         {
             _scanner = scanner;
-            _camera = scanner.GetComponent<ICameraProvider>();
-            if (_camera == null)
-                _camera = scanner.GetComponentInChildren<ICameraProvider>();
 
             Logger.Info($"[ObjectDetection] Init — model={(modelAsset != null ? "assigned" : "MISSING")}, " +
-                        $"camera={(_camera != null ? _camera.GetType().Name : "MISSING")}, " +
                         $"labels={(classLabels != null ? "assigned" : "MISSING")}");
             if (modelAsset == null)
                 Logger.Warning("[ObjectDetection] No model asset assigned — AI detection will be inactive");
@@ -75,12 +86,30 @@ namespace Genesis.RoomScan.AIDetection
                 Logger.Info("[ObjectDetection] Skipping — no registry or model asset");
                 return;
             }
+
+            _scanner.ColorFrameProvided += OnColorFrame;
             await StartDetection(registry);
         }
 
         public void OnScanStopped()
         {
+            if (_scanner != null)
+                _scanner.ColorFrameProvided -= OnColorFrame;
             StopDetection();
+        }
+
+        private void OnColorFrame(Texture frame, Pose worldPose,
+            Vector2 focal, Vector2 principal, Vector2 sensorRes, Vector2 currentRes)
+        {
+            _latestFrame = frame;
+            _latestSnapshot = new CameraSnapshot
+            {
+                pose = worldPose,
+                focal = focal,
+                principal = principal,
+                sensorRes = sensorRes,
+                currentRes = currentRes
+            };
         }
 
         // ── Detection control ────────────────────────────────────────
@@ -127,24 +156,19 @@ namespace Genesis.RoomScan.AIDetection
 
         private void Update()
         {
-            if (!_running || _busy || _camera == null || !_camera.IsReady) return;
-            if (Time.frameCount % detectEveryNFrames != 0) return;
+            if (!_running || _busy || _latestFrame == null) return;
+            if (++_framesSinceLastDetect < detectEveryNFrames) return;
+            _framesSinceLastDetect = 0;
 
-            // Capture camera state NOW, at the same instant as the frame texture.
-            // Inference is async and will complete many frames later — we need
-            // the pose from when the image was actually taken.
-            var framePose = _camera.CameraPose;
-            var frameFocal = _camera.FocalLength;
-            var framePP = _camera.PrincipalPoint;
-            var frameRes = _camera.CurrentResolution;
-            var frame = _camera.CurrentFrame;
+            // Freeze the frame and camera snapshot for this detection run
+            var frame = _latestFrame;
+            var snap = _latestSnapshot;
+            _latestFrame = null;
 
-            if (frame == null) return;
-            _ = RunDetection(frame, framePose, frameFocal, framePP, frameRes);
+            _ = RunDetection(frame, snap);
         }
 
-        private async Task RunDetection(Texture frame, Pose cameraPose,
-            Vector2 focal, Vector2 principalPoint, Vector2 resolution)
+        private async Task RunDetection(Texture frame, CameraSnapshot cam)
         {
             _busy = true;
             try
@@ -159,8 +183,7 @@ namespace Genesis.RoomScan.AIDetection
                 {
                     if (d.confidence < minConfidence) continue;
 
-                    var worldPos = ProjectToWorld(d.boundingBox, cameraPose,
-                        focal, principalPoint, resolution);
+                    var worldPos = ProjectToWorld(d.boundingBox, cam);
                     if (!worldPos.HasValue) continue;
 
                     var existing = FindExisting(registry, d.label, worldPos.Value);
@@ -170,8 +193,7 @@ namespace Genesis.RoomScan.AIDetection
                         continue;
                     }
 
-                    var worldScale = EstimateWorldScale(d.boundingBox, worldPos.Value,
-                        cameraPose, focal);
+                    var worldScale = EstimateWorldScale(d.boundingBox, worldPos.Value, cam);
 
                     var obj = new SceneObject
                     {
@@ -203,27 +225,48 @@ namespace Genesis.RoomScan.AIDetection
             }
         }
 
-        // ── 2D → 3D projection using CAPTURED camera pose ───────────
+        // ── 2D → 3D projection — exact inverse of the TSDF ProjectToCameraUV ──
 
-        private Vector3? ProjectToWorld(Rect bbox, Pose cameraPose,
-            Vector2 focal, Vector2 principalPoint, Vector2 resolution)
+        private static Vector3? ProjectToWorld(Rect bbox, CameraSnapshot cam)
         {
-            if (resolution.x < 1 || resolution.y < 1) return null;
+            if (cam.sensorRes.x < 1 || cam.sensorRes.y < 1) return null;
 
-            float cx = bbox.center.x;
-            float cy = bbox.center.y;
+            // Step 1: Convert bbox center from delivered-image pixels to sensor-space pixels.
+            // This is the inverse of the crop correction in VolumeIntegration.compute:
+            //   scaleFactor = currentRes / sensorRes;
+            //   scaleFactor /= max(scaleFactor.x, scaleFactor.y);
+            //   cropMin = sensorRes * (1 - scaleFactor) * 0.5;
+            //   cropSize = sensorRes * scaleFactor;
+            //   uv = (sensorPt - cropMin) / cropSize;
+            // Inverse: sensorPt = uv * cropSize + cropMin
+            Vector2 scaleFactor = cam.currentRes / cam.sensorRes;
+            float maxScale = Mathf.Max(scaleFactor.x, scaleFactor.y);
+            scaleFactor /= maxScale;
+            Vector2 cropMin = cam.sensorRes * (Vector2.one - scaleFactor) * 0.5f;
+            Vector2 cropSize = cam.sensorRes * scaleFactor;
 
+            // bbox is in delivered-image pixel coords → convert to UV [0,1]
+            float u = bbox.center.x / cam.currentRes.x;
+            float v = bbox.center.y / cam.currentRes.y;
+
+            // UV → sensor pixel coords
+            float sensorX = u * cropSize.x + cropMin.x;
+            float sensorY = v * cropSize.y + cropMin.y;
+
+            // Step 2: Pinhole unproject (same convention as the compute shader — no Y negation)
             var localDir = new Vector3(
-                (cx - principalPoint.x) / focal.x,
-                -(cy - principalPoint.y) / focal.y,
+                (sensorX - cam.principal.x) / cam.focal.x,
+                (sensorY - cam.principal.y) / cam.focal.y,
                 1f).normalized;
 
-            var worldDir = cameraPose.rotation * localDir;
+            // Step 3: Camera local → world (pose is already in world space via TrackingToWorld)
+            var worldDir = cam.pose.rotation * localDir;
 
-            if (Physics.Raycast(new Ray(cameraPose.position, worldDir), out var hit, 20f))
+            // Step 4: Raycast for depth
+            if (Physics.Raycast(new Ray(cam.pose.position, worldDir), out var hit, 20f))
                 return hit.point;
 
-            return cameraPose.position + worldDir * 2.5f;
+            return cam.pose.position + worldDir * 2.5f;
         }
 
         // ── Deduplication with position smoothing ────────────────────
@@ -247,21 +290,18 @@ namespace Genesis.RoomScan.AIDetection
             count++;
             _observationCounts[existing.id] = count;
 
-            // Exponential moving average — early observations have more weight,
-            // converges to stable position as count grows
             float alpha = positionSmoothingAlpha / Mathf.Sqrt(count);
             existing.position = Vector3.Lerp(existing.position, newPos, alpha);
             existing.confidence = Mathf.Max(existing.confidence, d.confidence);
             registry.Update(existing);
         }
 
-        private Vector3 EstimateWorldScale(Rect bbox, Vector3 worldPos,
-            Pose cameraPose, Vector2 focal)
+        private static Vector3 EstimateWorldScale(Rect bbox, Vector3 worldPos, CameraSnapshot cam)
         {
-            float depth = (worldPos - cameraPose.position).magnitude;
+            float depth = (worldPos - cam.pose.position).magnitude;
 
-            float widthM = bbox.width / focal.x * depth;
-            float heightM = bbox.height / focal.y * depth;
+            float widthM = bbox.width / cam.focal.x * depth;
+            float heightM = bbox.height / cam.focal.y * depth;
             float depthM = (widthM + heightM) * 0.25f;
 
             return new Vector3(
@@ -272,6 +312,8 @@ namespace Genesis.RoomScan.AIDetection
 
         private void OnDestroy()
         {
+            if (_scanner != null)
+                _scanner.ColorFrameProvided -= OnColorFrame;
             StopDetection();
             _model?.Dispose();
         }
