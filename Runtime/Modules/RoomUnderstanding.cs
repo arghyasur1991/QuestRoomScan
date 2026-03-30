@@ -175,6 +175,7 @@ namespace Genesis.RoomScan
                 var surfType = ClassifyAnchor(anchor);
 
                 var size = Vector3.one;
+                var rot = t.rotation;
                 bool hasVolume = anchor.VolumeBounds.HasValue;
                 bool hasPlane = anchor.PlaneRect.HasValue;
                 if (hasVolume)
@@ -189,6 +190,17 @@ namespace Genesis.RoomScan
                 // GetAnchorCenter() returns the true geometric center.
                 var worldCenter = anchor.GetAnchorCenter();
 
+                // Floor/ceiling anchors have an arbitrary yaw that doesn't match the
+                // room layout. Use the room's axis-aligned bounding box instead so
+                // the visualized rectangle aligns with walls and furniture.
+                if (surfType == SurfaceType.Floor || surfType == SurfaceType.Ceiling)
+                {
+                    var roomBounds = _room.GetRoomBounds();
+                    worldCenter = new Vector3(roomBounds.center.x, t.position.y, roomBounds.center.z);
+                    size = new Vector3(roomBounds.size.x, roomBounds.size.z, 0.05f);
+                    rot = Quaternion.Euler(90f, 0f, 0f);
+                }
+
                 registry.Add(new SceneObject
                 {
                     id = $"mruk_{a}_{label}",
@@ -197,7 +209,7 @@ namespace Genesis.RoomScan
                     surfaceType = surfType,
                     confidence = 1f,
                     position = worldCenter,
-                    rotation = t.rotation,
+                    rotation = rot,
                     size = size,
                     mrukLabel = anchor.Label.ToString(),
                     anchorUuid = anchor.Anchor != null ? anchor.Anchor.Uuid.ToString() : ""
@@ -206,7 +218,7 @@ namespace Genesis.RoomScan
 
                 Logger.Info($"[RoomUnderstanding] Anchor[{a}]: label={label}, " +
                             $"rawLabel={anchor.Label}, vol={hasVolume}, plane={hasPlane}, " +
-                            $"size={size}, center={worldCenter}, anchorPos={t.position}");
+                            $"size={size}, rot={rot.eulerAngles}, center={worldCenter}, anchorPos={t.position}");
             }
             Logger.Info($"[RoomUnderstanding] Populated {added} MRUK objects " +
                         $"(from {_room.Anchors.Count} anchors, {skipped} skipped)");
