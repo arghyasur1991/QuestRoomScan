@@ -14,6 +14,7 @@ namespace Genesis.RoomScan.Editor
         bool _aiModelAssigned;
         bool _aiLabelsAssigned;
         bool _aiNmsShaderAssigned;
+        bool _aiDepthProjectionAssigned;
 
         // -----------------------------------------------------------------
         //  Partial method implementations
@@ -27,12 +28,14 @@ namespace Genesis.RoomScan.Editor
                 _aiModelAssigned = AreFieldsAssigned(_objectDetection, "modelAsset");
                 _aiLabelsAssigned = AreFieldsAssigned(_objectDetection, "classLabels");
                 _aiNmsShaderAssigned = AreFieldsAssigned(_objectDetection, "nmsComputeShader");
+                _aiDepthProjectionAssigned = AreFieldsAssigned(_objectDetection, "depthProjectionShader");
             }
             else
             {
                 _aiModelAssigned = false;
                 _aiLabelsAssigned = false;
                 _aiNmsShaderAssigned = false;
+                _aiDepthProjectionAssigned = false;
             }
         }
 
@@ -44,6 +47,7 @@ namespace Genesis.RoomScan.Editor
                 StatusRow("  YOLO model asset (.onnx)", _aiModelAssigned);
                 StatusRow("  Class labels (.txt)", _aiLabelsAssigned);
                 StatusRow("  NMS compute shader", _aiNmsShaderAssigned);
+                StatusRow("  Depth projection shader", _aiDepthProjectionAssigned);
             }
         }
 
@@ -62,6 +66,11 @@ namespace Genesis.RoomScan.Editor
             if (_objectDetection != null && !_aiNmsShaderAssigned)
             {
                 StatusRow("AI Detection NMS compute shader", false);
+                needsFix = true;
+            }
+            if (_objectDetection != null && !_aiDepthProjectionAssigned)
+            {
+                StatusRow("AI Detection depth projection shader", false);
                 needsFix = true;
             }
         }
@@ -97,6 +106,7 @@ namespace Genesis.RoomScan.Editor
                 }
 
                 AssignNmsShader(so);
+                AssignDepthProjectionShader(so);
 
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(odm);
@@ -112,6 +122,18 @@ namespace Genesis.RoomScan.Editor
                     AI_PKG_SHADERS + "NMSCompute.compute");
                 if (nms != null)
                     nmsProp.objectReferenceValue = nms;
+            }
+        }
+
+        static void AssignDepthProjectionShader(SerializedObject so)
+        {
+            var prop = so.FindProperty("depthProjectionShader");
+            if (prop != null && prop.objectReferenceValue == null)
+            {
+                var shader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
+                    AI_PKG_SHADERS + "DepthProjection.compute");
+                if (shader != null)
+                    prop.objectReferenceValue = shader;
             }
         }
 
@@ -136,6 +158,7 @@ namespace Genesis.RoomScan.Editor
             }
 
             AssignNmsShader(so);
+            AssignDepthProjectionShader(so);
 
             // Try to find a model asset in the project (user must have imported one)
             var modelProp = so.FindProperty("modelAsset");

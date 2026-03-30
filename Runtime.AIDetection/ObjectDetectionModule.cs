@@ -4,14 +4,16 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using Unity.InferenceEngine;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan.AIDetection
 {
     /// <summary>
     /// Scan-time object detection orchestrator. Subscribes to RoomScanner.ColorFrameProvided
     /// to receive camera frames with the exact same world-space pose and intrinsics used by
-    /// the TSDF pipeline. Projects 2D YOLO detections to 3D via the same pinhole model
-    /// (including crop correction) and feeds results into SceneObjectRegistry.
+    /// the TSDF pipeline. Projects 2D YOLO detections to 3D via DepthProjection.compute
+    /// (reusing the same DepthKit.hlsl depth pipeline as VolumeIntegration) and feeds
+    /// results into SceneObjectRegistry.
     /// </summary>
     public class ObjectDetectionModule : MonoBehaviour, IRoomScanModule
     {
@@ -19,6 +21,9 @@ namespace Genesis.RoomScan.AIDetection
         [SerializeField] private ModelAsset modelAsset;
         [SerializeField] private TextAsset classLabels;
         [SerializeField] private ComputeShader nmsComputeShader;
+
+        [Header("Depth Projection")]
+        [SerializeField] internal ComputeShader depthProjectionShader;
 
         [Header("Detection Settings")]
         [SerializeField] private int detectEveryNFrames = 5;
@@ -47,6 +52,14 @@ namespace Genesis.RoomScan.AIDetection
         private CameraSnapshot _latestSnapshot;
 
         private readonly Dictionary<string, int> _observationCounts = new();
+
+        // GPU depth projection buffers
+        private const int MaxDetections = 64;
+        private ComputeBuffer _raysBuffer;
+        private ComputeBuffer _resultsBuffer;
+        private int _depthProjectKernel = -1;
+        private readonly Vector4[] _raysCpu = new Vector4[MaxDetections];
+        private readonly Vector4[] _resultsCpu = new Vector4[MaxDetections];
 
         public string ModuleName => "Object Detection";
         public bool IsRunning => _running;
@@ -175,25 +188,51 @@ namespace Genesis.RoomScan.AIDetection
             {
                 var detections = await _model.DetectAsync(frame);
                 if (detections == null || detections.Length == 0) return;
+                if (!DepthCapture.DepthAvailable) return;
 
                 var registry = _scanner?.SceneObjectRegistry;
                 if (registry == null) return;
 
+                // Filter by confidence and compute world-space ray directions (CPU, trivial pinhole math)
+                var cropData = ComputeCropData(cam);
+                var validDetections = new List<Detection>();
+                int rayCount = 0;
+
                 foreach (var d in detections)
                 {
                     if (d.confidence < minConfidence) continue;
+                    if (rayCount >= MaxDetections) break;
 
-                    var worldPos = ProjectToWorld(d.boundingBox, cam);
-                    if (!worldPos.HasValue) continue;
+                    var dir = BboxToWorldRay(d.boundingBox, cam, cropData);
+                    if (!dir.HasValue) continue;
 
-                    var existing = FindExisting(registry, d.label, worldPos.Value);
+                    _raysCpu[rayCount] = new Vector4(dir.Value.x, dir.Value.y, dir.Value.z, 0);
+                    validDetections.Add(d);
+                    rayCount++;
+                }
+
+                if (rayCount == 0) return;
+
+                // GPU depth projection — same pipeline as VolumeIntegration.compute
+                var worldPositions = await ProjectRaysViaDepth(cam.pose.position, rayCount);
+                if (worldPositions == null) return;
+
+                for (int i = 0; i < validDetections.Count; i++)
+                {
+                    var wp = worldPositions[i];
+                    if (wp.w < 0.5f) continue; // invalid depth sample
+
+                    var worldPos = new Vector3(wp.x, wp.y, wp.z);
+                    var d = validDetections[i];
+
+                    var existing = FindExisting(registry, d.label, worldPos);
                     if (existing != null)
                     {
-                        UpdateExisting(registry, existing, worldPos.Value, d);
+                        UpdateExisting(registry, existing, worldPos, d);
                         continue;
                     }
 
-                    var worldScale = EstimateWorldScale(d.boundingBox, worldPos.Value, cam);
+                    var worldScale = EstimateWorldScale(d.boundingBox, worldPos, cam, cropData);
 
                     var obj = new SceneObject
                     {
@@ -202,7 +241,7 @@ namespace Genesis.RoomScan.AIDetection
                         source = SceneObjectSource.AIDetection,
                         surfaceType = SurfaceType.Unknown,
                         confidence = d.confidence,
-                        position = worldPos.Value,
+                        position = worldPos,
                         rotation = Quaternion.identity,
                         size = worldScale,
                         classId = d.classId,
@@ -225,48 +264,94 @@ namespace Genesis.RoomScan.AIDetection
             }
         }
 
-        // ── 2D → 3D projection — exact inverse of the TSDF ProjectToCameraUV ──
+        // ── Crop correction data (shared between ray and scale calculations) ──
 
-        private static Vector3? ProjectToWorld(Rect bbox, CameraSnapshot cam)
+        private struct CropData
         {
-            if (cam.sensorRes.x < 1 || cam.sensorRes.y < 1) return null;
+            public Vector2 cropMin;
+            public Vector2 cropSize;
+        }
 
-            // Step 1: Convert bbox center from delivered-image pixels to sensor-space pixels.
-            // This is the inverse of the crop correction in VolumeIntegration.compute:
-            //   scaleFactor = currentRes / sensorRes;
-            //   scaleFactor /= max(scaleFactor.x, scaleFactor.y);
-            //   cropMin = sensorRes * (1 - scaleFactor) * 0.5;
-            //   cropSize = sensorRes * scaleFactor;
-            //   uv = (sensorPt - cropMin) / cropSize;
-            // Inverse: sensorPt = uv * cropSize + cropMin
+        private static CropData ComputeCropData(CameraSnapshot cam)
+        {
             Vector2 scaleFactor = cam.currentRes / cam.sensorRes;
             float maxScale = Mathf.Max(scaleFactor.x, scaleFactor.y);
             scaleFactor /= maxScale;
-            Vector2 cropMin = cam.sensorRes * (Vector2.one - scaleFactor) * 0.5f;
-            Vector2 cropSize = cam.sensorRes * scaleFactor;
+            return new CropData
+            {
+                cropMin = cam.sensorRes * (Vector2.one - scaleFactor) * 0.5f,
+                cropSize = cam.sensorRes * scaleFactor
+            };
+        }
 
-            // bbox is in delivered-image pixel coords → convert to UV [0,1]
+        // ── 2D → world ray direction (CPU, same pinhole model as TSDF) ─────
+
+        private static Vector3? BboxToWorldRay(Rect bbox, CameraSnapshot cam, CropData crop)
+        {
+            if (cam.sensorRes.x < 1 || cam.sensorRes.y < 1) return null;
+
+            // YOLO bbox uses top-left origin; camera intrinsics use bottom-left origin.
+            // Flip Y to match (confirmed by Meta's ObjectDetectionVisualizer).
             float u = bbox.center.x / cam.currentRes.x;
-            float v = bbox.center.y / cam.currentRes.y;
+            float v = 1.0f - (bbox.center.y / cam.currentRes.y);
 
-            // UV → sensor pixel coords
-            float sensorX = u * cropSize.x + cropMin.x;
-            float sensorY = v * cropSize.y + cropMin.y;
+            float sensorX = u * crop.cropSize.x + crop.cropMin.x;
+            float sensorY = v * crop.cropSize.y + crop.cropMin.y;
 
-            // Step 2: Pinhole unproject (same convention as the compute shader — no Y negation)
             var localDir = new Vector3(
                 (sensorX - cam.principal.x) / cam.focal.x,
                 (sensorY - cam.principal.y) / cam.focal.y,
                 1f).normalized;
 
-            // Step 3: Camera local → world (pose is already in world space via TrackingToWorld)
-            var worldDir = cam.pose.rotation * localDir;
+            return cam.pose.rotation * localDir;
+        }
 
-            // Step 4: Raycast for depth
-            if (Physics.Raycast(new Ray(cam.pose.position, worldDir), out var hit, 20f))
-                return hit.point;
+        // ── GPU depth projection (reuses DepthKit.hlsl, same as VolumeIntegration) ──
 
-            return cam.pose.position + worldDir * 2.5f;
+        private void EnsureDepthProjectionBuffers()
+        {
+            if (_raysBuffer != null) return;
+            _raysBuffer = new ComputeBuffer(MaxDetections, sizeof(float) * 4);
+            _resultsBuffer = new ComputeBuffer(MaxDetections, sizeof(float) * 4);
+            _depthProjectKernel = depthProjectionShader.FindKernel("ProjectDetections");
+        }
+
+        private Task<Vector4[]> ProjectRaysViaDepth(Vector3 camOrigin, int count)
+        {
+            if (depthProjectionShader == null)
+            {
+                Logger.Warning("[ObjectDetection] No depthProjectionShader assigned");
+                return Task.FromResult<Vector4[]>(null);
+            }
+
+            EnsureDepthProjectionBuffers();
+
+            _raysBuffer.SetData(_raysCpu, 0, 0, count);
+
+            depthProjectionShader.SetBuffer(_depthProjectKernel, "_Rays", _raysBuffer);
+            depthProjectionShader.SetBuffer(_depthProjectKernel, "_Results", _resultsBuffer);
+            depthProjectionShader.SetVector("_CamOrigin", camOrigin);
+            depthProjectionShader.SetInt("_Count", count);
+
+            int groups = (count + 63) / 64;
+            depthProjectionShader.Dispatch(_depthProjectKernel, groups, 1, 1);
+
+            var tcs = new TaskCompletionSource<Vector4[]>();
+            AsyncGPUReadback.Request(_resultsBuffer, count * sizeof(float) * 4, 0, req =>
+            {
+                if (req.hasError)
+                {
+                    Logger.Warning("[ObjectDetection] GPU depth readback failed");
+                    tcs.SetResult(null);
+                    return;
+                }
+                var data = req.GetData<Vector4>();
+                var result = new Vector4[count];
+                data.CopyTo(result);
+                tcs.SetResult(result);
+            });
+
+            return tcs.Task;
         }
 
         // ── Deduplication with position smoothing ────────────────────
@@ -296,12 +381,17 @@ namespace Genesis.RoomScan.AIDetection
             registry.Update(existing);
         }
 
-        private static Vector3 EstimateWorldScale(Rect bbox, Vector3 worldPos, CameraSnapshot cam)
+        private static Vector3 EstimateWorldScale(Rect bbox, Vector3 worldPos,
+            CameraSnapshot cam, CropData crop)
         {
             float depth = (worldPos - cam.pose.position).magnitude;
 
-            float widthM = bbox.width / cam.focal.x * depth;
-            float heightM = bbox.height / cam.focal.y * depth;
+            // Convert bbox dimensions from delivered-image pixels to sensor pixels via crop,
+            // then use sensor-space focal length for angular size → world size.
+            float cropScaleX = crop.cropSize.x / cam.currentRes.x;
+            float cropScaleY = crop.cropSize.y / cam.currentRes.y;
+            float widthM = (bbox.width * cropScaleX) / cam.focal.x * depth;
+            float heightM = (bbox.height * cropScaleY) / cam.focal.y * depth;
             float depthM = (widthM + heightM) * 0.25f;
 
             return new Vector3(
@@ -316,6 +406,8 @@ namespace Genesis.RoomScan.AIDetection
                 _scanner.ColorFrameProvided -= OnColorFrame;
             StopDetection();
             _model?.Dispose();
+            _raysBuffer?.Release();
+            _resultsBuffer?.Release();
         }
     }
 }

@@ -1,0 +1,39 @@
+// GPU depth-buffer projection for AI object detection.
+// Given world-space camera ray directions, samples the environment depth texture
+// (via DepthKit.hlsl) and outputs world-space surface positions.
+//
+// Reuses the exact same depth projection pipeline as VolumeIntegration.compute:
+//   gsDepthWorldToNDC -> gsDepthSample -> gsDepthNDCtoWorld
+// The depth globals (gsDepthProj, gsDepthView, etc.) are set each frame by
+// DepthCapture.SetGlobalShaderProperties().
+
+#pragma kernel ProjectDetections
+
+#include "Packages/com.genesis.roomscan/Runtime/Shaders/DepthKit.hlsl"
+
+StructuredBuffer<float4> _Rays;     // per detection: (dirX, dirY, dirZ, 0) world-space
+float3 _CamOrigin;                   // world-space camera position
+uint _Count;
+RWStructuredBuffer<float4> _Results; // per detection: (worldX, worldY, worldZ, valid)
+
+[numthreads(64, 1, 1)]
+void ProjectDetections(uint id : SV_DispatchThreadID)
+{
+    if (id >= _Count) return;
+
+    float3 dir = normalize(_Rays[id].xyz);
+    float3 world1M = _CamOrigin + dir;
+
+    float3 ndc = gsDepthWorldToNDC(world1M);
+
+    if (ndc.x < 0.01 || ndc.x > 0.99 || ndc.y < 0.01 || ndc.y > 0.99)
+    {
+        _Results[id] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    float depthNDC = gsDepthSample(ndc.xy);
+    float3 surfaceWorld = gsDepthNDCtoWorld(float3(ndc.xy, depthNDC));
+
+    _Results[id] = float4(surfaceWorld, 1);
+}

@@ -1,6 +1,8 @@
+using System;
 using System.Collections.Generic;
 using Meta.XR.MRUtilityKit;
 using UnityEngine;
+using UnityEngine.Events;
 
 namespace Genesis.RoomScan
 {
@@ -27,6 +29,15 @@ namespace Genesis.RoomScan
         public void OnModuleInitialize(RoomScanner scanner) { }
 
         private MRUKRoom _room;
+        private MRUK _mruk;
+        private bool _subscribedToRoomEvents;
+
+        /// <summary>
+        /// Raised when MRUK anchors change (created, updated, or room updated).
+        /// RoomScanner subscribes to this to re-populate the SceneObjectRegistry reactively
+        /// instead of polling.
+        /// </summary>
+        public event Action AnchorsChanged;
 
         // Cached per-vertex classification
         private SurfaceType[] _lastClassification;
@@ -212,22 +223,81 @@ namespace Genesis.RoomScan
 
         private void EnsureRoom()
         {
-            // Only skip re-resolution if we actually have a valid room.
-            // If room was null last time, keep trying — MRUK may not have loaded yet.
             if (_room != null) return;
 
-            var mruk = FindFirstObjectByType<MRUK>();
-            if (mruk == null) return;
-            _room = mruk.GetCurrentRoom();
-            if (_room == null && mruk.Rooms != null && mruk.Rooms.Count > 0)
-                _room = mruk.Rooms[0];
+            if (_mruk == null)
+                _mruk = FindFirstObjectByType<MRUK>();
+            if (_mruk == null) return;
+
+            _room = _mruk.GetCurrentRoom();
+            if (_room == null && _mruk.Rooms != null && _mruk.Rooms.Count > 0)
+                _room = _mruk.Rooms[0];
+
+            SubscribeToRoomEvents();
+        }
+
+        private void SubscribeToRoomEvents()
+        {
+            if (_subscribedToRoomEvents) return;
+
+            if (_mruk != null)
+            {
+                _mruk.RoomCreatedEvent.AddListener(OnRoomCreatedOrUpdated);
+                _mruk.RoomUpdatedEvent.AddListener(OnRoomCreatedOrUpdated);
+            }
+
+            if (_room != null)
+                _room.AnchorCreatedEvent.AddListener(OnAnchorCreated);
+
+            _subscribedToRoomEvents = true;
+        }
+
+        private void UnsubscribeFromRoomEvents()
+        {
+            if (!_subscribedToRoomEvents) return;
+
+            if (_mruk != null)
+            {
+                _mruk.RoomCreatedEvent.RemoveListener(OnRoomCreatedOrUpdated);
+                _mruk.RoomUpdatedEvent.RemoveListener(OnRoomCreatedOrUpdated);
+            }
+
+            if (_room != null)
+                _room.AnchorCreatedEvent.RemoveListener(OnAnchorCreated);
+
+            _subscribedToRoomEvents = false;
+        }
+
+        private void OnRoomCreatedOrUpdated(MRUKRoom room)
+        {
+            // Re-subscribe to the new/updated room's anchor events
+            if (_room != null)
+                _room.AnchorCreatedEvent.RemoveListener(OnAnchorCreated);
+
+            _room = room;
+            _room.AnchorCreatedEvent.AddListener(OnAnchorCreated);
+
+            Logger.Info($"[RoomUnderstanding] Room created/updated — {_room.Anchors?.Count ?? 0} anchors");
+            AnchorsChanged?.Invoke();
+        }
+
+        private void OnAnchorCreated(MRUKAnchor anchor)
+        {
+            Logger.Info($"[RoomUnderstanding] Anchor created: {anchor.Label}");
+            AnchorsChanged?.Invoke();
         }
 
         /// <summary>Re-query MRUK for the current room (e.g., after scene reload).</summary>
         public void RefreshRoom()
         {
+            UnsubscribeFromRoomEvents();
             _room = null;
             EnsureRoom();
+        }
+
+        private void OnDestroy()
+        {
+            UnsubscribeFromRoomEvents();
         }
 
         private void ClassifyFromMRUK(Vector3[] verts, SurfaceType[] result)

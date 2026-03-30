@@ -407,12 +407,12 @@ namespace Genesis.RoomScan
         private void OnDisable()
         {
             StopScanning();
+            UnsubscribeFromAnchorsChanged();
         }
 
         private float _lastScannerLog;
-        private float _lastMrukRetry;
-        private bool _mrukFullyPopulated;
         private int _integrateCount;
+        private bool _subscribedToAnchorsChanged;
 
         private void Update()
         {
@@ -456,20 +456,6 @@ namespace Genesis.RoomScan
                     UpdatePlateauDetection();
                     MeshExtracted?.Invoke();
                 }
-            }
-
-            // Re-poll MRUK until we get a stable set of objects.
-            // Scene API anchors may arrive after scan start.
-            if (!_mrukFullyPopulated && t - _lastMrukRetry >= 2f)
-            {
-                _lastMrukRetry = t;
-                int prevCount = _sceneObjectRegistry?.MrukCount ?? 0;
-                PopulateSceneObjectRegistry();
-                int newCount = _sceneObjectRegistry?.MrukCount ?? 0;
-                if (newCount > prevCount)
-                    Logger.Info($"MRUK late-populate: {prevCount} → {newCount} objects");
-                if (newCount > 0 && newCount == prevCount)
-                    _mrukFullyPopulated = true;
             }
 
             if (t - _lastScannerLog >= 5f)
@@ -537,9 +523,8 @@ namespace Genesis.RoomScan
             _depthCapture.StartDepthCapture();
 
             _sceneObjectRegistry ??= new SceneObjectRegistry();
-            _mrukFullyPopulated = false;
-            _lastMrukRetry = Time.time;
             PopulateSceneObjectRegistry();
+            SubscribeToAnchorsChanged();
 
             Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
             ScanStarted?.Invoke();
@@ -1282,6 +1267,26 @@ namespace Genesis.RoomScan
             _roomUnderstanding.RefreshRoom();
             _sceneObjectRegistry.RemoveBySource(SceneObjectSource.MRUK);
             _roomUnderstanding.PopulateRegistry(_sceneObjectRegistry);
+        }
+
+        private void SubscribeToAnchorsChanged()
+        {
+            if (_subscribedToAnchorsChanged || _roomUnderstanding == null) return;
+            _roomUnderstanding.AnchorsChanged += OnMrukAnchorsChanged;
+            _subscribedToAnchorsChanged = true;
+        }
+
+        private void UnsubscribeFromAnchorsChanged()
+        {
+            if (!_subscribedToAnchorsChanged || _roomUnderstanding == null) return;
+            _roomUnderstanding.AnchorsChanged -= OnMrukAnchorsChanged;
+            _subscribedToAnchorsChanged = false;
+        }
+
+        private void OnMrukAnchorsChanged()
+        {
+            Logger.Info("[RoomScanner] MRUK anchors changed — re-populating registry");
+            PopulateSceneObjectRegistry();
         }
 
         internal void ApplyHQTexture(Texture2D atlas)
