@@ -190,15 +190,44 @@ namespace Genesis.RoomScan
                 // GetAnchorCenter() returns the true geometric center.
                 var worldCenter = anchor.GetAnchorCenter();
 
-                // Floor/ceiling anchors have an arbitrary yaw that doesn't match the
-                // room layout. Use the room's axis-aligned bounding box instead so
-                // the visualized rectangle aligns with walls and furniture.
-                if (surfType == SurfaceType.Floor || surfType == SurfaceType.Ceiling)
+                // Floor/ceiling anchors have an arbitrary in-plane yaw.
+                // Derive the room's horizontal orientation from a wall anchor,
+                // then project the PlaneRect corners into that wall-aligned frame
+                // so the bounding box aligns with the physical room layout.
+                if ((surfType == SurfaceType.Floor || surfType == SurfaceType.Ceiling) && hasPlane)
                 {
-                    var roomBounds = _room.GetRoomBounds();
-                    worldCenter = new Vector3(roomBounds.center.x, t.position.y, roomBounds.center.z);
-                    size = new Vector3(roomBounds.size.x, roomBounds.size.z, 0.05f);
-                    rot = Quaternion.Euler(90f, 0f, 0f);
+                    var wallRight = FindWallHorizontalRight();
+                    var wallPerp  = Vector3.Cross(Vector3.up, wallRight).normalized;
+
+                    // Rotation: local X→wallRight, local Y→wallPerp, local Z→up (thin)
+                    rot = Quaternion.LookRotation(Vector3.up, wallPerp);
+
+                    // Project the anchor's PlaneRect corners into wall-aligned frame
+                    var pr = anchor.PlaneRect.Value;
+                    var hw = pr.width  * 0.5f;
+                    var hh = pr.height * 0.5f;
+                    var c0 = t.TransformPoint(new Vector3(-hw, -hh, 0));
+                    var c1 = t.TransformPoint(new Vector3( hw, -hh, 0));
+                    var c2 = t.TransformPoint(new Vector3( hw,  hh, 0));
+                    var c3 = t.TransformPoint(new Vector3(-hw,  hh, 0));
+
+                    float minW = float.MaxValue, maxW = float.MinValue;
+                    float minD = float.MaxValue, maxD = float.MinValue;
+                    foreach (var corner in new[] { c0, c1, c2, c3 })
+                    {
+                        var offset = corner - worldCenter;
+                        float projW = Vector3.Dot(offset, wallRight);
+                        float projD = Vector3.Dot(offset, wallPerp);
+                        if (projW < minW) minW = projW; if (projW > maxW) maxW = projW;
+                        if (projD < minD) minD = projD; if (projD > maxD) maxD = projD;
+                    }
+
+                    size = new Vector3(maxW - minW, maxD - minD, 0.05f);
+
+                    // Re-center to the centroid of the wall-aligned bounding box
+                    float offW = (minW + maxW) * 0.5f;
+                    float offD = (minD + maxD) * 0.5f;
+                    worldCenter += wallRight * offW + wallPerp * offD;
                 }
 
                 registry.Add(new SceneObject
@@ -222,6 +251,27 @@ namespace Genesis.RoomScan
             }
             Logger.Info($"[RoomUnderstanding] Populated {added} MRUK objects " +
                         $"(from {_room.Anchors.Count} anchors, {skipped} skipped)");
+        }
+
+        /// <summary>
+        /// Returns a horizontal "right" direction along the first wall anchor found
+        /// in the current room, giving us a reliable room-aligned axis.
+        /// Falls back to world-right if no wall exists.
+        /// </summary>
+        private Vector3 FindWallHorizontalRight()
+        {
+            if (_room != null)
+            {
+                foreach (var a in _room.Anchors)
+                {
+                    if (!a.HasAnyLabel(WallLabels)) continue;
+                    var right = a.transform.right;
+                    right.y = 0;
+                    if (right.sqrMagnitude > 0.001f)
+                        return right.normalized;
+                }
+            }
+            return Vector3.right;
         }
 
         private static string GetAnchorLabel(MRUKAnchor anchor)
