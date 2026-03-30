@@ -239,6 +239,11 @@ namespace Genesis.RoomScan.AIDetection
                 var worldPositions = await ProjectRaysViaDepth(cam.pose.position, rayCount);
                 if (worldPositions == null) return;
 
+                // All AI positions are stored relative to the scan session anchor
+                // so they stay world-locked across tracking corrections.
+                var anchorT = _scanner.ScanAnchorTransform;
+                if (anchorT == null) return;
+
                 for (int i = 0; i < validDetections.Count; i++)
                 {
                     var wp = worldPositions[i];
@@ -250,18 +255,21 @@ namespace Genesis.RoomScan.AIDetection
                     float depthDist = Vector3.Distance(worldPos, cam.pose.position);
                     if (depthDist > maxDetectionDepthM) continue;
 
-                    var existing = FindExisting(registry, d.label, worldPos);
+                    var worldScale = EstimateWorldScale(d.boundingBox, worldPos, cam, cropData);
+
+                    // Convert to anchor-local space for storage and dedup
+                    var localPos = anchorT.InverseTransformPoint(worldPos);
+
+                    var existing = FindExisting(registry, d.label, localPos);
                     if (existing != null)
                     {
-                        UpdateExisting(registry, existing, worldPos, d);
+                        UpdateExisting(registry, existing, localPos, d);
                         continue;
                     }
 
                     // Cap unique objects per label
                     _labelObjectCounts.TryGetValue(d.label, out int labelCount);
                     if (labelCount >= maxObjectsPerLabel) continue;
-
-                    var worldScale = EstimateWorldScale(d.boundingBox, worldPos, cam, cropData);
 
                     var obj = new SceneObject
                     {
@@ -270,7 +278,7 @@ namespace Genesis.RoomScan.AIDetection
                         source = SceneObjectSource.AIDetection,
                         surfaceType = SurfaceType.Unknown,
                         confidence = d.confidence,
-                        position = worldPos,
+                        position = localPos,
                         rotation = Quaternion.identity,
                         size = worldScale,
                         classId = d.classId,

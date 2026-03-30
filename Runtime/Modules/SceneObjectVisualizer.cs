@@ -19,9 +19,16 @@ namespace Genesis.RoomScan
         private readonly List<GameObject> _annotations = new();
         private Material _wireMaterial;
         private Shader _shader;
+        private Transform _scanAnchor;
         private bool _visible;
 
         public void SetShader(Shader shader) => _shader = shader;
+
+        /// <summary>
+        /// Set the scan anchor transform. AI annotations will be parented under this
+        /// so anchor-local positions automatically track with the world.
+        /// </summary>
+        public void SetScanAnchor(Transform anchor) => _scanAnchor = anchor;
 
         public void Show(SceneObjectRegistry registry)
         {
@@ -71,8 +78,21 @@ namespace Genesis.RoomScan
         private void SpawnAnnotation(SceneObject obj)
         {
             var go = new GameObject($"SceneObj_{obj.id}");
-            go.transform.SetParent(transform, false);
-            go.transform.SetPositionAndRotation(obj.position, obj.rotation);
+
+            if (obj.source == SceneObjectSource.AIDetection && _scanAnchor != null)
+            {
+                // AI positions are in anchor-local space — parent under the anchor
+                // so they automatically track with world-locked corrections.
+                go.transform.SetParent(_scanAnchor, false);
+                go.transform.localPosition = obj.position;
+                go.transform.localRotation = obj.rotation;
+            }
+            else
+            {
+                // MRUK positions are world-space (backed by their own spatial anchors)
+                go.transform.SetParent(transform, false);
+                go.transform.SetPositionAndRotation(obj.position, obj.rotation);
+            }
 
             var color = obj.source == SceneObjectSource.MRUK ? MrukColor : AiColor;
 

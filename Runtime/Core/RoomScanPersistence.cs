@@ -273,12 +273,18 @@ namespace Genesis.RoomScan
                 var tc = TriplanarCache.Instance;
                 int triRes = tc != null && tc.TriXZ != null ? tc.TriXZ.width : 0;
 
-                // Create spatial anchor at MRUK floor position
+                // Reuse the session anchor created at scan start, or create a new one
                 Matrix4x4 anchorMatrix = Matrix4x4.identity;
                 string anchorUuidStr = "";
                 var roomAnchor = RoomAnchorManager.Instance;
 
-                if (roomAnchor != null && roomAnchor.enabled && roomAnchor.IsRoomLoaded)
+                if (roomAnchor != null && roomAnchor.HasSpatialAnchor)
+                {
+                    anchorUuidStr = roomAnchor.SpatialAnchorUuid.ToString();
+                    anchorMatrix = roomAnchor.SpatialAnchorMatrix;
+                    Logger.Info($"Reusing session scan anchor for package: {anchorUuidStr}");
+                }
+                else if (roomAnchor != null && roomAnchor.enabled && roomAnchor.IsRoomLoaded)
                 {
                     var result = await roomAnchor.CreateAndSaveSpatialAnchorAsync(
                         default, Quaternion.identity);
@@ -1156,6 +1162,20 @@ namespace Genesis.RoomScan
             ActivePackageId = TmpPkgId;
             _activeAnchorData = new PackageAnchorData();
             Logger.Info($"Tmp package created: {tmpDir}");
+        }
+
+        /// <summary>
+        /// Writes anchor UUID and matrix to the active _tmp package's anchor.json.
+        /// Called when the scan session anchor is created so it survives promotion.
+        /// </summary>
+        public void WriteTmpAnchorData(string uuid, Matrix4x4 matrix)
+        {
+            if (!IsTmpPackage) return;
+            _activeAnchorData ??= new PackageAnchorData();
+            _activeAnchorData.anchorUuid = uuid;
+            _activeAnchorData.baseMatrixAtSave = MatrixToFloats(matrix);
+            WriteAnchorData(PkgAnchorJson, _activeAnchorData);
+            Logger.Info($"Tmp anchor.json written — uuid={uuid}");
         }
 
         /// <summary>

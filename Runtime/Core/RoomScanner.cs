@@ -155,6 +155,13 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Shader used for debug overlay wireframes and labels")]
         internal Shader debugOverlayShader;
 
+        /// <summary>
+        /// Live transform of the spatial anchor created at scan start.
+        /// AI detection positions are stored relative to this anchor for tracking stability.
+        /// </summary>
+        internal Transform ScanAnchorTransform =>
+            RoomAnchorManager.Instance != null ? RoomAnchorManager.Instance.SpatialAnchorTransform : null;
+
         /// <summary>Toggle scene object annotation overlay on any render mode.</summary>
         public bool ShowSceneObjects
         {
@@ -171,6 +178,7 @@ namespace Genesis.RoomScan
                         _sceneObjectVisualizer = go.AddComponent<SceneObjectVisualizer>();
                         _sceneObjectVisualizer.SetShader(debugOverlayShader);
                     }
+                    _sceneObjectVisualizer.SetScanAnchor(ScanAnchorTransform);
                     _sceneObjectVisualizer.Show(_sceneObjectRegistry);
                 }
                 else
@@ -507,6 +515,7 @@ namespace Genesis.RoomScan
                     _keyframeCollector.ClearInMemory();
 
                 _persistence.CreateTmpPackage();
+                _ = CreateScanAnchorAsync();
             }
 
             _keyframeCollector?.SetExportDirectory(
@@ -530,6 +539,23 @@ namespace Genesis.RoomScan
             ScanStarted?.Invoke();
             if (_modules != null)
                 foreach (var m in _modules) m.OnScanStarted();
+        }
+
+        /// <summary>
+        /// Creates a spatial anchor at scan start so AI detections can be stored
+        /// relative to a world-locked reference frame that survives tracking corrections.
+        /// </summary>
+        private async Task CreateScanAnchorAsync()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null || !mgr.IsRoomLoaded) return;
+
+            var result = await mgr.CreateAndSaveSpatialAnchorAsync(default, Quaternion.identity);
+            if (result.HasValue && _persistence != null && _persistence.IsTmpPackage)
+            {
+                _persistence.WriteTmpAnchorData(
+                    result.Value.uuid.ToString(), result.Value.matrix);
+            }
         }
 
         /// <summary>
@@ -766,7 +792,17 @@ namespace Genesis.RoomScan
             if (ok && _keyframeCollector != null)
                 _keyframeCollector.SetExportDirectory(KeyframeDirectory);
             if (ok && _sceneObjectRegistry != null && _sceneObjectRegistry.Count > 0)
+            {
+                // AI positions are stored in anchor-local space during scanning.
+                // Convert to world space for persistence, then restore.
+                var anchorT = ScanAnchorTransform;
+                Matrix4x4 toWorld = anchorT != null ? anchorT.localToWorldMatrix : Matrix4x4.identity;
+                Matrix4x4 toLocal = anchorT != null ? anchorT.worldToLocalMatrix : Matrix4x4.identity;
+
+                _sceneObjectRegistry.Relocate(toWorld, SceneObjectSource.AIDetection);
                 await _persistence.SaveSceneObjectsAsync(_sceneObjectRegistry);
+                _sceneObjectRegistry.Relocate(toLocal, SceneObjectSource.AIDetection);
+            }
             return ok;
         }
 

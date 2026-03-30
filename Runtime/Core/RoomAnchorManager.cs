@@ -174,6 +174,17 @@ namespace Genesis.RoomScan
         public bool HasSpatialAnchor => _activeSpatialAnchor != null;
 
         /// <summary>
+        /// Live transform of the active spatial anchor. Modules can parent objects
+        /// under this to stay world-locked across tracking corrections.
+        /// </summary>
+        public Transform SpatialAnchorTransform =>
+            _activeSpatialAnchor != null ? _activeSpatialAnchor.transform : null;
+
+        /// <summary>UUID of the active spatial anchor, or <see cref="Guid.Empty"/>.</summary>
+        public Guid SpatialAnchorUuid =>
+            _activeSpatialAnchor != null ? _activeSpatialAnchor.Uuid : Guid.Empty;
+
+        /// <summary>
         /// Creates an <see cref="OVRSpatialAnchor"/> at the given world pose, waits for
         /// creation, persists it, and returns the UUID + localToWorld matrix.
         /// Falls back to MRUK anchor position if <paramref name="position"/> is default.
