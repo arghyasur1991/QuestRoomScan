@@ -49,6 +49,7 @@ namespace Genesis.RoomScan.Editor
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
         bool _refinedShaderWired, _occlusionShaderWired, _roomTransformShaderWired, _atlasBakeComputeWired;
+        bool _debugOverlayWired;
         bool _boundarylessManifest;
         bool _cleartextAllowed;
         bool _insecureHttpAllowed;
@@ -143,6 +144,8 @@ namespace Genesis.RoomScan.Editor
                 "roomTransformShader");
             _atlasBakeComputeWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "atlasBakeCompute");
+            _debugOverlayWired = _roomScanner != null && AreFieldsAssigned(_roomScanner,
+                "debugOverlayShader");
             RefreshGSplat();
 
             _boundarylessManifest = ManifestHasBoundaryless();
@@ -907,8 +910,10 @@ namespace Genesis.RoomScan.Editor
 
             if (es.GetComponent<VRDocumentRaycaster>() == null)
                 Undo.AddComponent<VRDocumentRaycaster>(es.gameObject);
-            if (es.GetComponent<ControllerRayDriver>() == null)
-                Undo.AddComponent<ControllerRayDriver>(es.gameObject);
+            var rayDriver = es.GetComponent<ControllerRayDriver>();
+            if (rayDriver == null)
+                rayDriver = Undo.AddComponent<ControllerRayDriver>(es.gameObject);
+            WireComponent(rayDriver);
         }
 
         void EnsureVRInputInfrastructure() => EnsureVRInput();
@@ -940,6 +945,7 @@ namespace Genesis.RoomScan.Editor
             if (_textureRefinement != null)   { StatusRow("OcclusionMesh shader (MR occluder)", _occlusionShaderWired); needsFix |= !_occlusionShaderWired; }
             if (_textureRefinement != null)   { StatusRow("RoomTransform shader (themed overlay)", _roomTransformShaderWired); needsFix |= !_roomTransformShaderWired; }
             if (_textureRefinement != null)   { StatusRow("AtlasBakeCompute (GPU bake)", _atlasBakeComputeWired);      needsFix |= !_atlasBakeComputeWired; }
+            if (_roomScanner != null)        { StatusRow("DebugOverlay shader (scene viz)", _debugOverlayWired);     needsFix |= !_debugOverlayWired; }
             DrawGSplatShaderStatus(ref needsFix);
 
             if (needsFix)
@@ -962,10 +968,14 @@ namespace Genesis.RoomScan.Editor
             WireComponent(_meshExtractor);
             WireComponent(_triplanarCache);
             WireComponent(_depthDebug);
+            WireComponent(_roomScanner);
 
             var tr = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
             WireComponent(tr);
             WireGSplatComponents();
+
+            var rayDriver = FindAny<UI.ControllerRayDriver>();
+            WireComponent(rayDriver);
 
             MarkDirty();
             Refresh();
@@ -1117,6 +1127,22 @@ namespace Genesis.RoomScan.Editor
                     AssignAsset<Shader>(so, "depthVisualizeShader", PKG_SHADERS + "DepthVisualize.shader");
                     so.ApplyModifiedProperties();
                     EditorUtility.SetDirty(dd);
+                    break;
+                }
+                case RoomScanner rs:
+                {
+                    var so = new SerializedObject(rs);
+                    AssignAsset<Shader>(so, "debugOverlayShader", PKG_SHADERS + "DebugOverlay.shader");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(rs);
+                    break;
+                }
+                case UI.ControllerRayDriver crd:
+                {
+                    var so = new SerializedObject(crd);
+                    AssignAsset<Shader>(so, "overlayShader", PKG_SHADERS + "DebugOverlay.shader");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(crd);
                     break;
                 }
             }

@@ -152,6 +152,8 @@ namespace Genesis.RoomScan
 
         [SerializeField, Tooltip("Show scene object annotations overlay (wireframe boxes + labels)")]
         private bool showSceneObjects;
+        [SerializeField, Tooltip("Shader used for debug overlay wireframes and labels")]
+        internal Shader debugOverlayShader;
 
         /// <summary>Toggle scene object annotation overlay on any render mode.</summary>
         public bool ShowSceneObjects
@@ -167,6 +169,7 @@ namespace Genesis.RoomScan
                         var go = new GameObject("SceneObjectVisualizer");
                         go.transform.SetParent(transform, false);
                         _sceneObjectVisualizer = go.AddComponent<SceneObjectVisualizer>();
+                        _sceneObjectVisualizer.SetShader(debugOverlayShader);
                     }
                     _sceneObjectVisualizer.Show(_sceneObjectRegistry);
                 }

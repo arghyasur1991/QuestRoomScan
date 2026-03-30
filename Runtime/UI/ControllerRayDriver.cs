@@ -26,6 +26,9 @@ namespace Genesis.RoomScan.UI
         [SerializeField] private float cursorRadius = 0.006f;
         [SerializeField] private Color cursorColor = new(1f, 1f, 1f, 0.9f);
 
+        [Header("Rendering")]
+        [SerializeField] internal Shader overlayShader;
+
         private OVRInputModule _inputModule;
         private Transform _rayHelper;
         private LineRenderer _line;
@@ -131,7 +134,7 @@ namespace Genesis.RoomScan.UI
             _line.positionCount = 2;
             _line.startWidth = beamWidth;
             _line.endWidth = beamWidth * 0.5f;
-            _line.material = new Material(Shader.Find("Sprites/Default"));
+            _line.material = new Material(overlayShader);
             _line.startColor = _line.endColor = idleColor;
             _line.useWorldSpace = true;
             _line.receiveShadows = false;
@@ -149,7 +152,7 @@ namespace Genesis.RoomScan.UI
             if (col != null) Destroy(col);
 
             _cursorRenderer = _cursor.GetComponent<MeshRenderer>();
-            _cursorRenderer.material = new Material(Shader.Find("Sprites/Default"));
+            _cursorRenderer.material = new Material(overlayShader);
             _cursorRenderer.material.color = cursorColor;
             _cursorRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             _cursorRenderer.receiveShadows = false;

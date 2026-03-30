@@ -18,7 +18,10 @@ namespace Genesis.RoomScan
         private SceneObjectRegistry _registry;
         private readonly List<GameObject> _annotations = new();
         private Material _wireMaterial;
+        private Shader _shader;
         private bool _visible;
+
+        public void SetShader(Shader shader) => _shader = shader;
 
         public void Show(SceneObjectRegistry registry)
         {
@@ -138,14 +141,14 @@ namespace Genesis.RoomScan
         {
             if (_wireMaterial != null) return _wireMaterial;
 
-            // Sprites/Default supports vertex colors + transparency out of the box in URP
-            var shader = Shader.Find("Sprites/Default");
-            if (shader == null) shader = Shader.Find("Universal Render Pipeline/Unlit");
-            if (shader == null) shader = Shader.Find("Unlit/Color");
+            if (_shader == null)
+            {
+                Debug.LogWarning("[SceneObjectVisualizer] No shader assigned — debug overlay may not render in builds");
+                return null;
+            }
 
-            _wireMaterial = new Material(shader);
+            _wireMaterial = new Material(_shader);
             _wireMaterial.color = Color.white;
-            _wireMaterial.renderQueue = (int)RenderQueue.Overlay;
             return _wireMaterial;
         }
 
