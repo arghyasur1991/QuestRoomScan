@@ -1,0 +1,97 @@
+// GPU Non-Maximum Suppression for YOLO object detection.
+// Each thread evaluates one candidate box: if it passes the score threshold
+// and isn't suppressed by a higher-scoring box of the same class, it appends
+// its coords and label to the output AppendBuffers.
+//
+// This avoids reading back all ~2100 raw candidates to CPU — only the final
+// kept detections (~10-20) are read back.
+
+#pragma kernel RunNMS
+
+// Raw model outputs — flat float/int buffers pinned from Inference Engine tensors.
+// The coords tensor is (N, 4) laid out as [cx0, cy0, w0, h0, cx1, cy1, w1, h1, …]
+StructuredBuffer<float>  inBoxCoords;   // N*4 floats
+StructuredBuffer<int>    inClassIDs;    // N ints
+StructuredBuffer<float>  inScores;      // N floats
+
+AppendStructuredBuffer<float4> outCoords;
+AppendStructuredBuffer<int>    outLabelIDs;
+AppendStructuredBuffer<float>  outScores;
+
+float scoreThreshold;
+float iouThreshold;
+uint  numCandidates;
+
+float4 LoadBox(uint idx)
+{
+    uint base_idx = idx * 4;
+    return float4(
+        inBoxCoords[base_idx],
+        inBoxCoords[base_idx + 1],
+        inBoxCoords[base_idx + 2],
+        inBoxCoords[base_idx + 3]);
+}
+
+float ComputeIoU(float4 a, float4 b)
+{
+    float a_x1 = a.x - a.z * 0.5;
+    float a_y1 = a.y - a.w * 0.5;
+    float a_x2 = a.x + a.z * 0.5;
+    float a_y2 = a.y + a.w * 0.5;
+
+    float b_x1 = b.x - b.z * 0.5;
+    float b_y1 = b.y - b.w * 0.5;
+    float b_x2 = b.x + b.z * 0.5;
+    float b_y2 = b.y + b.w * 0.5;
+
+    float ix1 = max(a_x1, b_x1);
+    float iy1 = max(a_y1, b_y1);
+    float ix2 = min(a_x2, b_x2);
+    float iy2 = min(a_y2, b_y2);
+
+    float iw = max(0, ix2 - ix1);
+    float ih = max(0, iy2 - iy1);
+    float intersection = iw * ih;
+
+    float areaA = a.z * a.w;
+    float areaB = b.z * b.w;
+    float uni = areaA + areaB - intersection;
+
+    return uni > 0 ? intersection / uni : 0;
+}
+
+[numthreads(64, 1, 1)]
+void RunNMS(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= numCandidates) return;
+
+    float myScore = inScores[i];
+    if (myScore < scoreThreshold) return;
+
+    float4 myBox = LoadBox(i);
+    int myClass = inClassIDs[i];
+
+    // Greedy NMS: suppressed if any earlier candidate with a higher score
+    // (and same class) overlaps beyond the IoU threshold.
+    bool suppressed = false;
+    for (uint j = 0; j < i; j++)
+    {
+        if (inScores[j] < scoreThreshold) continue;
+        if (inClassIDs[j] != myClass) continue;
+        if (inScores[j] < myScore) continue;
+
+        if (ComputeIoU(myBox, LoadBox(j)) > iouThreshold)
+        {
+            suppressed = true;
+            break;
+        }
+    }
+
+    if (!suppressed)
+    {
+        outCoords.Append(myBox);
+        outLabelIDs.Append(myClass);
+        outScores.Append(myScore);
+    }
+}

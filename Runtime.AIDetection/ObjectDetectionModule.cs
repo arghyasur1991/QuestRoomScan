@@ -18,6 +18,7 @@ namespace Genesis.RoomScan.AIDetection
         [Header("Model")]
         [SerializeField] private ModelAsset modelAsset;
         [SerializeField] private TextAsset classLabels;
+        [SerializeField] private ComputeShader nmsComputeShader;
 
         [Header("Detection Settings")]
         [SerializeField] private int detectEveryNFrames = 5;
@@ -82,8 +83,8 @@ namespace Genesis.RoomScan.AIDetection
             if (_model == null && modelAsset != null)
             {
                 _model = new YoloDetectionModel(
-                    modelAsset, classLabels, backend, splitOverFrames,
-                    layersPerFrame, minConfidence);
+                    modelAsset, classLabels, nmsComputeShader,
+                    backend, splitOverFrames, layersPerFrame, minConfidence);
                 try
                 {
                     await _model.LoadAsync();

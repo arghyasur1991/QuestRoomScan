@@ -8,10 +8,12 @@ namespace Genesis.RoomScan.Editor
     public partial class RoomScanSetupWizard
     {
         const string AI_PKG_DATA = "Packages/com.genesis.roomscan/Runtime.AIDetection/Data/";
+        const string AI_PKG_SHADERS = "Packages/com.genesis.roomscan/Runtime.AIDetection/Shaders/";
 
         ObjectDetectionModule _objectDetection;
         bool _aiModelAssigned;
         bool _aiLabelsAssigned;
+        bool _aiNmsShaderAssigned;
 
         // -----------------------------------------------------------------
         //  Partial method implementations
@@ -24,11 +26,13 @@ namespace Genesis.RoomScan.Editor
             {
                 _aiModelAssigned = AreFieldsAssigned(_objectDetection, "modelAsset");
                 _aiLabelsAssigned = AreFieldsAssigned(_objectDetection, "classLabels");
+                _aiNmsShaderAssigned = AreFieldsAssigned(_objectDetection, "nmsComputeShader");
             }
             else
             {
                 _aiModelAssigned = false;
                 _aiLabelsAssigned = false;
+                _aiNmsShaderAssigned = false;
             }
         }
 
@@ -39,6 +43,7 @@ namespace Genesis.RoomScan.Editor
             {
                 StatusRow("  YOLO model asset (.onnx)", _aiModelAssigned);
                 StatusRow("  Class labels (.txt)", _aiLabelsAssigned);
+                StatusRow("  NMS compute shader", _aiNmsShaderAssigned);
             }
         }
 
@@ -52,6 +57,11 @@ namespace Genesis.RoomScan.Editor
             if (_objectDetection != null && !_aiLabelsAssigned)
             {
                 StatusRow("AI Detection class labels", false);
+                needsFix = true;
+            }
+            if (_objectDetection != null && !_aiNmsShaderAssigned)
+            {
+                StatusRow("AI Detection NMS compute shader", false);
                 needsFix = true;
             }
         }
@@ -86,8 +96,22 @@ namespace Genesis.RoomScan.Editor
                         labelsProp.objectReferenceValue = labels;
                 }
 
+                AssignNmsShader(so);
+
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(odm);
+            }
+        }
+
+        static void AssignNmsShader(SerializedObject so)
+        {
+            var nmsProp = so.FindProperty("nmsComputeShader");
+            if (nmsProp != null && nmsProp.objectReferenceValue == null)
+            {
+                var nms = AssetDatabase.LoadAssetAtPath<ComputeShader>(
+                    AI_PKG_SHADERS + "NMSCompute.compute");
+                if (nms != null)
+                    nmsProp.objectReferenceValue = nms;
             }
         }
 
@@ -110,6 +134,8 @@ namespace Genesis.RoomScan.Editor
                 if (labels != null)
                     labelsProp.objectReferenceValue = labels;
             }
+
+            AssignNmsShader(so);
 
             // Try to find a model asset in the project (user must have imported one)
             var modelProp = so.FindProperty("modelAsset");
