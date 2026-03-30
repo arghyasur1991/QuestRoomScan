@@ -185,6 +185,10 @@ namespace Genesis.RoomScan
                     size = new Vector3(r.width, r.height, 0.05f);
                 }
 
+                // anchor.transform.position is at the TOP face for volumes;
+                // GetAnchorCenter() returns the true geometric center.
+                var worldCenter = anchor.GetAnchorCenter();
+
                 registry.Add(new SceneObject
                 {
                     id = $"mruk_{a}_{label}",
@@ -192,7 +196,7 @@ namespace Genesis.RoomScan
                     source = SceneObjectSource.MRUK,
                     surfaceType = surfType,
                     confidence = 1f,
-                    position = t.position,
+                    position = worldCenter,
                     rotation = t.rotation,
                     size = size,
                     mrukLabel = anchor.Label.ToString(),
@@ -202,7 +206,7 @@ namespace Genesis.RoomScan
 
                 Logger.Info($"[RoomUnderstanding] Anchor[{a}]: label={label}, " +
                             $"rawLabel={anchor.Label}, vol={hasVolume}, plane={hasPlane}, " +
-                            $"size={size}, pos={t.position}");
+                            $"size={size}, center={worldCenter}, anchorPos={t.position}");
             }
             Logger.Info($"[RoomUnderstanding] Populated {added} MRUK objects " +
                         $"(from {_room.Anchors.Count} anchors, {skipped} skipped)");
