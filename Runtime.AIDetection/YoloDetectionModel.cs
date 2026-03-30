@@ -65,11 +65,23 @@ namespace Genesis.RoomScan.AIDetection
             _inputH = inputShape.Get(2) > 0 ? inputShape.Get(2) : 640;
             _inputW = inputShape.Get(3) > 0 ? inputShape.Get(3) : 640;
 
+            // Quest 3 has a 128MB max compute buffer — YOLO at 640x640 exceeds it.
+            // Cap to 320x320 on Android (reduces intermediate buffers by ~4x).
+#if UNITY_ANDROID && !UNITY_EDITOR
+            const int maxDim = 320;
+            if (_inputH > maxDim || _inputW > maxDim)
+            {
+                _inputH = maxDim;
+                _inputW = maxDim;
+            }
+#endif
+
             _labels = _classLabelsAsset != null
                 ? _classLabelsAsset.text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
                 : Array.Empty<string>();
 
-            // Step 2: Build the functional graph with NMS (moderate cost)
+            // Step 2: Build the functional graph with NMS (moderate cost).
+            // Use explicit input shape (may differ from model default on Quest).
             _centersToCorners = new Tensor<float>(new TensorShape(4, 4), new float[]
             {
                 1, 0, 1, 0,
@@ -79,16 +91,17 @@ namespace Genesis.RoomScan.AIDetection
             });
 
             var graph = new FunctionalGraph();
-            var inputs = graph.AddInputs(_rawModel);
-            var modelOutput = Functional.Forward(_rawModel, inputs)[0]; // (1, 84, 8400)
-            var boxCoords = modelOutput[0, 0..4, ..].Transpose(0, 1);  // (8400, 4)
-            var allScores = modelOutput[0, 4.., ..];                    // (80, 8400)
-            var scores = Functional.ReduceMax(allScores, 0);            // (8400)
-            var classIDs = Functional.ArgMax(allScores, 0);             // (8400)
-            var boxCorners = Functional.MatMul(boxCoords, Functional.Constant(_centersToCorners)); // (8400, 4)
-            var indices = Functional.NMS(boxCorners, scores, _iouThreshold, _scoreThreshold);      // (N)
-            var coords = Functional.IndexSelect(boxCoords, 0, indices); // (N, 4)  — center format
-            var labelIDs = Functional.IndexSelect(classIDs, 0, indices); // (N)
+            var input = graph.AddInput(DataType.Float,
+                new DynamicTensorShape(1, 3, _inputH, _inputW));
+            var modelOutput = Functional.Forward(_rawModel, new[] { input })[0];
+            var boxCoords = modelOutput[0, 0..4, ..].Transpose(0, 1);
+            var allScores = modelOutput[0, 4.., ..];
+            var scores = Functional.ReduceMax(allScores, 0);
+            var classIDs = Functional.ArgMax(allScores, 0);
+            var boxCorners = Functional.MatMul(boxCoords, Functional.Constant(_centersToCorners));
+            var indices = Functional.NMS(boxCorners, scores, _iouThreshold, _scoreThreshold);
+            var coords = Functional.IndexSelect(boxCoords, 0, indices);
+            var labelIDs = Functional.IndexSelect(classIDs, 0, indices);
             await Task.Yield();
 
             // Step 3: Compile graph + create worker (heavy — GPU shader compilation)
