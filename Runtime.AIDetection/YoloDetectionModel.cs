@@ -59,8 +59,8 @@ namespace Genesis.RoomScan.AIDetection
 
             _rawModel = ModelLoader.Load(_modelAsset);
             var inputShape = _rawModel.inputs[0].shape;
-            _inputH = inputShape[2].value;
-            _inputW = inputShape[3].value;
+            _inputH = inputShape.Get(2) > 0 ? inputShape.Get(2) : 640;
+            _inputW = inputShape.Get(3) > 0 ? inputShape.Get(3) : 640;
 
             _labels = _classLabelsAsset != null
                 ? _classLabelsAsset.text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
