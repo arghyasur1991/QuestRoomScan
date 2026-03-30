@@ -150,6 +150,20 @@ namespace Genesis.RoomScan
             return result;
         }
 
+        /// <summary>Remove all objects from a specific source (e.g. stale MRUK data on reload).</summary>
+        public void RemoveBySource(SceneObjectSource source)
+        {
+            for (int i = _objects.Count - 1; i >= 0; i--)
+            {
+                if (_objects[i].source == source)
+                {
+                    UpdateCounts(_objects[i], -1);
+                    _byId.Remove(_objects[i].id);
+                    _objects.RemoveAt(i);
+                }
+            }
+        }
+
         public void Clear()
         {
             _objects.Clear();

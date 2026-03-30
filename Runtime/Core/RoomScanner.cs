@@ -478,7 +478,6 @@ namespace Genesis.RoomScan
             IsScanning = true;
             KeyframeRelocation = Matrix4x4.identity;
             _cachedUnwrap = null;
-            if (_persistence != null) _persistence.ClearActivePackage();
 
             if (_scanResourcesReleased)
             {
@@ -487,16 +486,27 @@ namespace Genesis.RoomScan
                 _scanResourcesReleased = false;
             }
 
-            _prevVertexCount = 0;
-            _stableVertexCycles = 0;
-            _stableColorCycles = 0;
-            _prevColorCoverage = 0f;
-            _stabilizedTime = 0f;
+            // Resume within the same session: if we already have an active tmp
+            // package with scan data, keep it instead of nuking everything.
+            bool resuming = _persistence != null
+                && _persistence.ActivePackageId == RoomScanPersistence.TmpPkgId
+                && _volumeIntegrator.IntegrationCount > 0;
 
-            if (_keyframeCollector != null)
-                _keyframeCollector.ClearInMemory();
+            if (!resuming)
+            {
+                _prevVertexCount = 0;
+                _stableVertexCycles = 0;
+                _stableColorCycles = 0;
+                _prevColorCoverage = 0f;
+                _stabilizedTime = 0f;
 
-            _persistence.CreateTmpPackage();
+                if (_persistence != null) _persistence.ClearActivePackage();
+                if (_keyframeCollector != null)
+                    _keyframeCollector.ClearInMemory();
+
+                _persistence.CreateTmpPackage();
+            }
+
             _keyframeCollector?.SetExportDirectory(
                 Path.Combine(_persistence.ActivePackageDirectory, "keyframes"));
 
@@ -511,8 +521,9 @@ namespace Genesis.RoomScan
             _depthCapture.StartDepthCapture();
 
             _sceneObjectRegistry ??= new SceneObjectRegistry();
+            PopulateSceneObjectRegistry();
 
-            Logger.Info($"StartScanning — integrationCount={_volumeIntegrator.IntegrationCount}");
+            Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
             ScanStarted?.Invoke();
             if (_modules != null)
                 foreach (var m in _modules) m.OnScanStarted();
@@ -1241,14 +1252,18 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Populates the SceneObjectRegistry from MRUK anchors (and loaded data).
-        /// Called after a refined mesh is available.
+        /// Populates the SceneObjectRegistry from live MRUK anchors.
+        /// Always replaces stale MRUK entries with fresh tracking-accurate positions.
+        /// Safe to call multiple times — AI detections are preserved.
         /// </summary>
         private void PopulateSceneObjectRegistry()
         {
             _sceneObjectRegistry ??= new SceneObjectRegistry();
-            if (_roomUnderstanding != null && _sceneObjectRegistry.MrukCount == 0)
-                _roomUnderstanding.PopulateRegistry(_sceneObjectRegistry);
+            if (_roomUnderstanding == null) return;
+
+            _roomUnderstanding.RefreshRoom();
+            _sceneObjectRegistry.RemoveBySource(SceneObjectSource.MRUK);
+            _roomUnderstanding.PopulateRegistry(_sceneObjectRegistry);
         }
 
         internal void ApplyHQTexture(Texture2D atlas)

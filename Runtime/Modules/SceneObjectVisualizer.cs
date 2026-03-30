@@ -175,7 +175,7 @@ namespace Genesis.RoomScan
             _canvas.sortingOrder = 30000;
 
             var rt = _canvas.GetComponent<RectTransform>();
-            rt.sizeDelta = new Vector2(0.4f, 0.12f);
+            rt.sizeDelta = new Vector2(300f, 80f);
             rt.localScale = Vector3.one * 0.001f;
 
             var bg = new GameObject("BG");
@@ -199,8 +199,10 @@ namespace Genesis.RoomScan
             _text = textGo.AddComponent<UnityEngine.UI.Text>();
             _text.text = text;
             _text.color = color;
-            _text.fontSize = 24;
-            _text.font = Font.CreateDynamicFontFromOSFont("Arial", 24);
+            _text.fontSize = 28;
+            _text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            if (_text.font == null)
+                _text.font = Resources.GetBuiltinResource<Font>("Arial.ttf");
             _text.alignment = TextAnchor.MiddleCenter;
             _text.horizontalOverflow = HorizontalWrapMode.Overflow;
             _text.verticalOverflow = VerticalWrapMode.Overflow;

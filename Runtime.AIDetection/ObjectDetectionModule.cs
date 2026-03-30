@@ -52,6 +52,9 @@ namespace Genesis.RoomScan.AIDetection
             if (_camera == null)
                 _camera = scanner.GetComponentInChildren<ICameraProvider>();
 
+            Logger.Info($"[ObjectDetection] Init — model={(modelAsset != null ? "assigned" : "MISSING")}, " +
+                        $"camera={(_camera != null ? _camera.GetType().Name : "MISSING")}, " +
+                        $"labels={(classLabels != null ? "assigned" : "MISSING")}");
             if (modelAsset == null)
                 Logger.Warning("[ObjectDetection] No model asset assigned — AI detection will be inactive");
         }

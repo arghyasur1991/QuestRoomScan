@@ -57,7 +57,10 @@ namespace Genesis.RoomScan.AIDetection
             if (_modelAsset == null)
                 throw new InvalidOperationException("No model asset assigned");
 
+            // Step 1: Parse the ONNX model (heavy — ~100-300ms on Quest)
             _rawModel = ModelLoader.Load(_modelAsset);
+            await Task.Yield();
+
             var inputShape = _rawModel.inputs[0].shape;
             _inputH = inputShape.Get(2) > 0 ? inputShape.Get(2) : 640;
             _inputW = inputShape.Get(3) > 0 ? inputShape.Get(3) : 640;
@@ -66,8 +69,7 @@ namespace Genesis.RoomScan.AIDetection
                 ? _classLabelsAsset.text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
                 : Array.Empty<string>();
 
-            // Build a compiled model that includes NMS in the graph (GPU-accelerated).
-            // Raw YOLO output: (1, numClasses+4, numBoxes) e.g. (1, 84, 8400)
+            // Step 2: Build the functional graph with NMS (moderate cost)
             _centersToCorners = new Tensor<float>(new TensorShape(4, 4), new float[]
             {
                 1, 0, 1, 0,
@@ -87,10 +89,13 @@ namespace Genesis.RoomScan.AIDetection
             var indices = Functional.NMS(boxCorners, scores, _iouThreshold, _scoreThreshold);      // (N)
             var coords = Functional.IndexSelect(boxCoords, 0, indices); // (N, 4)  — center format
             var labelIDs = Functional.IndexSelect(classIDs, 0, indices); // (N)
+            await Task.Yield();
 
-            _worker = new Worker(graph.Compile(coords, labelIDs), _backend);
+            // Step 3: Compile graph + create worker (heavy — GPU shader compilation)
+            var compiled = graph.Compile(coords, labelIDs);
+            await Task.Yield();
 
-            // Warmup pass
+            _worker = new Worker(compiled, _backend);
             await Task.Yield();
         }
 
