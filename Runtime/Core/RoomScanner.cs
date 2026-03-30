@@ -160,11 +160,20 @@ namespace Genesis.RoomScan
             set
             {
                 showSceneObjects = value;
-                var viz = GetComponent<SceneObjectVisualizer>();
-                if (value && viz != null)
-                    viz.Show(_sceneObjectRegistry);
+                if (value)
+                {
+                    if (_sceneObjectVisualizer == null)
+                    {
+                        var go = new GameObject("SceneObjectVisualizer");
+                        go.transform.SetParent(transform, false);
+                        _sceneObjectVisualizer = go.AddComponent<SceneObjectVisualizer>();
+                    }
+                    _sceneObjectVisualizer.Show(_sceneObjectRegistry);
+                }
                 else
-                    viz?.Hide();
+                {
+                    _sceneObjectVisualizer?.Hide();
+                }
             }
         }
 
@@ -248,6 +257,7 @@ namespace Genesis.RoomScan
 
         // Scene object registry
         private SceneObjectRegistry _sceneObjectRegistry;
+        private SceneObjectVisualizer _sceneObjectVisualizer;
 
         public bool HasRefinedTexture { get; private set; }
         public bool HasHQRefinedTexture { get; private set; }
@@ -496,6 +506,8 @@ namespace Genesis.RoomScan
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StartCapture();
             _depthCapture.StartDepthCapture();
+
+            _sceneObjectRegistry ??= new SceneObjectRegistry();
 
             Logger.Info($"StartScanning — integrationCount={_volumeIntegrator.IntegrationCount}");
             ScanStarted?.Invoke();

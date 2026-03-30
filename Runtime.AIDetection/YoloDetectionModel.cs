@@ -1,6 +1,5 @@
 #if HAS_AI_INFERENCE
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Unity.InferenceEngine;
@@ -10,8 +9,8 @@ namespace Genesis.RoomScan.AIDetection
 {
     /// <summary>
     /// YOLO-based object detection via Unity Inference Engine.
-    /// Loads a .sentis ModelAsset, runs time-sliced GPU inference, and returns
-    /// Detection[] results. Uses our own camera pipeline, not Meta's building blocks.
+    /// Compiles a model graph with built-in GPU NMS (matching Unity's official reference),
+    /// runs time-sliced inference to avoid VR frame drops, and returns Detection[] results.
     /// </summary>
     public class YoloDetectionModel : IDetectionModel
     {
@@ -21,11 +20,13 @@ namespace Genesis.RoomScan.AIDetection
         private readonly bool _splitOverFrames;
         private readonly int _layersPerFrame;
         private readonly float _scoreThreshold;
-        private readonly int _maxDetections;
+        private readonly float _iouThreshold;
 
-        private Model _model;
+        private Model _rawModel;
         private Worker _worker;
+        private Tensor<float> _centersToCorners;
         private string[] _labels;
+        private int _inputW, _inputH;
         private bool _disposed;
 
         public string ModelName => "YOLOv9t";
@@ -39,7 +40,8 @@ namespace Genesis.RoomScan.AIDetection
             bool splitOverFrames = true,
             int layersPerFrame = 22,
             float scoreThreshold = 0.5f,
-            int maxDetections = 100)
+            int maxDetections = 100,
+            float iouThreshold = 0.5f)
         {
             _modelAsset = modelAsset;
             _classLabelsAsset = classLabelsAsset;
@@ -47,7 +49,7 @@ namespace Genesis.RoomScan.AIDetection
             _splitOverFrames = splitOverFrames;
             _layersPerFrame = layersPerFrame;
             _scoreThreshold = scoreThreshold;
-            _maxDetections = maxDetections;
+            _iouThreshold = iouThreshold;
         }
 
         public async Task LoadAsync()
@@ -55,14 +57,40 @@ namespace Genesis.RoomScan.AIDetection
             if (_modelAsset == null)
                 throw new InvalidOperationException("No model asset assigned");
 
-            _model = ModelLoader.Load(_modelAsset);
-            _worker = new Worker(_model, _backend);
+            _rawModel = ModelLoader.Load(_modelAsset);
+            var inputShape = _rawModel.inputs[0].shape;
+            _inputH = inputShape[2].value;
+            _inputW = inputShape[3].value;
 
             _labels = _classLabelsAsset != null
                 ? _classLabelsAsset.text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
                 : Array.Empty<string>();
 
-            // Warmup pass to avoid first-frame spike
+            // Build a compiled model that includes NMS in the graph (GPU-accelerated).
+            // Raw YOLO output: (1, numClasses+4, numBoxes) e.g. (1, 84, 8400)
+            _centersToCorners = new Tensor<float>(new TensorShape(4, 4), new float[]
+            {
+                1, 0, 1, 0,
+                0, 1, 0, 1,
+                -0.5f, 0, 0.5f, 0,
+                0, -0.5f, 0, 0.5f
+            });
+
+            var graph = new FunctionalGraph();
+            var inputs = graph.AddInputs(_rawModel);
+            var modelOutput = Functional.Forward(_rawModel, inputs)[0]; // (1, 84, 8400)
+            var boxCoords = modelOutput[0, 0..4, ..].Transpose(0, 1);  // (8400, 4)
+            var allScores = modelOutput[0, 4.., ..];                    // (80, 8400)
+            var scores = Functional.ReduceMax(allScores, 0);            // (8400)
+            var classIDs = Functional.ArgMax(allScores, 0);             // (8400)
+            var boxCorners = Functional.MatMul(boxCoords, Functional.Constant(_centersToCorners)); // (8400, 4)
+            var indices = Functional.NMS(boxCorners, scores, _iouThreshold, _scoreThreshold);      // (N)
+            var coords = Functional.IndexSelect(boxCoords, 0, indices); // (N, 4)  — center format
+            var labelIDs = Functional.IndexSelect(classIDs, 0, indices); // (N)
+
+            _worker = new Worker(graph.Compile(coords, labelIDs), _backend);
+
+            // Warmup pass
             await Task.Yield();
         }
 
@@ -70,11 +98,7 @@ namespace Genesis.RoomScan.AIDetection
         {
             if (_worker == null || src == null) return Array.Empty<Detection>();
 
-            var inputShape = _model.inputs[0].shape;
-            int inputH = inputShape[2].value;
-            int inputW = inputShape[3].value;
-
-            using var input = new Tensor<float>(new TensorShape(1, 3, inputH, inputW));
+            using var input = new Tensor<float>(new TensorShape(1, 3, _inputH, _inputW));
             TextureConverter.ToTensor(src, input);
 
             if (_splitOverFrames)
@@ -92,112 +116,40 @@ namespace Genesis.RoomScan.AIDetection
                 _worker.Schedule(input);
             }
 
-            // Read output tensors — shape depends on model export, handle common YOLO formats
-            var output = _worker.PeekOutput(0) as Tensor<float>;
-            if (output == null) return Array.Empty<Detection>();
-
-            var cpuOutput = await output.ReadbackAndCloneAsync();
+            // Read post-NMS outputs: coords (N, 4) and labelIDs (N)
+            using var coordsCpu = await (_worker.PeekOutput("output_0") as Tensor<float>).ReadbackAndCloneAsync();
+            using var labelsCpu = await (_worker.PeekOutput("output_1") as Tensor<int>).ReadbackAndCloneAsync();
             ct.ThrowIfCancellationRequested();
 
-            float scaleX = (float)src.width / inputW;
-            float scaleY = (float)src.height / inputH;
+            float scaleX = (float)src.width / _inputW;
+            float scaleY = (float)src.height / _inputH;
 
-            var results = DecodeDetections(cpuOutput, scaleX, scaleY);
-            cpuOutput.Dispose();
-            return ApplyNms(results, 0.5f);
-        }
+            int count = coordsCpu.shape[0];
+            var results = new Detection[Mathf.Min(count, 200)];
 
-        private List<Detection> DecodeDetections(Tensor<float> output, float scaleX, float scaleY)
-        {
-            var results = new List<Detection>();
-            var shape = output.shape;
-
-            // Common YOLO output: [1, numClasses+4, numBoxes] or [1, numBoxes, numClasses+4]
-            int dim1 = shape[1];
-            int dim2 = shape[2];
-            bool transposed = dim1 > dim2;
-            int numBoxes = transposed ? dim2 : dim1;
-            int numFields = transposed ? dim1 : dim2;
-            int numClasses = numFields - 4;
-            if (numClasses <= 0) return results;
-
-            for (int b = 0; b < numBoxes && results.Count < _maxDetections; b++)
+            for (int n = 0; n < results.Length; n++)
             {
-                float bestScore = 0;
-                int bestClass = -1;
+                float cx = coordsCpu[n, 0];
+                float cy = coordsCpu[n, 1];
+                float w = coordsCpu[n, 2];
+                float h = coordsCpu[n, 3];
+                int classId = labelsCpu[n];
 
-                for (int c = 0; c < numClasses; c++)
-                {
-                    float score = transposed ? output[0, c + 4, b] : output[0, b, c + 4];
-                    if (score > bestScore)
-                    {
-                        bestScore = score;
-                        bestClass = c;
-                    }
-                }
-
-                if (bestScore < _scoreThreshold) continue;
-
-                float cx, cy, w, h;
-                if (transposed)
-                {
-                    cx = output[0, 0, b]; cy = output[0, 1, b];
-                    w  = output[0, 2, b]; h  = output[0, 3, b];
-                }
-                else
-                {
-                    cx = output[0, b, 0]; cy = output[0, b, 1];
-                    w  = output[0, b, 2]; h  = output[0, b, 3];
-                }
-
-                results.Add(new Detection
+                results[n] = new Detection
                 {
                     boundingBox = new Rect(
                         (cx - w * 0.5f) * scaleX,
                         (cy - h * 0.5f) * scaleY,
                         w * scaleX,
                         h * scaleY),
-                    classId = bestClass,
-                    label = bestClass < _labels.Length ? _labels[bestClass] : $"cls_{bestClass}",
-                    confidence = bestScore
-                });
+                    classId = classId,
+                    label = classId >= 0 && classId < _labels.Length
+                        ? _labels[classId] : $"cls_{classId}",
+                    confidence = 1f
+                };
             }
 
             return results;
-        }
-
-        /// <summary>Simple CPU non-max suppression — sufficient for ≤100 candidates.</summary>
-        private static Detection[] ApplyNms(List<Detection> detections, float iouThreshold)
-        {
-            detections.Sort((a, b) => b.confidence.CompareTo(a.confidence));
-            var kept = new List<Detection>();
-
-            for (int i = 0; i < detections.Count; i++)
-            {
-                bool suppressed = false;
-                for (int j = 0; j < kept.Count; j++)
-                {
-                    if (IoU(detections[i].boundingBox, kept[j].boundingBox) > iouThreshold)
-                    {
-                        suppressed = true;
-                        break;
-                    }
-                }
-                if (!suppressed) kept.Add(detections[i]);
-            }
-
-            return kept.ToArray();
-        }
-
-        private static float IoU(Rect a, Rect b)
-        {
-            float x1 = Mathf.Max(a.xMin, b.xMin);
-            float y1 = Mathf.Max(a.yMin, b.yMin);
-            float x2 = Mathf.Min(a.xMax, b.xMax);
-            float y2 = Mathf.Min(a.yMax, b.yMax);
-            float inter = Mathf.Max(0, x2 - x1) * Mathf.Max(0, y2 - y1);
-            float union = a.width * a.height + b.width * b.height - inter;
-            return union > 0 ? inter / union : 0;
         }
 
         public void Dispose()
@@ -206,6 +158,8 @@ namespace Genesis.RoomScan.AIDetection
             _disposed = true;
             _worker?.Dispose();
             _worker = null;
+            _centersToCorners?.Dispose();
+            _centersToCorners = null;
         }
     }
 }

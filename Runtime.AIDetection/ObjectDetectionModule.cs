@@ -9,8 +9,9 @@ namespace Genesis.RoomScan.AIDetection
 {
     /// <summary>
     /// Scan-time object detection orchestrator. Runs inference on passthrough camera
-    /// frames, projects 2D detections to 3D world space using our own ICameraProvider +
-    /// DepthCapture, and feeds results into SceneObjectRegistry.
+    /// frames, projects 2D detections to 3D world space using ICameraProvider + raycasting,
+    /// and feeds results into SceneObjectRegistry.
+    /// Discovered automatically by RoomScanner via <see cref="IRoomScanModule"/>.
     /// </summary>
     public class ObjectDetectionModule : MonoBehaviour, IRoomScanModule
     {
@@ -25,10 +26,13 @@ namespace Genesis.RoomScan.AIDetection
         [SerializeField] private bool splitOverFrames = true;
         [SerializeField, Range(1, 100)] private int layersPerFrame = 22;
 
+        [Header("Deduplication")]
+        [Tooltip("Detections closer than this distance to an existing object of the same class are merged")]
+        [SerializeField] private float mergeDistanceM = 0.4f;
+
         private IDetectionModel _model;
+        private RoomScanner _scanner;
         private ICameraProvider _camera;
-        private DepthCapture _depth;
-        private SceneObjectRegistry _registry;
         private bool _running;
         private bool _busy;
         private int _detectionCount;
@@ -39,15 +43,39 @@ namespace Genesis.RoomScan.AIDetection
 
         public event Action<SceneObject> OnObjectDetected;
 
+        // ── IRoomScanModule lifecycle ────────────────────────────────
+
         public void OnModuleInitialize(RoomScanner scanner)
         {
+            _scanner = scanner;
             _camera = scanner.GetComponent<ICameraProvider>();
-            _depth = scanner.GetComponent<DepthCapture>();
+            if (_camera == null)
+                _camera = scanner.GetComponentInChildren<ICameraProvider>();
+
+            if (modelAsset == null)
+                Logger.Warning("[ObjectDetection] No model asset assigned — AI detection will be inactive");
         }
 
-        public async void StartDetection(SceneObjectRegistry registry)
+        public async void OnScanStarted()
         {
-            _registry = registry;
+            var registry = _scanner?.SceneObjectRegistry;
+            if (registry == null || modelAsset == null)
+            {
+                Logger.Info("[ObjectDetection] Skipping — no registry or model asset");
+                return;
+            }
+            await StartDetection(registry);
+        }
+
+        public void OnScanStopped()
+        {
+            StopDetection();
+        }
+
+        // ── Detection control ────────────────────────────────────────
+
+        public async Task StartDetection(SceneObjectRegistry registry)
+        {
             if (_model == null && modelAsset != null)
             {
                 _model = new YoloDetectionModel(
@@ -56,7 +84,8 @@ namespace Genesis.RoomScan.AIDetection
                 try
                 {
                     await _model.LoadAsync();
-                    Logger.Info($"[ObjectDetection] Model loaded: {_model.ModelName}");
+                    Logger.Info($"[ObjectDetection] Model loaded: {_model.ModelName}, " +
+                                $"{_model.ClassLabels?.Length ?? 0} classes");
                 }
                 catch (Exception e)
                 {
@@ -65,17 +94,24 @@ namespace Genesis.RoomScan.AIDetection
                 }
             }
             _running = _model is { IsLoaded: true };
+            if (_running)
+                Logger.Info("[ObjectDetection] Detection started");
         }
 
         public void StopDetection()
         {
+            if (_running)
+                Logger.Info($"[ObjectDetection] Stopped. Total detections: {_detectionCount}");
             _running = false;
         }
 
         public List<SceneObject> GetAccumulatedDetections()
         {
-            return _registry?.FindBySource(SceneObjectSource.AIDetection) ?? new List<SceneObject>();
+            var registry = _scanner?.SceneObjectRegistry;
+            return registry?.FindBySource(SceneObjectSource.AIDetection) ?? new List<SceneObject>();
         }
+
+        // ── Per-frame detection loop ─────────────────────────────────
 
         private void Update()
         {
@@ -93,7 +129,10 @@ namespace Genesis.RoomScan.AIDetection
                 if (frame == null) return;
 
                 var detections = await _model.DetectAsync(frame);
-                if (detections == null) return;
+                if (detections == null || detections.Length == 0) return;
+
+                var registry = _scanner?.SceneObjectRegistry;
+                if (registry == null) return;
 
                 foreach (var d in detections)
                 {
@@ -101,6 +140,9 @@ namespace Genesis.RoomScan.AIDetection
 
                     var worldPos = ProjectToWorld(d.boundingBox);
                     if (!worldPos.HasValue) continue;
+
+                    if (IsDuplicate(registry, d.label, worldPos.Value))
+                        continue;
 
                     var worldScale = EstimateWorldScale(d.boundingBox, worldPos.Value);
 
@@ -119,7 +161,7 @@ namespace Genesis.RoomScan.AIDetection
                     };
 
                     _detectionCount++;
-                    _registry?.Add(obj);
+                    registry.Add(obj);
                     OnObjectDetected?.Invoke(obj);
                 }
             }
@@ -133,49 +175,51 @@ namespace Genesis.RoomScan.AIDetection
             }
         }
 
-        /// <summary>
-        /// 2D bbox center → 3D world position using camera intrinsics + depth.
-        /// </summary>
+        // ── 2D → 3D projection using camera intrinsics + raycasting ─
+
         private Vector3? ProjectToWorld(Rect bbox)
         {
-            if (_camera == null || _depth == null) return null;
+            if (_camera == null) return null;
 
-            float cx = bbox.center.x;
-            float cy = bbox.center.y;
             var res = _camera.CurrentResolution;
             if (res.x < 1 || res.y < 1) return null;
 
+            float cx = bbox.center.x;
+            float cy = bbox.center.y;
             var focal = _camera.FocalLength;
             var pp = _camera.PrincipalPoint;
 
-            var dir = new Vector3(
+            var localDir = new Vector3(
                 (cx - pp.x) / focal.x,
                 -(cy - pp.y) / focal.y,
                 1f).normalized;
 
-            float uvx = cx / res.x;
-            float uvy = 1f - cy / res.y;
-            float depth = SampleDepth(new Vector2(uvx, uvy));
-            if (depth <= 0.1f || depth > 20f) return null;
-
             var camPose = _camera.CameraPose;
-            var worldDir = camPose.rotation * dir;
-            return camPose.position + worldDir * depth;
+            var worldDir = camPose.rotation * localDir;
+
+            // Raycast against scene geometry for accurate depth
+            if (Physics.Raycast(new Ray(camPose.position, worldDir), out var hit, 20f))
+                return hit.point;
+
+            // Fallback: project at estimated average room depth
+            return camPose.position + worldDir * 2.5f;
         }
 
-        private float SampleDepth(Vector2 uv)
+        private bool IsDuplicate(SceneObjectRegistry registry, string label, Vector3 pos)
         {
-            // DepthCapture may expose depth sampling in the future; for now use
-            // the environment depth texture approach from AROcclusionManager.
-            // This is a placeholder that returns a fixed estimate.
-            return 2.5f;
+            var nearby = registry.FindInRadius(pos, mergeDistanceM);
+            foreach (var existing in nearby)
+            {
+                if (string.Equals(existing.label, label, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
         }
 
         private Vector3 EstimateWorldScale(Rect bbox, Vector3 worldPos)
         {
             if (_camera == null) return Vector3.one * 0.3f;
 
-            var res = _camera.CurrentResolution;
             var focal = _camera.FocalLength;
             float depth = (worldPos - _camera.CameraPose.position).magnitude;
 
@@ -183,11 +227,15 @@ namespace Genesis.RoomScan.AIDetection
             float heightM = bbox.height / focal.y * depth;
             float depthM = (widthM + heightM) * 0.25f;
 
-            return new Vector3(widthM, heightM, depthM);
+            return new Vector3(
+                Mathf.Max(widthM, 0.05f),
+                Mathf.Max(heightM, 0.05f),
+                Mathf.Max(depthM, 0.05f));
         }
 
         private void OnDestroy()
         {
+            StopDetection();
             _model?.Dispose();
         }
     }
