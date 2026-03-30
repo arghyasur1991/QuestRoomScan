@@ -31,7 +31,9 @@ namespace Genesis.RoomScan.AIDetection
 
         [Header("Deduplication")]
         [Tooltip("Detections closer than this distance to an existing object of the same class are merged")]
-        [SerializeField] private float mergeDistanceM = 0.4f;
+        [SerializeField] private float mergeDistanceM = 0.8f;
+        [Tooltip("How fast existing positions converge to new observations (0=ignore new, 1=snap)")]
+        [SerializeField, Range(0f, 1f)] private float positionSmoothingAlpha = 0.3f;
 
         private IDetectionModel _model;
         private RoomScanner _scanner;
@@ -39,6 +41,9 @@ namespace Genesis.RoomScan.AIDetection
         private bool _running;
         private bool _busy;
         private int _detectionCount;
+
+        // Track observation counts per object for weighted averaging
+        private readonly Dictionary<string, int> _observationCounts = new();
 
         public string ModuleName => "Object Detection";
         public bool IsRunning => _running;
@@ -124,17 +129,26 @@ namespace Genesis.RoomScan.AIDetection
         {
             if (!_running || _busy || _camera == null || !_camera.IsReady) return;
             if (Time.frameCount % detectEveryNFrames != 0) return;
-            _ = RunDetection();
+
+            // Capture camera state NOW, at the same instant as the frame texture.
+            // Inference is async and will complete many frames later — we need
+            // the pose from when the image was actually taken.
+            var framePose = _camera.CameraPose;
+            var frameFocal = _camera.FocalLength;
+            var framePP = _camera.PrincipalPoint;
+            var frameRes = _camera.CurrentResolution;
+            var frame = _camera.CurrentFrame;
+
+            if (frame == null) return;
+            _ = RunDetection(frame, framePose, frameFocal, framePP, frameRes);
         }
 
-        private async Task RunDetection()
+        private async Task RunDetection(Texture frame, Pose cameraPose,
+            Vector2 focal, Vector2 principalPoint, Vector2 resolution)
         {
             _busy = true;
             try
             {
-                var frame = _camera.CurrentFrame;
-                if (frame == null) return;
-
                 var detections = await _model.DetectAsync(frame);
                 if (detections == null || detections.Length == 0) return;
 
@@ -145,13 +159,19 @@ namespace Genesis.RoomScan.AIDetection
                 {
                     if (d.confidence < minConfidence) continue;
 
-                    var worldPos = ProjectToWorld(d.boundingBox);
+                    var worldPos = ProjectToWorld(d.boundingBox, cameraPose,
+                        focal, principalPoint, resolution);
                     if (!worldPos.HasValue) continue;
 
-                    if (IsDuplicate(registry, d.label, worldPos.Value))
+                    var existing = FindExisting(registry, d.label, worldPos.Value);
+                    if (existing != null)
+                    {
+                        UpdateExisting(registry, existing, worldPos.Value, d);
                         continue;
+                    }
 
-                    var worldScale = EstimateWorldScale(d.boundingBox, worldPos.Value);
+                    var worldScale = EstimateWorldScale(d.boundingBox, worldPos.Value,
+                        cameraPose, focal);
 
                     var obj = new SceneObject
                     {
@@ -168,6 +188,7 @@ namespace Genesis.RoomScan.AIDetection
                     };
 
                     _detectionCount++;
+                    _observationCounts[obj.id] = 1;
                     registry.Add(obj);
                     OnObjectDetected?.Invoke(obj);
                 }
@@ -182,53 +203,62 @@ namespace Genesis.RoomScan.AIDetection
             }
         }
 
-        // ── 2D → 3D projection using camera intrinsics + raycasting ─
+        // ── 2D → 3D projection using CAPTURED camera pose ───────────
 
-        private Vector3? ProjectToWorld(Rect bbox)
+        private Vector3? ProjectToWorld(Rect bbox, Pose cameraPose,
+            Vector2 focal, Vector2 principalPoint, Vector2 resolution)
         {
-            if (_camera == null) return null;
-
-            var res = _camera.CurrentResolution;
-            if (res.x < 1 || res.y < 1) return null;
+            if (resolution.x < 1 || resolution.y < 1) return null;
 
             float cx = bbox.center.x;
             float cy = bbox.center.y;
-            var focal = _camera.FocalLength;
-            var pp = _camera.PrincipalPoint;
 
             var localDir = new Vector3(
-                (cx - pp.x) / focal.x,
-                -(cy - pp.y) / focal.y,
+                (cx - principalPoint.x) / focal.x,
+                -(cy - principalPoint.y) / focal.y,
                 1f).normalized;
 
-            var camPose = _camera.CameraPose;
-            var worldDir = camPose.rotation * localDir;
+            var worldDir = cameraPose.rotation * localDir;
 
-            // Raycast against scene geometry for accurate depth
-            if (Physics.Raycast(new Ray(camPose.position, worldDir), out var hit, 20f))
+            if (Physics.Raycast(new Ray(cameraPose.position, worldDir), out var hit, 20f))
                 return hit.point;
 
-            // Fallback: project at estimated average room depth
-            return camPose.position + worldDir * 2.5f;
+            return cameraPose.position + worldDir * 2.5f;
         }
 
-        private bool IsDuplicate(SceneObjectRegistry registry, string label, Vector3 pos)
+        // ── Deduplication with position smoothing ────────────────────
+
+        private SceneObject FindExisting(SceneObjectRegistry registry, string label, Vector3 pos)
         {
             var nearby = registry.FindInRadius(pos, mergeDistanceM);
             foreach (var existing in nearby)
             {
+                if (existing.source != SceneObjectSource.AIDetection) continue;
                 if (string.Equals(existing.label, label, StringComparison.OrdinalIgnoreCase))
-                    return true;
+                    return existing;
             }
-            return false;
+            return null;
         }
 
-        private Vector3 EstimateWorldScale(Rect bbox, Vector3 worldPos)
+        private void UpdateExisting(SceneObjectRegistry registry, SceneObject existing,
+            Vector3 newPos, Detection d)
         {
-            if (_camera == null) return Vector3.one * 0.3f;
+            _observationCounts.TryGetValue(existing.id, out int count);
+            count++;
+            _observationCounts[existing.id] = count;
 
-            var focal = _camera.FocalLength;
-            float depth = (worldPos - _camera.CameraPose.position).magnitude;
+            // Exponential moving average — early observations have more weight,
+            // converges to stable position as count grows
+            float alpha = positionSmoothingAlpha / Mathf.Sqrt(count);
+            existing.position = Vector3.Lerp(existing.position, newPos, alpha);
+            existing.confidence = Mathf.Max(existing.confidence, d.confidence);
+            registry.Update(existing);
+        }
+
+        private Vector3 EstimateWorldScale(Rect bbox, Vector3 worldPos,
+            Pose cameraPose, Vector2 focal)
+        {
+            float depth = (worldPos - cameraPose.position).magnitude;
 
             float widthM = bbox.width / focal.x * depth;
             float heightM = bbox.height / focal.y * depth;

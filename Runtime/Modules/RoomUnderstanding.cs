@@ -27,7 +27,6 @@ namespace Genesis.RoomScan
         public void OnModuleInitialize(RoomScanner scanner) { }
 
         private MRUKRoom _room;
-        private bool _roomResolved;
 
         // Cached per-vertex classification
         private SurfaceType[] _lastClassification;
@@ -143,14 +142,21 @@ namespace Genesis.RoomScan
         {
             if (registry == null) return;
             EnsureRoom();
-            if (_room == null || _room.Anchors == null) return;
+            if (_room == null || _room.Anchors == null)
+            {
+                Logger.Warning("[RoomUnderstanding] PopulateRegistry — no MRUK room available");
+                return;
+            }
 
+            int added = 0;
             for (int a = 0; a < _room.Anchors.Count; a++)
             {
                 var anchor = _room.Anchors[a];
+                string label = GetAnchorLabel(anchor);
+                if (label == null) continue; // GLOBAL_MESH — skip
+
                 var t = anchor.transform;
                 var surfType = ClassifyAnchor(anchor);
-                string label = GetAnchorLabel(anchor);
 
                 var size = Vector3.one;
                 if (anchor.VolumeBounds.HasValue)
@@ -174,14 +180,20 @@ namespace Genesis.RoomScan
                     mrukLabel = anchor.Label.ToString(),
                     anchorUuid = anchor.Anchor != null ? anchor.Anchor.Uuid.ToString() : ""
                 });
+                added++;
             }
+            Logger.Info($"[RoomUnderstanding] Populated {added} MRUK objects " +
+                        $"(from {_room.Anchors.Count} anchors)");
         }
 
         private static string GetAnchorLabel(MRUKAnchor anchor)
         {
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.GLOBAL_MESH)) return null;
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.FLOOR)) return "floor";
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.CEILING)) return "ceiling";
             if (anchor.HasAnyLabel(WallLabels)) return "wall";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.DOOR_FRAME)) return "door";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.WINDOW_FRAME)) return "window";
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.TABLE)) return "table";
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.COUCH)) return "couch";
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.BED)) return "bed";
@@ -189,8 +201,9 @@ namespace Genesis.RoomScan
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.STORAGE)) return "storage";
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN)) return "screen";
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.PLANT)) return "plant";
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.WALL_ART)) return "wall_art";
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.OTHER)) return "other";
-            return "unknown";
+            return anchor.Label.ToString().ToLowerInvariant();
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -199,8 +212,9 @@ namespace Genesis.RoomScan
 
         private void EnsureRoom()
         {
-            if (_roomResolved) return;
-            _roomResolved = true;
+            // Only skip re-resolution if we actually have a valid room.
+            // If room was null last time, keep trying — MRUK may not have loaded yet.
+            if (_room != null) return;
 
             var mruk = FindFirstObjectByType<MRUK>();
             if (mruk == null) return;
@@ -212,7 +226,7 @@ namespace Genesis.RoomScan
         /// <summary>Re-query MRUK for the current room (e.g., after scene reload).</summary>
         public void RefreshRoom()
         {
-            _roomResolved = false;
+            _room = null;
             EnsureRoom();
         }
 
@@ -256,19 +270,28 @@ namespace Genesis.RoomScan
             MRUKAnchor.SceneLabels.STORAGE |
             MRUKAnchor.SceneLabels.SCREEN |
             MRUKAnchor.SceneLabels.PLANT |
+            MRUKAnchor.SceneLabels.WALL_ART |
             MRUKAnchor.SceneLabels.OTHER;
+
+        private const MRUKAnchor.SceneLabels StructureLabels =
+            MRUKAnchor.SceneLabels.DOOR_FRAME |
+            MRUKAnchor.SceneLabels.WINDOW_FRAME;
 
         private static SurfaceType ClassifyAnchor(MRUKAnchor anchor)
         {
+            if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.GLOBAL_MESH))
+                return SurfaceType.Unknown;
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.FLOOR))
                 return SurfaceType.Floor;
             if (anchor.HasAnyLabel(MRUKAnchor.SceneLabels.CEILING))
                 return SurfaceType.Ceiling;
             if (anchor.HasAnyLabel(WallLabels))
                 return SurfaceType.Wall;
+            if (anchor.HasAnyLabel(StructureLabels))
+                return SurfaceType.Wall;
             if (anchor.HasAnyLabel(FurnitureLabels))
                 return SurfaceType.Furniture;
-            return SurfaceType.Unknown;
+            return SurfaceType.Furniture;
         }
 
         private static bool IsWall(MRUKAnchor anchor) => anchor.HasAnyLabel(WallLabels);
