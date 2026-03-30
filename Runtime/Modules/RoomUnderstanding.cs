@@ -158,7 +158,7 @@ namespace Genesis.RoomScan
                 else if (anchor.PlaneRect.HasValue)
                 {
                     var r = anchor.PlaneRect.Value;
-                    size = new Vector3(r.width, 0.05f, r.height);
+                    size = new Vector3(r.width, r.height, 0.05f);
                 }
 
                 registry.Add(new SceneObject
