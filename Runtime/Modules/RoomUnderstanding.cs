@@ -160,19 +160,26 @@ namespace Genesis.RoomScan
             }
 
             int added = 0;
+            int skipped = 0;
             for (int a = 0; a < _room.Anchors.Count; a++)
             {
                 var anchor = _room.Anchors[a];
                 string label = GetAnchorLabel(anchor);
-                if (label == null) continue; // GLOBAL_MESH — skip
+                if (label == null)
+                {
+                    skipped++;
+                    continue;
+                }
 
                 var t = anchor.transform;
                 var surfType = ClassifyAnchor(anchor);
 
                 var size = Vector3.one;
-                if (anchor.VolumeBounds.HasValue)
+                bool hasVolume = anchor.VolumeBounds.HasValue;
+                bool hasPlane = anchor.PlaneRect.HasValue;
+                if (hasVolume)
                     size = anchor.VolumeBounds.Value.size;
-                else if (anchor.PlaneRect.HasValue)
+                else if (hasPlane)
                 {
                     var r = anchor.PlaneRect.Value;
                     size = new Vector3(r.width, r.height, 0.05f);
@@ -192,9 +199,13 @@ namespace Genesis.RoomScan
                     anchorUuid = anchor.Anchor != null ? anchor.Anchor.Uuid.ToString() : ""
                 });
                 added++;
+
+                Logger.Info($"[RoomUnderstanding] Anchor[{a}]: label={label}, " +
+                            $"rawLabel={anchor.Label}, vol={hasVolume}, plane={hasPlane}, " +
+                            $"size={size}, pos={t.position}");
             }
             Logger.Info($"[RoomUnderstanding] Populated {added} MRUK objects " +
-                        $"(from {_room.Anchors.Count} anchors)");
+                        $"(from {_room.Anchors.Count} anchors, {skipped} skipped)");
         }
 
         private static string GetAnchorLabel(MRUKAnchor anchor)
