@@ -974,6 +974,7 @@ namespace Genesis.RoomScan
 
                 // Resolve relocation from anchor
                 Matrix4x4 relocRefined = Matrix4x4.identity;
+                Matrix4x4 relocBase = Matrix4x4.identity;
                 if (anchorData != null && !string.IsNullOrEmpty(anchorData.anchorUuid)
                     && Guid.TryParse(anchorData.anchorUuid, out Guid uuid))
                 {
@@ -990,6 +991,11 @@ namespace Genesis.RoomScan
                                     ? FloatsToMatrix(anchorData.baseMatrixAtSave)
                                     : Matrix4x4.identity);
                             relocRefined = RoomAnchorManager.ComputeRelocationMatrix(loadedMatrix.Value, refinedMatrix);
+
+                            Matrix4x4 baseMatrix = anchorData.baseMatrixAtSave != null
+                                ? FloatsToMatrix(anchorData.baseMatrixAtSave)
+                                : Matrix4x4.identity;
+                            relocBase = RoomAnchorManager.ComputeRelocationMatrix(loadedMatrix.Value, baseMatrix);
                         }
                     }
                 }
@@ -1068,11 +1074,11 @@ namespace Genesis.RoomScan
                 ActivePackageId = pkgId;
                 _activeAnchorData = anchorData ?? new PackageAnchorData();
 
-                // Load scene objects if present — relocate AI detections to current tracking space
+                // Load scene objects if present — relocate AI detections using scan-time anchor
                 var sceneObjects = LoadSceneObjects(Path.Combine(RoomScansRoot, pkgId));
                 if (sceneObjects.Count > 0 && scanner != null)
                 {
-                    sceneObjects.Relocate(relocRefined, SceneObjectSource.AIDetection);
+                    sceneObjects.Relocate(relocBase, SceneObjectSource.AIDetection);
                     scanner.SetSceneObjectRegistry(sceneObjects);
                 }
 
