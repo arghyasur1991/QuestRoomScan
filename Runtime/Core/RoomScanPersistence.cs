@@ -902,11 +902,12 @@ namespace Genesis.RoomScan
                     baseMatrixAtSave = MatrixToFloats(anchorAtSave)
                 };
 
-                // Load scene objects if present — relocate AI detections to current tracking space
+                // Load scene objects — AI positions are stored in anchor-local space,
+                // so apply anchorNow directly (not the relocation delta) to get current world space.
                 var sceneObjects = LoadSceneObjects(pkgDir);
                 if (sceneObjects.Count > 0 && scanner != null)
                 {
-                    sceneObjects.Relocate(relocVolume, SceneObjectSource.AIDetection);
+                    sceneObjects.Relocate(anchorNow, SceneObjectSource.AIDetection);
                     scanner.SetSceneObjectRegistry(sceneObjects);
                 }
 
@@ -980,7 +981,7 @@ namespace Genesis.RoomScan
 
                 // Resolve relocation from anchor
                 Matrix4x4 relocRefined = Matrix4x4.identity;
-                Matrix4x4 relocBase = Matrix4x4.identity;
+                Matrix4x4 anchorNow = Matrix4x4.identity;
                 if (anchorData != null && !string.IsNullOrEmpty(anchorData.anchorUuid)
                     && Guid.TryParse(anchorData.anchorUuid, out Guid uuid))
                 {
@@ -991,19 +992,24 @@ namespace Genesis.RoomScan
                         await SwitchToUnityMainThreadAsync(unitySync);
                         if (loadedMatrix.HasValue)
                         {
+                            anchorNow = loadedMatrix.Value;
+
                             Matrix4x4 refinedMatrix = anchorData.refinedMatrixAtCreate != null
                                 ? FloatsToMatrix(anchorData.refinedMatrixAtCreate)
                                 : (anchorData.baseMatrixAtSave != null
                                     ? FloatsToMatrix(anchorData.baseMatrixAtSave)
                                     : Matrix4x4.identity);
-                            relocRefined = RoomAnchorManager.ComputeRelocationMatrix(loadedMatrix.Value, refinedMatrix);
-
-                            Matrix4x4 baseMatrix = anchorData.baseMatrixAtSave != null
-                                ? FloatsToMatrix(anchorData.baseMatrixAtSave)
-                                : Matrix4x4.identity;
-                            relocBase = RoomAnchorManager.ComputeRelocationMatrix(loadedMatrix.Value, baseMatrix);
+                            relocRefined = RoomAnchorManager.ComputeRelocationMatrix(anchorNow, refinedMatrix);
                         }
                     }
+                }
+
+                // MRUK fallback for scene objects if spatial anchor failed
+                if (anchorNow == Matrix4x4.identity)
+                {
+                    var roomAnchor = RoomAnchorManager.Instance;
+                    if (roomAnchor != null && roomAnchor.IsRoomLoaded)
+                        anchorNow = roomAnchor.GetRoomLocalToWorldForPersistence();
                 }
 
                 if (relocRefined != Matrix4x4.identity)
@@ -1080,11 +1086,11 @@ namespace Genesis.RoomScan
                 ActivePackageId = pkgId;
                 _activeAnchorData = anchorData ?? new PackageAnchorData();
 
-                // Load scene objects if present — relocate AI detections using scan-time anchor
+                // Load scene objects — AI positions are anchor-local, apply anchorNow directly
                 var sceneObjects = LoadSceneObjects(Path.Combine(RoomScansRoot, pkgId));
                 if (sceneObjects.Count > 0 && scanner != null)
                 {
-                    sceneObjects.Relocate(relocBase, SceneObjectSource.AIDetection);
+                    sceneObjects.Relocate(anchorNow, SceneObjectSource.AIDetection);
                     scanner.SetSceneObjectRegistry(sceneObjects);
                 }
 
@@ -1165,17 +1171,18 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Writes anchor UUID and matrix to the active _tmp package's anchor.json.
-        /// Called when the scan session anchor is created so it survives promotion.
+        /// Writes anchor UUID and matrix to the active package's anchor.json.
+        /// Called when the scan session anchor is created so it's available on
+        /// promotion and for cross-session reload.
         /// </summary>
-        public void WriteTmpAnchorData(string uuid, Matrix4x4 matrix)
+        public void WriteSessionAnchorData(string uuid, Matrix4x4 matrix)
         {
-            if (!IsTmpPackage) return;
+            if (!HasActivePackage) return;
             _activeAnchorData ??= new PackageAnchorData();
             _activeAnchorData.anchorUuid = uuid;
             _activeAnchorData.baseMatrixAtSave = MatrixToFloats(matrix);
             WriteAnchorData(PkgAnchorJson, _activeAnchorData);
-            Logger.Info($"Tmp anchor.json written — uuid={uuid}");
+            Logger.Info($"Session anchor written to {ActivePackageId} — uuid={uuid}");
         }
 
         /// <summary>

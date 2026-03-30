@@ -531,7 +531,16 @@ namespace Genesis.RoomScan
             provider?.StartCapture();
             _depthCapture.StartDepthCapture();
 
-            _sceneObjectRegistry ??= new SceneObjectRegistry();
+            if (!resuming)
+            {
+                // Fresh scan: reset registry — stale AI detections from a previous
+                // session/load are in a different anchor frame and must be discarded.
+                _sceneObjectRegistry = new SceneObjectRegistry();
+            }
+            else
+            {
+                _sceneObjectRegistry ??= new SceneObjectRegistry();
+            }
             PopulateSceneObjectRegistry();
             SubscribeToAnchorsChanged();
 
@@ -551,9 +560,9 @@ namespace Genesis.RoomScan
             if (mgr == null || !mgr.IsRoomLoaded) return;
 
             var result = await mgr.CreateAndSaveSpatialAnchorAsync(default, Quaternion.identity);
-            if (result.HasValue && _persistence != null && _persistence.IsTmpPackage)
+            if (result.HasValue && _persistence != null && _persistence.HasActivePackage)
             {
-                _persistence.WriteTmpAnchorData(
+                _persistence.WriteSessionAnchorData(
                     result.Value.uuid.ToString(), result.Value.matrix);
             }
         }
@@ -792,17 +801,7 @@ namespace Genesis.RoomScan
             if (ok && _keyframeCollector != null)
                 _keyframeCollector.SetExportDirectory(KeyframeDirectory);
             if (ok && _sceneObjectRegistry != null && _sceneObjectRegistry.Count > 0)
-            {
-                // AI positions are stored in anchor-local space during scanning.
-                // Convert to world space for persistence, then restore.
-                var anchorT = ScanAnchorTransform;
-                Matrix4x4 toWorld = anchorT != null ? anchorT.localToWorldMatrix : Matrix4x4.identity;
-                Matrix4x4 toLocal = anchorT != null ? anchorT.worldToLocalMatrix : Matrix4x4.identity;
-
-                _sceneObjectRegistry.Relocate(toWorld, SceneObjectSource.AIDetection);
                 await _persistence.SaveSceneObjectsAsync(_sceneObjectRegistry);
-                _sceneObjectRegistry.Relocate(toLocal, SceneObjectSource.AIDetection);
-            }
             return ok;
         }
 
