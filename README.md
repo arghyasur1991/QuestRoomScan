@@ -112,6 +112,19 @@ For Gaussian Splat support, also add the optional dependency:
 }
 ```
 
+For AI object detection (YOLO), add the Sentis inference package:
+
+```json
+{
+  "dependencies": {
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git",
+    "com.unity.ai.inference": "2.3.0"
+  }
+}
+```
+
+Both optional dependencies can be combined. The `Genesis.RoomScan.AIDetection` assembly auto-activates when `com.unity.ai.inference` is installed (via `HAS_AI_INFERENCE` define).
+
 ## Quick Start
 
 1. Create a new blank URP scene
