@@ -49,6 +49,7 @@ namespace Genesis.RoomScan.Editor
 
         bool _depthCaptureWired, _volumeWired, _meshMatWired, _triplanarWired, _computeShaderWired;
         bool _refinedShaderWired, _occlusionShaderWired, _atlasBakeComputeWired;
+        bool _debugOverlayWired;
         bool _boundarylessManifest;
         bool _cleartextAllowed;
         bool _insecureHttpAllowed;
@@ -141,7 +142,10 @@ namespace Genesis.RoomScan.Editor
                 "occlusionMeshShader");
             _atlasBakeComputeWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "atlasBakeCompute");
+            _debugOverlayWired = _roomScanner != null && AreFieldsAssigned(_roomScanner,
+                "debugOverlayShader");
             RefreshGSplat();
+            RefreshAIDetection();
 
             _boundarylessManifest = ManifestHasBoundaryless();
             _cleartextAllowed = ManifestHasCleartextTraffic();
@@ -156,6 +160,15 @@ namespace Genesis.RoomScan.Editor
         partial void DrawGSplatShaderStatus(ref bool needsFix);
         partial void WireGSplatComponents();
         partial void SetupGSplatIfAvailable(GameObject root);
+
+        // Partial methods implemented in RoomScanSetupWizard.AIDetection.cs when
+        // HAS_AI_INFERENCE is defined; silent no-ops otherwise.
+        partial void RefreshAIDetection();
+        partial void DrawAIDetectionOptionalStatus();
+        partial void CheckAIDetectionAnyMissing(ref bool anyMissing);
+        partial void DrawAIDetectionShaderStatus(ref bool needsFix);
+        partial void WireAIDetectionComponents();
+        partial void SetupAIDetectionIfAvailable(GameObject root);
 
         // =================================================================
         //  GUI
@@ -549,7 +562,9 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("TriplanarCache", _triplanarCache != null);
             StatusRowOptional("KeyframeCollector", _keyframeCollector != null);
             DrawGSplatOptionalStatus();
+            DrawAIDetectionOptionalStatus();
             StatusRowOptional("TextureRefinement", _roomScanner != null && _roomScanner.GetComponent<TextureRefinement>() != null);
+            StatusRowOptional("RoomUnderstanding (MRUK bridge)", _roomScanner != null && _roomScanner.GetComponent<RoomUnderstanding>() != null);
             StatusRowOptional("CameraDebugOverlay", _cameraDebug != null);
             StatusRowOptional("DepthDebugOverlay", _depthDebug != null);
             StatusRowOptional("RoomScanInputHandler", _inputHandler != null);
@@ -559,6 +574,7 @@ namespace Genesis.RoomScan.Editor
                                       _debugMenu == null ||
                                       _inputHandler == null;
             CheckGSplatAnyMissing(ref anyOptionalMissing);
+            CheckAIDetectionAnyMissing(ref anyOptionalMissing);
             if (anyOptionalMissing)
             {
                 GUILayout.Space(2);
@@ -634,7 +650,10 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<TriplanarCache>(root);
             if (root.GetComponent<TextureRefinement>() == null)
                 Undo.AddComponent<TextureRefinement>(root);
+            if (root.GetComponent<RoomUnderstanding>() == null)
+                Undo.AddComponent<RoomUnderstanding>(root);
             SetupGSplatIfAvailable(root);
+            SetupAIDetectionIfAvailable(root);
 
             // Optional components not covered by RequireComponent
             if (root.GetComponent<RoomScanInputHandler>() == null)
@@ -697,9 +716,12 @@ namespace Genesis.RoomScan.Editor
             bool hasPCAProvider = _cameraProvider != null;
             bool hasRefinement = _textureRefinement != null;
 
+            bool hasRoomUnderstanding = _roomScanner != null && _roomScanner.GetComponent<RoomUnderstanding>() != null;
+
             StatusRowOptional("PassthroughCameraAccess (camera RGB)", hasPCA);
             StatusRowOptional("PassthroughCameraProvider", hasPCAProvider);
             StatusRowOptional("TextureRefinement (atlas baking)", hasRefinement);
+            StatusRowOptional("RoomUnderstanding (MRUK bridge)", hasRoomUnderstanding);
 
             if (hasRefinement)
             {
@@ -730,7 +752,7 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
             }
 
-            bool gameReadyMissing = !hasPCA || !hasPCAProvider || !hasRefinement;
+            bool gameReadyMissing = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding;
             if (gameReadyMissing)
             {
                 GUILayout.Space(2);
@@ -801,6 +823,8 @@ namespace Genesis.RoomScan.Editor
 
             if (root.GetComponent<TextureRefinement>() == null)
                 Undo.AddComponent<TextureRefinement>(root);
+            if (root.GetComponent<RoomUnderstanding>() == null)
+                Undo.AddComponent<RoomUnderstanding>(root);
 
             var tr = root.GetComponent<TextureRefinement>();
             if (tr != null)
@@ -897,8 +921,10 @@ namespace Genesis.RoomScan.Editor
 
             if (es.GetComponent<VRDocumentRaycaster>() == null)
                 Undo.AddComponent<VRDocumentRaycaster>(es.gameObject);
-            if (es.GetComponent<ControllerRayDriver>() == null)
-                Undo.AddComponent<ControllerRayDriver>(es.gameObject);
+            var rayDriver = es.GetComponent<ControllerRayDriver>();
+            if (rayDriver == null)
+                rayDriver = Undo.AddComponent<ControllerRayDriver>(es.gameObject);
+            WireComponent(rayDriver);
         }
 
         void EnsureVRInputInfrastructure() => EnsureVRInput();
@@ -929,7 +955,9 @@ namespace Genesis.RoomScan.Editor
             if (_textureRefinement != null)   { StatusRow("RefinedMesh shader (texture refine)", _refinedShaderWired); needsFix |= !_refinedShaderWired; }
             if (_textureRefinement != null)   { StatusRow("OcclusionMesh shader (MR occluder)", _occlusionShaderWired); needsFix |= !_occlusionShaderWired; }
             if (_textureRefinement != null)   { StatusRow("AtlasBakeCompute (GPU bake)", _atlasBakeComputeWired);      needsFix |= !_atlasBakeComputeWired; }
+            if (_roomScanner != null)        { StatusRow("DebugOverlay shader (scene viz)", _debugOverlayWired);     needsFix |= !_debugOverlayWired; }
             DrawGSplatShaderStatus(ref needsFix);
+            DrawAIDetectionShaderStatus(ref needsFix);
 
             if (needsFix)
             {
@@ -951,10 +979,15 @@ namespace Genesis.RoomScan.Editor
             WireComponent(_meshExtractor);
             WireComponent(_triplanarCache);
             WireComponent(_depthDebug);
+            WireComponent(_roomScanner);
 
             var tr = _roomScanner != null ? _roomScanner.GetComponent<TextureRefinement>() : null;
             WireComponent(tr);
             WireGSplatComponents();
+            WireAIDetectionComponents();
+
+            var rayDriver = FindAny<UI.ControllerRayDriver>();
+            WireComponent(rayDriver);
 
             MarkDirty();
             Refresh();
@@ -1107,10 +1140,29 @@ namespace Genesis.RoomScan.Editor
                     EditorUtility.SetDirty(dd);
                     break;
                 }
+                case RoomScanner rs:
+                {
+                    var so = new SerializedObject(rs);
+                    AssignAsset<Shader>(so, "debugOverlayShader", PKG_SHADERS + "DebugOverlay.shader");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(rs);
+                    break;
+                }
+                case UI.ControllerRayDriver crd:
+                {
+                    var so = new SerializedObject(crd);
+                    AssignAsset<Shader>(so, "overlayShader", PKG_SHADERS + "DebugOverlay.shader");
+                    so.ApplyModifiedProperties();
+                    EditorUtility.SetDirty(crd);
+                    break;
+                }
             }
 
 #if HAS_GAUSSIAN_SPLATTING
             WireGSplatComponent(component);
+#endif
+#if HAS_AI_INFERENCE
+            WireAIDetectionComponent(component);
 #endif
         }
 

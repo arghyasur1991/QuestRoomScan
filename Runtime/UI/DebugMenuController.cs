@@ -26,7 +26,8 @@ namespace Genesis.RoomScan.UI
         // Scan view elements
         private Label _valScanning, _valIntegrations, _valKeyframes, _valRender, _valPackage;
         private Label _valProgress, _valPhase, _valColorCoverage, _valFrozen, _valMeshStats;
-        private Button _btnToggleScan, _btnRenderMode, _btnFreezeTint, _btnSaveScan, _btnDeleteArtifact;
+        private Label _valSceneObjectList;
+        private Button _btnToggleScan, _btnRenderMode, _btnFreezeTint, _btnSceneObjects, _btnSaveScan, _btnDeleteArtifact;
 
         // Saved scans view
         private ScrollView _scanList;
@@ -159,6 +160,8 @@ namespace Genesis.RoomScan.UI
             _btnToggleScan = _root.Q<Button>("btn-toggle-scan");
             _btnRenderMode = _root.Q<Button>("btn-render-mode");
             _btnFreezeTint = _root.Q<Button>("btn-freeze-tint");
+            _btnSceneObjects = _root.Q<Button>("btn-scene-objects");
+            _valSceneObjectList = _root.Q<Label>("val-scene-object-list");
             _btnSaveScan = _root.Q<Button>("btn-save-scan");
             _btnDeleteArtifact = _root.Q<Button>("btn-delete-artifact");
 
@@ -216,6 +219,12 @@ namespace Genesis.RoomScan.UI
             {
                 var s = RoomScanner.Instance;
                 if (s != null) s.ShowFreezeTint = !s.ShowFreezeTint;
+            });
+
+            _btnSceneObjects?.RegisterCallback<ClickEvent>(_ =>
+            {
+                var s = RoomScanner.Instance;
+                if (s != null) s.ShowSceneObjects = !s.ShowSceneObjects;
             });
 
             _btnSaveScan?.RegisterCallback<ClickEvent>(async _ =>
@@ -470,6 +479,22 @@ namespace Genesis.RoomScan.UI
             if (_btnFreezeTint != null)
                 _btnFreezeTint.text = scanner.ShowFreezeTint ? "Freeze Tint: ON" : "Freeze Tint: OFF";
 
+            if (_btnSceneObjects != null)
+            {
+                var reg = scanner.SceneObjectRegistry;
+                _btnSceneObjects.text = scanner.ShowSceneObjects
+                    ? $"Objects: ON ({reg?.MrukCount ?? 0}M + {reg?.AiCount ?? 0}AI)"
+                    : "Objects: OFF";
+
+                if (_valSceneObjectList != null)
+                {
+                    bool show = scanner.ShowSceneObjects && reg != null && reg.Count > 0;
+                    _valSceneObjectList.style.display = show ? DisplayStyle.Flex : DisplayStyle.None;
+                    if (show)
+                        _valSceneObjectList.text = BuildSceneObjectListing(reg);
+                }
+            }
+
             var vi = VolumeIntegrator.Instance;
             if (vi != null) SetLabel(_valIntegrations, vi.IntegrationCount.ToString());
 
@@ -686,6 +711,34 @@ namespace Genesis.RoomScan.UI
                 _fpsFrames = 0;
                 _fpsTimer = 0f;
             }
+        }
+
+        private static string BuildSceneObjectListing(SceneObjectRegistry reg)
+        {
+            var sb = new System.Text.StringBuilder(512);
+            sb.Append("<b>MRUK:</b> ");
+            bool any = false;
+            foreach (var obj in reg.AllObjects)
+            {
+                if (obj.source != SceneObjectSource.MRUK) continue;
+                if (any) sb.Append(", ");
+                sb.Append(obj.label);
+                any = true;
+            }
+            if (!any) sb.Append("(none)");
+
+            sb.Append("\n<b>AI:</b> ");
+            any = false;
+            foreach (var obj in reg.AllObjects)
+            {
+                if (obj.source != SceneObjectSource.AIDetection) continue;
+                if (any) sb.Append(", ");
+                sb.Append($"{obj.label}({obj.confidence:F2})");
+                any = true;
+            }
+            if (!any) sb.Append("(none)");
+
+            return sb.ToString();
         }
 
         private static void SetLabel(Label label, string text)

@@ -1,0 +1,61 @@
+// GPU depth-buffer projection for AI object detection.
+// Given world-space camera ray directions, samples the environment depth texture
+// (via DepthKit.hlsl) and outputs world-space surface positions.
+//
+// Reuses the exact same depth projection pipeline as VolumeIntegration.compute:
+//   gsDepthWorldToNDC -> gsDepthSample -> gsDepthNDCtoWorld
+//
+// CopyDepthTexture: freezes the live depth buffer into a persistent RT so that
+// async YOLO inference can project against the same depth frame as the color image.
+
+#pragma kernel ProjectDetections
+#pragma kernel CopyDepthTexture
+
+#include "Packages/com.genesis.roomscan/Runtime/Shaders/DepthKit.hlsl"
+
+// ── ProjectDetections ──────────────────────────────────────────────
+
+StructuredBuffer<float4> _Rays;     // per detection: (dirX, dirY, dirZ, 0) world-space
+float3 _CamOrigin;                   // world-space camera position
+uint _Count;
+RWStructuredBuffer<float4> _Results; // per detection: (worldX, worldY, worldZ, valid)
+
+[numthreads(64, 1, 1)]
+void ProjectDetections(uint id : SV_DispatchThreadID)
+{
+    if (id >= _Count) return;
+
+    float3 dir = normalize(_Rays[id].xyz);
+    float3 world1M = _CamOrigin + dir;
+
+    float3 ndc = gsDepthWorldToNDC(world1M);
+
+    if (ndc.x < 0.01 || ndc.x > 0.99 || ndc.y < 0.01 || ndc.y > 0.99)
+    {
+        _Results[id] = float4(0, 0, 0, 0);
+        return;
+    }
+
+    float depthNDC = gsDepthSample(ndc.xy);
+    float3 surfaceWorld = gsDepthNDCtoWorld(float3(ndc.xy, depthNDC));
+
+    _Results[id] = float4(surfaceWorld, 1);
+}
+
+// ── CopyDepthTexture ───────────────────────────────────────────────
+// Samples from gsDepthTex (live global, any format) and writes to a
+// RWTexture2DArray<float>. Using texture sampling ensures correct format
+// conversion regardless of the source texture's underlying pixel format
+// (external OVR texture, R16_UNorm bilateral output, etc.).
+
+RWTexture2DArray<float> _DepthCopyDest;
+
+[numthreads(8, 8, 1)]
+void CopyDepthTexture(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= gsDepthTexSize.x || id.y >= gsDepthTexSize.y) return;
+
+    float2 uv = (float2(id.xy) + 0.5) / float2(gsDepthTexSize);
+    _DepthCopyDest[uint3(id.xy, 0)] = gsDepthTex.SampleLevel(gsPointClampSampler, float3(uv, 0), 0);
+    _DepthCopyDest[uint3(id.xy, 1)] = gsDepthTex.SampleLevel(gsPointClampSampler, float3(uv, 1), 0);
+}

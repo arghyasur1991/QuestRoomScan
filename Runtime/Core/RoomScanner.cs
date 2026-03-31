@@ -14,21 +14,21 @@ namespace Genesis.RoomScan
     public enum ScanRenderMode
     {
         /// <summary>Live GPU mesh with vertex colors only (triplanar forced off).</summary>
-        Vertex,
+        Vertex = 0,
         /// <summary>Live GPU mesh with triplanar-projected camera textures (falls back to vertex colors where data is missing).</summary>
-        Triplanar,
+        Triplanar = 1,
         /// <summary>UV-unwrapped mesh with on-device baked atlas.</summary>
-        Refined,
+        Refined = 2,
         /// <summary>UV-unwrapped mesh with server-enhanced high-resolution atlas.</summary>
-        HQRefined,
+        HQRefined = 3,
         /// <summary>Refined mesh rendered as invisible depth-only occluder for MR.</summary>
-        Occlusion,
+        Occlusion = 4,
         /// <summary>Gaussian Splat point cloud rendered from server-trained PLY data.</summary>
-        Splat,
+        Splat = 6,
         /// <summary>All scan rendering disabled.</summary>
-        None,
+        None = 7,
         /// <summary>Live GPU mesh wireframe via barycentric edge detection.</summary>
-        Wireframe
+        Wireframe = 8
     }
 
     /// <summary>High-level phase of the scanning session.</summary>
@@ -125,6 +125,7 @@ namespace Genesis.RoomScan
         private KeyframeCollector _keyframeCollector;
         private IGSplatProvider _gsplatProvider;
         private TextureRefinement _textureRefinement;
+        private RoomUnderstanding _roomUnderstanding;
         private DebugMenuController _debugMenu;
         private ICameraProvider _customCameraProvider;
         private IRoomScanModule[] _modules;
@@ -138,6 +139,39 @@ namespace Genesis.RoomScan
         {
             get => showFreezeTint;
             set { showFreezeTint = value; Shader.SetGlobalFloat(NoFreezeTintID, value ? 0f : 1f); }
+        }
+
+        /// <summary>The unified scene object registry (MRUK + AI detections).</summary>
+        public SceneObjectRegistry SceneObjectRegistry => _sceneObjectRegistry;
+
+        [SerializeField, Tooltip("Show scene object annotations overlay (wireframe boxes + labels)")]
+        private bool showSceneObjects;
+        [SerializeField, Tooltip("Shader used for debug overlay wireframes and labels")]
+        internal Shader debugOverlayShader;
+
+        /// <summary>Toggle scene object annotation overlay on any render mode.</summary>
+        public bool ShowSceneObjects
+        {
+            get => showSceneObjects;
+            set
+            {
+                showSceneObjects = value;
+                if (value)
+                {
+                    if (_sceneObjectVisualizer == null)
+                    {
+                        var go = new GameObject("SceneObjectVisualizer");
+                        go.transform.SetParent(transform, false);
+                        _sceneObjectVisualizer = go.AddComponent<SceneObjectVisualizer>();
+                        _sceneObjectVisualizer.SetShader(debugOverlayShader);
+                    }
+                    _sceneObjectVisualizer.Show(_sceneObjectRegistry);
+                }
+                else
+                {
+                    _sceneObjectVisualizer?.Hide();
+                }
+            }
         }
 
         public bool IsScanning { get; private set; }
@@ -210,8 +244,13 @@ namespace Genesis.RoomScan
         private Material _occlusionMaterial;
         private Texture2D _refinedAtlasTexture;
         private Texture2D _hqAtlasTexture;
+        private Texture2D _normalMapTexture;
         private Mesh _refinedMesh;
         private UnwrappedMeshResult? _cachedUnwrap;
+
+        // Scene object registry
+        private SceneObjectRegistry _sceneObjectRegistry;
+        private SceneObjectVisualizer _sceneObjectVisualizer;
 
         public bool HasRefinedTexture { get; private set; }
         public bool HasHQRefinedTexture { get; private set; }
@@ -314,6 +353,7 @@ namespace Genesis.RoomScan
             _keyframeCollector = GetComponent<KeyframeCollector>();
             _gsplatProvider = GetComponent<IGSplatProvider>();
             _textureRefinement = GetComponent<TextureRefinement>();
+            _roomUnderstanding = GetComponent<RoomUnderstanding>();
             _debugMenu = GetComponentInChildren<DebugMenuController>();
             _roomAnchor = GetComponent<RoomAnchorManager>();
         }
@@ -332,10 +372,12 @@ namespace Genesis.RoomScan
         private void OnDisable()
         {
             StopScanning();
+            UnsubscribeFromAnchorsChanged();
         }
 
         private float _lastScannerLog;
         private int _integrateCount;
+        private bool _subscribedToAnchorsChanged;
 
         private void Update()
         {
@@ -403,7 +445,6 @@ namespace Genesis.RoomScan
             IsScanning = true;
             KeyframeRelocation = Matrix4x4.identity;
             _cachedUnwrap = null;
-            if (_persistence != null) _persistence.ClearActivePackage();
 
             if (_scanResourcesReleased)
             {
@@ -412,16 +453,28 @@ namespace Genesis.RoomScan
                 _scanResourcesReleased = false;
             }
 
-            _prevVertexCount = 0;
-            _stableVertexCycles = 0;
-            _stableColorCycles = 0;
-            _prevColorCoverage = 0f;
-            _stabilizedTime = 0f;
+            // Resume within the same session: if we already have an active tmp
+            // package with scan data, keep it instead of nuking everything.
+            bool resuming = _persistence != null
+                && _persistence.ActivePackageId == RoomScanPersistence.TmpPkgId
+                && _volumeIntegrator.IntegrationCount > 0;
 
-            if (_keyframeCollector != null)
-                _keyframeCollector.ClearInMemory();
+            if (!resuming)
+            {
+                _prevVertexCount = 0;
+                _stableVertexCycles = 0;
+                _stableColorCycles = 0;
+                _prevColorCoverage = 0f;
+                _stabilizedTime = 0f;
 
-            _persistence.CreateTmpPackage();
+                if (_persistence != null) _persistence.ClearActivePackage();
+                if (_keyframeCollector != null)
+                    _keyframeCollector.ClearInMemory();
+
+                _persistence.CreateTmpPackage();
+                _ = CreateScanAnchorAsync();
+            }
+
             _keyframeCollector?.SetExportDirectory(
                 Path.Combine(_persistence.ActivePackageDirectory, "keyframes"));
 
@@ -435,10 +488,43 @@ namespace Genesis.RoomScan
             provider?.StartCapture();
             _depthCapture.StartDepthCapture();
 
-            Logger.Info($"StartScanning — integrationCount={_volumeIntegrator.IntegrationCount}");
+            if (!resuming)
+            {
+                // Fresh scan: reset registry — stale AI detections from a previous
+                // session/load are in a different anchor frame and must be discarded.
+                _sceneObjectRegistry = new SceneObjectRegistry();
+            }
+            else
+            {
+                _sceneObjectRegistry ??= new SceneObjectRegistry();
+            }
+            PopulateSceneObjectRegistry();
+            SubscribeToAnchorsChanged();
+
+            Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
             ScanStarted?.Invoke();
             if (_modules != null)
                 foreach (var m in _modules) m.OnScanStarted();
+        }
+
+        /// <summary>
+        /// Creates a spatial anchor at scan start for persistence. The anchor's matrix
+        /// serves as the baseMatrixAtSave for delta relocation on reload — same pattern
+        /// used by TSDF, refined mesh, and splat. Placed at the camera's current position
+        /// with identity rotation to avoid inheriting MRUK floor's arbitrary yaw.
+        /// </summary>
+        private async Task CreateScanAnchorAsync()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null || !mgr.IsRoomLoaded) return;
+
+            var camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+            var result = await mgr.CreateAndSaveSpatialAnchorAsync(camPos, Quaternion.identity);
+            if (result.HasValue && _persistence != null && _persistence.HasActivePackage)
+            {
+                _persistence.WriteSessionAnchorData(
+                    result.Value.uuid.ToString(), result.Value.matrix);
+            }
         }
 
         /// <summary>
@@ -533,6 +619,11 @@ namespace Genesis.RoomScan
                 LastSimplifiedResult = null;
                 _cachedUnwrap = null;
                 _refinedMesh = null;
+                if (_normalMapTexture != null)
+                {
+                    Destroy(_normalMapTexture);
+                    _normalMapTexture = null;
+                }
 
                 _meshExtractor.DisposeOnly();
                 _volumeIntegrator.Clear();
@@ -667,6 +758,8 @@ namespace Genesis.RoomScan
             bool ok = await _persistence.SaveToNewPackageAsync();
             if (ok && _keyframeCollector != null)
                 _keyframeCollector.SetExportDirectory(KeyframeDirectory);
+            if (ok && _sceneObjectRegistry != null && _sceneObjectRegistry.Count > 0)
+                await _persistence.SaveSceneObjectsAsync(_sceneObjectRegistry);
             return ok;
         }
 
@@ -761,7 +854,7 @@ namespace Genesis.RoomScan
             {
                 string keyframeDir = KeyframeDirectory;
                 var unwrap = await EnsureUnwrappedAsync();
-                byte[] atlasPixels = await _textureRefinement.BakeAtlasAsync(
+                var (atlasPixels, normalPixels) = await _textureRefinement.BakeAtlasAsync(
                     unwrap, keyframeDir, KeyframeRelocation);
 
                 var original = new RefinedTextureResult
@@ -771,6 +864,7 @@ namespace Genesis.RoomScan
                     UVs = unwrap.UVs,
                     Indices = unwrap.Indices,
                     AtlasPixels = atlasPixels,
+                    NormalPixels = normalPixels,
                     AtlasWidth = unwrap.AtlasWidth,
                     AtlasHeight = unwrap.AtlasHeight
                 };
@@ -1080,6 +1174,17 @@ namespace Genesis.RoomScan
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
             _refinedAtlasTexture.Apply();
 
+            if (_normalMapTexture != null)
+                Destroy(_normalMapTexture);
+            _normalMapTexture = null;
+            if (result.NormalPixels != null)
+            {
+                _normalMapTexture = new Texture2D(result.AtlasWidth, result.AtlasHeight,
+                    TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                _normalMapTexture.SetPixelData(result.NormalPixels, 0);
+                _normalMapTexture.Apply();
+            }
+
             if (_refinedMesh == null)
                 _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
 
@@ -1088,30 +1193,81 @@ namespace Genesis.RoomScan
             _refinedMesh.SetNormals(result.Normals);
             _refinedMesh.SetUVs(0, result.UVs);
             _refinedMesh.SetTriangles(result.Indices, 0);
+            _refinedMesh.RecalculateTangents();
 
             Logger.Info($"Refined mesh applied: " +
                 $"{result.Positions.Length} verts, {result.Indices.Length / 3} tris, " +
-                $"atlas {result.AtlasWidth}x{result.AtlasHeight}");
+                $"atlas {result.AtlasWidth}x{result.AtlasHeight}" +
+                (result.NormalPixels != null ? " +normal" : ""));
 
             EnsureRefinedRenderer();
             _refinedMeshFilter.mesh = _refinedMesh;
             _refinedRenderer.material.mainTexture = _refinedAtlasTexture;
+            if (_normalMapTexture != null)
+                _refinedRenderer.material.SetTexture("_BumpMap", _normalMapTexture);
         }
 
         /// <summary>
         /// Applies pre-loaded atlas and mesh data (called from persistence load).
         /// </summary>
-        internal void ApplyRefinedTexture(Texture2D atlas, Mesh mesh)
+        internal void ApplyRefinedTexture(Texture2D atlas, Mesh mesh, Texture2D normalMap = null)
         {
             _refinedAtlasTexture = atlas;
             _refinedMesh = mesh;
+            if (_normalMapTexture != null)
+                Destroy(_normalMapTexture);
+            _normalMapTexture = normalMap;
+
             EnsureRefinedRenderer();
             _refinedMeshFilter.mesh = mesh;
             _refinedRenderer.material.mainTexture = atlas;
+            if (_normalMapTexture != null)
+                _refinedRenderer.material.SetTexture("_BumpMap", _normalMapTexture);
             HasRefinedTexture = true;
+            PopulateSceneObjectRegistry();
             RefinedMeshReady?.Invoke(mesh, atlas);
         }
 
+        /// <summary>Sets the SceneObjectRegistry (used by persistence load).</summary>
+        internal void SetSceneObjectRegistry(SceneObjectRegistry registry)
+        {
+            _sceneObjectRegistry = registry;
+        }
+
+        /// <summary>
+        /// Populates the SceneObjectRegistry from live MRUK anchors.
+        /// Always replaces stale MRUK entries with fresh tracking-accurate positions.
+        /// Safe to call multiple times — AI detections are preserved.
+        /// </summary>
+        internal void PopulateSceneObjectRegistry()
+        {
+            _sceneObjectRegistry ??= new SceneObjectRegistry();
+            if (_roomUnderstanding == null) return;
+
+            _roomUnderstanding.RefreshRoom();
+            _sceneObjectRegistry.RemoveBySource(SceneObjectSource.MRUK);
+            _roomUnderstanding.PopulateRegistry(_sceneObjectRegistry);
+        }
+
+        private void SubscribeToAnchorsChanged()
+        {
+            if (_subscribedToAnchorsChanged || _roomUnderstanding == null) return;
+            _roomUnderstanding.AnchorsChanged += OnMrukAnchorsChanged;
+            _subscribedToAnchorsChanged = true;
+        }
+
+        private void UnsubscribeFromAnchorsChanged()
+        {
+            if (!_subscribedToAnchorsChanged || _roomUnderstanding == null) return;
+            _roomUnderstanding.AnchorsChanged -= OnMrukAnchorsChanged;
+            _subscribedToAnchorsChanged = false;
+        }
+
+        private void OnMrukAnchorsChanged()
+        {
+            Logger.Info("[RoomScanner] MRUK anchors changed — re-populating registry");
+            PopulateSceneObjectRegistry();
+        }
 
         internal void ApplyHQTexture(Texture2D atlas)
         {
@@ -1486,6 +1642,8 @@ namespace Genesis.RoomScan
                             : _refinedAtlasTexture;
                         if (tex != null)
                             _refinedMaterial.mainTexture = tex;
+                        if (_normalMapTexture != null)
+                            _refinedMaterial.SetTexture("_BumpMap", _normalMapTexture);
                     }
                 }
             }

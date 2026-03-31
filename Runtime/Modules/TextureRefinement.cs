@@ -27,7 +27,8 @@ namespace Genesis.RoomScan
         public Vector3[] Normals;
         public Vector2[] UVs;
         public int[] Indices;
-        public byte[] AtlasPixels; // RGBA32
+        public byte[] AtlasPixels;  // RGBA32
+        public byte[] NormalPixels; // RGBA32 Sobel normal map (may be null for older packages / CPU bake)
         public int AtlasWidth;
         public int AtlasHeight;
     }
@@ -67,6 +68,9 @@ namespace Genesis.RoomScan
         [Tooltip("Minimum score fraction for multi-view blend inclusion")]
         [Range(0.1f, 0.9f)]
         [SerializeField] internal float blendMinFraction = 0.3f;
+        [Tooltip("Sobel normal map strength (0 = skip normal map generation)")]
+        [Range(0f, 20f)]
+        [SerializeField] internal float normalStrength = 8f;
 
         [Header("HQ Server Refinement")]
         [Tooltip("Server-side atlas super-resolution scale")]
@@ -469,14 +473,14 @@ namespace Genesis.RoomScan
         /// on StructuredBuffers — no texture UV ambiguity, no framebuffer orientation issues.
         /// Falls back to CPU path if the compute shader is unavailable.
         /// </summary>
-        internal async Task<byte[]> BakeAtlasAsync(
+        internal async Task<(byte[] atlas, byte[] normal)> BakeAtlasAsync(
             UnwrappedMeshResult mesh, string keyframeDir, Matrix4x4 keyframeRelocation)
         {
             ComputeShader compute = forceCpuBake ? null : atlasBakeCompute;
             if (compute == null)
             {
                 Logger.Warning("[TextureRefine] No compute shader, falling back to CPU bake");
-                return await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation);
+                return (await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation), null);
             }
 
             ReportStatus("Loading keyframe metadata...");
@@ -787,9 +791,43 @@ namespace Genesis.RoomScan
                 Logger.Info("[TextureRefine] Seam blending complete");
             }
 
+            // ── Sobel normal map pass (GPU) ──
+            ComputeBuffer normalBuf = null;
+            if (normalStrength > 0.01f)
+            {
+                ReportStatus("Generating normal map...");
+                int kSobel = compute.FindKernel("SobelNormalMap");
+                normalBuf = new ComputeBuffer(texelCount, 4);
+
+                var sobelSrcBuf = new ComputeBuffer(texelCount, 4);
+                var tmp = new uint[texelCount];
+                atlasBuf.GetData(tmp);
+                sobelSrcBuf.SetData(tmp);
+
+                compute.SetFloat("_NormalStrength", normalStrength);
+                compute.SetInt("_AtlasW", atlasW);
+                compute.SetInt("_AtlasH", atlasH);
+                compute.SetBuffer(kSobel, "_AtlasBufSrc", sobelSrcBuf);
+                compute.SetBuffer(kSobel, "_NormalBuf", normalBuf);
+
+                int groupsX = (atlasW + 7) / 8;
+                int groupsY = (atlasH + 7) / 8;
+                compute.Dispatch(kSobel, groupsX, groupsY, 1);
+
+                sobelSrcBuf.Release();
+                Logger.Info($"[TextureRefine] Sobel normal map generated (strength={normalStrength})");
+            }
+
             // Readback atlas buffer
             ReportStatus("Reading back atlas...");
             byte[] atlasPixels = await ReadbackComputeBufferAsync(atlasBuf, texelCount);
+
+            byte[] normalPixels = null;
+            if (normalBuf != null)
+            {
+                normalPixels = await ReadbackComputeBufferAsync(normalBuf, texelCount);
+                normalBuf.Release();
+            }
 
             // Log fill stats
             {
@@ -808,7 +846,12 @@ namespace Genesis.RoomScan
             }
 
             ReportStatus("Filling gaps...");
-            await Task.Run(() => DilateAtlas(atlasPixels, atlasW, atlasH, 8));
+            await Task.Run(() =>
+            {
+                DilateAtlas(atlasPixels, atlasW, atlasH, 8);
+                if (normalPixels != null)
+                    DilateAtlas(normalPixels, atlasW, atlasH, 8);
+            });
 
             // Cleanup
             origPosBuf.Release(); origIdxBuf.Release();
@@ -819,7 +862,7 @@ namespace Genesis.RoomScan
             ReportStatus("Done");
             Logger.Info($"[TextureRefine] GPU compute bake complete: {atlasW}x{atlasH} atlas");
 
-            return atlasPixels;
+            return (atlasPixels, normalPixels);
         }
 
         // ═══════════════════════════════════════════════════════════════

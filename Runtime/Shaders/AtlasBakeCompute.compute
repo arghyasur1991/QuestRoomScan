@@ -5,6 +5,7 @@
 #pragma kernel BlendAccum
 #pragma kernel ResolveBlend
 #pragma kernel SharpenAtlas
+#pragma kernel SobelNormalMap
 
 // ── Shared uniforms ──────────────────────────────────────────
 float4x4 _ViewMat;
@@ -508,4 +509,82 @@ void SharpenAtlas(uint3 id : SV_DispatchThreadID)
     uint g = (uint)round(sharpened.y);
     uint b = (uint)round(sharpened.z);
     _AtlasBuf[idx] = r | (g << 8) | (b << 16) | (255u << 24);
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Kernel 7: Sobel Normal Map
+//  Derives a tangent-space normal map from atlas luminance.
+//  Reads from _AtlasBufSrc (snapshot), writes to _NormalBuf.
+//  Preserves alpha=0 for empty texels so dilation can fill them.
+// ═════════════════════════════════════════════════════════════
+
+float _NormalStrength;
+RWStructuredBuffer<uint> _NormalBuf;
+
+// Returns luminance of a texel, or fallback if the texel is empty (alpha=0).
+// Using the center's own luminance as fallback means UV island seams produce
+// zero gradient instead of a false edge.
+uint PackedToLum(uint packed, uint fallback)
+{
+    if ((packed >> 24) == 0) return fallback;
+    uint cr = packed & 0xFF;
+    uint cg = (packed >> 8) & 0xFF;
+    uint cb = (packed >> 16) & 0xFF;
+    return (cr * 77 + cg * 150 + cb * 29) >> 8;
+}
+
+uint SampleLum(int x, int y, uint centerLum)
+{
+    x = clamp(x, 0, _AtlasW - 1);
+    y = clamp(y, 0, _AtlasH - 1);
+    return PackedToLum(_AtlasBufSrc[y * _AtlasW + x], centerLum);
+}
+
+[numthreads(8, 8, 1)]
+void SobelNormalMap(uint3 id : SV_DispatchThreadID)
+{
+    int x = (int)id.x, y = (int)id.y;
+    if (x >= _AtlasW || y >= _AtlasH) return;
+
+    int idx = y * _AtlasW + x;
+    uint centerPacked = _AtlasBufSrc[idx];
+    uint centerAlpha = centerPacked >> 24;
+    if (centerAlpha == 0)
+    {
+        _NormalBuf[idx] = 0;
+        return;
+    }
+
+    uint cR = centerPacked & 0xFF;
+    uint cG = (centerPacked >> 8) & 0xFF;
+    uint cB = (centerPacked >> 16) & 0xFF;
+    uint cLum = (cR * 77 + cG * 150 + cB * 29) >> 8;
+
+    // 3x3 Sobel — empty neighbors fall back to center luminance (no false edge)
+    float tl = (float)SampleLum(x-1, y+1, cLum);
+    float t  = (float)SampleLum(x,   y+1, cLum);
+    float tr = (float)SampleLum(x+1, y+1, cLum);
+    float l  = (float)SampleLum(x-1, y,   cLum);
+    float r  = (float)SampleLum(x+1, y,   cLum);
+    float bl = (float)SampleLum(x-1, y-1, cLum);
+    float b  = (float)SampleLum(x,   y-1, cLum);
+    float br = (float)SampleLum(x+1, y-1, cLum);
+
+    float gx = ((tr + 2.0*r + br) - (tl + 2.0*l + bl)) / 255.0;
+    float gy = ((tl + 2.0*t + tr) - (bl + 2.0*b + br)) / 255.0;
+
+    // Dead zone: suppress gradients below ~3% luminance difference per texel.
+    // Kills subtle bake seams from multi-view color mismatch while keeping
+    // real texture edges (tile grout, wood grain, etc.)
+    float mag = sqrt(gx * gx + gy * gy);
+    float threshold = 0.03;
+    float scale = saturate((mag - threshold) / max(mag, 0.001));
+    gx *= scale * _NormalStrength;
+    gy *= scale * _NormalStrength;
+
+    uint nx = (uint)clamp(round(gx * 127.5 + 127.5), 0, 255);
+    uint ny = (uint)clamp(round(gy * 127.5 + 127.5), 0, 255);
+    uint nz = 255;
+
+    _NormalBuf[idx] = nx | (ny << 8) | (nz << 16) | (255u << 24);
 }

@@ -27,6 +27,7 @@ namespace Genesis.RoomScan
         public bool hasEnhancedMesh;
         public bool hasSimplifiedMesh;
         public bool hasKeyframes;
+        public bool hasSceneObjects;
     }
 
     [Serializable]
@@ -114,7 +115,9 @@ namespace Genesis.RoomScan
         private string PkgSplatPath => Path.Combine(ActivePackageDirectory, "splat.ply");
         private string PkgRefinedMeshPath => Path.Combine(ActivePackageDirectory, "refined_mesh.bin");
         private string PkgRefinedAtlasPath => Path.Combine(ActivePackageDirectory, "refined_atlas.raw");
+        private string PkgRefinedNormalPath => Path.Combine(ActivePackageDirectory, "refined_normal.raw");
         private string PkgHQAtlasPath => Path.Combine(ActivePackageDirectory, "hq_atlas.png");
+        private string PkgSceneObjectsPath => Path.Combine(ActivePackageDirectory, "scene_objects.json");
 
         // Legacy single-slot paths (for backward compat references in RoomScanner.ClearAllDataAsync)
         [Obsolete("Use package-based paths")] public string SaveFilePath => PkgScanBin;
@@ -270,12 +273,18 @@ namespace Genesis.RoomScan
                 var tc = TriplanarCache.Instance;
                 int triRes = tc != null && tc.TriXZ != null ? tc.TriXZ.width : 0;
 
-                // Create spatial anchor at MRUK floor position
+                // Reuse the session anchor created at scan start, or create a new one
                 Matrix4x4 anchorMatrix = Matrix4x4.identity;
                 string anchorUuidStr = "";
                 var roomAnchor = RoomAnchorManager.Instance;
 
-                if (roomAnchor != null && roomAnchor.enabled && roomAnchor.IsRoomLoaded)
+                if (roomAnchor != null && roomAnchor.HasSpatialAnchor)
+                {
+                    anchorUuidStr = roomAnchor.SpatialAnchorUuid.ToString();
+                    anchorMatrix = roomAnchor.SpatialAnchorMatrix;
+                    Logger.Info($"Reusing session scan anchor for package: {anchorUuidStr}");
+                }
+                else if (roomAnchor != null && roomAnchor.enabled && roomAnchor.IsRoomLoaded)
                 {
                     var result = await roomAnchor.CreateAndSaveSpatialAnchorAsync(
                         default, Quaternion.identity);
@@ -334,7 +343,8 @@ namespace Genesis.RoomScan
                     hasRefined = File.Exists(Path.Combine(pkgDir, "refined_mesh.bin")),
                     hasHQRefined = File.Exists(Path.Combine(pkgDir, "hq_atlas.png")),
                     hasEnhancedMesh = File.Exists(Path.Combine(pkgDir, "enhanced_mesh.bin")),
-                    hasSimplifiedMesh = File.Exists(Path.Combine(pkgDir, "simplified_mesh.bin"))
+                    hasSimplifiedMesh = File.Exists(Path.Combine(pkgDir, "simplified_mesh.bin")),
+                    hasSceneObjects = File.Exists(Path.Combine(pkgDir, "scene_objects.json"))
                 });
                 WriteManifest(manifest);
 
@@ -397,6 +407,11 @@ namespace Genesis.RoomScan
                             {
                                 string atlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
                                 await Task.Run(() => File.WriteAllBytes(atlasPath, r.AtlasPixels));
+                            }
+                            if (r.NormalPixels != null)
+                            {
+                                string normalPath = Path.Combine(pkgDir, "refined_normal.raw");
+                                await Task.Run(() => File.WriteAllBytes(normalPath, r.NormalPixels));
                             }
                         }
                         if (_activeAnchorData != null)
@@ -466,6 +481,7 @@ namespace Genesis.RoomScan
                 case ArtifactType.Refined:
                     TryDeleteFile(Path.Combine(pkgDir, "refined_mesh.bin"));
                     TryDeleteFile(Path.Combine(pkgDir, "refined_atlas.raw"));
+                    TryDeleteFile(Path.Combine(pkgDir, "refined_normal.raw"));
                     TryDeleteFile(Path.Combine(pkgDir, "simplified_mesh.bin"));
                     if (_activeAnchorData != null) _activeAnchorData.refinedMatrixAtCreate = null;
                     UpdateManifestFlags(ActivePackageId, ArtifactType.SimplifiedMesh, false);
@@ -489,7 +505,296 @@ namespace Genesis.RoomScan
         }
 
         // ─────────────────────────────────────────────────────────────
+        //  Scene Object Registry persistence
+        // ─────────────────────────────────────────────────────────────
+
+        /// <summary>Saves a SceneObjectRegistry to the active package as JSON.</summary>
+        public async Task<bool> SaveSceneObjectsAsync(SceneObjectRegistry registry)
+        {
+            if (!HasActivePackage || registry == null || registry.Count == 0) return false;
+            try
+            {
+                string json = registry.ToJson();
+                string path = PkgSceneObjectsPath;
+                await Task.Run(() => File.WriteAllText(path, json));
+
+                var manifest = ReadManifest();
+                var entry = manifest.packages.Find(p => p.id == ActivePackageId);
+                if (entry != null) { entry.hasSceneObjects = true; WriteManifest(manifest); }
+
+                Logger.Info($"Scene objects saved ({registry.Count} objects)");
+                return true;
+            }
+            catch (Exception e)
+            {
+                Logger.Error($"Scene objects save failed: {e.Message}");
+                return false;
+            }
+        }
+
+        /// <summary>Loads a SceneObjectRegistry from a package directory.</summary>
+        public SceneObjectRegistry LoadSceneObjects(string pkgDir = null)
+        {
+            pkgDir ??= ActivePackageDirectory;
+            if (string.IsNullOrEmpty(pkgDir)) return new SceneObjectRegistry();
+            string path = Path.Combine(pkgDir, "scene_objects.json");
+            if (!File.Exists(path)) return new SceneObjectRegistry();
+            try
+            {
+                string json = File.ReadAllText(path);
+                var registry = SceneObjectRegistry.FromJson(json);
+                Logger.Info($"Scene objects loaded ({registry.Count} objects)");
+                return registry;
+            }
+            catch (Exception e)
+            {
+                Logger.Warning($"Scene objects load failed: {e.Message}");
+                return new SceneObjectRegistry();
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────
         //  Load package
+        // ─────────────────────────────────────────────────────────────
+
+        // ─────────────────────────────────────────────────────────────
+        //  Load — shared helpers
+        // ─────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Resolves the current anchor matrix by loading the spatial anchor from
+        /// <paramref name="anchorData"/>, with MRUK wait+stabilize as fallback.
+        /// </summary>
+        private async Task<Matrix4x4> ResolveAnchorNowAsync(
+            PackageAnchorData anchorData, SynchronizationContext unitySync)
+        {
+            Matrix4x4 anchorNow = Matrix4x4.identity;
+            bool ok = false;
+
+            if (anchorData != null && !string.IsNullOrEmpty(anchorData.anchorUuid)
+                && Guid.TryParse(anchorData.anchorUuid, out Guid uuid))
+            {
+                var mgr = RoomAnchorManager.Instance;
+                if (mgr != null)
+                {
+                    var loaded = await mgr.LoadSpatialAnchorAsync(uuid);
+                    await SwitchToUnityMainThreadAsync(unitySync);
+                    if (loaded.HasValue)
+                    {
+                        anchorNow = loaded.Value;
+                        ok = true;
+                        Logger.Info("Spatial anchor localized for relocation");
+                    }
+                }
+            }
+
+            if (!ok)
+            {
+                var mgr = RoomAnchorManager.Instance;
+                if (mgr != null && mgr.enabled)
+                {
+                    if (!mgr.IsRoomLoaded)
+                    {
+                        Logger.Info("Waiting for MRUK room...");
+                        for (int i = 0; i < 300 && !mgr.IsRoomLoaded; i++)
+                        {
+                            await Task.Delay(16);
+                            await SwitchToUnityMainThreadAsync(unitySync);
+                        }
+                    }
+                    if (mgr.IsRoomLoaded)
+                    {
+                        Matrix4x4 prev = mgr.GetRoomLocalToWorldForPersistence();
+                        int stable = 0;
+                        for (int i = 0; i < 60 && stable < 5; i++)
+                        {
+                            await Task.Delay(16);
+                            await SwitchToUnityMainThreadAsync(unitySync);
+                            Matrix4x4 cur = mgr.GetRoomLocalToWorldForPersistence();
+                            float d = Vector3.Distance(
+                                new Vector3(prev.m03, prev.m13, prev.m23),
+                                new Vector3(cur.m03, cur.m13, cur.m23));
+                            stable = d < 0.001f ? stable + 1 : 0;
+                            prev = cur;
+                        }
+                        anchorNow = mgr.GetRoomLocalToWorldForPersistence();
+                        Logger.Warning("Using MRUK fallback for relocation");
+                    }
+                }
+            }
+
+            return anchorNow;
+        }
+
+        /// <summary>
+        /// Resolves the relocation matrix for a specific artifact.
+        /// Falls back through <paramref name="matrixAtCreate"/> → <paramref name="baseMatrix"/>.
+        /// </summary>
+        private static Matrix4x4 ComputeArtifactRelocation(
+            Matrix4x4 anchorNow, float[] matrixAtCreate, Matrix4x4 baseMatrix)
+        {
+            Matrix4x4 atCreate = matrixAtCreate != null ? FloatsToMatrix(matrixAtCreate) : baseMatrix;
+            return RoomAnchorManager.ComputeRelocationMatrix(anchorNow, atCreate);
+        }
+
+        /// <summary>
+        /// Loads refined mesh variants, atlas(es), applies vertex relocation, and
+        /// sends everything to the scanner. Both full and refined-only paths call this.
+        /// Returns true if at least the base mesh was loaded.
+        /// </summary>
+        private async Task<bool> LoadAndApplyRefinedArtifactsAsync(
+            string pkgDir, Matrix4x4 relocRefined, SynchronizationContext unitySync)
+        {
+            string refinedMeshPath = Path.Combine(pkgDir, "refined_mesh.bin");
+            if (!File.Exists(refinedMeshPath)) return false;
+
+            string enhancedMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
+            string simplifiedMeshPath = Path.Combine(pkgDir, "simplified_mesh.bin");
+            string refinedAtlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
+            string refinedNormalPath = Path.Combine(pkgDir, "refined_normal.raw");
+            string hqAtlasPath = Path.Combine(pkgDir, "hq_atlas.png");
+
+            bool hasEnhanced = File.Exists(enhancedMeshPath);
+            bool hasSimplified = File.Exists(simplifiedMeshPath);
+            bool hasAtlas = File.Exists(refinedAtlasPath);
+            bool hasNormal = File.Exists(refinedNormalPath);
+            bool hasHQ = File.Exists(hqAtlasPath);
+
+            RefinedTextureResult meshData = default, enhancedData = default, simplifiedData = default;
+            byte[] atlasBytes = null, normalBytes = null, hqBytes = null;
+
+            await Task.Run(() =>
+            {
+                meshData = ReadRefinedMesh(refinedMeshPath);
+                if (hasAtlas) atlasBytes = File.ReadAllBytes(refinedAtlasPath);
+                if (hasNormal) normalBytes = File.ReadAllBytes(refinedNormalPath);
+                if (hasEnhanced) enhancedData = ReadRefinedMesh(enhancedMeshPath);
+                if (hasSimplified) simplifiedData = ReadRefinedMesh(simplifiedMeshPath);
+                if (hasHQ) hqBytes = File.ReadAllBytes(hqAtlasPath);
+            });
+
+            await SwitchToUnityMainThreadAsync(unitySync);
+
+            if (relocRefined != Matrix4x4.identity)
+            {
+                RelocateVertices(ref meshData, relocRefined);
+                if (hasEnhanced) RelocateVertices(ref enhancedData, relocRefined);
+                if (hasSimplified) RelocateVertices(ref simplifiedData, relocRefined);
+            }
+
+            var scanner = RoomScanner.Instance;
+            if (scanner == null) return true;
+
+            meshData.AtlasPixels = atlasBytes;
+            meshData.NormalPixels = normalBytes;
+            scanner.LastRefinedResult = meshData;
+            scanner.HasEnhancedMesh = hasEnhanced;
+
+            if (hasSimplified)
+            {
+                simplifiedData.AtlasPixels = atlasBytes;
+                simplifiedData.NormalPixels = normalBytes;
+                simplifiedData.AtlasWidth = meshData.AtlasWidth;
+                simplifiedData.AtlasHeight = meshData.AtlasHeight;
+                scanner.LastSimplifiedResult = simplifiedData;
+            }
+
+            var displayData = hasEnhanced ? enhancedData
+                            : hasSimplified ? simplifiedData
+                            : meshData;
+
+            if (atlasBytes != null)
+            {
+                var atlasTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
+                    TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                atlasTex.SetPixelData(atlasBytes, 0);
+                atlasTex.Apply();
+
+                Texture2D normalTex = null;
+                if (normalBytes != null)
+                {
+                    normalTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
+                        TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
+                    normalTex.SetPixelData(normalBytes, 0);
+                    normalTex.Apply();
+                }
+
+                var mesh = new Mesh
+                {
+                    name = hasEnhanced ? "EnhancedScanMesh" : "RefinedScanMesh",
+                    indexFormat = IndexFormat.UInt32
+                };
+                mesh.SetVertices(displayData.Positions);
+                mesh.SetNormals(displayData.Normals);
+                mesh.SetUVs(0, displayData.UVs);
+                mesh.SetTriangles(displayData.Indices, 0);
+                mesh.RecalculateTangents();
+
+                scanner.ApplyRefinedTexture(atlasTex, mesh, normalTex);
+                Logger.Info($"Refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})" +
+                          (hasEnhanced ? " [enhanced mesh]" :
+                           hasSimplified ? " [simplified mesh]" : ""));
+            }
+
+            if (hasHQ && hqBytes != null)
+            {
+                var hqTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
+                    { filterMode = FilterMode.Bilinear };
+                if (ImageConversion.LoadImage(hqTex, hqBytes))
+                {
+                    scanner.ApplyHQTexture(hqTex);
+                    Logger.Info($"HQ atlas loaded ({hqTex.width}x{hqTex.height})");
+                }
+                else
+                {
+                    UnityEngine.Object.Destroy(hqTex);
+                    Logger.Warning("HQ atlas PNG decode failed");
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Loads scene objects from disk, applies delta relocation to AI detections
+        /// (same formula as TSDF/refined), discards stale MRUK entries and refreshes
+        /// from live room data.
+        /// </summary>
+        private void LoadAndApplySceneObjects(string pkgDir, Matrix4x4 relocDelta)
+        {
+            var sceneObjects = LoadSceneObjects(pkgDir);
+            sceneObjects.RemoveBySource(SceneObjectSource.MRUK);
+            sceneObjects.Relocate(relocDelta, SceneObjectSource.AIDetection);
+
+            var scanner = RoomScanner.Instance;
+            if (scanner != null)
+            {
+                scanner.SetSceneObjectRegistry(sceneObjects);
+                scanner.PopulateSceneObjectRegistry();
+            }
+        }
+
+        /// <summary>
+        /// Sets active package and anchor data after a successful load.
+        /// </summary>
+        private void FinalizeLoad(string pkgId, PackageAnchorData anchorData,
+            Matrix4x4? scanBinFallbackMatrix = null)
+        {
+            ActivePackageId = pkgId;
+            if (anchorData != null)
+            {
+                _activeAnchorData = anchorData;
+            }
+            else
+            {
+                _activeAnchorData = new PackageAnchorData();
+                if (scanBinFallbackMatrix.HasValue)
+                    _activeAnchorData.baseMatrixAtSave = MatrixToFloats(scanBinFallbackMatrix.Value);
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Load — full package (TSDF + all artifacts)
         // ─────────────────────────────────────────────────────────────
 
         /// <summary>
@@ -520,7 +825,6 @@ namespace Genesis.RoomScan
             {
                 var unitySync = SynchronizationContext.Current;
                 string triplanarDir = Path.Combine(pkgDir, "triplanar");
-                string anchorJsonPath = Path.Combine(pkgDir, "anchor.json");
 
                 // Read scan.bin + anchor.json in background
                 byte[] tsdfBytes = null, colorBytes = null;
@@ -534,7 +838,7 @@ namespace Genesis.RoomScan
                 {
                     ReadBinary(scanBinPath, out savedVoxCount, out savedVoxSize, out savedIntCount,
                         out tsdfBytes, out colorBytes, out triRes, out anchorAtSave);
-                    anchorData = ReadAnchorData(anchorJsonPath);
+                    anchorData = ReadAnchorData(Path.Combine(pkgDir, "anchor.json"));
                 });
 
                 await SwitchToUnityMainThreadAsync(unitySync);
@@ -557,71 +861,13 @@ namespace Genesis.RoomScan
                     ? FloatsToMatrix(anchorData.baseMatrixAtSave)
                     : anchorAtSave;
 
-                // Try to load spatial anchor for relocation
-                Matrix4x4 anchorNow = Matrix4x4.identity;
-                bool spatialAnchorOk = false;
-                var roomAnchor = RoomAnchorManager.Instance;
-
-                if (anchorData != null && !string.IsNullOrEmpty(anchorData.anchorUuid) &&
-                    Guid.TryParse(anchorData.anchorUuid, out Guid uuid))
-                {
-                    var loadedMatrix = await roomAnchor.LoadSpatialAnchorAsync(uuid);
-                    await SwitchToUnityMainThreadAsync(unitySync);
-                    if (loadedMatrix.HasValue)
-                    {
-                        anchorNow = loadedMatrix.Value;
-                        spatialAnchorOk = true;
-                        Logger.Info("Spatial anchor localized for relocation");
-                    }
-                }
-
-                // Fallback to MRUK if spatial anchor failed
-                if (!spatialAnchorOk && roomAnchor != null && roomAnchor.enabled)
-                {
-                    if (!roomAnchor.IsRoomLoaded)
-                    {
-                        Logger.Info("Waiting for MRUK room...");
-                        for (int i = 0; i < 300 && !roomAnchor.IsRoomLoaded; i++)
-                        {
-                            await Task.Delay(16);
-                            await SwitchToUnityMainThreadAsync(unitySync);
-                        }
-                    }
-                    if (roomAnchor.IsRoomLoaded)
-                    {
-                        // Stabilize MRUK anchor
-                        Matrix4x4 prev = roomAnchor.GetRoomLocalToWorldForPersistence();
-                        int stable = 0;
-                        for (int i = 0; i < 60 && stable < 5; i++)
-                        {
-                            await Task.Delay(16);
-                            await SwitchToUnityMainThreadAsync(unitySync);
-                            Matrix4x4 cur = roomAnchor.GetRoomLocalToWorldForPersistence();
-                            float d = Vector3.Distance(
-                                new Vector3(prev.m03, prev.m13, prev.m23),
-                                new Vector3(cur.m03, cur.m13, cur.m23));
-                            stable = d < 0.001f ? stable + 1 : 0;
-                            prev = cur;
-                        }
-                        anchorNow = roomAnchor.GetRoomLocalToWorldForPersistence();
-                        Logger.Warning("Using MRUK fallback for relocation");
-                    }
-                }
+                // Anchor resolution (spatial anchor → MRUK fallback)
+                Matrix4x4 anchorNow = await ResolveAnchorNowAsync(anchorData, unitySync);
 
                 // Compute per-artifact relocation matrices
                 Matrix4x4 relocVolume = RoomAnchorManager.ComputeRelocationMatrix(anchorNow, baseMatrix);
-
-                Matrix4x4 splatMatrix = anchorData?.splatMatrixAtCreate != null
-                    ? FloatsToMatrix(anchorData.splatMatrixAtCreate) : baseMatrix;
-                Matrix4x4 relocSplat = RoomAnchorManager.ComputeRelocationMatrix(anchorNow, splatMatrix);
-
-                Matrix4x4 refinedMatrix = anchorData?.refinedMatrixAtCreate != null
-                    ? FloatsToMatrix(anchorData.refinedMatrixAtCreate) : baseMatrix;
-                Matrix4x4 relocRefined = RoomAnchorManager.ComputeRelocationMatrix(anchorNow, refinedMatrix);
-
-                Matrix4x4 hqMatrix = anchorData?.hqMatrixAtCreate != null
-                    ? FloatsToMatrix(anchorData.hqMatrixAtCreate) : refinedMatrix;
-                Matrix4x4 relocHQ = RoomAnchorManager.ComputeRelocationMatrix(anchorNow, hqMatrix);
+                Matrix4x4 relocSplat = ComputeArtifactRelocation(anchorNow, anchorData?.splatMatrixAtCreate, baseMatrix);
+                Matrix4x4 relocRefined = ComputeArtifactRelocation(anchorNow, anchorData?.refinedMatrixAtCreate, baseMatrix);
 
                 var scanner = RoomScanner.Instance;
                 if (scanner != null)
@@ -692,137 +938,15 @@ namespace Genesis.RoomScan
                     }
                 }
 
-                // Load refined mesh + atlas
-                string refinedMeshPath = Path.Combine(pkgDir, "refined_mesh.bin");
-                string enhancedMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
-                string simplifiedMeshPath = Path.Combine(pkgDir, "simplified_mesh.bin");
-                string refinedAtlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
-                string hqAtlasPath = Path.Combine(pkgDir, "hq_atlas.png");
-                bool hasMesh = File.Exists(refinedMeshPath);
-                bool hasEnhanced = File.Exists(enhancedMeshPath);
-                bool hasSimplified = File.Exists(simplifiedMeshPath);
-                bool hasAtlas = File.Exists(refinedAtlasPath);
-                bool hasHQ = File.Exists(hqAtlasPath);
+                // Refined mesh + atlas + HQ
+                try { await LoadAndApplyRefinedArtifactsAsync(pkgDir, relocRefined, unitySync); }
+                catch (Exception e) { Logger.Warning($"Refined load skipped ({e.Message})"); }
 
-                if (hasMesh)
-                {
-                    try
-                    {
-                        RefinedTextureResult meshData = default;
-                        RefinedTextureResult enhancedData = default;
-                        RefinedTextureResult simplifiedData = default;
-                        byte[] atlasBytes = null;
-                        bool loadedEnhanced = false;
-                        bool loadedSimplified = false;
-                        await Task.Run(() =>
-                        {
-                            meshData = ReadRefinedMesh(refinedMeshPath);
-                            if (hasAtlas) atlasBytes = File.ReadAllBytes(refinedAtlasPath);
-                            if (hasEnhanced)
-                            {
-                                enhancedData = ReadRefinedMesh(enhancedMeshPath);
-                                loadedEnhanced = true;
-                            }
-                            if (hasSimplified)
-                            {
-                                simplifiedData = ReadRefinedMesh(simplifiedMeshPath);
-                                loadedSimplified = true;
-                            }
-                        });
-                        await SwitchToUnityMainThreadAsync(unitySync);
-
-                        // Per-artifact relocation
-                        if (relocRefined != Matrix4x4.identity)
-                        {
-                            RelocateVertices(ref meshData, relocRefined);
-                            if (loadedEnhanced) RelocateVertices(ref enhancedData, relocRefined);
-                            if (loadedSimplified) RelocateVertices(ref simplifiedData, relocRefined);
-                        }
-
-                        if (scanner != null)
-                        {
-                            meshData.AtlasPixels = atlasBytes;
-                            scanner.LastRefinedResult = meshData;
-                            scanner.HasEnhancedMesh = loadedEnhanced;
-
-                            if (loadedSimplified)
-                            {
-                                simplifiedData.AtlasPixels = atlasBytes;
-                                simplifiedData.AtlasWidth = meshData.AtlasWidth;
-                                simplifiedData.AtlasHeight = meshData.AtlasHeight;
-                                scanner.LastSimplifiedResult = simplifiedData;
-                            }
-
-                            // Display priority: enhanced > simplified > original
-                            var displayData = loadedEnhanced ? enhancedData
-                                            : loadedSimplified ? simplifiedData
-                                            : meshData;
-
-                            if (atlasBytes != null)
-                            {
-                                var atlasTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
-                                    TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-                                atlasTex.SetPixelData(atlasBytes, 0);
-                                atlasTex.Apply();
-
-                                var mesh = new Mesh
-                                {
-                                    name = loadedEnhanced ? "EnhancedScanMesh" : "RefinedScanMesh",
-                                    indexFormat = IndexFormat.UInt32
-                                };
-                                mesh.SetVertices(displayData.Positions);
-                                mesh.SetNormals(displayData.Normals);
-                                mesh.SetUVs(0, displayData.UVs);
-                                mesh.SetTriangles(displayData.Indices, 0);
-
-                                scanner.ApplyRefinedTexture(atlasTex, mesh);
-                                Logger.Info($"Refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})" +
-                                          (loadedEnhanced ? " [enhanced mesh]" :
-                                           loadedSimplified ? " [simplified mesh]" : ""));
-                            }
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        Logger.Warning($"Refined load skipped ({e.Message})");
-                    }
-                }
-
-                if (hasHQ)
-                {
-                    try
-                    {
-                        byte[] hqBytes = null;
-                        await Task.Run(() => hqBytes = File.ReadAllBytes(hqAtlasPath));
-                        await SwitchToUnityMainThreadAsync(unitySync);
-
-                        var hqTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
-                            { filterMode = FilterMode.Bilinear };
-                        if (ImageConversion.LoadImage(hqTex, hqBytes))
-                        {
-                            scanner?.ApplyHQTexture(hqTex);
-                            Logger.Info($"HQ atlas loaded ({hqTex.width}x{hqTex.height})");
-                        }
-                        else
-                        {
-                            UnityEngine.Object.Destroy(hqTex);
-                            Logger.Warning("HQ atlas PNG decode failed");
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        Logger.Warning($"HQ load skipped ({e.Message})");
-                    }
-                }
-
-                ActivePackageId = pkgId;
-                _activeAnchorData = anchorData ?? new PackageAnchorData
-                {
-                    baseMatrixAtSave = MatrixToFloats(anchorAtSave)
-                };
+                FinalizeLoad(pkgId, anchorData, anchorAtSave);
+                LoadAndApplySceneObjects(pkgDir, relocVolume);
 
                 Logger.Info($"Package loaded: {pkgId} (integ={savedIntCount}, " +
-                          $"splat={File.Exists(splatPath)}, refined={hasMesh}, hq={hasHQ})");
+                          $"splat={File.Exists(splatPath)}, refined={File.Exists(Path.Combine(pkgDir, "refined_mesh.bin"))})");
                 LoadCompleted?.Invoke();
                 return true;
             }
@@ -834,6 +958,10 @@ namespace Genesis.RoomScan
             finally { IsLoading = false; }
         }
 
+        // ─────────────────────────────────────────────────────────────
+        //  Load — refined only (lightweight, game-mode)
+        // ─────────────────────────────────────────────────────────────
+
         /// <summary>
         /// Lightweight load path: reads only the refined mesh, atlas, optional HQ atlas, and anchor
         /// from a saved package. Skips TSDF volume, triplanar, splat, and Surface Nets reconstruction.
@@ -843,8 +971,7 @@ namespace Genesis.RoomScan
         public async Task<bool> LoadRefinedOnlyAsync(string pkgId)
         {
             string pkgDir = Path.Combine(RoomScansRoot, pkgId);
-            string refinedMeshPath = Path.Combine(pkgDir, "refined_mesh.bin");
-            if (!File.Exists(refinedMeshPath))
+            if (!File.Exists(Path.Combine(pkgDir, "refined_mesh.bin")))
             {
                 Logger.Warning($"Package {pkgId} has no refined_mesh.bin — use LoadPackageAsync for full load");
                 return false;
@@ -855,120 +982,29 @@ namespace Genesis.RoomScan
             try
             {
                 var unitySync = SynchronizationContext.Current;
-                string anchorJsonPath = Path.Combine(pkgDir, "anchor.json");
-                string enhancedMeshPath = Path.Combine(pkgDir, "enhanced_mesh.bin");
-                string simplifiedMeshPath = Path.Combine(pkgDir, "simplified_mesh.bin");
-                string refinedAtlasPath = Path.Combine(pkgDir, "refined_atlas.raw");
-                string hqAtlasPath = Path.Combine(pkgDir, "hq_atlas.png");
 
-                RefinedTextureResult meshData = default;
-                RefinedTextureResult enhancedData = default;
-                RefinedTextureResult simplifiedData = default;
-                byte[] atlasBytes = null;
-                byte[] hqBytes = null;
-                bool hasEnhanced = File.Exists(enhancedMeshPath);
-                bool hasSimplified = File.Exists(simplifiedMeshPath);
-                bool hasAtlas = File.Exists(refinedAtlasPath);
-                bool hasHQ = File.Exists(hqAtlasPath);
                 PackageAnchorData anchorData = null;
-
-                await Task.Run(() =>
-                {
-                    meshData = ReadRefinedMesh(refinedMeshPath);
-                    if (hasAtlas) atlasBytes = File.ReadAllBytes(refinedAtlasPath);
-                    if (hasEnhanced) enhancedData = ReadRefinedMesh(enhancedMeshPath);
-                    if (hasSimplified) simplifiedData = ReadRefinedMesh(simplifiedMeshPath);
-                    if (hasHQ) hqBytes = File.ReadAllBytes(hqAtlasPath);
-                    anchorData = ReadAnchorData(anchorJsonPath);
-                });
-
+                await Task.Run(() => anchorData = ReadAnchorData(Path.Combine(pkgDir, "anchor.json")));
                 await SwitchToUnityMainThreadAsync(unitySync);
 
-                // Resolve relocation from anchor
-                Matrix4x4 relocRefined = Matrix4x4.identity;
-                if (anchorData != null && !string.IsNullOrEmpty(anchorData.anchorUuid)
-                    && Guid.TryParse(anchorData.anchorUuid, out Guid uuid))
-                {
-                    var roomAnchor = RoomAnchorManager.Instance;
-                    if (roomAnchor != null)
-                    {
-                        var loadedMatrix = await roomAnchor.LoadSpatialAnchorAsync(uuid);
-                        await SwitchToUnityMainThreadAsync(unitySync);
-                        if (loadedMatrix.HasValue)
-                        {
-                            Matrix4x4 refinedMatrix = anchorData.refinedMatrixAtCreate != null
-                                ? FloatsToMatrix(anchorData.refinedMatrixAtCreate)
-                                : (anchorData.baseMatrixAtSave != null
-                                    ? FloatsToMatrix(anchorData.baseMatrixAtSave)
-                                    : Matrix4x4.identity);
-                            relocRefined = RoomAnchorManager.ComputeRelocationMatrix(loadedMatrix.Value, refinedMatrix);
-                        }
-                    }
-                }
+                // Anchor resolution (shared path — spatial anchor → MRUK fallback)
+                Matrix4x4 anchorNow = await ResolveAnchorNowAsync(anchorData, unitySync);
 
-                if (relocRefined != Matrix4x4.identity)
-                {
-                    RelocateVertices(ref meshData, relocRefined);
-                    if (hasEnhanced) RelocateVertices(ref enhancedData, relocRefined);
-                    if (hasSimplified) RelocateVertices(ref simplifiedData, relocRefined);
-                }
+                Matrix4x4 baseMatrix = anchorData?.baseMatrixAtSave != null
+                    ? FloatsToMatrix(anchorData.baseMatrixAtSave) : Matrix4x4.identity;
+                Matrix4x4 relocRefined = ComputeArtifactRelocation(
+                    anchorNow, anchorData?.refinedMatrixAtCreate, baseMatrix);
 
-                var scanner = RoomScanner.Instance;
-                if (scanner != null)
-                {
-                    meshData.AtlasPixels = atlasBytes;
-                    scanner.LastRefinedResult = meshData;
-                    scanner.HasEnhancedMesh = hasEnhanced;
+                if (!await LoadAndApplyRefinedArtifactsAsync(pkgDir, relocRefined, unitySync))
+                    return false;
 
-                    if (hasSimplified)
-                    {
-                        simplifiedData.AtlasPixels = atlasBytes;
-                        simplifiedData.AtlasWidth = meshData.AtlasWidth;
-                        simplifiedData.AtlasHeight = meshData.AtlasHeight;
-                        scanner.LastSimplifiedResult = simplifiedData;
-                    }
+                RoomScanner.Instance?.SetRenderMode(ScanRenderMode.Refined);
 
-                    var displayData = hasEnhanced ? enhancedData
-                                    : hasSimplified ? simplifiedData
-                                    : meshData;
+                FinalizeLoad(pkgId, anchorData);
+                Matrix4x4 relocScene = RoomAnchorManager.ComputeRelocationMatrix(anchorNow, baseMatrix);
+                LoadAndApplySceneObjects(pkgDir, relocScene);
 
-                    if (atlasBytes != null)
-                    {
-                        var atlasTex = new Texture2D(meshData.AtlasWidth, meshData.AtlasHeight,
-                            TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
-                        atlasTex.SetPixelData(atlasBytes, 0);
-                        atlasTex.Apply();
-
-                        var mesh = new Mesh
-                        {
-                            name = hasEnhanced ? "EnhancedScanMesh" : "RefinedScanMesh",
-                            indexFormat = IndexFormat.UInt32
-                        };
-                        mesh.SetVertices(displayData.Positions);
-                        mesh.SetNormals(displayData.Normals);
-                        mesh.SetUVs(0, displayData.UVs);
-                        mesh.SetTriangles(displayData.Indices, 0);
-
-                        scanner.ApplyRefinedTexture(atlasTex, mesh);
-                    }
-
-                    if (hasHQ && hqBytes != null)
-                    {
-                        var hqTex = new Texture2D(2, 2, TextureFormat.RGBA32, false)
-                            { filterMode = FilterMode.Bilinear };
-                        if (ImageConversion.LoadImage(hqTex, hqBytes))
-                            scanner.ApplyHQTexture(hqTex);
-                        else
-                            UnityEngine.Object.Destroy(hqTex);
-                    }
-
-                    scanner.SetRenderMode(ScanRenderMode.Refined);
-                }
-
-                ActivePackageId = pkgId;
-                _activeAnchorData = anchorData ?? new PackageAnchorData();
-
-                Logger.Info($"Refined-only load complete: {pkgId} (enhanced={hasEnhanced}, hq={hasHQ})");
+                Logger.Info($"Refined-only load complete: {pkgId}");
                 LoadCompleted?.Invoke();
                 return true;
             }
@@ -1041,6 +1077,21 @@ namespace Genesis.RoomScan
             ActivePackageId = TmpPkgId;
             _activeAnchorData = new PackageAnchorData();
             Logger.Info($"Tmp package created: {tmpDir}");
+        }
+
+        /// <summary>
+        /// Writes anchor UUID and matrix to the active package's anchor.json.
+        /// Called when the scan session anchor is created so it's available on
+        /// promotion and for cross-session reload.
+        /// </summary>
+        public void WriteSessionAnchorData(string uuid, Matrix4x4 matrix)
+        {
+            if (!HasActivePackage) return;
+            _activeAnchorData ??= new PackageAnchorData();
+            _activeAnchorData.anchorUuid = uuid;
+            _activeAnchorData.baseMatrixAtSave = MatrixToFloats(matrix);
+            WriteAnchorData(PkgAnchorJson, _activeAnchorData);
+            Logger.Info($"Session anchor written to {ActivePackageId} — uuid={uuid}");
         }
 
         /// <summary>

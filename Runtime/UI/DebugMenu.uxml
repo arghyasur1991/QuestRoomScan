@@ -79,9 +79,12 @@
                     <ui:Button name="btn-toggle-scan" text="Stop Scanning" class="action-btn" />
                     <ui:Button name="btn-render-mode" text="Render: Vertex" class="action-btn action-btn--primary" />
                     <ui:Button name="btn-freeze-tint" text="Freeze Tint: ON" class="action-btn" />
+                    <ui:Button name="btn-scene-objects" text="Objects: OFF" class="action-btn" />
                     <ui:Button name="btn-save-scan" text="Save Scan" class="action-btn" />
                     <ui:Button name="btn-delete-artifact" text="Delete Artifact" class="action-btn action-btn--danger" />
                 </ui:VisualElement>
+
+                <ui:Label name="val-scene-object-list" text="" class="status-val status-val--small" style="display:none; white-space:normal; -unity-font-size:10px; padding:4px;" />
             </ui:VisualElement>
 
             <!-- ── SAVED SCANS VIEW ── -->

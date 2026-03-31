@@ -57,13 +57,14 @@ namespace Genesis.RoomScan
             _mruk.SceneSettings ??= new MRUK.MRUKSettings();
             _mruk.SceneSettings.DataSource = MRUK.SceneDataSource.Device;
             _mruk.SceneSettings.LoadSceneOnStartup = false;
+            _mruk.SceneSettings.EnableHighFidelityScene = true;
 
             if (_mruk.SceneLoadedEvent != null)
                 _mruk.SceneLoadedEvent.AddListener(OnSceneLoaded);
 
             yield return null;
-            _ = _mruk.LoadSceneFromDevice();
-            Logger.Info("MRUK LoadSceneFromDevice started (awaiting SceneLoadedEvent)...");
+            _ = _mruk.LoadSceneFromDevice(sceneModel: MRUK.SceneModel.V2FallbackV1);
+            Logger.Info("MRUK LoadSceneFromDevice started (V2FallbackV1, awaiting SceneLoadedEvent)...");
         }
 
         private void OnDestroy()
@@ -88,6 +89,11 @@ namespace Genesis.RoomScan
             }
 
             MRUKRoom room = _mruk.GetCurrentRoom() ?? _mruk.Rooms[0];
+
+            Logger.Info($"MRUK rooms={_mruk.Rooms.Count}, " +
+                        $"current room anchors={room.Anchors.Count}");
+            foreach (var a in room.Anchors)
+                Logger.Info($"  anchor: {a.Label} vol={a.VolumeBounds.HasValue} plane={a.PlaneRect.HasValue}");
 
             MRUKAnchor floorAnchor = null;
             if (room.FloorAnchors != null && room.FloorAnchors.Count > 0)
@@ -166,6 +172,17 @@ namespace Genesis.RoomScan
         /// Whether a spatial anchor is currently loaded and localized.
         /// </summary>
         public bool HasSpatialAnchor => _activeSpatialAnchor != null;
+
+        /// <summary>
+        /// Live transform of the active spatial anchor. Modules can parent objects
+        /// under this to stay world-locked across tracking corrections.
+        /// </summary>
+        public Transform SpatialAnchorTransform =>
+            _activeSpatialAnchor != null ? _activeSpatialAnchor.transform : null;
+
+        /// <summary>UUID of the active spatial anchor, or <see cref="Guid.Empty"/>.</summary>
+        public Guid SpatialAnchorUuid =>
+            _activeSpatialAnchor != null ? _activeSpatialAnchor.Uuid : Guid.Empty;
 
         /// <summary>
         /// Creates an <see cref="OVRSpatialAnchor"/> at the given world pose, waits for

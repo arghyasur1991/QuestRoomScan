@@ -226,6 +226,25 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Saves a pre-captured JPEG as a keyframe unconditionally (no motion/interval gates).
+        /// Used by detection modules that need to capture the frame before async processing
+        /// and only decide to save after results are known.
+        /// Returns the assigned keyframe ID, or -1 if export is not configured.
+        /// </summary>
+        public int SaveCapturedKeyframe(byte[] jpgBytes, float timestamp,
+            Vector3 pos, Quaternion rot, Vector2 focalLen, Vector2 principalPt,
+            Vector2 sensorRes, Vector2 currentRes)
+        {
+            if (_exportDir == null || jpgBytes == null || jpgBytes.Length == 0) return -1;
+            int id = _nextId++;
+            _savedPositions.Add(pos);
+            _savedRotations.Add(rot);
+            SaveKeyframeData(jpgBytes, id, timestamp, pos, rot,
+                focalLen, principalPt, sensorRes, currentRes);
+            return id;
+        }
+
+        /// <summary>
         /// Clears in-memory state only. Call before background file deletion.
         /// </summary>
         public void ClearInMemory()
