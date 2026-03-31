@@ -14,21 +14,21 @@ namespace Genesis.RoomScan
     public enum ScanRenderMode
     {
         /// <summary>Live GPU mesh with vertex colors only (triplanar forced off).</summary>
-        Vertex = 0,
+        Vertex,
         /// <summary>Live GPU mesh with triplanar-projected camera textures (falls back to vertex colors where data is missing).</summary>
-        Triplanar = 1,
+        Triplanar,
         /// <summary>UV-unwrapped mesh with on-device baked atlas.</summary>
-        Refined = 2,
+        Refined,
         /// <summary>UV-unwrapped mesh with server-enhanced high-resolution atlas.</summary>
-        HQRefined = 3,
+        HQRefined,
         /// <summary>Refined mesh rendered as invisible depth-only occluder for MR.</summary>
-        Occlusion = 4,
+        Occlusion,
         /// <summary>Gaussian Splat point cloud rendered from server-trained PLY data.</summary>
-        Splat = 6,
+        Splat,
         /// <summary>All scan rendering disabled.</summary>
-        None = 7,
+        None,
         /// <summary>Live GPU mesh wireframe via barycentric edge detection.</summary>
-        Wireframe = 8
+        Wireframe
     }
 
     /// <summary>High-level phase of the scanning session.</summary>
