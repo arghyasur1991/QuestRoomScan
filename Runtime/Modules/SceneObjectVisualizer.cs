@@ -28,11 +28,6 @@ namespace Genesis.RoomScan
             _registry = registry;
             _visible = true;
             Rebuild();
-
-            if (_registry != null)
-                _registry.ObjectAdded += OnObjectAdded;
-
-            Debug.Log($"[SceneObjectVisualizer] Show: {_registry?.Count ?? 0} objects, spawned {_annotations.Count} annotations");
         }
 
         public void Hide()
@@ -61,8 +56,7 @@ namespace Genesis.RoomScan
             _visible = wasVisible;
 
             if (_registry == null) return;
-            if (_registry != null)
-                _registry.ObjectAdded += OnObjectAdded;
+            _registry.ObjectAdded += OnObjectAdded;
 
             foreach (var obj in _registry.AllObjects)
                 SpawnAnnotation(obj);
@@ -143,7 +137,7 @@ namespace Genesis.RoomScan
 
             if (_shader == null)
             {
-                Debug.LogWarning("[SceneObjectVisualizer] No shader assigned — debug overlay may not render in builds");
+                Logger.Warning("SceneObjectVisualizer: no shader assigned — debug overlay may not render in builds");
                 return null;
             }
 

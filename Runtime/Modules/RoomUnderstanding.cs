@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using Meta.XR.MRUtilityKit;
 using UnityEngine;
-using UnityEngine.Events;
 
 namespace Genesis.RoomScan
 {

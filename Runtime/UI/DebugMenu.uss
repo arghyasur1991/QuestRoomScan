@@ -341,3 +341,15 @@
     -unity-text-align: middle-center;
     margin-top: 40px;
 }
+
+.scene-object-list {
+    font-size: 10px;
+    color: rgba(180, 190, 210, 0.85);
+    white-space: normal;
+    max-height: 60px;
+    overflow: hidden;
+    padding: 4px 6px;
+    margin: 2px 0;
+    background-color: rgba(15, 20, 30, 0.4);
+    border-radius: 4px;
+}

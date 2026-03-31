@@ -1371,18 +1371,16 @@ namespace Genesis.RoomScan
             _refinedRenderer = go.AddComponent<MeshRenderer>();
 
             var shader = _textureRefinement != null ? _textureRefinement.refinedMeshShader : null;
-            if (shader == null) shader = Shader.Find("Genesis/RefinedMesh");
             if (shader == null)
             {
-                Logger.Warning("Genesis/RefinedMesh shader not found, using URP/Unlit");
-                shader = Shader.Find("Universal Render Pipeline/Unlit");
+                Logger.Error("RefinedMesh shader not assigned. Run Setup Wizard to fix.");
+                return;
             }
             _refinedMaterial = new Material(shader);
             _refinedRenderer.material = _refinedMaterial;
             _refinedRenderer.enabled = false;
 
             var occShader = _textureRefinement != null ? _textureRefinement.occlusionMeshShader : null;
-            if (occShader == null) occShader = Shader.Find("Genesis/OcclusionMesh");
             if (occShader != null)
                 _occlusionMaterial = new Material(occShader);
         }

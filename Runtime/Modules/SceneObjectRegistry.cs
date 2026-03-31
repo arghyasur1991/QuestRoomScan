@@ -226,7 +226,7 @@ namespace Genesis.RoomScan
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[SceneObjectRegistry] Failed to deserialize: {e.Message}");
+                Logger.Warning($"SceneObjectRegistry: failed to deserialize: {e.Message}");
             }
             return registry;
         }

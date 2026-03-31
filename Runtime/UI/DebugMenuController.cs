@@ -389,10 +389,11 @@ namespace Genesis.RoomScan.UI
             var btns = new VisualElement();
             btns.AddToClassList("scan-entry-btns");
 
+            string pkgId = pkg.id;
+
             var loadBtn = new Button { text = "Load" };
             loadBtn.AddToClassList("scan-entry-btn");
             loadBtn.AddToClassList("scan-entry-btn--load");
-            string pkgId = pkg.id;
             loadBtn.RegisterCallback<ClickEvent>(async _ =>
             {
                 var scanner = RoomScanner.Instance;
@@ -406,11 +407,39 @@ namespace Genesis.RoomScan.UI
             });
             btns.Add(loadBtn);
 
+            if (pkg.hasRefined)
+            {
+                var refBtn = new Button { text = "Ref" };
+                refBtn.AddToClassList("scan-entry-btn");
+                refBtn.AddToClassList("scan-entry-btn--load");
+                refBtn.tooltip = "Load refined mesh only (fast, no TSDF)";
+                refBtn.RegisterCallback<ClickEvent>(async _ =>
+                {
+                    var scanner = RoomScanner.Instance;
+                    if (scanner == null) return;
+                    refBtn.text = "...";
+                    refBtn.SetEnabled(false);
+                    bool ok = await scanner.LoadRefinedOnlyAsync(pkgId);
+                    refBtn.text = "Ref";
+                    refBtn.SetEnabled(true);
+                    if (ok) SelectNav(_navScan);
+                });
+                btns.Add(refBtn);
+            }
+
             var delBtn = new Button { text = "Del" };
             delBtn.AddToClassList("scan-entry-btn");
             delBtn.AddToClassList("scan-entry-btn--delete");
+            bool confirmPending = false;
             delBtn.RegisterCallback<ClickEvent>(async _ =>
             {
+                if (!confirmPending)
+                {
+                    confirmPending = true;
+                    delBtn.text = "Sure?";
+                    ResetDeleteConfirmAfterDelay(delBtn, () => confirmPending = false);
+                    return;
+                }
                 var p = RoomScanPersistence.Instance;
                 if (p == null) return;
                 delBtn.text = "...";
@@ -780,6 +809,14 @@ namespace Genesis.RoomScan.UI
             if (btn == null) return;
             btn.text = text;
             btn.SetEnabled(true);
+        }
+
+        private static async void ResetDeleteConfirmAfterDelay(Button btn, System.Action onReset)
+        {
+            await System.Threading.Tasks.Task.Delay(3000);
+            if (btn == null) return;
+            onReset?.Invoke();
+            btn.text = "Del";
         }
 
         private static async void FlashStatus(Button btn, bool success)
