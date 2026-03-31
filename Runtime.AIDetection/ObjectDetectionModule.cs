@@ -1,6 +1,8 @@
 #if HAS_AI_INFERENCE
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using System.Threading.Tasks;
 using Unity.InferenceEngine;
 using UnityEngine;
@@ -58,6 +60,7 @@ namespace Genesis.RoomScan.AIDetection
 
         private IDetectionModel _model;
         private RoomScanner _scanner;
+        private KeyframeCollector _keyframeCollector;
         private bool _running;
         private bool _busy;
         private int _detectionCount;
@@ -104,6 +107,7 @@ namespace Genesis.RoomScan.AIDetection
         public void OnModuleInitialize(RoomScanner scanner)
         {
             _scanner = scanner;
+            _keyframeCollector = scanner.GetComponent<KeyframeCollector>();
 
             Logger.Info($"[ObjectDetection] Init — model={(modelAsset != null ? "assigned" : "MISSING")}, " +
                         $"labels={(classLabels != null ? "assigned" : "MISSING")}");
@@ -219,6 +223,9 @@ namespace Genesis.RoomScan.AIDetection
             _busy = true;
             try
             {
+                // Capture frame bytes BEFORE any await — the texture may be reused after yield
+                var frameCapture = CaptureFrameAsync(frame);
+
                 var detections = await _model.DetectAsync(frame);
                 if (detections == null || detections.Length == 0) return;
                 if (!DepthCapture.DepthAvailable) return;
@@ -237,11 +244,9 @@ namespace Genesis.RoomScan.AIDetection
                     if (d.confidence < minConfidence) continue;
                     if (rayCount >= MaxDetections) break;
 
-                    // Skip labels already covered by MRUK
                     if (skipLabelsInMruk && _mrukLabels.Contains(d.label))
                         continue;
 
-                    // Skip detections that fill too much of the frame (unreliable projection)
                     float bboxFractionW = d.boundingBox.width / cam.currentRes.x;
                     float bboxFractionH = d.boundingBox.height / cam.currentRes.y;
                     if (bboxFractionW > maxBboxFrameFraction || bboxFractionH > maxBboxFrameFraction)
@@ -259,6 +264,8 @@ namespace Genesis.RoomScan.AIDetection
 
                 var worldPositions = await ProjectRaysViaDepth(cam.pose.position, rayCount);
                 if (worldPositions == null) return;
+
+                var newDetections = new List<(Detection det, SceneObject obj)>();
 
                 for (int i = 0; i < validDetections.Count; i++)
                 {
@@ -302,7 +309,11 @@ namespace Genesis.RoomScan.AIDetection
                     _labelObjectCounts[d.label] = labelCount + 1;
                     registry.Add(obj);
                     OnObjectDetected?.Invoke(obj);
+                    newDetections.Add((d, obj));
                 }
+
+                if (newDetections.Count > 0)
+                    await SaveDetectionKeyframeAsync(frameCapture, cam, newDetections);
             }
             catch (Exception e)
             {
@@ -458,6 +469,82 @@ namespace Genesis.RoomScan.AIDetection
                 Mathf.Max(widthM, 0.05f),
                 Mathf.Max(heightM, 0.05f),
                 Mathf.Max(depthM, 0.05f));
+        }
+
+        // ── Detection keyframe capture ──────────────────────────────
+
+        private static Task<byte[]> CaptureFrameAsync(Texture frame)
+        {
+            var tcs = new TaskCompletionSource<byte[]>();
+            if (frame is RenderTexture rt)
+            {
+                AsyncGPUReadback.Request(rt, 0, TextureFormat.RGBA32, req =>
+                {
+                    if (req.hasError) { tcs.SetResult(null); return; }
+                    var tex = new Texture2D(req.width, req.height, TextureFormat.RGBA32, false);
+                    tex.LoadRawTextureData(req.GetData<byte>());
+                    tex.Apply();
+                    var bytes = tex.EncodeToJPG(85);
+                    UnityEngine.Object.Destroy(tex);
+                    tcs.SetResult(bytes);
+                });
+            }
+            else if (frame is Texture2D tex2d)
+            {
+                tcs.SetResult(tex2d.EncodeToJPG(85));
+            }
+            else
+            {
+                tcs.SetResult(null);
+            }
+            return tcs.Task;
+        }
+
+        private async Task SaveDetectionKeyframeAsync(Task<byte[]> frameCapture,
+            CameraSnapshot cam, List<(Detection det, SceneObject obj)> newDetections)
+        {
+            if (_keyframeCollector == null) return;
+
+            byte[] jpgBytes = await frameCapture;
+            if (jpgBytes == null || jpgBytes.Length == 0) return;
+
+            int kfId = _keyframeCollector.SaveCapturedKeyframe(
+                jpgBytes, Time.realtimeSinceStartup,
+                cam.pose.position, cam.pose.rotation,
+                cam.focal, cam.principal, cam.sensorRes, cam.currentRes);
+            if (kfId < 0) return;
+
+            string kfDir = _scanner.KeyframeDirectory;
+            if (string.IsNullOrEmpty(kfDir)) return;
+
+            string path = Path.Combine(kfDir, "detections.jsonl");
+            var sb = new StringBuilder(512);
+            foreach (var (det, obj) in newDetections)
+            {
+                sb.Clear();
+                sb.Append("{\"keyframe_id\":").Append(kfId);
+                sb.Append(",\"ts\":").Append(Time.realtimeSinceStartup.ToString("F3"));
+                sb.Append(",\"obj_id\":\"").Append(obj.id).Append('"');
+                sb.Append(",\"label\":\"").Append(det.label).Append('"');
+                sb.Append(",\"confidence\":").Append(det.confidence.ToString("F3"));
+                sb.Append(",\"class_id\":").Append(det.classId);
+                sb.Append(",\"bbox_x\":").Append(det.boundingBox.x.ToString("F1"));
+                sb.Append(",\"bbox_y\":").Append(det.boundingBox.y.ToString("F1"));
+                sb.Append(",\"bbox_w\":").Append(det.boundingBox.width.ToString("F1"));
+                sb.Append(",\"bbox_h\":").Append(det.boundingBox.height.ToString("F1"));
+                sb.Append(",\"world_x\":").Append(obj.position.x.ToString("F4"));
+                sb.Append(",\"world_y\":").Append(obj.position.y.ToString("F4"));
+                sb.Append(",\"world_z\":").Append(obj.position.z.ToString("F4"));
+                sb.Append(",\"scale_x\":").Append(obj.size.x.ToString("F3"));
+                sb.Append(",\"scale_y\":").Append(obj.size.y.ToString("F3"));
+                sb.Append(",\"scale_z\":").Append(obj.size.z.ToString("F3"));
+                sb.Append('}');
+
+                try { File.AppendAllText(path, sb + "\n"); }
+                catch (Exception e) { Logger.Warning($"[ObjectDetection] Detection manifest write failed: {e.Message}"); }
+            }
+
+            Logger.Info($"[ObjectDetection] Saved detection keyframe {kfId} with {newDetections.Count} new object(s)");
         }
 
         private void OnDestroy()
