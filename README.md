@@ -47,14 +47,18 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
-- **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools) and right detail views. Includes scan browser with load/delete per package, context-sensitive artifact deletion, and dynamic button disabled states. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
-- **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, and GPU unsharp-mask sharpening. Produces sharp, seamless textures from captured keyframes. `TextureRefinement` is an instance-based MonoBehaviour module — all configuration (xatlas options, bake settings, sharpen/seam parameters) is via inspector fields on the component.
+- **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools) and right detail views. Includes scan browser with load/delete per package (with delete confirmation), "Load Refined Only" for fast game-mode loading, context-sensitive artifact deletion, and dynamic button disabled states. Scene Objects toggle with live count. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
+- **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, GPU unsharp-mask sharpening, and Sobel normal map generation for real-time lighting. Produces sharp, seamless textures with surface detail from captured keyframes. `TextureRefinement` is an instance-based MonoBehaviour module — all configuration (xatlas options, bake settings, sharpen/seam parameters) is via inspector fields on the component.
 - **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
-- **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, HQRefined, Occlusion, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
+- **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, Occlusion, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
 - **Freeze Tint Toggle** — Independent toggle (not tied to render mode) shows/hides a blue tint overlay on frozen voxels in live mesh modes (Vertex, Triplanar, Wireframe). Bindable via `RoomScanInputHandler`.
-- **Game Integration APIs** — `RoomScanSession` provides a high-level facade: `StartScan()` → `await FinalizeScanAsync()` → `ScanResult` with mesh + atlas. `LoadLatestAsync()` for instant game-mode loading. For finer control: `LoadRefinedOnlyAsync()`, `ReleaseScanResources()`, public `RefinedMesh`/`RefinedAtlas` properties, `RefinedMeshReady` event, and `ScanCoverage`/`ScanProgress` metrics for guided UX.
+- **Game Integration APIs** — `RoomScanSession` provides a high-level facade: `StartScan()` → `await FinalizeScanAsync()` → `ScanResult` with mesh + atlas. `LoadLatestAsync()` for instant game-mode loading. For finer control: `LoadRefinedOnlyAsync()` (loads only refined mesh + atlas, no TSDF, < 1 second), `ReleaseScanResources()`, public `RefinedMesh`/`RefinedAtlas` properties, `RefinedMeshReady` event, and `ScanCoverage`/`ScanProgress` metrics for guided UX. Scene understanding accessible via `SceneObjectRegistry` for MRUK + AI detected objects.
 - **Post-Bake Mesh Simplification** — UV-preserving mesh simplification via `meshopt_simplifyWithAttributes` runs after atlas baking (configurable ratio), preserving texture quality. Replaces the old broken pre-bake decimation.
+- **AI Object Detection** — Optional YOLO-based object detection via Unity Inference Engine (Sentis) running during scanning. GPU Non-Maximum Suppression via compute shader (only ~500 bytes readback vs ~200KB for CPU NMS). Detected objects projected to 3D world space via GPU depth projection with temporal snapshot to handle async inference. Head angular velocity gating skips blurry frames. Detection keyframes saved with JSONL metadata for post-processing.
+- **MRUK Scene Understanding** — `RoomUnderstanding` module populates a `SceneObjectRegistry` from Meta's Mixed Reality Utility Kit anchors (walls, floor, ceiling, bed, TV, doors, windows, furniture). Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh for reliable detection. Event-driven anchor updates.
+- **Scene Object Debug Visualization** — Toggle world-space wireframe bounding boxes + billboard labels for all detected objects (MRUK + AI). Rendered via `DebugOverlay.shader` with per-source color coding (cyan = MRUK, yellow = AI). Count shown in debug menu button.
+- **Sobel Normal Maps** — GPU Sobel edge detection in `AtlasBakeCompute.compute` generates normal maps from the baked atlas. `RefinedMesh.shader` uses Sobel normals for real-time lighting on the refined mesh, adding depth and surface detail.
 
 ## Requirements
 
@@ -73,6 +77,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 | `com.unity.collections` | 2.4+ | NativeArray for plane detection |
 | `com.unity.mathematics` | 1.3+ | Math types used throughout |
 | `org.nesnausk.gaussian-splatting` | [fork](https://github.com/arghyasur1991/UnityGaussianSplatting) | **Optional** — Gaussian splat rendering with runtime PLY loading |
+| `com.unity.ai.inference` | 2.x+ | **Optional** — AI object detection (YOLO via Sentis). Assembly `Genesis.RoomScan.AIDetection` auto-activates when present |
 
 Additional project-level dependencies (not in `package.json` — installed via Meta's SDK or XR plugin management):
 - `com.unity.xr.meta-openxr` (bridges Meta depth to AR Foundation)
@@ -152,7 +157,7 @@ Once the room is well-scanned:
    - The debug menu shows live training status: state, progress bar, iteration count, elapsed time, backend
    - When training completes, the trained PLY is downloaded back to the Quest
 4. Press **Render Mode** to cycle to Splat view — the downloaded PLY is loaded into `GaussianSplatRenderer` and rendered on-device
-5. Cycle through render modes (Wireframe → Vertex → Triplanar → Refined → HQRefined → Occlusion → Splat → None) to compare views — modes whose data is not present are skipped automatically
+5. Cycle through render modes (Wireframe → Vertex → Triplanar → Refined → Occlusion → Splat → None) to compare views — modes whose data is not present are skipped automatically
 
 Scanning continues during training — you can keep refining the mesh while waiting.
 
@@ -167,8 +172,9 @@ After scanning, you can produce a sharper UV-mapped texture atlas from the captu
    - **GPU atlas baking**: A compute shader (`AtlasBakeCompute.compute`) processes each keyframe — two-pass multi-view blending selects and blends the top-scoring views per texel with occlusion-aware depth testing (~5-10s for 300 keyframes)
    - **GPU seam blending**: Gaussian-weighted blend across UV chart boundaries reduces color discontinuities
    - **GPU sharpening**: Unsharp mask restores crispness lost during multi-view blending (configurable strength and radius)
+   - **Sobel normal map**: GPU Sobel edge detection generates a normal map from the atlas for real-time fake lighting
    - **Dilation**: Fills gaps at UV island edges
-3. Press **Render Mode** to cycle to **Refined** — the UV-mapped mesh with baked atlas texture
+3. Press **Render Mode** to cycle to **Refined** — the UV-mapped mesh with baked atlas texture and normal-mapped lighting
 
 Refined textures persist automatically with the active package and are restored on load.
 
@@ -244,14 +250,18 @@ RoomScanner (orchestrator, events, scan lifecycle)
 ```
   ├── PassthroughCameraProvider (RGB frames from headset cameras)
   ├── TriplanarCache (bake camera RGB → 3 world-space textures + depth maps)
-  ├── TextureRefinement (GPU readback → xatlas UV unwrap → multi-view atlas bake)
+  ├── TextureRefinement (GPU readback → xatlas UV unwrap → multi-view atlas bake + Sobel normals)
   │     └── requires KeyframeCollector (auto-added)
+  ├── RoomUnderstanding (MRUK scene model → SceneObjectRegistry population)
+  ├── SceneObjectVisualizer (world-space wireframe boxes + billboard labels for detected objects)
   ├── RoomScanSession (high-level facade for game integration — see Game Integration Guide)
-  └── [separate assembly] GSplatManager + GSplatServerClient (Gaussian Splat training & rendering)
-        └── requires KeyframeCollector (auto-added)
+  ├── [separate assembly] GSplatManager + GSplatServerClient (Gaussian Splat training & rendering)
+  │     └── requires KeyframeCollector (auto-added)
+  └── [separate assembly] ObjectDetectionModule + YoloDetectionModel (AI detection via Sentis)
+        └── requires PassthroughCameraProvider
 ```
 
-All optional modules implement `IRoomScanModule` and are discovered automatically at startup. The `GaussianSplatting` package dependency lives in the separate `Genesis.RoomScan.GSplat` assembly — consumers who don't need Gaussian Splats can omit it entirely.
+All optional modules implement `IRoomScanModule` and are discovered automatically at startup. The `GaussianSplatting` package dependency lives in the separate `Genesis.RoomScan.GSplat` assembly, and AI detection lives in `Genesis.RoomScan.AIDetection` — consumers who don't need either can omit them entirely.
 
 See [ALGORITHM.md](ALGORITHM.md) for the full technical reference.
 
@@ -291,7 +301,7 @@ Trained splats are rendered using a [fork of Unity Gaussian Splatting](https://g
 - **Coordinate conversion**: COLMAP (right-handed Y-down) → Unity (left-handed Y-up)
 - **Quest 3 stereo**: Per-eye VP matrices for correct VR covariance projection, shared compute between eyes
 - **Performance**: Reduced-resolution rendering (0.5x), optimized compute shaders, partial radix sort, contribution-based culling
-- **Render mode switching**: Cycled via debug menu or controller binding without releasing GPU resources. Available modes: Wireframe, Vertex, Triplanar, Refined, HQRefined, Occlusion, Splat, None — unavailable modes are skipped
+- **Render mode switching**: Cycled via debug menu or controller binding without releasing GPU resources. Available modes: Wireframe, Vertex, Triplanar, Refined, Occlusion, Splat, None — unavailable modes are skipped
 
 ### Supported Training Backends
 
@@ -328,12 +338,13 @@ Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. 
 
 **Scan** (default) — Live status rows (Scanning, Mode, Integrations, Keyframes, Render, Package) plus coverage metrics (Progress, Phase, Color Coverage, Frozen, Mesh Stats) and action buttons:
 - **Start/Stop Scanning**: Toggle depth integration
-- **Render Mode**: Cycle through Wireframe → Vertex → Triplanar → Refined → HQRefined → Occlusion → Splat → None (unavailable modes skipped)
+- **Render Mode**: Cycle through Wireframe → Vertex → Triplanar → Refined → Occlusion → Splat → None (unavailable modes skipped)
 - **Freeze Tint**: Toggle blue tint overlay on frozen voxels (works in Vertex, Triplanar, and Wireframe modes)
+- **Objects**: Toggle world-space debug visualization of detected objects (MRUK + AI). Button text shows live count (e.g., "Objects: ON (10M + 2AI)")
 - **Save Scan**: Create a new package with current scan data
 - **Delete Artifact**: Context-sensitive — deletes Splat/Refined/HQ atlas from active package based on current render mode
 
-**Saved Scans** — Scrollable list of saved packages sorted newest-first. Each entry shows display name, date, artifact badges (KF, Tri, Splat, Refined, HQ, Enh), and Load/Delete buttons. Badge count shown on the nav button.
+**Saved Scans** — Scrollable list of saved packages sorted newest-first. Each entry shows display name, date, artifact badges (KF, Tri, Splat, Refined, HQ, Enh), and Load/Ref (load refined only)/Delete buttons. Delete requires two-click confirmation (turns red with "Sure?" text, resets after 3 seconds). Badge count shown on the nav button.
 
 **Refine** — On-device and server refinement status, mesh stats (original refined and simplified vertex/tri counts), and action buttons. Tab is disabled when `TextureRefinement` module is not attached.
 - **Refine Textures**: On-device GPU atlas bake from keyframes (multi-view blend + sharpen)

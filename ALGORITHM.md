@@ -19,7 +19,12 @@ MeshExtractor → GPUSurfaceNets (compute shader: classify → compact → smoot
        ├── PlaneDetector (periodic RANSAC on background thread → persistent plane list)
        ├── TriplanarCache (bake camera → 3 world-space textures + depth maps,
        │                    forward-splat relocation on load)
-       └── KeyframeCollector (motion-gated JPEG keyframes to disk for refinement/splat)
+       ├── KeyframeCollector (motion-gated JPEG keyframes to disk for refinement/splat)
+       ├── RoomUnderstanding (MRUK scene model → SceneObjectRegistry population)
+       │     └── SceneObjectVisualizer (wireframe boxes + billboard labels)
+       └── [separate assembly] ObjectDetectionModule (YOLO inference + GPU NMS + depth projection)
+             ├── YoloDetectionModel → NMSCompute.compute (GPU non-maximum suppression)
+             └── DepthProjection.compute (2D bbox → 3D world via frozen depth snapshot)
                │
 ScanMeshVertexColor.shader (SV_VertexID + StructuredBuffer → triplanar → vertex color → wireframe)
 ```
@@ -773,8 +778,7 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
 | **Wireframe** | GPU mesh (`ScanMeshVertexColor.shader`) | Always | Transparent mesh with white edges blending to vertex colors at vertices. Barycentric edge detection with configurable thickness (`_RSWireThickness`). Interior fragments discarded. |
 | **Vertex** | GPU mesh (`ScanMeshVertexColor.shader`) | Always (default) | Live GPU mesh with vertex colors only (~5cm resolution). Triplanar texturing forced off. |
 | **Triplanar** | GPU mesh (`ScanMeshVertexColor.shader`) | `TriplanarCache` attached | Live GPU mesh with triplanar-projected camera textures (~8mm/texel) with vertex color fallback where data is missing. |
-| **Refined** | `Mesh` object + `RefinedMesh.shader` | After on-device refinement | UV-unwrapped mesh with on-device baked atlas. Standard unlit UV-mapped rendering. |
-| **HQRefined** | `Mesh` object + `RefinedMesh.shader` | After server HQ refinement | Same mesh as Refined, with server-enhanced atlas (Real-ESRGAN + LaMa). |
+| **Refined** | `Mesh` object + `RefinedMesh.shader` | After on-device refinement | UV-unwrapped mesh with on-device baked atlas + Sobel normal map for fake lighting. |
 | **Occlusion** | `Mesh` object + `OcclusionMesh.shader` | After on-device refinement | Refined mesh as invisible depth-only occluder for MR. Writes depth via `SRPDefaultUnlit` pass (fragment returns `half4(0,0,0,0)` — Quest compositor shows passthrough via alpha=0). `DepthOnly`/`DepthNormals` passes provide prepass depth for Forward/Deferred URP modes. `Queue=Geometry-1` ensures virtual objects render behind the room mesh. Note: Adreno GPUs skip depth writes with `ColorMask 0` or `Blend Zero One` — the main pass must use default opaque blend with zero-alpha output. |
 | **Splat** | `GaussianSplatRenderer` (UGS) | After GS training completes | Gaussian Splat point cloud rendered from server-trained PLY data. |
 | **None** | — | Always | All scan rendering disabled (GPU mesh hidden, splat hidden, refined hidden). |
@@ -783,7 +787,33 @@ The **Freeze Tint** toggle (`ShowFreezeTint`) is independent of render mode — 
 
 Both refined atlases and mesh data persist to disk via `RoomScanPersistence` and survive app restarts / scan reloads.
 
-### 15.5 Server-Side HQ Refinement
+### 15.5 Sobel Normal Map Generation (`SobelNormalMap` kernel)
+
+After atlas baking, a GPU Sobel edge-detection pass generates a normal map from the baked atlas for real-time lighting on the refined mesh.
+
+**Kernel: `SobelNormalMap`** (`[numthreads(8, 8, 1)]`)
+
+1. For each atlas texel, compute luminance from RGB (weights 77/150/29) of the surrounding 3×3 neighborhood
+2. Apply standard Sobel operators: `gx` (horizontal gradient), `gy` (vertical gradient)
+3. **Dead zone**: If gradient magnitude < 0.03, output flat normal — suppresses false edges at UV chart seams
+4. Scale gradients by `_NormalStrength` (configurable)
+5. Output: Packed RGBA where R,G = encoded XY normal (mapped to 0–255), B = 255, A = 255. Empty source texels → 0.
+
+**Seam handling**: Neighbor lookups use center texel luminance as fallback when neighbor alpha = 0, preventing false gradient spikes at UV island boundaries.
+
+**Output buffer**: `_NormalBuf` (same `RWStructuredBuffer<uint>` packed format as `_AtlasBuf`), read into `Texture2D` and assigned as `_BumpMap` on `RefinedMesh.shader`.
+
+### 15.6 Refined Mesh Shading (`RefinedMesh.shader`)
+
+The refined mesh uses the Sobel normal map for real-time fake lighting:
+
+- **Normal map sampling**: `_BumpMap` RG channels → tangent-space normal (`tn.xy = (rg * 2 - 1) * _NormalStrength`, `tn.z = sqrt(1 - dot(tn.xy, tn.xy))`)
+- **TBN transform**: Tangent/bitangent/normal from mesh attributes → world-space normal
+- **Fake diffuse**: `abs(dot(worldNormal, normalize(_LightDir))) * 0.4 + 0.6` — half-lambert-like wrap lighting multiplied into atlas albedo
+- **Properties**: `_MainTex` (atlas), `_BumpMap` (Sobel normal map), `_NormalStrength`, `_LightDir`
+- **Passes**: `RefinedUnlit` (SRPDefaultUnlit, double-sided) + `DepthOnly`
+
+### 15.7 Server-Side HQ Refinement
 
 Server-side atlas enhancement via Real-ESRGAN super-resolution + LaMa inpainting:
 1. Client uploads the on-device refined atlas as PNG to `{serverUrl}/refine-texture/upload`
@@ -792,3 +822,145 @@ Server-side atlas enhancement via Real-ESRGAN super-resolution + LaMa inpainting
 4. Client downloads the enhanced atlas (`hq_atlas.png`)
 
 > **Note:** An earlier differentiable-rendering-based HQ path (PyTorch gradient-based texture optimization) is non-functional and not exposed. The Real-ESRGAN + LaMa pipeline described above is the working path.
+
+## 16. AI Object Detection Pipeline
+
+Optional YOLO-based object detection running alongside scanning. Lives in a separate assembly (`Genesis.RoomScan.AIDetection`) that activates when `com.unity.ai.inference` (Sentis) is installed.
+
+### 16.1 Architecture
+
+```
+ObjectDetectionModule (IRoomScanModule, orchestrator)
+  ├── YoloDetectionModel (IDetectionModel, YOLO inference + GPU NMS)
+  │     ├── NMSCompute.compute (GPU non-maximum suppression)
+  │     └── Unity Inference Engine (Sentis worker)
+  ├── DepthProjection.compute (2D bbox → 3D world position via depth)
+  └── SceneObjectRegistry (shared with RoomUnderstanding)
+```
+
+### 16.2 Detection Interface (`IDetectionModel`)
+
+Pluggable abstraction in the core assembly (no inference package dependency):
+- `Detection` struct: `boundingBox` (Rect, pixel coords), `classId`, `label`, `confidence`
+- `Task LoadAsync()` — load model weights
+- `Task<Detection[]> DetectAsync(Texture src, CancellationToken ct)` — run inference
+- Implementations: `YoloDetectionModel` (YOLO via Sentis)
+
+### 16.3 YOLO Inference (`YoloDetectionModel`)
+
+**Model**: YOLOv9t ONNX, loaded via `ModelLoader.Load()`.
+
+**Functional graph** (built without NMS — NMS runs on GPU separately):
+- Input: NCHW tensor from `TextureConverter.ToTensor`
+- Outputs: box coordinates `(N, 4)` as cx,cy,w,h; `ReduceMax` scores; `ArgMax` class IDs
+
+**Split scheduling**: When `splitOverFrames = true`, inference is spread across frames via `ScheduleIterable` yielding every `layersPerFrame` (default 22) layers. Prevents frame spikes on Quest 3.
+
+**Key parameters**:
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `scoreThreshold` | 0.5 | Min confidence for detection |
+| `iouThreshold` | 0.5 | NMS IoU overlap threshold |
+| `maxInputResolution` | 640 | Cap on input tensor resolution (0 = model default) |
+| `layersPerFrame` | 22 | Layers per frame when split scheduling |
+| `MaxKeptBoxes` | 200 | Max detections after NMS |
+
+### 16.4 GPU Non-Maximum Suppression (`NMSCompute.compute`)
+
+**Kernel: `RunNMS`** (`[numthreads(64, 1, 1)]`)
+
+Per-candidate thread `i`:
+1. Skip if `inScores[i] < scoreThreshold`
+2. Greedy suppression: suppressed if any earlier index `j < i` with same class, score ≥ current score, and IoU > `iouThreshold`
+3. Non-suppressed candidates appended to output buffers
+
+**Buffers**:
+- Input: `StructuredBuffer<float> inBoxCoords` (N×4 flat), `StructuredBuffer<int> inClassIDs`, `StructuredBuffer<float> inScores`
+- Output: `AppendStructuredBuffer<float4> outCoords`, `AppendStructuredBuffer<int> outLabelIDs`, `AppendStructuredBuffer<float> outScores`
+- Count: `ComputeBuffer.CopyCount` → indirect args buffer
+
+**GPU vs CPU NMS trade-off**: GPU NMS reads only ~500 bytes (append count + kept boxes) vs ~200KB for CPU NMS (entire score/coord tensor readback). On Quest 3's shared-memory architecture, avoiding the large GPU→CPU transfer is a significant win.
+
+### 16.5 Depth Projection (`DepthProjection.compute`)
+
+Projects 2D bounding box centers to 3D world positions using the depth buffer.
+
+**Kernel: `CopyDepthTexture`** (`[numthreads(8, 8, 1)]`)
+- Copies live depth into `RWTexture2DArray<float>` (2 stereo layers) as a temporal snapshot
+- Decouples depth from async inference timing
+
+**Kernel: `ProjectDetections`** (`[numthreads(64, 1, 1)]`)
+- Input: `StructuredBuffer<float4> _Rays` (world-space directions), `float3 _CamOrigin`, `uint _Count`
+- For each detection ray: project to depth NDC, sample depth texture via `gsDepthSample`, compute world hit position
+- Output: `RWStructuredBuffer<float4> _Results` — `(worldX, worldY, worldZ, valid)`. `valid = 0` if NDC outside [0.01, 0.99]
+- Results read back via `AsyncGPUReadback`
+
+### 16.6 Detection Orchestration (`ObjectDetectionModule`)
+
+**Frame selection**: Every `detectEveryNFrames` (default 15) frames, with angular velocity gating (`maxAngularVelocityDegPerSec = 30`) to skip blurry frames.
+
+**Per-detection cycle**:
+1. Freeze depth state → `CopyDepthTexture` dispatch (temporal snapshot into `RenderTexture Tex2DArray`)
+2. Blit latest camera frame
+3. `YoloDetectionModel.DetectAsync()` — split across frames
+4. Filter: min confidence, max bbox fraction (0.6), MRUK label skip (optional), per-label max count (2)
+5. `BboxToWorldRay` — convert YOLO bbox center to pinhole world ray (handles crop/letterbox)
+6. `ProjectRaysViaDepth` — GPU depth projection, max `MaxDetections` (64) rays per batch
+7. Merge with existing objects: within `mergeDistanceM` (0.8m) → update position with exponentially decaying smoothing (`alpha / sqrt(observationCount)`)
+8. New objects → `SceneObjectRegistry.Add`, fire `OnObjectDetected`
+9. Optional: save detection keyframe (JPEG + `detections.jsonl` with bbox, world position, scale)
+
+### 16.7 Detection Keyframe Logging
+
+Each detection cycle optionally saves:
+- JPEG snapshot of the camera frame (same as scanning keyframes)
+- Append to `detections.jsonl` with per-detection entries: bounding box, world position, label, confidence, scale
+
+## 17. MRUK Scene Understanding
+
+`RoomUnderstanding` populates the shared `SceneObjectRegistry` from Meta's Mixed Reality Utility Kit scene model.
+
+### 17.1 Anchor Population (`PopulateRegistry`)
+
+Iterates `MRUKRoom.Anchors`, for each:
+1. Map label via `GetAnchorLabel` (handles `OVRSemanticLabels` classification)
+2. Determine surface type: `ClassifyAnchor` using label bitmask constants (`WallLabels`, `FurnitureLabels`, `StructureLabels`)
+3. Size from `VolumeBounds` (3D furniture) or `PlaneRect` (flat surfaces like walls/floor)
+4. Special handling for floor/ceiling: wall-aligned bounding box via `FindWallHorizontalRight`
+5. Register as `SceneObject` with `id = mruk_{index}_{label}`, `source = MRUK`
+
+**Scene model**: Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh for reliable detection. Event-driven updates via `MRUKRoom.AnchorCreatedEvent` / `AnchorUpdatedEvent`.
+
+### 17.2 Surface Classification
+
+Dual classification strategy:
+- **MRUK-based** (`ClassifyFromMRUK`): Label bitmask lookup — walls, floor, ceiling, furniture
+- **Normal heuristic fallback** (`ClassifyFromNormals`): `ny > 0.7` → floor, `ny < -0.7` → ceiling, else → wall
+
+**Per-vertex API**: `GetPerVertexSurfaceTypes(Mesh)` — nearest MRUK anchor per vertex position, with normal heuristic fallback where no anchor is close enough.
+
+### 17.3 SceneObjectRegistry
+
+Shared registry for both MRUK and AI-detected objects:
+- Storage: `List<SceneObject>` + `Dictionary<string, SceneObject>` by ID
+- Counts: `MrukCount`, `AiCount` (tracked separately)
+- Event: `ObjectAdded`
+- Queries: `FindByLabel`, `FindBySource`, `FindBySurface`, `FindClosest`, `FindInRadius`
+- Spatial: `AssociateMeshVertices` — per-vertex best object index via `WorldBounds.Contains`
+- Persistence: `Relocate(Matrix4x4, SceneObjectSource)` — transforms object positions/rotations by source, `ToJson` / `FromJson`
+
+### 17.4 Scene Object Visualization (`SceneObjectVisualizer`)
+
+World-space wireframe bounding boxes + billboard labels for all registered objects:
+- **Box rendering**: `LineRenderer` with Hamiltonian-path traversal of box edges (single continuous line per object). Material from `DebugOverlay.shader`.
+- **Color coding**: MRUK = cyan `(0, 1, 1, 0.85)`, AI = yellow `(1, 1, 0, 0.85)`
+- **Billboard labels**: World-space `Canvas` with `[M]`/`[AI]` prefix, `sortingOrder = 30000`, LateUpdate billboard toward camera
+- **Line width**: 0.004m (constant world-space)
+- **Toggle**: `Show(registry)` / `Hide()` from debug menu "Objects" button
+
+### 17.5 Debug Overlay Shader (`Genesis/DebugOverlay`)
+
+URP unlit shader for debug visualization primitives:
+- Render queue: `Overlay`, `ZWrite Off`, `ZTest Always` (always on top)
+- Alpha blended, double-sided
+- Fragment: `vertexColor × _Color` — per-vertex color from `LineRenderer` with material tint
