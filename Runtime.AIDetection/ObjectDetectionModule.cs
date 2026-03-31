@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Unity.InferenceEngine;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan.AIDetection
@@ -81,8 +82,13 @@ namespace Genesis.RoomScan.AIDetection
         private ComputeBuffer _raysBuffer;
         private ComputeBuffer _resultsBuffer;
         private int _depthProjectKernel = -1;
+        private int _depthCopyKernel = -1;
         private readonly Vector4[] _raysCpu = new Vector4[MaxDetections];
         private readonly Vector4[] _resultsCpu = new Vector4[MaxDetections];
+
+        // Persistent GPU-side copy of the depth texture, frozen at detection start.
+        // Prevents temporal mismatch when async YOLO inference spans multiple frames.
+        private RenderTexture _depthSnapshotTex;
 
         public string ModuleName => "Object Detection";
         public bool IsRunning => _running;
@@ -92,6 +98,9 @@ namespace Genesis.RoomScan.AIDetection
 
         /// <summary>
         /// All camera params frozen at frame capture time, matching the TSDF pipeline exactly.
+        /// Includes depth state (matrices + texture size) so that the async detection pipeline
+        /// projects rays against the same depth frame as the color image, not whichever frame
+        /// happens to be current when YOLO inference finishes.
         /// </summary>
         private struct CameraSnapshot
         {
@@ -100,6 +109,15 @@ namespace Genesis.RoomScan.AIDetection
             public Vector2 principal;  // sensor-space principal point
             public Vector2 sensorRes;  // native sensor resolution
             public Vector2 currentRes; // delivered frame resolution
+
+            // Depth state frozen at frame capture time
+            public Matrix4x4[] depthProj;
+            public Matrix4x4[] depthProjInv;
+            public Matrix4x4[] depthView;
+            public Matrix4x4[] depthViewInv;
+            public Vector2 depthPlanes;
+            public Vector2 depthTexSize;
+            public bool hasDepth;
         }
 
         // ── IRoomScanModule lifecycle ────────────────────────────────
@@ -147,6 +165,73 @@ namespace Genesis.RoomScan.AIDetection
                 sensorRes = sensorRes,
                 currentRes = currentRes
             };
+        }
+
+        /// <summary>
+        /// Freezes the current depth state (matrices + texture) into the CameraSnapshot.
+        /// MUST be called synchronously before any await — on the same frame as the color
+        /// capture — so that the live DepthCapture globals haven't been overwritten yet.
+        /// Uses a compute shader copy (not Graphics.CopyTexture) to handle any source
+        /// texture format (external OVR, bilateral-filtered RT, simulated, etc.).
+        /// </summary>
+        private void FreezeDepthState(ref CameraSnapshot snap)
+        {
+            var dc = DepthCapture.Instance;
+            if (dc == null || !DepthCapture.DepthAvailable) return;
+
+            var depthTex = dc.DepthTex;
+            if (depthTex == null) return;
+
+            snap.depthProj = (Matrix4x4[])dc.Proj.Clone();
+            snap.depthProjInv = (Matrix4x4[])dc.ProjInv.Clone();
+            snap.depthView = (Matrix4x4[])dc.View.Clone();
+            snap.depthViewInv = (Matrix4x4[])dc.ViewInv.Clone();
+            snap.depthPlanes = dc.Planes;
+            snap.depthTexSize = new Vector2(depthTex.width, depthTex.height);
+
+            EnsureDepthSnapshotTexture(depthTex.width, depthTex.height);
+            CopyDepthViaCompute(snap.depthTexSize);
+            snap.hasDepth = true;
+        }
+
+        private void EnsureDepthSnapshotTexture(int width, int height)
+        {
+            if (_depthSnapshotTex != null &&
+                _depthSnapshotTex.width == width &&
+                _depthSnapshotTex.height == height)
+                return;
+
+            if (_depthSnapshotTex != null)
+            {
+                _depthSnapshotTex.Release();
+                Destroy(_depthSnapshotTex);
+            }
+
+            _depthSnapshotTex = new RenderTexture(width, height, 0,
+                GraphicsFormat.R32_SFloat, 1)
+            {
+                dimension = TextureDimension.Tex2DArray,
+                volumeDepth = 2,
+                enableRandomWrite = true,
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp
+            };
+            _depthSnapshotTex.Create();
+        }
+
+        private void CopyDepthViaCompute(Vector2 texSize)
+        {
+            if (depthProjectionShader == null) return;
+            EnsureDepthProjectionBuffers();
+
+            var cs = depthProjectionShader;
+            cs.SetTexture(_depthCopyKernel, DepthCapture.DepthTexID, DepthCapture.Instance.DepthTex);
+            cs.SetTexture(_depthCopyKernel, "_DepthCopyDest", _depthSnapshotTex);
+            cs.SetVector(DepthCapture.TexSizeID, texSize);
+
+            int gx = Mathf.CeilToInt(texSize.x / 8f);
+            int gy = Mathf.CeilToInt(texSize.y / 8f);
+            cs.Dispatch(_depthCopyKernel, gx, gy, 1);
         }
 
         // ── Detection control ────────────────────────────────────────
@@ -221,16 +306,19 @@ namespace Genesis.RoomScan.AIDetection
         private async Task RunDetection(Texture frame, CameraSnapshot cam)
         {
             _busy = true;
-            // Cheap GPU-side copy before any await — the source texture may be
-            // overwritten on subsequent frames. Readback only happens later if
-            // there are new detections, avoiding unnecessary GPU stalls.
+            // Freeze depth state BEFORE any await — we're still on the same frame as
+            // the color capture, so DepthCapture globals match the camera snapshot.
+            // Uses a compute shader copy to handle any source texture format.
+            FreezeDepthState(ref cam);
+
+            // Cheap GPU-side copy of color frame before any await.
             var frameCopy = RenderTexture.GetTemporary(frame.width, frame.height, 0, RenderTextureFormat.ARGB32);
             Graphics.Blit(frame, frameCopy);
             try
             {
                 var detections = await _model.DetectAsync(frame);
                 if (detections == null || detections.Length == 0) return;
-                if (!DepthCapture.DepthAvailable) return;
+                if (!cam.hasDepth) return;
 
                 var registry = _scanner?.SceneObjectRegistry;
                 if (registry == null) return;
@@ -264,7 +352,7 @@ namespace Genesis.RoomScan.AIDetection
 
                 if (rayCount == 0) return;
 
-                var worldPositions = await ProjectRaysViaDepth(cam.pose.position, rayCount);
+                var worldPositions = await ProjectRaysViaDepth(cam, rayCount);
                 if (worldPositions == null) return;
 
                 var newDetections = new List<(Detection det, SceneObject obj)>();
@@ -388,9 +476,10 @@ namespace Genesis.RoomScan.AIDetection
             _raysBuffer = new ComputeBuffer(MaxDetections, sizeof(float) * 4);
             _resultsBuffer = new ComputeBuffer(MaxDetections, sizeof(float) * 4);
             _depthProjectKernel = depthProjectionShader.FindKernel("ProjectDetections");
+            _depthCopyKernel = depthProjectionShader.FindKernel("CopyDepthTexture");
         }
 
-        private Task<Vector4[]> ProjectRaysViaDepth(Vector3 camOrigin, int count)
+        private Task<Vector4[]> ProjectRaysViaDepth(CameraSnapshot cam, int count)
         {
             if (depthProjectionShader == null)
             {
@@ -402,13 +491,24 @@ namespace Genesis.RoomScan.AIDetection
 
             _raysBuffer.SetData(_raysCpu, 0, 0, count);
 
-            depthProjectionShader.SetBuffer(_depthProjectKernel, "_Rays", _raysBuffer);
-            depthProjectionShader.SetBuffer(_depthProjectKernel, "_Results", _resultsBuffer);
-            depthProjectionShader.SetVector("_CamOrigin", camOrigin);
-            depthProjectionShader.SetInt("_Count", count);
+            // Bind the frozen depth state from color-frame time instead of relying on
+            // live globals which may be many frames ahead after async YOLO inference.
+            var cs = depthProjectionShader;
+            cs.SetMatrixArray(DepthCapture.ProjID, cam.depthProj);
+            cs.SetMatrixArray(DepthCapture.ProjInvID, cam.depthProjInv);
+            cs.SetMatrixArray(DepthCapture.ViewID, cam.depthView);
+            cs.SetMatrixArray(DepthCapture.ViewInvID, cam.depthViewInv);
+            cs.SetVector(DepthCapture.ZParamsID, cam.depthPlanes);
+            cs.SetVector(DepthCapture.TexSizeID, cam.depthTexSize);
+            cs.SetTexture(_depthProjectKernel, DepthCapture.DepthTexID, _depthSnapshotTex);
+
+            cs.SetBuffer(_depthProjectKernel, "_Rays", _raysBuffer);
+            cs.SetBuffer(_depthProjectKernel, "_Results", _resultsBuffer);
+            cs.SetVector("_CamOrigin", cam.pose.position);
+            cs.SetInt("_Count", count);
 
             int groups = (count + 63) / 64;
-            depthProjectionShader.Dispatch(_depthProjectKernel, groups, 1, 1);
+            cs.Dispatch(_depthProjectKernel, groups, 1, 1);
 
             var tcs = new TaskCompletionSource<Vector4[]>();
             AsyncGPUReadback.Request(_resultsBuffer, count * sizeof(float) * 4, 0, req =>
@@ -558,6 +658,11 @@ namespace Genesis.RoomScan.AIDetection
             _model?.Dispose();
             _raysBuffer?.Release();
             _resultsBuffer?.Release();
+            if (_depthSnapshotTex != null)
+            {
+                _depthSnapshotTex.Release();
+                Destroy(_depthSnapshotTex);
+            }
         }
     }
 }
