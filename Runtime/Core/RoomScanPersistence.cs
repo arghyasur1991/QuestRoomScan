@@ -756,15 +756,22 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Loads scene objects from disk, relocates AI detections into current world
-        /// space, and sets them on the scanner.
+        /// Loads scene objects from disk, applies delta relocation to AI detections
+        /// (same formula as TSDF/refined), discards stale MRUK entries and refreshes
+        /// from live room data.
         /// </summary>
-        private void LoadAndApplySceneObjects(string pkgDir, Matrix4x4 anchorNow)
+        private void LoadAndApplySceneObjects(string pkgDir, Matrix4x4 relocDelta)
         {
             var sceneObjects = LoadSceneObjects(pkgDir);
-            if (sceneObjects.Count == 0) return;
-            sceneObjects.Relocate(anchorNow, SceneObjectSource.AIDetection);
-            RoomScanner.Instance?.SetSceneObjectRegistry(sceneObjects);
+            sceneObjects.RemoveBySource(SceneObjectSource.MRUK);
+            sceneObjects.Relocate(relocDelta, SceneObjectSource.AIDetection);
+
+            var scanner = RoomScanner.Instance;
+            if (scanner != null)
+            {
+                scanner.SetSceneObjectRegistry(sceneObjects);
+                scanner.PopulateSceneObjectRegistry();
+            }
         }
 
         /// <summary>
@@ -936,7 +943,7 @@ namespace Genesis.RoomScan
                 catch (Exception e) { Logger.Warning($"Refined load skipped ({e.Message})"); }
 
                 FinalizeLoad(pkgId, anchorData, anchorAtSave);
-                LoadAndApplySceneObjects(pkgDir, anchorNow);
+                LoadAndApplySceneObjects(pkgDir, relocVolume);
 
                 Logger.Info($"Package loaded: {pkgId} (integ={savedIntCount}, " +
                           $"splat={File.Exists(splatPath)}, refined={File.Exists(Path.Combine(pkgDir, "refined_mesh.bin"))})");
@@ -994,7 +1001,8 @@ namespace Genesis.RoomScan
                 RoomScanner.Instance?.SetRenderMode(ScanRenderMode.Refined);
 
                 FinalizeLoad(pkgId, anchorData);
-                LoadAndApplySceneObjects(pkgDir, anchorNow);
+                Matrix4x4 relocScene = RoomAnchorManager.ComputeRelocationMatrix(anchorNow, baseMatrix);
+                LoadAndApplySceneObjects(pkgDir, relocScene);
 
                 Logger.Info($"Refined-only load complete: {pkgId}");
                 LoadCompleted?.Invoke();

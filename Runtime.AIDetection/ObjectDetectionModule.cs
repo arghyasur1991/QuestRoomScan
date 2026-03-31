@@ -11,9 +11,11 @@ namespace Genesis.RoomScan.AIDetection
     /// <summary>
     /// Scan-time object detection orchestrator. Subscribes to RoomScanner.ColorFrameProvided
     /// to receive camera frames with the exact same world-space pose and intrinsics used by
-    /// the TSDF pipeline. Projects 2D YOLO detections to 3D via DepthProjection.compute
-    /// (reusing the same DepthKit.hlsl depth pipeline as VolumeIntegration) and feeds
-    /// results into SceneObjectRegistry.
+    /// the TSDF pipeline. Projects 2D YOLO detections to 3D world-space positions via
+    /// DepthProjection.compute (reusing the same DepthKit.hlsl depth pipeline as
+    /// VolumeIntegration) and feeds results into SceneObjectRegistry. Positions are stored
+    /// in world space — same coordinate system as TSDF/refined mesh/splat — and relocated
+    /// via the same delta relocation on reload.
     /// </summary>
     public class ObjectDetectionModule : MonoBehaviour, IRoomScanModule
     {
@@ -26,7 +28,7 @@ namespace Genesis.RoomScan.AIDetection
         [SerializeField] internal ComputeShader depthProjectionShader;
 
         [Header("Detection Settings")]
-        [SerializeField] private int detectEveryNFrames = 5;
+        [SerializeField] private int detectEveryNFrames = 15;
         [SerializeField, Range(0f, 1f)] private float minConfidence = 0.5f;
         [SerializeField] private BackendType backend = BackendType.GPUCompute;
         [SerializeField] private bool splitOverFrames = true;
@@ -44,6 +46,10 @@ namespace Genesis.RoomScan.AIDetection
         [Tooltip("Skip AI detection for labels already present in MRUK (e.g. bed, couch)")]
         [SerializeField] private bool skipLabelsInMruk = true;
 
+        [Header("Stability")]
+        [Tooltip("Skip detection when head rotates faster than this (deg/s). Prevents blurry-frame detections.")]
+        [SerializeField] private float maxAngularVelocityDegPerSec = 30f;
+
         [Header("Deduplication")]
         [Tooltip("Detections closer than this distance to an existing object of the same class are merged")]
         [SerializeField] private float mergeDistanceM = 0.8f;
@@ -56,6 +62,8 @@ namespace Genesis.RoomScan.AIDetection
         private bool _busy;
         private int _detectionCount;
         private int _framesSinceLastDetect;
+        private Quaternion _prevRotation = Quaternion.identity;
+        private float _prevTime;
 
         // Latest camera frame snapshot from ColorFrameProvided
         private Texture _latestFrame;
@@ -183,11 +191,24 @@ namespace Genesis.RoomScan.AIDetection
         {
             if (!_running || _busy || _latestFrame == null) return;
             if (++_framesSinceLastDetect < detectEveryNFrames) return;
+
+            var snap = _latestSnapshot;
+            float dt = Time.time - _prevTime;
+            if (dt > 0.001f)
+            {
+                float angleDeg = Quaternion.Angle(_prevRotation, snap.pose.rotation);
+                if (angleDeg / dt > maxAngularVelocityDegPerSec)
+                {
+                    _prevRotation = snap.pose.rotation;
+                    _prevTime = Time.time;
+                    return;
+                }
+            }
+            _prevRotation = snap.pose.rotation;
+            _prevTime = Time.time;
             _framesSinceLastDetect = 0;
 
-            // Freeze the frame and camera snapshot for this detection run
             var frame = _latestFrame;
-            var snap = _latestSnapshot;
             _latestFrame = null;
 
             _ = RunDetection(frame, snap);
@@ -239,11 +260,6 @@ namespace Genesis.RoomScan.AIDetection
                 var worldPositions = await ProjectRaysViaDepth(cam.pose.position, rayCount);
                 if (worldPositions == null) return;
 
-                // All AI positions are stored relative to the scan session anchor
-                // so they stay world-locked across tracking corrections.
-                var anchorT = _scanner.ScanAnchorTransform;
-                if (anchorT == null) return;
-
                 for (int i = 0; i < validDetections.Count; i++)
                 {
                     var wp = worldPositions[i];
@@ -257,17 +273,13 @@ namespace Genesis.RoomScan.AIDetection
 
                     var worldScale = EstimateWorldScale(d.boundingBox, worldPos, cam, cropData);
 
-                    // Convert to anchor-local space for storage and dedup
-                    var localPos = anchorT.InverseTransformPoint(worldPos);
-
-                    var existing = FindExisting(registry, d.label, localPos);
+                    var existing = FindExisting(registry, d.label, worldPos);
                     if (existing != null)
                     {
-                        UpdateExisting(registry, existing, localPos, d);
+                        UpdateExisting(registry, existing, worldPos, d);
                         continue;
                     }
 
-                    // Cap unique objects per label
                     _labelObjectCounts.TryGetValue(d.label, out int labelCount);
                     if (labelCount >= maxObjectsPerLabel) continue;
 
@@ -278,7 +290,7 @@ namespace Genesis.RoomScan.AIDetection
                         source = SceneObjectSource.AIDetection,
                         surfaceType = SurfaceType.Unknown,
                         confidence = d.confidence,
-                        position = localPos,
+                        position = worldPos,
                         rotation = Quaternion.identity,
                         size = worldScale,
                         classId = d.classId,

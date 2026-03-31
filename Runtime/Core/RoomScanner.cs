@@ -155,13 +155,6 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Shader used for debug overlay wireframes and labels")]
         internal Shader debugOverlayShader;
 
-        /// <summary>
-        /// Live transform of the spatial anchor created at scan start.
-        /// AI detection positions are stored relative to this anchor for tracking stability.
-        /// </summary>
-        internal Transform ScanAnchorTransform =>
-            RoomAnchorManager.Instance != null ? RoomAnchorManager.Instance.SpatialAnchorTransform : null;
-
         /// <summary>Toggle scene object annotation overlay on any render mode.</summary>
         public bool ShowSceneObjects
         {
@@ -178,7 +171,6 @@ namespace Genesis.RoomScan
                         _sceneObjectVisualizer = go.AddComponent<SceneObjectVisualizer>();
                         _sceneObjectVisualizer.SetShader(debugOverlayShader);
                     }
-                    _sceneObjectVisualizer.SetScanAnchor(ScanAnchorTransform);
                     _sceneObjectVisualizer.Show(_sceneObjectRegistry);
                 }
                 else
@@ -551,15 +543,18 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Creates a spatial anchor at scan start so AI detections can be stored
-        /// relative to a world-locked reference frame that survives tracking corrections.
+        /// Creates a spatial anchor at scan start for persistence. The anchor's matrix
+        /// serves as the baseMatrixAtSave for delta relocation on reload — same pattern
+        /// used by TSDF, refined mesh, and splat. Placed at the camera's current position
+        /// with identity rotation to avoid inheriting MRUK floor's arbitrary yaw.
         /// </summary>
         private async Task CreateScanAnchorAsync()
         {
             var mgr = RoomAnchorManager.Instance;
             if (mgr == null || !mgr.IsRoomLoaded) return;
 
-            var result = await mgr.CreateAndSaveSpatialAnchorAsync(default, Quaternion.identity);
+            var camPos = Camera.main != null ? Camera.main.transform.position : Vector3.zero;
+            var result = await mgr.CreateAndSaveSpatialAnchorAsync(camPos, Quaternion.identity);
             if (result.HasValue && _persistence != null && _persistence.HasActivePackage)
             {
                 _persistence.WriteSessionAnchorData(
@@ -1294,7 +1289,7 @@ namespace Genesis.RoomScan
         /// Always replaces stale MRUK entries with fresh tracking-accurate positions.
         /// Safe to call multiple times — AI detections are preserved.
         /// </summary>
-        private void PopulateSceneObjectRegistry()
+        internal void PopulateSceneObjectRegistry()
         {
             _sceneObjectRegistry ??= new SceneObjectRegistry();
             if (_roomUnderstanding == null) return;
