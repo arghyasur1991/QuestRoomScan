@@ -221,11 +221,13 @@ namespace Genesis.RoomScan.AIDetection
         private async Task RunDetection(Texture frame, CameraSnapshot cam)
         {
             _busy = true;
+            // Cheap GPU-side copy before any await — the source texture may be
+            // overwritten on subsequent frames. Readback only happens later if
+            // there are new detections, avoiding unnecessary GPU stalls.
+            var frameCopy = RenderTexture.GetTemporary(frame.width, frame.height, 0, RenderTextureFormat.ARGB32);
+            Graphics.Blit(frame, frameCopy);
             try
             {
-                // Capture frame bytes BEFORE any await — the texture may be reused after yield
-                var frameCapture = CaptureFrameAsync(frame);
-
                 var detections = await _model.DetectAsync(frame);
                 if (detections == null || detections.Length == 0) return;
                 if (!DepthCapture.DepthAvailable) return;
@@ -313,7 +315,7 @@ namespace Genesis.RoomScan.AIDetection
                 }
 
                 if (newDetections.Count > 0)
-                    await SaveDetectionKeyframeAsync(frameCapture, cam, newDetections);
+                    await SaveDetectionKeyframeAsync(frameCopy, cam, newDetections);
             }
             catch (Exception e)
             {
@@ -321,6 +323,7 @@ namespace Genesis.RoomScan.AIDetection
             }
             finally
             {
+                RenderTexture.ReleaseTemporary(frameCopy);
                 _busy = false;
             }
         }
@@ -500,12 +503,12 @@ namespace Genesis.RoomScan.AIDetection
             return tcs.Task;
         }
 
-        private async Task SaveDetectionKeyframeAsync(Task<byte[]> frameCapture,
+        private async Task SaveDetectionKeyframeAsync(RenderTexture frameCopy,
             CameraSnapshot cam, List<(Detection det, SceneObject obj)> newDetections)
         {
             if (_keyframeCollector == null) return;
 
-            byte[] jpgBytes = await frameCapture;
+            byte[] jpgBytes = await CaptureFrameAsync(frameCopy);
             if (jpgBytes == null || jpgBytes.Length == 0) return;
 
             int kfId = _keyframeCollector.SaveCapturedKeyframe(
