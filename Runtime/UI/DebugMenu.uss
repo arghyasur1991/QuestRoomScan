@@ -341,3 +341,30 @@
     -unity-text-align: middle-center;
     margin-top: 40px;
 }
+
+/* ===== TRANSFORM SLIDER ===== */
+.transform-slider {
+    margin: 8px 0;
+    height: 28px;
+}
+
+.transform-slider .unity-base-slider__dragger {
+    width: 20px;
+    height: 20px;
+    border-radius: 10px;
+    background-color: rgb(0, 200, 255);
+    border-width: 2px;
+    border-color: rgba(0, 120, 180, 0.8);
+    margin-top: -8px;
+}
+
+.transform-slider .unity-base-slider__tracker {
+    height: 4px;
+    border-radius: 2px;
+    background-color: rgba(40, 50, 70, 0.8);
+    margin-top: -1px;
+}
+
+.transform-slider .unity-base-slider__drag-container {
+    padding: 0 4px;
+}

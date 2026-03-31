@@ -16,11 +16,11 @@ namespace Genesis.RoomScan.UI
         private bool _visible;
 
         // Nav buttons
-        private Button _navScan, _navSaved, _navRefine, _navTraining, _navTools;
+        private Button _navScan, _navSaved, _navRefine, _navTraining, _navTransform, _navTools;
         private Button[] _navButtons;
 
         // Views
-        private VisualElement _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools;
+        private VisualElement _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTransform, _viewTools;
         private VisualElement[] _views;
 
         // Scan view elements
@@ -43,6 +43,11 @@ namespace Genesis.RoomScan.UI
         private Label _valTrainElapsed, _valTrainBackend, _valTrainMessage;
         private VisualElement _progressFill;
         private Button _btnGsTrain, _btnCancelTrain;
+
+        // Transform view
+        private Label _valThemeName, _valTransformProgress;
+        private Slider _sliderTransform;
+        private Button _btnTransformMode, _btnSpreadTick, _btnTransformReset;
 
         // Tools view
         private Button _btnExportPc, _btnClearAll;
@@ -133,16 +138,18 @@ namespace Genesis.RoomScan.UI
             _navSaved = _root.Q<Button>("nav-saved");
             _navRefine = _root.Q<Button>("nav-refine");
             _navTraining = _root.Q<Button>("nav-training");
+            _navTransform = _root.Q<Button>("nav-transform");
             _navTools = _root.Q<Button>("nav-tools");
-            _navButtons = new[] { _navScan, _navSaved, _navRefine, _navTraining, _navTools };
+            _navButtons = new[] { _navScan, _navSaved, _navRefine, _navTraining, _navTransform, _navTools };
 
             // Views
             _viewScan = _root.Q<VisualElement>("view-scan");
             _viewSaved = _root.Q<VisualElement>("view-saved");
             _viewRefine = _root.Q<VisualElement>("view-refine");
             _viewTraining = _root.Q<VisualElement>("view-training");
+            _viewTransform = _root.Q<VisualElement>("view-transform");
             _viewTools = _root.Q<VisualElement>("view-tools");
-            _views = new[] { _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools };
+            _views = new[] { _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTransform, _viewTools };
 
             // Scan view
             _valScanning = _root.Q<Label>("val-scanning");
@@ -189,6 +196,14 @@ namespace Genesis.RoomScan.UI
             _btnGsTrain = _root.Q<Button>("btn-gs-train");
             _btnCancelTrain = _root.Q<Button>("btn-cancel-train");
 
+            // Transform
+            _valThemeName = _root.Q<Label>("val-theme-name");
+            _valTransformProgress = _root.Q<Label>("val-transform-progress");
+            _sliderTransform = _root.Q<Slider>("slider-transform");
+            _btnTransformMode = _root.Q<Button>("btn-transform-mode");
+            _btnSpreadTick = _root.Q<Button>("btn-spread-tick");
+            _btnTransformReset = _root.Q<Button>("btn-transform-reset");
+
             // Tools
             _btnExportPc = _root.Q<Button>("btn-export-pc");
             _btnClearAll = _root.Q<Button>("btn-clear-all");
@@ -204,6 +219,7 @@ namespace Genesis.RoomScan.UI
             _navSaved?.RegisterCallback<ClickEvent>(_ => { SelectNav(_navSaved); PopulateScanList(); });
             _navRefine?.RegisterCallback<ClickEvent>(_ => SelectNav(_navRefine));
             _navTraining?.RegisterCallback<ClickEvent>(_ => SelectNav(_navTraining));
+            _navTransform?.RegisterCallback<ClickEvent>(_ => SelectNav(_navTransform));
             _navTools?.RegisterCallback<ClickEvent>(_ => SelectNav(_navTools));
 
             // Scan view buttons
@@ -265,6 +281,35 @@ namespace Genesis.RoomScan.UI
                 CancelAndResetButton();
             });
 
+            // Transform
+            _sliderTransform?.RegisterValueChangedCallback(evt =>
+            {
+                var s = RoomScanner.Instance;
+                if (s != null) s.TransformProgress = evt.newValue;
+            });
+
+            _btnTransformMode?.RegisterCallback<ClickEvent>(_ =>
+            {
+                var s = RoomScanner.Instance;
+                if (s == null) return;
+                if (s.CurrentRenderMode == ScanRenderMode.Transformed)
+                    s.SetRenderMode(ScanRenderMode.Refined);
+                else if (s.IsModeAvailable(ScanRenderMode.Transformed))
+                    s.SetRenderMode(ScanRenderMode.Transformed);
+            });
+
+            _btnSpreadTick?.RegisterCallback<ClickEvent>(_ =>
+            {
+                // Placeholder: manually trigger one spread tick if TransformationState is wired
+            });
+
+            _btnTransformReset?.RegisterCallback<ClickEvent>(_ =>
+            {
+                var s = RoomScanner.Instance;
+                if (s != null) s.TransformProgress = 0f;
+                if (_sliderTransform != null) _sliderTransform.SetValueWithoutNotify(0f);
+            });
+
             // Tools
             _btnExportPc?.RegisterCallback<ClickEvent>(async _ =>
             {
@@ -294,6 +339,7 @@ namespace Genesis.RoomScan.UI
             _gsplatAvailable = scanner != null && scanner.GSplatProvider != null;
 
             SetNavAvailable(_navRefine, _refineAvailable);
+            SetNavAvailable(_navTransform, _refineAvailable);
             SetNavAvailable(_navTraining, _gsplatAvailable);
         }
 
@@ -470,6 +516,7 @@ namespace Genesis.RoomScan.UI
             RefreshScanView(scanner);
             RefreshRefineView(scanner);
             RefreshTrainingStatus();
+            RefreshTransformView(scanner);
             RefreshDisabledStates(scanner);
 
             SetLabel(_valFps, $"{_currentFps:F0} FPS");
@@ -658,6 +705,28 @@ namespace Genesis.RoomScan.UI
             SetLabel(_valTrainElapsed, _cachedGSplat.ElapsedSeconds > 0 ? FormatElapsed(_cachedGSplat.ElapsedSeconds) : "--");
             SetLabel(_valTrainBackend, string.IsNullOrEmpty(_cachedGSplat.TrainingBackend) ? "--" : _cachedGSplat.TrainingBackend);
             SetLabel(_valTrainMessage, string.IsNullOrEmpty(_cachedGSplat.TrainingMessage) ? "--" : _cachedGSplat.TrainingMessage);
+        }
+
+        private void RefreshTransformView(RoomScanner scanner)
+        {
+            var theme = scanner.ActiveThemePack;
+            SetLabel(_valThemeName, theme != null ? theme.displayName : "None");
+            SetLabel(_valTransformProgress, $"{scanner.TransformProgress:P0}");
+
+            if (_sliderTransform != null)
+            {
+                bool isFocused = _sliderTransform.focusController?.focusedElement == _sliderTransform;
+                if (!isFocused)
+                    _sliderTransform.SetValueWithoutNotify(scanner.TransformProgress);
+            }
+
+            bool canTransform = scanner.IsModeAvailable(ScanRenderMode.Transformed);
+            if (_btnTransformMode != null)
+            {
+                _btnTransformMode.SetEnabled(canTransform || scanner.CurrentRenderMode == ScanRenderMode.Transformed);
+                _btnTransformMode.text = scanner.CurrentRenderMode == ScanRenderMode.Transformed
+                    ? "Switch to Refined" : "Switch to Transformed";
+            }
         }
 
         private void RefreshDisabledStates(RoomScanner scanner)

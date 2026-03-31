@@ -23,6 +23,8 @@ namespace Genesis.RoomScan
         HQRefined,
         /// <summary>Refined mesh rendered as invisible depth-only occluder for MR.</summary>
         Occlusion,
+        /// <summary>Refined mesh with themed triplanar overlay driven by transformation progress.</summary>
+        Transformed,
         /// <summary>Gaussian Splat point cloud rendered from server-trained PLY data.</summary>
         Splat,
         /// <summary>All scan rendering disabled.</summary>
@@ -105,6 +107,10 @@ namespace Genesis.RoomScan
 
         [SerializeField, Tooltip("Show blue tint overlay on frozen voxels (Vertex/Triplanar/Wireframe modes)")]
         private bool showFreezeTint = true;
+
+        [Header("Room Transform")]
+        [SerializeField, Tooltip("Active ThemePack for the Transformed render mode")]
+        private ThemePack themePack;
 
         [Header("Logging")]
         [SerializeField] private LogLevel logLevel = LogLevel.Info;
@@ -242,11 +248,15 @@ namespace Genesis.RoomScan
         private MeshRenderer _refinedRenderer;
         private Material _refinedMaterial;
         private Material _occlusionMaterial;
+        private Material _transformMaterial;
         private Texture2D _refinedAtlasTexture;
         private Texture2D _hqAtlasTexture;
         private Texture2D _normalMapTexture;
         private Mesh _refinedMesh;
         private UnwrappedMeshResult? _cachedUnwrap;
+
+        // Room transformation
+        private float _transformProgress;
 
         // Scene object registry
         private SceneObjectRegistry _sceneObjectRegistry;
@@ -273,6 +283,31 @@ namespace Genesis.RoomScan
         public Texture2D RefinedAtlas => _refinedAtlasTexture;
         /// <summary>The server-enhanced HQ atlas, or null if not available.</summary>
         public Texture2D HQAtlas => _hqAtlasTexture;
+
+        /// <summary>Active ThemePack for the Transformed render mode. Assign in Inspector or set at runtime.</summary>
+        public ThemePack ActiveThemePack
+        {
+            get => themePack;
+            set
+            {
+                themePack = value;
+                if (_transformMaterial != null && value != null)
+                    value.ApplyToMaterial(_transformMaterial);
+                if (renderMode == ScanRenderMode.Transformed) ApplyRenderMode();
+            }
+        }
+
+        /// <summary>Global transformation progress (0 = real room, 1 = fully themed). Drives the shader blend.</summary>
+        public float TransformProgress
+        {
+            get => _transformProgress;
+            set
+            {
+                _transformProgress = Mathf.Clamp01(value);
+                if (_transformMaterial != null)
+                    _transformMaterial.SetFloat("_TransformGlobal", _transformProgress);
+            }
+        }
 
         /// <summary>
         /// The original (unsimplified) refined mesh data. Always preserved across re-refines.
@@ -675,6 +710,7 @@ namespace Genesis.RoomScan
             {
                 ScanRenderMode.Wireframe, ScanRenderMode.Vertex, ScanRenderMode.Triplanar,
                 ScanRenderMode.Refined, ScanRenderMode.HQRefined, ScanRenderMode.Occlusion,
+                ScanRenderMode.Transformed,
                 ScanRenderMode.Splat, ScanRenderMode.None
             };
 
@@ -712,6 +748,7 @@ namespace Genesis.RoomScan
                 ScanRenderMode.Refined => HasRefinedTexture,
                 ScanRenderMode.HQRefined => HasHQRefinedTexture,
                 ScanRenderMode.Occlusion => HasRefinedTexture && _occlusionMaterial != null,
+                ScanRenderMode.Transformed => HasRefinedTexture && _transformMaterial != null && themePack != null,
                 ScanRenderMode.Splat => (_gsplatProvider != null && _gsplatProvider.HasServerTrainedSplats) || HasDownloadedSplat,
                 _ => false
             };
@@ -1195,6 +1232,19 @@ namespace Genesis.RoomScan
             _refinedMesh.SetTriangles(result.Indices, 0);
             _refinedMesh.RecalculateTangents();
 
+            // Encode per-vertex surface type into vertex colors (R channel)
+            if (_roomUnderstanding != null)
+            {
+                var surfaceTypes = _roomUnderstanding.GetPerVertexSurfaceTypes(_refinedMesh);
+                if (surfaceTypes != null)
+                {
+                    var colors = new Color32[result.Positions.Length];
+                    for (int i = 0; i < colors.Length; i++)
+                        colors[i] = new Color32((byte)surfaceTypes[i], 0, 0, 255);
+                    _refinedMesh.colors32 = colors;
+                }
+            }
+
             Logger.Info($"Refined mesh applied: " +
                 $"{result.Positions.Length} verts, {result.Indices.Length / 3} tris, " +
                 $"atlas {result.AtlasWidth}x{result.AtlasHeight}" +
@@ -1383,6 +1433,16 @@ namespace Genesis.RoomScan
             var occShader = _textureRefinement != null ? _textureRefinement.occlusionMeshShader : null;
             if (occShader != null)
                 _occlusionMaterial = new Material(occShader);
+
+            var txShader = _textureRefinement != null ? _textureRefinement.roomTransformShader : null;
+            if (txShader == null) txShader = Shader.Find("Genesis/RoomTransform");
+            if (txShader != null)
+            {
+                _transformMaterial = new Material(txShader);
+                _transformMaterial.SetFloat("_TransformGlobal", _transformProgress);
+                if (themePack != null)
+                    themePack.ApplyToMaterial(_transformMaterial);
+            }
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -1617,7 +1677,8 @@ namespace Genesis.RoomScan
                                || renderMode == ScanRenderMode.Wireframe;
             bool refinedVisible = renderMode == ScanRenderMode.Refined
                                || renderMode == ScanRenderMode.HQRefined
-                               || renderMode == ScanRenderMode.Occlusion;
+                               || renderMode == ScanRenderMode.Occlusion
+                               || renderMode == ScanRenderMode.Transformed;
 
             if (gpuRenderer != null)
                 gpuRenderer.RenderVisible = gpuMeshVisible;
@@ -1631,6 +1692,18 @@ namespace Genesis.RoomScan
                     if (renderMode == ScanRenderMode.Occlusion && _occlusionMaterial != null)
                     {
                         _refinedRenderer.material = _occlusionMaterial;
+                    }
+                    else if (renderMode == ScanRenderMode.Transformed && _transformMaterial != null)
+                    {
+                        var atlas = _hqAtlasTexture != null ? _hqAtlasTexture : _refinedAtlasTexture;
+                        if (atlas != null)
+                            _transformMaterial.mainTexture = atlas;
+                        if (_normalMapTexture != null)
+                            _transformMaterial.SetTexture("_BumpMap", _normalMapTexture);
+                        if (themePack != null)
+                            themePack.ApplyToMaterial(_transformMaterial);
+                        _transformMaterial.SetFloat("_TransformGlobal", _transformProgress);
+                        _refinedRenderer.material = _transformMaterial;
                     }
                     else
                     {

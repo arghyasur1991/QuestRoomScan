@@ -19,6 +19,7 @@
             <ui:Button name="nav-saved"       text="Saved Scans" class="nav-btn" />
             <ui:Button name="nav-refine"      text="Refine"      class="nav-btn" />
             <ui:Button name="nav-training"    text="Gaussian Splat"    class="nav-btn" />
+            <ui:Button name="nav-transform"   text="Transform"   class="nav-btn" />
             <ui:Button name="nav-tools"       text="Tools"       class="nav-btn" />
 
             <ui:VisualElement class="nav-spacer" />
@@ -165,6 +166,28 @@
                 <ui:VisualElement class="btn-group">
                     <ui:Button name="btn-gs-train" text="Start GS Training" class="action-btn action-btn--primary" />
                     <ui:Button name="btn-cancel-train" text="Cancel Training" class="action-btn action-btn--danger" />
+                </ui:VisualElement>
+            </ui:VisualElement>
+
+            <!-- ── TRANSFORM VIEW ── -->
+            <ui:VisualElement name="view-transform" class="detail-view" style="display:none;">
+                <ui:Label text="ROOM TRANSFORM" class="view-title" />
+
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Theme" class="status-key" />
+                    <ui:Label name="val-theme-name" text="None" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Progress" class="status-key" />
+                    <ui:Label name="val-transform-progress" text="0%" class="status-val" />
+                </ui:VisualElement>
+
+                <ui:Slider name="slider-transform" low-value="0" high-value="1" value="0" class="transform-slider" />
+
+                <ui:VisualElement class="btn-group">
+                    <ui:Button name="btn-transform-mode" text="Switch to Transformed" class="action-btn action-btn--primary" />
+                    <ui:Button name="btn-spread-tick" text="Spread Tick" class="action-btn" />
+                    <ui:Button name="btn-transform-reset" text="Reset Progress" class="action-btn action-btn--danger" />
                 </ui:VisualElement>
             </ui:VisualElement>
 

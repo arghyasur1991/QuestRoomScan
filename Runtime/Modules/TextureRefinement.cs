@@ -47,6 +47,7 @@ namespace Genesis.RoomScan
         [Header("Bake Pipeline")]
         [SerializeField] internal Shader refinedMeshShader;
         [SerializeField] internal Shader occlusionMeshShader;
+        [SerializeField] internal Shader roomTransformShader;
         [SerializeField] internal ComputeShader atlasBakeCompute;
         [Tooltip("Force CPU bake path instead of GPU compute")]
         [SerializeField] internal bool forceCpuBake = false;
