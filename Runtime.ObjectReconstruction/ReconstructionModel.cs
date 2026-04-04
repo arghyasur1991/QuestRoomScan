@@ -8,62 +8,87 @@ using UnityEngine;
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
-    /// Wraps the main TripoSR model (419M params). Loads a pre-quantized .sentis file
-    /// from StreamingAssets. The forward pass is split over many frames via
-    /// <see cref="Worker.ScheduleIterable"/>. Output stays on GPU — caller uses
-    /// PeekOutput() to access the scene codes tensor without readback.
+    /// Wraps the split TripoSR model (two halves). Part 1 runs the image encoder + decoder
+    /// blocks 0-7, Part 2 runs blocks 8-15 + post-processor. Between the two halves, only
+    /// the hidden state (~12 MB) and encoder features (~3 MB) are transferred. Each half is
+    /// loaded and disposed independently so peak GPU memory is roughly halved.
     /// </summary>
     internal sealed class ReconstructionModel : IDisposable
     {
-        private const string ModelFileName = "ObjectReconstruction/triposr.sentis";
-
-        private Worker _worker;
-        private bool _loaded;
-
-        internal async Task LoadAsync(CancellationToken ct)
-        {
-            if (_loaded) return;
-
-            string path = await ModelPathResolver.ResolveAsync(ModelFileName, ct);
-            var model = await Task.Run(() => ModelLoader.Load(path), ct);
-            _worker = new Worker(model, BackendType.GPUCompute);
-            _loaded = true;
-            await AsyncHelper.YieldFrame();
-        }
+        private const string Part1FileName = "ObjectReconstruction/triposr_part1.sentis";
+        private const string Part2FileName = "ObjectReconstruction/triposr_part2.sentis";
 
         /// <summary>
-        /// Run the TripoSR forward pass on a preprocessed 512x512 image.
-        /// Output stays on GPU — use PeekOutput() to get the scene codes tensor.
+        /// Run both halves sequentially. Part 1 is loaded, executed, and disposed before
+        /// Part 2 is loaded. The intermediate tensors are downloaded to CPU in between.
+        /// After completion, use PeekOutput() to get the scene codes from Part 2.
         /// </summary>
-        internal async Task RunAsync(Tensor<float> preprocessed, CancellationToken ct)
+        internal async Task<Tensor<float>> RunAsync(Tensor<float> preprocessed, CancellationToken ct)
         {
-            if (!_loaded)
-                throw new InvalidOperationException("ReconstructionModel not loaded");
+            Tensor<float> encoderStates;
+            Tensor<float> hiddenStates;
 
-            var budget = new AsyncHelper.FrameBudget();
-            var it = _worker.ScheduleIterable(preprocessed);
-            while (it.MoveNext())
+            // --- Part 1: image -> encoder_hidden_states + hidden_states ---
             {
-                ct.ThrowIfCancellationRequested();
-                await budget.YieldIfNeeded();
+                string path = await ModelPathResolver.ResolveAsync(Part1FileName, ct);
+                var model = await Task.Run(() => ModelLoader.Load(path), ct);
+                using var worker = new Worker(model, BackendType.GPUCompute);
+                await AsyncHelper.YieldFrame();
+
+                var budget = new AsyncHelper.FrameBudget();
+                var it = worker.ScheduleIterable(preprocessed);
+                while (it.MoveNext())
+                {
+                    ct.ThrowIfCancellationRequested();
+                    await budget.YieldIfNeeded();
+                }
+
+                var rawEncoder = worker.PeekOutput("/Reshape_output_0") as Tensor<float>;
+                var rawHidden = worker.PeekOutput("/backbone/transformer_blocks.7/Add_2_output_0") as Tensor<float>;
+
+                var encData = rawEncoder.DownloadToArray();
+                encoderStates = new Tensor<float>(rawEncoder.shape);
+                encoderStates.Upload(encData);
+
+                var hidData = rawHidden.DownloadToArray();
+                hiddenStates = new Tensor<float>(rawHidden.shape);
+                hiddenStates.Upload(hidData);
             }
+            await AsyncHelper.YieldFrame();
+
+            // --- Part 2: (encoder_states, hidden_states) -> scene_codes ---
+            Tensor<float> sceneCodes;
+            {
+                string path = await ModelPathResolver.ResolveAsync(Part2FileName, ct);
+                var model = await Task.Run(() => ModelLoader.Load(path), ct);
+                using var worker = new Worker(model, BackendType.GPUCompute);
+                await AsyncHelper.YieldFrame();
+
+                worker.SetInput("/Reshape_output_0", encoderStates);
+                worker.SetInput("/backbone/transformer_blocks.7/Add_2_output_0", hiddenStates);
+
+                var budget = new AsyncHelper.FrameBudget();
+                var it = worker.ScheduleIterable();
+                while (it.MoveNext())
+                {
+                    ct.ThrowIfCancellationRequested();
+                    await budget.YieldIfNeeded();
+                }
+
+                encoderStates.Dispose();
+                hiddenStates.Dispose();
+
+                var rawOut = worker.PeekOutput() as Tensor<float>;
+                var outData = rawOut.DownloadToArray();
+                sceneCodes = new Tensor<float>(rawOut.shape);
+                sceneCodes.Upload(outData);
+            }
+            await AsyncHelper.YieldFrame();
+
+            return sceneCodes;
         }
 
-        /// <summary>
-        /// Returns the scene codes output tensor (shape 1,3,40,64,64).
-        /// Valid until the next RunAsync call. Do NOT dispose this tensor.
-        /// </summary>
-        internal Tensor<float> PeekOutput()
-        {
-            return _worker.PeekOutput() as Tensor<float>;
-        }
-
-        public void Dispose()
-        {
-            _worker?.Dispose();
-            _worker = null;
-            _loaded = false;
-        }
+        public void Dispose() { }
     }
 }
 #endif

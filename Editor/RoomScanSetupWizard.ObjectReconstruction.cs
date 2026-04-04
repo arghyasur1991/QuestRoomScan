@@ -36,14 +36,16 @@ namespace Genesis.RoomScan.Editor
 
         static readonly string[] SentisModelNames =
         {
-            "triposr.sentis",
+            "triposr_part1.sentis",
+            "triposr_part2.sentis",
             "nerf_decoder.sentis",
             "u2netp.sentis"
         };
 
         static readonly (string onnx, string sentis, bool quantize)[] ModelConversions =
         {
-            ("triposr_fp32.onnx", "triposr.sentis", true),
+            ("triposr_part1.onnx", "triposr_part1.sentis", true),
+            ("triposr_part2.onnx", "triposr_part2.sentis", true),
             ("nerf_decoder.onnx", "nerf_decoder.sentis", false),
             ("u2netp.onnx", "u2netp.sentis", false),
         };
@@ -124,7 +126,8 @@ namespace Genesis.RoomScan.Editor
                 GUILayout.Label("Missing", EditorStyles.boldLabel);
                 EditorGUILayout.EndHorizontal();
                 EditorGUILayout.HelpBox(
-                    $"Place triposr_fp32.onnx, nerf_decoder.onnx, and u2netp.onnx in {RECON_ONNX_DIR}/",
+                    $"Place triposr_part1.onnx, triposr_part2.onnx, nerf_decoder.onnx, and u2netp.onnx in {RECON_ONNX_DIR}/\n" +
+                    "Generate split ONNX via: python TripoSR/split_triposr.py",
                     MessageType.Warning);
             }
         }

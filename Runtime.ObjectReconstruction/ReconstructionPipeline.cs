@@ -116,18 +116,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Load TripoSR, run forward pass, copy scene codes to sampler, then dispose the model
-        /// to free GPU memory before mesh extraction begins.
+        /// Run the split TripoSR model (part 1 then part 2). Each half is loaded, executed,
+        /// and disposed independently. Scene codes are copied to the sampler's own buffer.
         /// </summary>
         internal async Task RunForwardAsync(Tensor<float> preprocessed, CancellationToken ct)
         {
             using var reconstruction = new ReconstructionModel();
-            await reconstruction.LoadAsync(ct);
-            await reconstruction.RunAsync(preprocessed, ct);
+            var sceneCodes = await reconstruction.RunAsync(preprocessed, ct);
 
             EnsureSampler();
-            _sampler.CacheSceneCodesGPU(reconstruction.PeekOutput());
-            reconstruction.Dispose();
+            _sampler.CacheSceneCodesGPU(sceneCodes);
+            sceneCodes.Dispose();
             await AsyncHelper.YieldFrame();
         }
 
