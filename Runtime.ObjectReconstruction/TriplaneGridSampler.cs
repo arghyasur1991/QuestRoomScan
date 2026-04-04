@@ -103,45 +103,57 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// <summary>
         /// Bilinear sampling matching F.grid_sample(align_corners=False).
         /// Position in [-0.5, 0.5] maps to pixel position = pos*N + N/2 - 0.5.
+        /// Zero heap allocations per call — all work on stack.
         /// </summary>
         private void SampleTriplaneAt(float x, float y, float z,
             float[] sceneData, float[] output, int outOffset)
         {
-            float u0f, u1f, v0f, v1f;
-            int u0, u1, v0, v1;
-            float fu, fv;
+            int pw = _planeW, ph = _planeH, ch = _channels;
+            float halfW = pw * 0.5f - 0.5f;
+            float halfH = ph * 0.5f - 0.5f;
+            int chPh = ch * ph;
+            int planeStride = chPh * pw;
 
-            // XY, XZ, YZ plane coordinates
-            float[] uCoords = { x, x, y };
-            float[] vCoords = { y, z, z };
+            // Unrolled 3 planes: XY(x,y), XZ(x,z), YZ(y,z) — no heap allocation
+            SampleOnePlane(sceneData, output, outOffset,
+                x * pw + halfW, y * ph + halfH, 0, pw, ph, ch, planeStride);
+            SampleOnePlane(sceneData, output, outOffset + ch,
+                x * pw + halfW, z * ph + halfH, planeStride, pw, ph, ch, planeStride);
+            SampleOnePlane(sceneData, output, outOffset + ch * 2,
+                y * pw + halfW, z * ph + halfH, planeStride * 2, pw, ph, ch, planeStride);
+        }
 
-            for (int p = 0; p < _numPlanes; p++)
+        private static void SampleOnePlane(float[] data, float[] output, int outOff,
+            float uf, float vf, int planeOff, int pw, int ph, int ch, int planeStride)
+        {
+            int u0 = (int)uf;
+            int v0 = (int)vf;
+            if (u0 < 0) u0 = 0; else if (u0 >= pw) u0 = pw - 1;
+            if (v0 < 0) v0 = 0; else if (v0 >= ph) v0 = ph - 1;
+            int u1 = u0 < pw - 1 ? u0 + 1 : u0;
+            int v1 = v0 < ph - 1 ? v0 + 1 : v0;
+
+            float fu = uf - u0;
+            float fv = vf - v0;
+            if (fu < 0f) fu = 0f; else if (fu > 1f) fu = 1f;
+            if (fv < 0f) fv = 0f; else if (fv > 1f) fv = 1f;
+
+            float w00 = (1f - fu) * (1f - fv);
+            float w10 = fu * (1f - fv);
+            float w01 = (1f - fu) * fv;
+            float w11 = fu * fv;
+
+            int row0 = v0 * pw;
+            int row1 = v1 * pw;
+
+            for (int c = 0; c < ch; c++)
             {
-                float uf = uCoords[p] * _planeW + _planeW * 0.5f - 0.5f;
-                float vf = vCoords[p] * _planeH + _planeH * 0.5f - 0.5f;
-
-                u0 = Mathf.Clamp(Mathf.FloorToInt(uf), 0, _planeW - 1);
-                v0 = Mathf.Clamp(Mathf.FloorToInt(vf), 0, _planeH - 1);
-                u1 = Mathf.Min(u0 + 1, _planeW - 1);
-                v1 = Mathf.Min(v0 + 1, _planeH - 1);
-                fu = Mathf.Clamp01(uf - u0);
-                fv = Mathf.Clamp01(vf - v0);
-
-                int planeOffset = p * _channels * _planeH * _planeW;
-                for (int c = 0; c < _channels; c++)
-                {
-                    int chOffset = planeOffset + c * _planeH * _planeW;
-                    float val00 = sceneData[chOffset + v0 * _planeW + u0];
-                    float val01 = sceneData[chOffset + v1 * _planeW + u0];
-                    float val10 = sceneData[chOffset + v0 * _planeW + u1];
-                    float val11 = sceneData[chOffset + v1 * _planeW + u1];
-
-                    output[outOffset + p * _channels + c] =
-                        val00 * (1 - fu) * (1 - fv) +
-                        val10 * fu * (1 - fv) +
-                        val01 * (1 - fu) * fv +
-                        val11 * fu * fv;
-                }
+                int chOff = planeOff + c * ph * pw;
+                output[outOff + c] =
+                    data[chOff + row0 + u0] * w00 +
+                    data[chOff + row0 + u1] * w10 +
+                    data[chOff + row1 + u0] * w01 +
+                    data[chOff + row1 + u1] * w11;
             }
         }
 

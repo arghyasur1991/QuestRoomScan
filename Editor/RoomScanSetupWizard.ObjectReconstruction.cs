@@ -34,9 +34,14 @@ namespace Genesis.RoomScan.Editor
 
         static readonly string[] SentisModelNames =
         {
-            "triposr_uint8.sentis",
             "nerf_decoder.sentis",
             "u2netp.sentis"
+        };
+        static readonly string[] TriposrSentisVariants =
+        {
+            "triposr_uint8.sentis",
+            "triposr_fp16.sentis",
+            "triposr_fp32.sentis",
         };
 
         static readonly (string onnx, string sentis, bool quantize)[] ModelConversions =
@@ -99,10 +104,12 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
 
                 EditorGUILayout.BeginHorizontal();
-                if (GUILayout.Button("Convert Models (Uint8)", GUILayout.Height(24)))
+                if (GUILayout.Button("Uint8", GUILayout.Height(24)))
                     ConvertModels(QuantizationType.Uint8);
-                if (GUILayout.Button("Convert Models (FP16)", GUILayout.Height(24)))
+                if (GUILayout.Button("FP16", GUILayout.Height(24)))
                     ConvertModels(QuantizationType.Float16);
+                if (GUILayout.Button("FP32 (no quant)", GUILayout.Height(24)))
+                    ConvertModels(null);
                 EditorGUILayout.EndHorizontal();
             }
             else
@@ -224,7 +231,10 @@ namespace Genesis.RoomScan.Editor
         {
             foreach (var name in SentisModelNames)
                 if (!File.Exists(Path.Combine(dir, name))) return false;
-            return true;
+            bool hasTriposr = false;
+            foreach (var name in TriposrSentisVariants)
+                if (File.Exists(Path.Combine(dir, name))) { hasTriposr = true; break; }
+            return hasTriposr;
         }
 
         private static bool AllOnnxModelsExist()
@@ -237,19 +247,21 @@ namespace Genesis.RoomScan.Editor
             return true;
         }
 
-        private static void ConvertModels(QuantizationType quantType)
+        private static void ConvertModels(QuantizationType? quantType)
         {
             string sentisDir = Path.Combine(Application.streamingAssetsPath, RECON_SENTIS_DIR);
             Directory.CreateDirectory(sentisDir);
+
+            string quantLabel = quantType == null ? "fp32"
+                : quantType == QuantizationType.Float16 ? "fp16" : "uint8";
 
             int total = ModelConversions.Length;
             for (int i = 0; i < total; i++)
             {
                 var (onnxName, sentisName, shouldQuantize) = ModelConversions[i];
 
-                // Override sentis name if FP16 is selected for quantizable models
-                if (shouldQuantize && quantType == QuantizationType.Float16)
-                    sentisName = sentisName.Replace("uint8", "fp16");
+                if (shouldQuantize)
+                    sentisName = sentisName.Replace("uint8", quantLabel);
 
                 string onnxPath = Path.Combine(RECON_ONNX_DIR, onnxName);
                 string sentisPath = Path.Combine(sentisDir, sentisName);
@@ -261,7 +273,7 @@ namespace Genesis.RoomScan.Editor
                 }
 
                 EditorUtility.DisplayProgressBar("Converting Models",
-                    $"Converting {onnxName}... ({i + 1}/{total})", (float)i / total);
+                    $"Converting {onnxName} → {quantLabel}... ({i + 1}/{total})", (float)i / total);
 
                 try
                 {
@@ -280,8 +292,8 @@ namespace Genesis.RoomScan.Editor
 
                     var model = ModelLoader.Load(modelAsset);
 
-                    if (shouldQuantize)
-                        ModelQuantizer.QuantizeWeights(quantType, ref model);
+                    if (shouldQuantize && quantType.HasValue)
+                        ModelQuantizer.QuantizeWeights(quantType.Value, ref model);
 
                     ModelWriter.Save(sentisPath, model);
                     Debug.Log($"[ObjectReconstruction] Saved {sentisPath} ({new FileInfo(sentisPath).Length / 1048576} MB)");
@@ -294,7 +306,7 @@ namespace Genesis.RoomScan.Editor
 
             EditorUtility.ClearProgressBar();
             AssetDatabase.Refresh();
-            Debug.Log("[ObjectReconstruction] Model conversion complete");
+            Debug.Log($"[ObjectReconstruction] Model conversion complete ({quantLabel})");
         }
     }
 }

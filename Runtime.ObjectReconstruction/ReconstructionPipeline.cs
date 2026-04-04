@@ -106,12 +106,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             int totalPoints = sampler.TotalGridPoints;
             int featureDim = sampler.FeatureDim;
-            int chunkSize = 65536; // ~31 MB per chunk at 120 features
+            // Larger chunks = fewer decoder calls. 131072 pts × 120 × 4 = ~63 MB
+            int chunkSize = 131072;
             var budget = new AsyncHelper.FrameBudget();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
 
             // --- Pass 1: sample grid chunks → decode → keep only density ---
             var density = new float[totalPoints];
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
+            Logger.Info($"[Pipeline] Pass 1: {totalPoints} grid points, {numChunks} chunks of {chunkSize}");
 
             for (int c = 0; c < numChunks; c++)
             {
@@ -126,18 +129,22 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 var resultData = chunkResult.DownloadToArray();
                 chunkResult.Dispose();
-                await Task.Run(() => WriteDensityOnly(resultData, density, start, count));
+                WriteDensityOnly(resultData, density, start, count);
                 await budget.YieldIfNeeded();
             }
+            Logger.Info($"[Pipeline] Pass 1 density done: {sw.ElapsedMilliseconds}ms");
 
             // --- Surface nets: density → mesh geometry ---
+            sw.Restart();
             var surfaceNets = new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold);
             var mesh = await surfaceNets.ExtractAsync(density);
             surfaceNets.Dispose();
+            Logger.Info($"[Pipeline] Surface nets done: {sw.ElapsedMilliseconds}ms");
             await AsyncHelper.YieldFrame();
             ct.ThrowIfCancellationRequested();
 
             // --- Pass 2: query decoder at mesh vertex positions for accurate surface colors ---
+            sw.Restart();
             var meshVerts = mesh.vertices;
             int numVerts = meshVerts.Length;
             Logger.Info($"[Pipeline] Pass 2: querying colors at {numVerts} mesh vertices");
@@ -160,9 +167,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 var resultData = chunkResult.DownloadToArray();
                 chunkResult.Dispose();
-                await Task.Run(() => WriteColorsOnly(resultData, vertColors, start, count));
+                WriteColorsOnly(resultData, vertColors, start, count);
                 await budget.YieldIfNeeded();
             }
+            Logger.Info($"[Pipeline] Pass 2 colors done: {sw.ElapsedMilliseconds}ms");
 
             sampler.Dispose();
             mesh.SetColors(vertColors);

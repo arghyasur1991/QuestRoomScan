@@ -25,6 +25,7 @@ namespace Genesis.RoomScan.Editor
         }
 
         [SerializeField] private Texture2D _testImage;
+        [SerializeField] private int _gridResolution = 128;
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
@@ -88,6 +89,10 @@ namespace Genesis.RoomScan.Editor
 
             _testImage = (Texture2D)EditorGUILayout.ObjectField(
                 "Test Image", _testImage, typeof(Texture2D), false);
+
+            _gridResolution = EditorGUILayout.IntPopup("Grid Resolution",
+                _gridResolution, new[] { "64 (fast)", "128 (balanced)", "256 (quality)" },
+                new[] { 64, 128, 256 });
 
             EditorGUILayout.Space(4);
             DrawShaderStatus();
@@ -333,7 +338,7 @@ namespace Genesis.RoomScan.Editor
         {
             return new ReconstructionPipeline(
                 frameBudgetMs: 16,
-                gridResolution: 256,
+                gridResolution: _gridResolution,
                 densityThreshold: 25f,
                 triplaneShader: _triplaneShader,
                 surfaceNetsShader: _surfaceNetsShader);

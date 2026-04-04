@@ -38,6 +38,27 @@ namespace Genesis.RoomScan.ObjectReconstruction
 #endif
         }
 
+        /// <summary>
+        /// Resolves the first available model from a list of candidate paths.
+        /// Preferred variants come first (e.g., fp32 before uint8).
+        /// </summary>
+        internal static async Task<string> ResolveFirstAsync(string[] candidates, CancellationToken ct)
+        {
+            foreach (var candidate in candidates)
+            {
+                string streamingPath = Path.Combine(Application.streamingAssetsPath, candidate);
+#if UNITY_ANDROID && !UNITY_EDITOR
+                string persistentPath = Path.Combine(Application.persistentDataPath, candidate);
+                if (File.Exists(persistentPath))
+                    return persistentPath;
+#endif
+                if (File.Exists(streamingPath))
+                    return await ResolveAsync(candidate, ct);
+            }
+            throw new FileNotFoundException(
+                $"No model variant found. Run 'Convert Models' in the Setup Wizard. Tried: {string.Join(", ", candidates)}");
+        }
+
         internal static async Task<string> ResolveAsync(string relativePath, CancellationToken ct)
         {
             string streamingPath = Path.Combine(Application.streamingAssetsPath, relativePath);
