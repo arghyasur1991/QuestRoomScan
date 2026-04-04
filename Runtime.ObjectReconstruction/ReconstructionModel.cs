@@ -10,19 +10,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// <summary>
     /// Wraps the split TripoSR model (two halves). Part 1 runs the image encoder + decoder
     /// blocks 0-7, Part 2 runs blocks 8-15 + post-processor. Between the two halves, only
-    /// the hidden state (~12 MB) and encoder features (~3 MB) are transferred. Each half is
-    /// loaded and disposed independently so peak GPU memory is roughly halved.
+    /// the hidden state (~12 MB) and encoder features (~3 MB) are transferred via GPU-to-GPU
+    /// copy (no CPU readback). Each half is loaded and disposed independently so peak GPU
+    /// memory is roughly halved.
     /// </summary>
     internal sealed class ReconstructionModel : IDisposable
     {
         private const string Part1FileName = "ObjectReconstruction/triposr_part1.sentis";
         private const string Part2FileName = "ObjectReconstruction/triposr_part2.sentis";
 
-        /// <summary>
-        /// Run both halves sequentially. Part 1 is loaded, executed, and disposed before
-        /// Part 2 is loaded. The intermediate tensors are downloaded to CPU in between.
-        /// After completion, use PeekOutput() to get the scene codes from Part 2.
-        /// </summary>
         internal async Task<Tensor<float>> RunAsync(Tensor<float> preprocessed, CancellationToken ct)
         {
             Tensor<float> encoderStates;
@@ -43,16 +39,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     await budget.YieldIfNeeded();
                 }
 
-                var rawEncoder = worker.PeekOutput("/Reshape_output_0") as Tensor<float>;
-                var rawHidden = worker.PeekOutput("/backbone/transformer_blocks.7/Add_2_output_0") as Tensor<float>;
-
-                var encData = rawEncoder.DownloadToArray();
-                encoderStates = new Tensor<float>(rawEncoder.shape);
-                encoderStates.Upload(encData);
-
-                var hidData = rawHidden.DownloadToArray();
-                hiddenStates = new Tensor<float>(rawHidden.shape);
-                hiddenStates.Upload(hidData);
+                encoderStates = CloneGPU(worker.PeekOutput("/Reshape_output_0") as Tensor<float>);
+                hiddenStates = CloneGPU(worker.PeekOutput("/backbone/transformer_blocks.7/Add_2_output_0") as Tensor<float>);
             }
             await AsyncHelper.YieldFrame();
 
@@ -78,14 +66,21 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 encoderStates.Dispose();
                 hiddenStates.Dispose();
 
-                var rawOut = worker.PeekOutput() as Tensor<float>;
-                var outData = rawOut.DownloadToArray();
-                sceneCodes = new Tensor<float>(rawOut.shape);
-                sceneCodes.Upload(outData);
+                sceneCodes = CloneGPU(worker.PeekOutput() as Tensor<float>);
             }
             await AsyncHelper.YieldFrame();
 
             return sceneCodes;
+        }
+
+        /// <summary>GPU-to-GPU tensor copy — no CPU readback.</summary>
+        private static Tensor<float> CloneGPU(Tensor<float> source)
+        {
+            var clone = new Tensor<float>(source.shape);
+            var srcBuf = ComputeTensorData.Pin(source).buffer;
+            var dstBuf = ComputeTensorData.Pin(clone).buffer;
+            Graphics.CopyBuffer(srcBuf, dstBuf);
+            return clone;
         }
 
         public void Dispose() { }
