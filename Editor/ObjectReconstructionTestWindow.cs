@@ -457,6 +457,14 @@ namespace Genesis.RoomScan.Editor
                 tensor.Dispose();
                 AppendTiming($"Forward pass: {sw.ElapsedMilliseconds:F0}ms");
 
+                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                Directory.CreateDirectory(debugDir);
+                pipeline.DebugDumpDir = debugDir;
+
+                string scPath = Path.Combine(debugDir, "sentis_scene_codes.bin");
+                pipeline.DumpSceneCodes(scPath);
+                AppendTiming($"Scene codes dumped: {scPath}");
+
                 SetStatus("Extracting mesh + vertex colors...", 0.60f);
                 sw.Restart();
                 var mesh = await pipeline.ExtractMeshAsync(_cts.Token);

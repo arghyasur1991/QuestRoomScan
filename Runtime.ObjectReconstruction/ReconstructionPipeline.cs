@@ -148,6 +148,39 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
+        /// Dumps the scene codes tensor (after RunForwardAsync) to a raw binary file for comparison.
+        /// </summary>
+        internal void DumpSceneCodes(string path)
+        {
+            var sceneCodes = _reconstruction.PeekOutput();
+            var data = sceneCodes.ReadbackAndClone();
+            var floats = data.DownloadToArray();
+            data.Dispose();
+
+            var bytes = new byte[floats.Length * sizeof(float)];
+            System.Buffer.BlockCopy(floats, 0, bytes, 0, bytes.Length);
+            System.IO.File.WriteAllBytes(path, bytes);
+
+            var shape = sceneCodes.shape;
+            var metaPath = path + ".meta.txt";
+            System.IO.File.WriteAllText(metaPath,
+                $"dtype=float32\nshape={shape[0]},{shape[1]},{shape[2]},{shape[3]},{shape[4]}\n");
+
+            float min = float.MaxValue, max = float.MinValue, sum = 0;
+            for (int i = 0; i < floats.Length; i++)
+            {
+                if (floats[i] < min) min = floats[i];
+                if (floats[i] > max) max = floats[i];
+                sum += floats[i];
+            }
+            Logger.Info($"[Pipeline] Scene codes dumped: {path}");
+            Logger.Info($"[Pipeline] Shape: ({shape[0]},{shape[1]},{shape[2]},{shape[3]},{shape[4]}), " +
+                        $"range: [{min:F4}, {max:F4}], mean: {sum / floats.Length:F4}");
+        }
+
+        internal string DebugDumpDir { get; set; }
+
+        /// <summary>
         /// GPU-resident mesh extraction pipeline. Scene codes come from the reconstruction
         /// worker's last output (no readback). All triplane sampling, decoder inference, and
         /// density/color extraction happen on GPU with zero CPU round-trips per chunk.
@@ -193,6 +226,39 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     await budget.YieldIfNeeded();
                 }
                 Logger.Info($"[Pipeline] Pass 1 density (GPU-resident): {sw.ElapsedMilliseconds}ms ({numChunks} chunks)");
+
+                // Dump density field for debugging
+                if (!string.IsNullOrEmpty(DebugDumpDir))
+                {
+                    try
+                    {
+                        var densityData = await AsyncHelper.ReadbackAsync<float>(densityBuf, totalPoints);
+                        float dMin = float.MaxValue, dMax = float.MinValue, dSum = 0;
+                        int aboveThresh = 0;
+                        for (int i = 0; i < densityData.Length; i++)
+                        {
+                            if (densityData[i] < dMin) dMin = densityData[i];
+                            if (densityData[i] > dMax) dMax = densityData[i];
+                            dSum += densityData[i];
+                            if (densityData[i] > _densityThreshold) aboveThresh++;
+                        }
+                        Logger.Info($"[Pipeline] Density field: range=[{dMin:F4}, {dMax:F4}], " +
+                                    $"mean={dSum / densityData.Length:F4}, " +
+                                    $"above {_densityThreshold}: {aboveThresh}/{totalPoints} ({100f * aboveThresh / totalPoints:F1}%)");
+
+                        string dPath = System.IO.Path.Combine(DebugDumpDir, "sentis_density.bin");
+                        var dBytes = new byte[densityData.Length * sizeof(float)];
+                        System.Buffer.BlockCopy(densityData, 0, dBytes, 0, dBytes.Length);
+                        System.IO.File.WriteAllBytes(dPath, dBytes);
+                        System.IO.File.WriteAllText(dPath + ".meta.txt",
+                            $"dtype=float32\nshape={totalPoints}\nresolution={res}\nnote=x varies fastest: ix + iy*res + iz*res*res\n");
+                        Logger.Info($"[Pipeline] Density dumped: {dPath}");
+                    }
+                    catch (System.Exception e)
+                    {
+                        Logger.Info($"[Pipeline] Density dump failed: {e.Message}");
+                    }
+                }
 
                 // --- Mesh extraction: density buffer already on GPU ---
                 sw.Restart();
