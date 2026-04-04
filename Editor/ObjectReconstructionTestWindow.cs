@@ -542,8 +542,9 @@ namespace Genesis.RoomScan.Editor
                     throw new Exception($"Failed to import {onnxPath} as ModelAsset");
 
                 var model = ModelLoader.Load(modelAsset);
-                triposrWorker = new Worker(model, BackendType.GPUCompute);
-                AppendTiming($"ONNX model loaded (direct): {sw.ElapsedMilliseconds:F0}ms");
+                var backend = BackendType.CPU;
+                triposrWorker = new Worker(model, backend);
+                AppendTiming($"ONNX model loaded (direct, {backend}): {sw.ElapsedMilliseconds:F0}ms");
 
                 // Run forward pass
                 SetStatus("Running TripoSR (ONNX direct)...", 0.35f);
