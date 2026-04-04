@@ -40,6 +40,7 @@ namespace Genesis.RoomScan.Editor
         private GameObject _previewObj;
 
         private string _timingLog = "";
+        private bool _saveDebugImages;
 
         private const string SHADER_DIR = "Packages/com.genesis.roomscan/Runtime.ObjectReconstruction/Shaders/";
 
@@ -93,6 +94,8 @@ namespace Genesis.RoomScan.Editor
             _gridResolution = EditorGUILayout.IntPopup("Grid Resolution",
                 _gridResolution, new[] { "64 (fast)", "128 (balanced)", "256 (quality)" },
                 new[] { 64, 128, 256 });
+
+            _saveDebugImages = EditorGUILayout.Toggle("Save Debug Images", _saveDebugImages);
 
             EditorGUILayout.Space(4);
             DrawShaderStatus();
@@ -204,6 +207,15 @@ namespace Genesis.RoomScan.Editor
                 var preprocessed = await pipeline.PreprocessAsync(_testImage, _cts.Token);
                 float rembgMs = sw.ElapsedMilliseconds;
                 AppendTiming($"Preprocess (rembg + composite): {rembgMs:F0}ms");
+
+                if (_saveDebugImages)
+                {
+                    string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                    Directory.CreateDirectory(debugDir);
+                    ImagePreprocessor.SaveDebugImage(preprocessed,
+                        Path.Combine(debugDir, "unity_preprocessed.png"));
+                    AppendTiming($"Debug images saved to {debugDir}");
+                }
 
                 SetStatus("Running TripoSR forward pass...", 0.35f);
                 sw.Restart();

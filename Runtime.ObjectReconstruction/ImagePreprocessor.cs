@@ -58,7 +58,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             float[] maskData, int maskW, int maskH,
             float ratio, int outSize)
         {
-            // Step 1: build per-pixel alpha from mask (resample mask to src resolution)
+            // Step 1: build per-pixel alpha from mask (resample mask to src resolution).
+            // srcPixels: y=0 is BOTTOM (Unity GetPixels32 convention).
+            // maskData:  h=0 is TOP (tensor NCHW convention).
+            // We flip the y-axis when sampling the mask to align with source pixels.
             var alpha = new float[srcW * srcH];
             int minX = srcW, minY = srcH, maxX = 0, maxY = 0;
 
@@ -66,11 +69,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
             {
                 for (int x = 0; x < srcW; x++)
                 {
-                    float mx = (float)x / srcW * maskW;
-                    float my = (float)y / srcH * maskH;
-                    int mi = Mathf.Clamp((int)my, 0, maskH - 1) * maskW +
-                             Mathf.Clamp((int)mx, 0, maskW - 1);
-                    float a = Mathf.Clamp01(maskData[mi]);
+                    int maskX = Mathf.Clamp((int)((float)x / srcW * maskW), 0, maskW - 1);
+                    int maskY = maskH - 1 - Mathf.Clamp((int)((float)y / srcH * maskH), 0, maskH - 1);
+                    float a = Mathf.Clamp01(maskData[maskY * maskW + maskX]);
                     alpha[y * srcW + x] = a;
 
                     if (a > 0.01f)
@@ -142,6 +143,61 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// Saves a preprocessed tensor as a PNG for debugging. Converts (1,3,H,W) tensor
+        /// back to an image and writes to the specified path.
+        /// </summary>
+        internal static void SaveDebugImage(Tensor<float> tensor, string path)
+        {
+            var shape = tensor.shape;
+            int h = shape[2], w = shape[3];
+            var data = tensor.DownloadToArray();
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            var pixels = new Color32[w * h];
+
+            for (int y = 0; y < h; y++)
+            {
+                for (int x = 0; x < w; x++)
+                {
+                    // Tensor: (1, 3, H, W) with y=0 at top. Texture: y=0 at bottom.
+                    int ty = h - 1 - y;
+                    float r = data[0 * h * w + y * w + x];
+                    float g = data[1 * h * w + y * w + x];
+                    float b = data[2 * h * w + y * w + x];
+                    pixels[ty * w + x] = new Color32(
+                        (byte)(Mathf.Clamp01(r) * 255),
+                        (byte)(Mathf.Clamp01(g) * 255),
+                        (byte)(Mathf.Clamp01(b) * 255), 255);
+                }
+            }
+
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            SafeDestroy(tex);
+
+            // Print tensor stats matching Python debug_preprocess.py
+            float min = float.MaxValue, max = float.MinValue;
+            float sumR = 0, sumG = 0, sumB = 0;
+            int chSize = h * w;
+            for (int i = 0; i < data.Length; i++)
+            {
+                if (data[i] < min) min = data[i];
+                if (data[i] > max) max = data[i];
+            }
+            for (int i = 0; i < chSize; i++) sumR += data[i];
+            for (int i = 0; i < chSize; i++) sumG += data[chSize + i];
+            for (int i = 0; i < chSize; i++) sumB += data[2 * chSize + i];
+
+            int cx = w / 2, cy = h / 2;
+            Logger.Info($"[ImagePreprocessor] Debug tensor shape: (1, 3, {h}, {w})");
+            Logger.Info($"[ImagePreprocessor] Range: [{min:F4}, {max:F4}]");
+            Logger.Info($"[ImagePreprocessor] Mean: [{sumR / chSize:F4}, {sumG / chSize:F4}, {sumB / chSize:F4}]");
+            Logger.Info($"[ImagePreprocessor] Center ({cx},{cy}): R={data[cy * w + cx]:F4} G={data[chSize + cy * w + cx]:F4} B={data[2 * chSize + cy * w + cx]:F4}");
+            Logger.Info($"[ImagePreprocessor] Corner (0,0): R={data[0]:F4} G={data[chSize]:F4} B={data[2 * chSize]:F4}");
+            Logger.Info($"[ImagePreprocessor] Saved debug image: {path}");
         }
 
         private static void SafeDestroy(Object obj)
