@@ -143,6 +143,11 @@ namespace Genesis.RoomScan.Editor
                 StatusRow("Reconstruction density surface nets shader", false);
                 needsFix = true;
             }
+            if (!_reconMarchingCubesShaderAssigned)
+            {
+                StatusRow("Reconstruction marching cubes shader", false);
+                needsFix = true;
+            }
             if (!_reconVertexColorShaderAssigned)
             {
                 StatusRow("Reconstruction vertex color shader", false);
