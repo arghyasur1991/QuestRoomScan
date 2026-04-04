@@ -200,7 +200,8 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            AsyncHelper.DefaultOpsPerFrame = 64; // editor: no FPS concern, run fast
+            InferenceScheduler.LightOpBatchSize = 200;
+            InferenceScheduler.HeavyOpCooldownFrames = 0;
             _timingLog = "";
             var totalSw = Stopwatch.StartNew();
             ReconstructionPipeline pipeline = null;
@@ -266,7 +267,8 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            AsyncHelper.DefaultOpsPerFrame = 64;
+            InferenceScheduler.LightOpBatchSize = 200;
+            InferenceScheduler.HeavyOpCooldownFrames = 0;
             _timingLog = "";
             RembgModel rembg = null;
 
@@ -321,7 +323,8 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            AsyncHelper.DefaultOpsPerFrame = 64;
+            InferenceScheduler.LightOpBatchSize = 200;
+            InferenceScheduler.HeavyOpCooldownFrames = 0;
             _timingLog = "";
             ReconstructionPipeline pipeline = null;
 
@@ -377,7 +380,8 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            AsyncHelper.DefaultOpsPerFrame = 64;
+            InferenceScheduler.LightOpBatchSize = 200;
+            InferenceScheduler.HeavyOpCooldownFrames = 0;
             _timingLog = "";
             var totalSw = Stopwatch.StartNew();
             ReconstructionPipeline pipeline = null;

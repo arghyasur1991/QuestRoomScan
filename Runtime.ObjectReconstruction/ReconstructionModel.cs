@@ -31,13 +31,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 using var worker = new Worker(model, BackendType.GPUCompute);
                 await AsyncHelper.YieldFrame();
 
-                var budget = new AsyncHelper.FrameBudget();
-                var it = worker.ScheduleIterable(preprocessed);
-                while (it.MoveNext())
-                {
-                    ct.ThrowIfCancellationRequested();
-                    await budget.YieldIfNeeded();
-                }
+                await InferenceScheduler.RunAsync(worker, model, ct, preprocessed);
 
                 Tensor encoderStatesTmp = null;
                 worker.CopyOutput("/Reshape_output_0", ref encoderStatesTmp);
@@ -60,13 +54,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 worker.SetInput("/Reshape_output_0", encoderStates);
                 worker.SetInput("/backbone/transformer_blocks.7/Add_2_output_0", hiddenStates);
 
-                var budget = new AsyncHelper.FrameBudget();
-                var it = worker.ScheduleIterable();
-                while (it.MoveNext())
-                {
-                    ct.ThrowIfCancellationRequested();
-                    await budget.YieldIfNeeded();
-                }
+                await InferenceScheduler.RunAsync(worker, model, ct);
 
                 encoderStates.Dispose();
                 hiddenStates.Dispose();

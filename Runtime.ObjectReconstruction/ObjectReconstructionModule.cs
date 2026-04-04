@@ -26,10 +26,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [SerializeField] private Texture2D[] testImages = Array.Empty<Texture2D>();
 
         [Header("Performance")]
-        [SerializeField, Tooltip("GPU ops dispatched per frame during inference. " +
-            "Higher = faster inference but lower FPS. Lower = smoother FPS but slower inference. " +
-            "At 72Hz: 8 ops ≈ 15-20 FPS, 16 ops ≈ 8-12 FPS, 32 ops ≈ 4-6 FPS.")]
-        [Range(1, 64)] private int opsPerFrame = 8;
+        [SerializeField, Tooltip("Light ops (Reshape, Add, etc.) batched per frame. " +
+            "Higher = faster inference, slightly lower FPS.")]
+        [Range(4, 64)] private int lightOpBatchSize = 20;
+
+        [SerializeField, Tooltip("Extra frames to yield after heavy ops (MatMul, Conv, Softmax) " +
+            "so the GPU can finish before rendering. 1 = good balance, 2+ = smoother FPS.")]
+        [Range(0, 4)] private int heavyOpCooldownFrames = 1;
 
         [Header("Mesh Extraction")]
         [SerializeField] private int gridResolution = 256;
@@ -74,7 +77,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             _running = true;
             _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            AsyncHelper.DefaultOpsPerFrame = opsPerFrame;
+            InferenceScheduler.LightOpBatchSize = lightOpBatchSize;
+            InferenceScheduler.HeavyOpCooldownFrames = heavyOpCooldownFrames;
 
             Tensor<float> preprocessed = null;
             try

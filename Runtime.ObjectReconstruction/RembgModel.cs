@@ -18,6 +18,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private const int RembgLayersPerFrame = 20;
 
         private Worker _worker;
+        private Model _model;
         private bool _loaded;
 
         internal async Task LoadAsync(CancellationToken ct)
@@ -25,8 +26,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (_loaded) return;
 
             string path = await ModelPathResolver.ResolveAsync(ModelFileName, ct);
-            var model = await Task.Run(() => ModelLoader.Load(path), ct);
-            _worker = new Worker(model, BackendType.GPUCompute);
+            _model = await Task.Run(() => ModelLoader.Load(path), ct);
+            _worker = new Worker(_model, BackendType.GPUCompute);
             _loaded = true;
             await AsyncHelper.YieldFrame();
         }
@@ -41,14 +42,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 throw new InvalidOperationException("RembgModel not loaded");
 
             var input = PrepareInput(image);
-
-            var budget = new AsyncHelper.FrameBudget();
-            var it = _worker.ScheduleIterable(input);
-            while (it.MoveNext())
-            {
-                ct.ThrowIfCancellationRequested();
-                await budget.YieldIfNeeded();
-            }
+            await InferenceScheduler.RunAsync(_worker, _model, ct, input);
             input.Dispose();
 
             var rawOutput = _worker.PeekOutput() as Tensor<float>;
