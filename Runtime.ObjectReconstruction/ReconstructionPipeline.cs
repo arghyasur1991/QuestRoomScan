@@ -15,7 +15,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// </summary>
     internal sealed class ReconstructionPipeline : IDisposable
     {
-        private readonly int _frameBudgetMs;
         private readonly int _gridResolution;
         private readonly float _densityThreshold;
         private readonly ComputeShader _triplaneShader;
@@ -31,7 +30,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private int _postKernelColors;
 
         internal ReconstructionPipeline(
-            int frameBudgetMs,
             int gridResolution,
             float densityThreshold,
             ComputeShader triplaneShader,
@@ -40,7 +38,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             ComputeShader postprocessShader,
             MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes)
         {
-            _frameBudgetMs = frameBudgetMs;
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
             _triplaneShader = triplaneShader;
@@ -140,7 +137,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int featureDim = _sampler.FeatureDim;
             const int maxBufferBytes = 128 * 1024 * 1024; // Quest 3 per-buffer limit
             int chunkSize = maxBufferBytes / (featureDim * sizeof(float));
-            var budget = new AsyncHelper.FrameBudget();
 
             using var decoder = new DecoderModel();
             await decoder.LoadAsync(ct);
@@ -165,7 +161,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                     var decoderOutBuf = decoder.PeekOutputBuffer();
                     DispatchDensityExtraction(decoderOutBuf, densityBuf, start, count);
-                    await budget.YieldIfNeeded();
+                    await AsyncHelper.YieldFrame();
                 }
                 // --- Mesh extraction: density buffer already on GPU ---
                 EnsureExtractor();
@@ -209,7 +205,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                         var decoderOutBuf = decoder.PeekOutputBuffer();
                         DispatchColorExtraction(decoderOutBuf, colorBuf, start, count);
-                        await budget.YieldIfNeeded();
+                        await AsyncHelper.YieldFrame();
                     }
 
                     var colorData = await AsyncHelper.ReadbackAsync<float>(colorBuf, numVerts * 3);

@@ -447,7 +447,6 @@ namespace Genesis.RoomScan.Editor
         private ReconstructionPipeline CreatePipeline()
         {
             return new ReconstructionPipeline(
-                frameBudgetMs: 16,
                 gridResolution: _gridResolution,
                 densityThreshold: 25f,
                 triplaneShader: _triplaneShader,

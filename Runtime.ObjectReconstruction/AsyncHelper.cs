@@ -1,6 +1,5 @@
 #if HAS_AI_INFERENCE
 using System;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Unity.Collections;
@@ -38,32 +37,35 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Tracks elapsed time and yields when the frame budget is exceeded.
-        /// Use one instance per async operation to avoid stalling the main thread.
+        /// Tracks dispatched ops and yields after a fixed count per frame.
+        /// GPU dispatches are near-instant on CPU, so time-based budgeting
+        /// doesn't work — it queues hundreds of layers before yielding,
+        /// saturating the GPU and starving rendering. Op-counting ensures
+        /// the GPU gets regular breaks for rendering.
         /// </summary>
         internal sealed class FrameBudget
         {
-            private readonly Stopwatch _sw = Stopwatch.StartNew();
-            private readonly int _budgetMs;
+            private int _opsThisFrame;
+            private readonly int _maxOpsPerFrame;
 
-            /// <param name="budgetMs">
-            /// Max milliseconds to run before yielding. 8ms default keeps well
-            /// under a single VR frame (11ms at 90Hz).
+            /// <param name="maxOpsPerFrame">
+            /// Max GPU ops to dispatch before yielding a frame. Lower values
+            /// give smoother FPS but longer total inference time.
+            /// At 72 Hz with ~3000 TripoSR layers, 4 ops/frame ≈ 10s inference.
             /// </param>
-            internal FrameBudget(int budgetMs = 8) => _budgetMs = budgetMs;
+            internal FrameBudget(int maxOpsPerFrame = 4) => _maxOpsPerFrame = maxOpsPerFrame;
 
             /// <summary>
-            /// Call after each unit of work. Yields and resets the timer only when
-            /// the budget is exceeded, avoiding unnecessary yield overhead.
+            /// Call after each dispatched op. Yields a frame once the budget is hit.
             /// </summary>
             internal async Task YieldIfNeeded()
             {
-                if (_sw.ElapsedMilliseconds < _budgetMs) return;
+                if (++_opsThisFrame < _maxOpsPerFrame) return;
+                _opsThisFrame = 0;
                 await YieldFrame();
-                _sw.Restart();
             }
 
-            internal void Reset() => _sw.Restart();
+            internal void Reset() => _opsThisFrame = 0;
         }
 
         /// <summary>

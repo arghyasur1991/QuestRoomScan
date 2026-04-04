@@ -25,10 +25,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [Header("Test Images")]
         [SerializeField] private Texture2D[] testImages = Array.Empty<Texture2D>();
 
-        [Header("Performance")]
-        [SerializeField, Tooltip("Max ms per frame before yielding. 8ms keeps under one 90Hz VR frame.")]
-        [Range(2, 16)] private int frameBudgetMs = 8;
-
         [Header("Mesh Extraction")]
         [SerializeField] private int gridResolution = 256;
         [SerializeField] private float densityThreshold = 25f;
@@ -145,7 +141,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private void EnsurePipeline()
         {
             _pipeline ??= new ReconstructionPipeline(
-                frameBudgetMs,
                 gridResolution,
                 densityThreshold,
                 triplaneGridSampleShader,
