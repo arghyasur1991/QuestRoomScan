@@ -207,12 +207,12 @@ namespace Genesis.RoomScan.Editor
                 float forwardMs = sw.ElapsedMilliseconds;
                 AppendTiming($"Forward pass: {forwardMs:F0}ms");
 
-                SetStatus("Extracting mesh (surface nets)...", 0.70f);
+                SetStatus("Extracting mesh + vertex colors...", 0.60f);
                 sw.Restart();
                 var mesh = await pipeline.ExtractMeshAsync(sceneCodes, _cts.Token);
                 sceneCodes.Dispose();
                 float meshMs = sw.ElapsedMilliseconds;
-                AppendTiming($"Mesh extraction: {meshMs:F0}ms");
+                AppendTiming($"Mesh + vertex color extraction: {meshMs:F0}ms");
 
                 totalSw.Stop();
                 AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds:F0}ms ---");
@@ -333,7 +333,7 @@ namespace Genesis.RoomScan.Editor
         {
             return new ReconstructionPipeline(
                 frameBudgetMs: 16,
-                gridResolution: 128,
+                gridResolution: 256,
                 densityThreshold: 25f,
                 triplaneShader: _triplaneShader,
                 surfaceNetsShader: _surfaceNetsShader);

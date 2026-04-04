@@ -34,24 +34,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Runs the heavy voxel traversal on a background thread, then builds
-        /// the Unity Mesh back on the main thread.
+        /// Extracts geometry only (no vertex colors). Returns mesh with vertices in
+        /// [-0.5, 0.5] coordinate space for a second-pass decoder color query.
+        /// Uses edge-to-edge positions matching Python's linspace(0, 1, res).
         /// </summary>
-        internal async Task<Mesh> ExtractAsync(float[] density, Color[] colors)
+        internal async Task<Mesh> ExtractAsync(float[] density)
         {
             int res = _resolution;
             float threshold = _threshold;
 
-            var (vertices, vertColors, indices) = await Task.Run(() =>
+            var (vertices, indices) = await Task.Run(() =>
             {
                 var vertMap = new int[res * res * res];
                 for (int i = 0; i < vertMap.Length; i++) vertMap[i] = -1;
 
                 var verts = new System.Collections.Generic.List<Vector3>();
-                var vCols = new System.Collections.Generic.List<Color>();
                 var inds = new System.Collections.Generic.List<int>();
-
-                float voxSize = 1f / res;
+                float invResM1 = 1f / (res - 1);
 
                 for (int z = 0; z < res - 1; z++)
                 for (int y = 0; y < res - 1; y++)
@@ -83,17 +82,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     if (crossings < 3) continue;
 
                     posSum /= crossings;
-                    var worldPos = (posSum + Vector3.one * 0.5f - Vector3.one * res * 0.5f) * voxSize;
+                    // Map grid-index interpolated position to [-0.5, 0.5] using edge-to-edge formula
+                    var worldPos = new Vector3(
+                        posSum.x * invResM1 - 0.5f,
+                        posSum.y * invResM1 - 0.5f,
+                        posSum.z * invResM1 - 0.5f);
 
                     vertMap[flatIdx] = verts.Count;
                     verts.Add(worldPos);
-
-                    int colorIdx = Mathf.Clamp(
-                        Mathf.RoundToInt(posSum.x) +
-                        Mathf.RoundToInt(posSum.y) * res +
-                        Mathf.RoundToInt(posSum.z) * res * res,
-                        0, colors.Length - 1);
-                    vCols.Add(colors[colorIdx]);
                 }
 
                 for (int z = 0; z < res - 1; z++)
@@ -105,14 +101,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     TryEmitQuad(vertMap, density, threshold, inds, x, y, z, 0, 0, 1, 0, 1, 0, 1, 0, 0, res);
                 }
 
-                return (verts, vCols, inds);
+                return (verts, inds);
             });
 
             await AsyncHelper.YieldFrame();
 
             var mesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
             mesh.SetVertices(vertices);
-            mesh.SetColors(vertColors);
             mesh.SetTriangles(indices, 0);
             mesh.RecalculateNormals();
             mesh.RecalculateBounds();

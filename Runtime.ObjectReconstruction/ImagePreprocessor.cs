@@ -12,16 +12,19 @@ namespace Genesis.RoomScan.ObjectReconstruction
     internal static class ImagePreprocessor
     {
         /// <summary>
-        /// Composites the foreground (using alpha mask) onto a gray (0.5, 0.5, 0.5) background,
-        /// applies resize_foreground (centers foreground at given ratio), and returns
-        /// a 512x512 Tensor suitable for the reconstruction model.
+        /// Replicates the Python TripoSR preprocessing exactly:
+        /// 1. Apply mask to get RGBA
+        /// 2. Crop to foreground bounding box (from alpha)
+        /// 3. Pad to square
+        /// 4. Pad to achieve foreground ratio (fg occupies ratio% of frame)
+        /// 5. Composite fg*alpha + gray*(1-alpha)
+        /// 6. Resize to 512x512
         /// CPU pixel work is offloaded to a background thread.
         /// </summary>
         internal static async Task<Tensor<float>> ApplyMaskAndCompositeAsync(
             Texture2D image, Tensor<float> alphaMask, float foregroundRatio)
         {
             const int outputSize = 512;
-            const float grayVal = 0.5f;
 
             int srcW = image.width;
             int srcH = image.height;
@@ -31,83 +34,112 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int maskH = alphaMask.shape[alphaMask.shape.rank - 2];
             var maskData = alphaMask.DownloadToArray();
 
-            var outPixels = await Task.Run(() =>
-            {
-                var pixels = new Color32[srcW * srcH];
-                for (int y = 0; y < srcH; y++)
-                {
-                    for (int x = 0; x < srcW; x++)
-                    {
-                        int srcIdx = y * srcW + x;
-                        float mx = (float)x / srcW * maskW;
-                        float my = (float)y / srcH * maskH;
-                        int mi = Mathf.Clamp((int)my, 0, maskH - 1) * maskW +
-                                 Mathf.Clamp((int)mx, 0, maskW - 1);
-                        float alpha = Mathf.Clamp01(maskData[mi]);
-
-                        var src = srcPixels[srcIdx];
-                        byte r = (byte)(src.r * alpha + grayVal * 255 * (1 - alpha));
-                        byte g = (byte)(src.g * alpha + grayVal * 255 * (1 - alpha));
-                        byte b = (byte)(src.b * alpha + grayVal * 255 * (1 - alpha));
-                        pixels[srcIdx] = new Color32(r, g, b, 255);
-                    }
-                }
-                return pixels;
-            });
+            var resultPixels = await Task.Run(() =>
+                BuildComposite(srcPixels, srcW, srcH, maskData, maskW, maskH, foregroundRatio, outputSize));
 
             await AsyncHelper.YieldFrame();
 
-            var composite = new Texture2D(srcW, srcH, TextureFormat.RGB24, false);
-            composite.SetPixels32(outPixels);
-            composite.Apply();
-
-            var resized = ResizeForeground(composite, foregroundRatio, outputSize);
-            SafeDestroy(composite);
+            var result = new Texture2D(outputSize, outputSize, TextureFormat.RGB24, false);
+            result.SetPixels32(resultPixels);
+            result.Apply();
 
             var tensor = new Tensor<float>(new TensorShape(1, 3, outputSize, outputSize));
-            TextureConverter.ToTensor(resized, tensor, new TextureTransform());
-            SafeDestroy(resized);
+            TextureConverter.ToTensor(result, tensor, new TextureTransform());
+            SafeDestroy(result);
 
             return tensor;
         }
 
-        private static Texture2D ResizeForeground(Texture2D src, float ratio, int outputSize)
+        /// <summary>
+        /// Pure CPU work matching Python's resize_foreground + alpha composite.
+        /// </summary>
+        private static Color32[] BuildComposite(
+            Color32[] srcPixels, int srcW, int srcH,
+            float[] maskData, int maskW, int maskH,
+            float ratio, int outSize)
         {
-            int fgSize = Mathf.RoundToInt(outputSize * ratio);
-            int pad = (outputSize - fgSize) / 2;
+            // Step 1: build per-pixel alpha from mask (resample mask to src resolution)
+            var alpha = new float[srcW * srcH];
+            int minX = srcW, minY = srcH, maxX = 0, maxY = 0;
 
-            var rt = RenderTexture.GetTemporary(fgSize, fgSize, 0, RenderTextureFormat.ARGB32);
-            Graphics.Blit(src, rt);
-
-            var result = new Texture2D(outputSize, outputSize, TextureFormat.RGB24, false);
-            var grayPixels = new Color32[outputSize * outputSize];
-            byte gray = (byte)(0.5f * 255);
-            for (int i = 0; i < grayPixels.Length; i++)
-                grayPixels[i] = new Color32(gray, gray, gray, 255);
-            result.SetPixels32(grayPixels);
-
-            RenderTexture.active = rt;
-            var fgTex = new Texture2D(fgSize, fgSize, TextureFormat.RGB24, false);
-            fgTex.ReadPixels(new Rect(0, 0, fgSize, fgSize), 0, 0);
-            fgTex.Apply();
-            RenderTexture.active = null;
-            RenderTexture.ReleaseTemporary(rt);
-
-            var fgPixels = fgTex.GetPixels32();
-            for (int y = 0; y < fgSize; y++)
+            for (int y = 0; y < srcH; y++)
             {
-                for (int x = 0; x < fgSize; x++)
+                for (int x = 0; x < srcW; x++)
                 {
-                    int dstX = pad + x;
-                    int dstY = pad + y;
-                    if (dstX < outputSize && dstY < outputSize)
-                        grayPixels[dstY * outputSize + dstX] = fgPixels[y * fgSize + x];
+                    float mx = (float)x / srcW * maskW;
+                    float my = (float)y / srcH * maskH;
+                    int mi = Mathf.Clamp((int)my, 0, maskH - 1) * maskW +
+                             Mathf.Clamp((int)mx, 0, maskW - 1);
+                    float a = Mathf.Clamp01(maskData[mi]);
+                    alpha[y * srcW + x] = a;
+
+                    if (a > 0.01f)
+                    {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
                 }
             }
 
-            result.SetPixels32(grayPixels);
-            result.Apply();
-            SafeDestroy(fgTex);
+            if (maxX <= minX || maxY <= minY)
+            {
+                // No foreground found — return gray
+                var gray = new Color32[outSize * outSize];
+                byte g = (byte)(0.5f * 255);
+                for (int i = 0; i < gray.Length; i++)
+                    gray[i] = new Color32(g, g, g, 255);
+                return gray;
+            }
+
+            // Step 2: crop to foreground bbox
+            int cropW = maxX - minX + 1;
+            int cropH = maxY - minY + 1;
+
+            // Step 3: pad to square
+            int sqSize = Mathf.Max(cropW, cropH);
+            int padX0 = (sqSize - cropW) / 2;
+            int padY0 = (sqSize - cropH) / 2;
+
+            // Step 4: pad to achieve foreground ratio
+            int finalSize = Mathf.CeilToInt(sqSize / ratio);
+            int outerPadX = (finalSize - sqSize) / 2;
+            int outerPadY = (finalSize - sqSize) / 2;
+
+            // Step 5: composite onto gray at output resolution
+            var result = new Color32[outSize * outSize];
+            byte grayByte = (byte)(0.5f * 255);
+            for (int i = 0; i < result.Length; i++)
+                result[i] = new Color32(grayByte, grayByte, grayByte, 255);
+
+            float scale = (float)finalSize / outSize;
+
+            for (int oy = 0; oy < outSize; oy++)
+            {
+                for (int ox = 0; ox < outSize; ox++)
+                {
+                    // Map output pixel back to the padded foreground coordinate system
+                    float px = ox * scale - outerPadX - padX0;
+                    float py = oy * scale - outerPadY - padY0;
+
+                    int srcX = Mathf.FloorToInt(px) + minX;
+                    int srcY = Mathf.FloorToInt(py) + minY;
+
+                    if (srcX < 0 || srcX >= srcW || srcY < 0 || srcY >= srcH)
+                        continue;
+
+                    int si = srcY * srcW + srcX;
+                    float a = alpha[si];
+                    if (a < 0.001f) continue;
+
+                    var s = srcPixels[si];
+                    byte r = (byte)(s.r * a + grayByte * (1f - a));
+                    byte g2 = (byte)(s.g * a + grayByte * (1f - a));
+                    byte b = (byte)(s.b * a + grayByte * (1f - a));
+                    result[oy * outSize + ox] = new Color32(r, g2, b, 255);
+                }
+            }
 
             return result;
         }

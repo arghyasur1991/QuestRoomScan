@@ -6,9 +6,9 @@ using UnityEngine;
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
-    /// Samples triplane features at 3D query points via a GPU compute shader.
-    /// For each point in a resolution^3 grid, projects onto XY, XZ, YZ planes
-    /// and bilinearly samples features, concatenating to a (N, 3*C) output.
+    /// Samples triplane features at 3D positions via bilinear interpolation.
+    /// Coordinate convention matches PyTorch F.grid_sample(align_corners=False):
+    /// positions in [-0.5, 0.5] map to pixel edges [-0.5, N-0.5].
     /// </summary>
     internal sealed class TriplaneGridSampler : IDisposable
     {
@@ -17,6 +17,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly int _kernelSample;
         private ComputeBuffer _queryPoints;
         private ComputeBuffer _outputFeatures;
+
+        private float[] _cachedSceneData;
+        private int _numPlanes, _channels, _planeH, _planeW, _featureDim;
 
         internal TriplaneGridSampler(ComputeShader shader, int resolution)
         {
@@ -28,83 +31,127 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Samples all three planes of scene_codes (1, 3, C, H, W) at a uniform grid.
-        /// Returns a CPU tensor of shape (resolution^3, 3*C).
+        /// Cache scene codes for multiple sampling passes (grid + vertex color re-query).
+        /// </summary>
+        internal void CacheSceneCodes(Tensor<float> sceneCodes)
+        {
+            _cachedSceneData = sceneCodes.DownloadToArray();
+            var shape = sceneCodes.shape;
+            _numPlanes = shape[1]; // 3
+            _channels = shape[2];  // 40
+            _planeH = shape[3];    // 64
+            _planeW = shape[4];    // 64
+            _featureDim = _numPlanes * _channels; // 120
+        }
+
+        /// <summary>
+        /// Samples all three planes at a uniform grid using edge-to-edge positions
+        /// matching Python's linspace(0,1,res). Returns (resolution^3, 3*C) tensor.
         /// </summary>
         internal Tensor<float> SampleFeatures(Tensor<float> sceneCodes)
         {
-            var sceneData = sceneCodes.DownloadToArray();
-            var shape = sceneCodes.shape;
+            CacheSceneCodes(sceneCodes);
+            return SampleFeaturesAtGrid();
+        }
 
-            int numPlanes = shape[1]; // 3
-            int channels = shape[2];  // 40
-            int planeH = shape[3];    // 64
-            int planeW = shape[4];    // 64
-            int featureDim = numPlanes * channels; // 120
+        private Tensor<float> SampleFeaturesAtGrid()
+        {
+            int res = _resolution;
+            int totalPoints = res * res * res;
+            var features = new float[totalPoints * _featureDim];
 
-            int totalPoints = _resolution * _resolution * _resolution;
-            var features = new float[totalPoints * featureDim];
+            float invResM1 = 1f / (res - 1);
 
-            float step = 1f / _resolution;
-            float offset = step * 0.5f - 0.5f;
-
-            for (int iz = 0; iz < _resolution; iz++)
+            for (int iz = 0; iz < res; iz++)
             {
-                float z = offset + iz * step;
-                for (int iy = 0; iy < _resolution; iy++)
+                float z = iz * invResM1 - 0.5f; // linspace(-0.5, 0.5, res)
+                for (int iy = 0; iy < res; iy++)
                 {
-                    float y = offset + iy * step;
-                    for (int ix = 0; ix < _resolution; ix++)
+                    float y = iy * invResM1 - 0.5f;
+                    for (int ix = 0; ix < res; ix++)
                     {
-                        float x = offset + ix * step;
-                        int ptIdx = (iz * _resolution * _resolution + iy * _resolution + ix) * featureDim;
-
-                        float[][] coords = {
-                            new[] { x, y },  // XY plane
-                            new[] { x, z },  // XZ plane
-                            new[] { y, z },  // YZ plane
-                        };
-
-                        for (int p = 0; p < numPlanes; p++)
-                        {
-                            float u = (coords[p][0] + 0.5f) * (planeW - 1);
-                            float v = (coords[p][1] + 0.5f) * (planeH - 1);
-
-                            int u0 = Mathf.Clamp(Mathf.FloorToInt(u), 0, planeW - 1);
-                            int v0 = Mathf.Clamp(Mathf.FloorToInt(v), 0, planeH - 1);
-                            int u1 = Mathf.Min(u0 + 1, planeW - 1);
-                            int v1 = Mathf.Min(v0 + 1, planeH - 1);
-                            float fu = u - u0;
-                            float fv = v - v0;
-
-                            int planeOffset = p * channels * planeH * planeW;
-                            for (int c = 0; c < channels; c++)
-                            {
-                                int chOffset = planeOffset + c * planeH * planeW;
-                                float val00 = sceneData[chOffset + v0 * planeW + u0];
-                                float val01 = sceneData[chOffset + v1 * planeW + u0];
-                                float val10 = sceneData[chOffset + v0 * planeW + u1];
-                                float val11 = sceneData[chOffset + v1 * planeW + u1];
-
-                                float val = val00 * (1 - fu) * (1 - fv) +
-                                            val10 * fu * (1 - fv) +
-                                            val01 * (1 - fu) * fv +
-                                            val11 * fu * fv;
-
-                                features[ptIdx + p * channels + c] = val;
-                            }
-                        }
+                        float x = ix * invResM1 - 0.5f;
+                        int ptIdx = (iz * res * res + iy * res + ix) * _featureDim;
+                        SampleTriplaneAt(x, y, z, _cachedSceneData, features, ptIdx);
                     }
                 }
             }
 
-            var tensor = new Tensor<float>(new TensorShape(totalPoints, featureDim));
+            var tensor = new Tensor<float>(new TensorShape(totalPoints, _featureDim));
             tensor.Upload(features);
             return tensor;
         }
 
+        /// <summary>
+        /// Samples triplane features at arbitrary 3D positions (e.g. mesh vertices).
+        /// Positions should be in [-0.5, 0.5] coordinate space.
+        /// Returns float array of shape (numPositions * featureDim).
+        /// </summary>
+        internal float[] SampleFeaturesAtPositions(Vector3[] positions)
+        {
+            if (_cachedSceneData == null)
+                throw new System.InvalidOperationException("Call SampleFeatures first to cache scene codes");
+
+            int count = positions.Length;
+            var features = new float[count * _featureDim];
+
+            for (int i = 0; i < count; i++)
+            {
+                var p = positions[i];
+                SampleTriplaneAt(p.x, p.y, p.z, _cachedSceneData, features, i * _featureDim);
+            }
+
+            return features;
+        }
+
+        /// <summary>
+        /// Bilinear sampling matching F.grid_sample(align_corners=False).
+        /// Position in [-0.5, 0.5] maps to pixel position = pos*N + N/2 - 0.5.
+        /// </summary>
+        private void SampleTriplaneAt(float x, float y, float z,
+            float[] sceneData, float[] output, int outOffset)
+        {
+            float u0f, u1f, v0f, v1f;
+            int u0, u1, v0, v1;
+            float fu, fv;
+
+            // XY, XZ, YZ plane coordinates
+            float[] uCoords = { x, x, y };
+            float[] vCoords = { y, z, z };
+
+            for (int p = 0; p < _numPlanes; p++)
+            {
+                float uf = uCoords[p] * _planeW + _planeW * 0.5f - 0.5f;
+                float vf = vCoords[p] * _planeH + _planeH * 0.5f - 0.5f;
+
+                u0 = Mathf.Clamp(Mathf.FloorToInt(uf), 0, _planeW - 1);
+                v0 = Mathf.Clamp(Mathf.FloorToInt(vf), 0, _planeH - 1);
+                u1 = Mathf.Min(u0 + 1, _planeW - 1);
+                v1 = Mathf.Min(v0 + 1, _planeH - 1);
+                fu = Mathf.Clamp01(uf - u0);
+                fv = Mathf.Clamp01(vf - v0);
+
+                int planeOffset = p * _channels * _planeH * _planeW;
+                for (int c = 0; c < _channels; c++)
+                {
+                    int chOffset = planeOffset + c * _planeH * _planeW;
+                    float val00 = sceneData[chOffset + v0 * _planeW + u0];
+                    float val01 = sceneData[chOffset + v1 * _planeW + u0];
+                    float val10 = sceneData[chOffset + v0 * _planeW + u1];
+                    float val11 = sceneData[chOffset + v1 * _planeW + u1];
+
+                    output[outOffset + p * _channels + c] =
+                        val00 * (1 - fu) * (1 - fv) +
+                        val10 * fu * (1 - fv) +
+                        val01 * (1 - fu) * fv +
+                        val11 * fu * fv;
+                }
+            }
+        }
+
         public void Dispose()
         {
+            _cachedSceneData = null;
             _queryPoints?.Release();
             _outputFeatures?.Release();
         }

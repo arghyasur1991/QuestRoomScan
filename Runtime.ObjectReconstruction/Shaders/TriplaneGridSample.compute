@@ -49,16 +49,17 @@ void SampleTriplane(uint3 id : SV_DispatchThreadID)
     uint iy = (idx / res) % res;
     uint iz = idx / (res * res);
 
-    float step = 1.0 / res;
-    float x = step * 0.5 - 0.5 + ix * step;
-    float y = step * 0.5 - 0.5 + iy * step;
-    float z = step * 0.5 - 0.5 + iz * step;
+    // Edge-to-edge grid matching linspace(-0.5, 0.5, res)
+    float invResM1 = 1.0 / (res - 1);
+    float x = ix * invResM1 - 0.5;
+    float y = iy * invResM1 - 0.5;
+    float z = iz * invResM1 - 0.5;
 
-    // UV coords for 3 planes: XY, XZ, YZ
+    // UV coords matching F.grid_sample(align_corners=False): px = pos*N + N/2 - 0.5
     float2 uvs[3];
-    uvs[0] = float2((x + 0.5) * (_PlaneW - 1), (y + 0.5) * (_PlaneH - 1));
-    uvs[1] = float2((x + 0.5) * (_PlaneW - 1), (z + 0.5) * (_PlaneH - 1));
-    uvs[2] = float2((y + 0.5) * (_PlaneW - 1), (z + 0.5) * (_PlaneH - 1));
+    uvs[0] = float2(x * _PlaneW + _PlaneW * 0.5 - 0.5, y * _PlaneH + _PlaneH * 0.5 - 0.5);
+    uvs[1] = float2(x * _PlaneW + _PlaneW * 0.5 - 0.5, z * _PlaneH + _PlaneH * 0.5 - 0.5);
+    uvs[2] = float2(y * _PlaneW + _PlaneW * 0.5 - 0.5, z * _PlaneH + _PlaneH * 0.5 - 0.5);
 
     uint featureDim = _NumPlanes * _Channels;
     uint outBase = idx * featureDim;

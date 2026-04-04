@@ -103,21 +103,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int totalPoints = res * res * res;
             int featureDim = 120; // 3 planes * 40 channels
 
+            // --- Pass 1: grid sample → decoder → density → surface nets geometry ---
             var sampler = new TriplaneGridSampler(_triplaneShader, res);
             var featuresTensor = sampler.SampleFeatures(sceneCodes);
             await AsyncHelper.YieldFrame();
             var featuresData = featuresTensor.DownloadToArray();
             featuresTensor.Dispose();
-            sampler.Dispose();
             await AsyncHelper.YieldFrame();
             ct.ThrowIfCancellationRequested();
 
             int chunkSize = 65536;
-            int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
             var density = new float[totalPoints];
-            var colors = new Color[totalPoints];
             var budget = new AsyncHelper.FrameBudget();
 
+            int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
             for (int c = 0; c < numChunks; c++)
             {
                 ct.ThrowIfCancellationRequested();
@@ -130,15 +129,45 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 var resultData = chunkResult.DownloadToArray();
                 chunkResult.Dispose();
-                await Task.Run(() => WriteDecoderResults(resultData, density, colors, start, count));
-
+                await Task.Run(() => WriteDensityOnly(resultData, density, start, count));
                 await budget.YieldIfNeeded();
             }
 
             var surfaceNets = new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold);
-            var mesh = await surfaceNets.ExtractAsync(density, colors);
+            var mesh = await surfaceNets.ExtractAsync(density);
             surfaceNets.Dispose();
+            await AsyncHelper.YieldFrame();
+            ct.ThrowIfCancellationRequested();
 
+            // --- Pass 2: query decoder at mesh vertex positions for accurate surface colors ---
+            var meshVerts = mesh.vertices;
+            int numVerts = meshVerts.Length;
+            Logger.Info($"[Pipeline] Pass 2: querying colors at {numVerts} mesh vertices");
+
+            var vertFeatures = await Task.Run(() => sampler.SampleFeaturesAtPositions(meshVerts));
+            sampler.Dispose();
+            await AsyncHelper.YieldFrame();
+            ct.ThrowIfCancellationRequested();
+
+            var vertColors = new Color[numVerts];
+            int vertChunks = (numVerts + chunkSize - 1) / chunkSize;
+            for (int c = 0; c < vertChunks; c++)
+            {
+                ct.ThrowIfCancellationRequested();
+                int start = c * chunkSize;
+                int count = Mathf.Min(chunkSize, numVerts - start);
+
+                var chunkFeatures = ExtractChunk(vertFeatures, start, count, featureDim);
+                var chunkResult = await _decoder.InferAsync(chunkFeatures, ct);
+                chunkFeatures.Dispose();
+
+                var resultData = chunkResult.DownloadToArray();
+                chunkResult.Dispose();
+                await Task.Run(() => WriteColorsOnly(resultData, vertColors, start, count));
+                await budget.YieldIfNeeded();
+            }
+
+            mesh.SetColors(vertColors);
             return mesh;
         }
 
@@ -151,15 +180,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return chunk;
         }
 
-        private static void WriteDecoderResults(
-            float[] data, float[] density, Color[] colors, int start, int count)
+        private static void WriteDensityOnly(float[] data, float[] density, int start, int count)
         {
             for (int i = 0; i < count; i++)
             {
-                int idx = start + i;
                 float rawDensity = data[i * 4];
-                density[idx] = Mathf.Exp(Mathf.Clamp(rawDensity - 1f, -10f, 10f));
-                colors[idx] = new Color(
+                density[start + i] = Mathf.Exp(Mathf.Clamp(rawDensity - 1f, -10f, 10f));
+            }
+        }
+
+        private static void WriteColorsOnly(float[] data, Color[] colors, int start, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                colors[start + i] = new Color(
                     Sigmoid(data[i * 4 + 1]),
                     Sigmoid(data[i * 4 + 2]),
                     Sigmoid(data[i * 4 + 3]));
