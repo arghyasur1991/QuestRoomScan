@@ -1,6 +1,6 @@
 // GPU Surface Nets mesh extraction from density field (object reconstruction).
-// Adapted from SurfaceNetsExtract.compute but uses density threshold
-// instead of TSDF zero-crossing.
+// Uses shared Surface Nets infrastructure from SurfaceNetsCommon.hlsl,
+// only implements density-threshold ClassifyAndEmit and TryEmitQuad.
 //
 // Dispatch sequence:
 //   1. ClearCounters
@@ -16,76 +16,20 @@
 #pragma kernel BuildIndirectArgs
 #pragma kernel WriteVertexColors
 
+#include "Packages/com.genesis.roomscan/Runtime/Shaders/SurfaceNetsCommon.hlsl"
+
 // ──────────────────────────────────────────────────────────────────
-//  Parameters
+//  Density-specific parameters and buffers
 // ──────────────────────────────────────────────────────────────────
-uint3  _VoxCount;
-float  _VoxSize;
 uint   _TotalVoxels;
-uint   _MaxVertices;
 float  _DensityThreshold;
 
-// ──────────────────────────────────────────────────────────────────
-//  Density volume (filled from decoder output)
-// ──────────────────────────────────────────────────────────────────
-StructuredBuffer<float> _DensityVolume;
+StructuredBuffer<float>  _DensityVolume;
+StructuredBuffer<float4> _VertexColorsIn;
 
 // ──────────────────────────────────────────────────────────────────
-//  GPU Vertex (matches the scan pipeline GPUVertex layout)
+//  Density sampling
 // ──────────────────────────────────────────────────────────────────
-struct GPUVertex
-{
-    float3 pos;
-    float3 norm;
-    uint   packedColor;
-    uint   voxelFlatIdx;
-};
-
-// ──────────────────────────────────────────────────────────────────
-//  Buffers
-// ──────────────────────────────────────────────────────────────────
-RWStructuredBuffer<int>       _CoordVertMap;
-RWStructuredBuffer<GPUVertex> _Vertices;
-RWStructuredBuffer<uint>      _Indices;
-RWStructuredBuffer<uint>      _Counters;
-RWStructuredBuffer<uint>      _DispatchArgs;
-RWStructuredBuffer<uint>      _DrawIndirectArgs;
-
-// Vertex colors (written in a separate pass after surface extraction)
-StructuredBuffer<float4>      _VertexColorsIn;
-
-// ──────────────────────────────────────────────────────────────────
-//  Corner / edge tables
-// ──────────────────────────────────────────────────────────────────
-static const int3 kCornerOffs[8] =
-{
-    int3(0,0,0), int3(1,0,0), int3(1,0,1), int3(0,0,1),
-    int3(0,1,0), int3(1,1,0), int3(1,1,1), int3(0,1,1)
-};
-static const uint kEdgeA[12] = { 0,1,2,3, 4,5,6,7, 0,1,2,3 };
-static const uint kEdgeB[12] = { 1,2,3,0, 5,6,7,4, 4,5,6,7 };
-
-// ──────────────────────────────────────────────────────────────────
-//  Helpers
-// ──────────────────────────────────────────────────────────────────
-int Flatten(int3 c)
-{
-    return c.x + c.y * (int)_VoxCount.x + c.z * (int)_VoxCount.x * (int)_VoxCount.y;
-}
-
-float3 VoxelCoordToWorld(float3 c)
-{
-    return (c + 0.5 - (float3)_VoxCount / 2.0) * _VoxSize;
-}
-
-uint PackColor(float4 c)
-{
-    return (uint)(saturate(c.r) * 255.0)
-         | ((uint)(saturate(c.g) * 255.0) << 8)
-         | ((uint)(saturate(c.b) * 255.0) << 16)
-         | (255u << 24);
-}
-
 float SampleDensity(int3 coord)
 {
     if (any(coord < 0) || any(coord >= (int3)_VoxCount)) return 0;
@@ -98,8 +42,7 @@ float SampleDensity(int3 coord)
 [numthreads(1, 1, 1)]
 void ClearCounters(uint3 id : SV_DispatchThreadID)
 {
-    _Counters[0] = 0;
-    _Counters[1] = 0;
+    ClearCountersImpl();
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -173,14 +116,12 @@ void ClassifyAndEmit(uint3 id : SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void BuildVertexDispatchArgs(uint3 id : SV_DispatchThreadID)
 {
-    uint vertCount = min(_Counters[0], _MaxVertices);
-    _DispatchArgs[0] = (vertCount + 63) / 64;
-    _DispatchArgs[1] = 1;
-    _DispatchArgs[2] = 1;
+    BuildVertexDispatchArgsImpl();
 }
 
 // ══════════════════════════════════════════════════════════════════
 //  Kernel 3 : GenerateIndices
+//  Density-based quad emission
 // ══════════════════════════════════════════════════════════════════
 void TryEmitQuad(int3 coord, int3 axis, int3 d1, int3 d2)
 {
@@ -229,13 +170,7 @@ void GenerateIndices(uint3 id : SV_DispatchThreadID)
     uint vertCount = min(_Counters[0], _MaxVertices);
     if (id.x >= vertCount) return;
 
-    int3 coord;
-    uint flatIdx = _Vertices[id.x].voxelFlatIdx;
-    uint sliceXY = _VoxCount.x * _VoxCount.y;
-    coord.z = (int)(flatIdx / sliceXY);
-    uint rem = flatIdx - (uint)coord.z * sliceXY;
-    coord.y = (int)(rem / _VoxCount.x);
-    coord.x = (int)(rem - (uint)coord.y * _VoxCount.x);
+    int3 coord = Unflatten((int)_Vertices[id.x].voxelFlatIdx);
 
     TryEmitQuad(coord, int3(1,0,0), int3(0,0,1), int3(0,1,0));
     TryEmitQuad(coord, int3(0,1,0), int3(1,0,0), int3(0,0,1));
@@ -248,11 +183,7 @@ void GenerateIndices(uint3 id : SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void BuildIndirectArgs(uint3 id : SV_DispatchThreadID)
 {
-    _DrawIndirectArgs[0] = _Counters[1]; // indexCount
-    _DrawIndirectArgs[1] = 1;
-    _DrawIndirectArgs[2] = 0;
-    _DrawIndirectArgs[3] = 0;
-    _DrawIndirectArgs[4] = 0;
+    BuildIndirectArgsImpl();
 }
 
 // ══════════════════════════════════════════════════════════════════

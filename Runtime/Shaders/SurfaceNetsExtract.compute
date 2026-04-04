@@ -22,20 +22,16 @@
 #pragma kernel BuildIndirectArgs
 #pragma kernel InitTemporal
 
+#include "SurfaceNetsCommon.hlsl"
+
 // ──────────────────────────────────────────────────────────────────
-//  Volume textures (bound by VolumeIntegrator, read-only here)
+//  TSDF-specific textures and parameters
 // ──────────────────────────────────────────────────────────────────
 Texture3D<float2> _TsdfVolume;     // R = signed distance [-1,1], G = weight [0,1]
 Texture3D<float4> _ColorVolume;    // RGBA8 UNorm
 
-// ──────────────────────────────────────────────────────────────────
-//  Parameters
-// ──────────────────────────────────────────────────────────────────
-uint3  _VoxCount;
-float  _VoxSize;
 float  _MinWeight;
 uint   _TotalVoxels;
-uint   _MaxVertices;
 
 float  _SmoothLambda;
 float  _SmoothBeta;
@@ -47,75 +43,16 @@ float  _ConvergeThreshold;
 float  _TemporalDeadzone;
 
 // ──────────────────────────────────────────────────────────────────
-//  GPU Vertex (32 bytes, matches StructuredBuffer in render shader)
+//  TSDF-specific buffers
 // ──────────────────────────────────────────────────────────────────
-struct GPUVertex
-{
-    float3 pos;
-    float3 norm;
-    uint   packedColor;
-    uint   voxelFlatIdx;
-};
-
-// ──────────────────────────────────────────────────────────────────
-//  Buffers
-// ──────────────────────────────────────────────────────────────────
-RWStructuredBuffer<int>       _CoordVertMap;     // [totalVoxels] flat idx -> compact vert idx (-1 = none)
-RWStructuredBuffer<GPUVertex> _Vertices;         // [maxVertices] compact vertex output
-RWStructuredBuffer<uint>      _Indices;          // [maxIndices]  triangle index output
-
-RWStructuredBuffer<uint>      _Counters;         // [0] = vertex count, [1] = index count
-RWStructuredBuffer<uint>      _DispatchArgs;     // [0,1,2] = indirect dispatch group counts
-RWStructuredBuffer<uint>      _DrawIndirectArgs; // [0..4]  = DrawProceduralIndirect args
-
 RWStructuredBuffer<float3>    _SmoothPosA;       // [maxVertices] ping-pong smoothing
 RWStructuredBuffer<float3>    _SmoothPosB;       // [maxVertices] ping-pong smoothing
 
 RWTexture3D<float4>           _TemporalState;    // 3D texture: xyz = prev pos, w = age (-1 = uninit)
 
 // ──────────────────────────────────────────────────────────────────
-//  Corner / edge tables  (Surface Nets cell topology)
+//  TSDF sampling
 // ──────────────────────────────────────────────────────────────────
-static const int3 kCornerOffs[8] =
-{
-    int3(0,0,0), int3(1,0,0), int3(1,0,1), int3(0,0,1),
-    int3(0,1,0), int3(1,1,0), int3(1,1,1), int3(0,1,1)
-};
-static const uint kEdgeA[12] = { 0,1,2,3, 4,5,6,7, 0,1,2,3 };
-static const uint kEdgeB[12] = { 1,2,3,0, 5,6,7,4, 4,5,6,7 };
-
-// ──────────────────────────────────────────────────────────────────
-//  Helpers
-// ──────────────────────────────────────────────────────────────────
-int Flatten(int3 c)
-{
-    return c.x + c.y * (int)_VoxCount.x + c.z * (int)_VoxCount.x * (int)_VoxCount.y;
-}
-
-int3 Unflatten(int idx)
-{
-    uint uidx = (uint)idx;
-    uint sliceXY = _VoxCount.x * _VoxCount.y;
-    uint z = uidx / sliceXY;
-    uint rem = uidx - z * sliceXY;
-    uint y = rem / _VoxCount.x;
-    uint x = rem - y * _VoxCount.x;
-    return int3(x, y, z);
-}
-
-float3 VoxelCoordToWorld(float3 c)
-{
-    return (c + 0.5 - (float3)_VoxCount / 2.0) * _VoxSize;
-}
-
-uint PackColor(float4 c)
-{
-    return (uint)(saturate(c.r) * 255.0)
-         | ((uint)(saturate(c.g) * 255.0) << 8)
-         | ((uint)(saturate(c.b) * 255.0) << 16)
-         | (255u << 24);
-}
-
 float SampleSDF(int3 coord)
 {
     float2 s = _TsdfVolume[coord];
@@ -130,8 +67,7 @@ float SampleSDF(int3 coord)
 [numthreads(1, 1, 1)]
 void ClearCounters(uint3 id : SV_DispatchThreadID)
 {
-    _Counters[0] = 0;
-    _Counters[1] = 0;
+    ClearCountersImpl();
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -224,15 +160,11 @@ void ClassifyAndEmit(uint3 id : SV_DispatchThreadID)
 
 // ══════════════════════════════════════════════════════════════════
 //  Kernel 2 : BuildVertexDispatchArgs
-//  Writes indirect dispatch dimensions for per-vertex kernels
 // ══════════════════════════════════════════════════════════════════
 [numthreads(1, 1, 1)]
 void BuildVertexDispatchArgs(uint3 id : SV_DispatchThreadID)
 {
-    uint vertCount = min(_Counters[0], _MaxVertices);
-    _DispatchArgs[0] = (vertCount + 63) / 64;
-    _DispatchArgs[1] = 1;
-    _DispatchArgs[2] = 1;
+    BuildVertexDispatchArgsImpl();
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -413,16 +345,11 @@ void GenerateIndices(uint3 id : SV_DispatchThreadID)
 
 // ══════════════════════════════════════════════════════════════════
 //  Kernel 8 : BuildIndirectArgs
-//  Packs index count into DrawProceduralIndirect args
 // ══════════════════════════════════════════════════════════════════
 [numthreads(1, 1, 1)]
 void BuildIndirectArgs(uint3 id : SV_DispatchThreadID)
 {
-    _DrawIndirectArgs[0] = _Counters[1]; // indexCount
-    _DrawIndirectArgs[1] = 1;            // instanceCount
-    _DrawIndirectArgs[2] = 0;            // startIndex
-    _DrawIndirectArgs[3] = 0;            // baseVertex
-    _DrawIndirectArgs[4] = 0;            // startInstance
+    BuildIndirectArgsImpl();
 }
 
 // ══════════════════════════════════════════════════════════════════
