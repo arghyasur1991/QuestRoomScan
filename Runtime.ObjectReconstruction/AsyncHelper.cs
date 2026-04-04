@@ -25,12 +25,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
         internal static Func<Task> EditModeYield;
 
         /// <summary>
+        /// When true, <see cref="YieldFrame"/> becomes a no-op.
+        /// Set by editor code when maximum throughput is needed.
+        /// </summary>
+        internal static bool SuppressYields;
+
+        /// <summary>
         /// Yields control back to Unity. In Play mode uses Task.Yield (defers to
         /// next frame via UnitySynchronizationContext). In Edit mode uses the
         /// plugged-in EditorApplication.delayCall-based yield.
+        /// When <see cref="SuppressYields"/> is true, returns immediately.
         /// </summary>
         internal static async Task YieldFrame()
         {
+            if (SuppressYields) return;
             if (EditModeYield != null)
             {
                 await EditModeYield();
@@ -74,7 +82,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// <summary>Max light ops to batch in a single frame before yielding.</summary>
         internal static int LightOpBatchSize = 20;
 
-        /// <summary>Extra frames to yield after a heavy op for GPU cooldown.</summary>
+        /// <summary>
+        /// Extra frames to yield after a heavy op for GPU cooldown.
+        /// Set to -1 to disable all throttling (editor fast path): uses
+        /// worker.Schedule() instead of ScheduleIterable — zero yields.
+        /// </summary>
         internal static int HeavyOpCooldownFrames = 1;
 
         private static readonly HashSet<string> HeavyOpNames = new()
@@ -95,12 +107,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         /// <summary>
         /// Runs inference with adaptive per-layer throttling.
-        /// Pre-scans the model to classify ops, then batches light ops and yields
-        /// extra frames after heavy ones.
+        /// When <see cref="HeavyOpCooldownFrames"/> is -1, uses worker.Schedule()
+        /// for zero-yield maximum throughput (editor fast path).
+        /// Otherwise pre-scans the model to classify ops, batches light ops,
+        /// and yields extra frames after heavy ones.
         /// </summary>
         internal static async Task RunAsync(
             Worker worker, Model model, CancellationToken ct, Tensor input = null)
         {
+            if (HeavyOpCooldownFrames < 0)
+            {
+                if (input != null) worker.Schedule(input); else worker.Schedule();
+                return;
+            }
+
             var schedule = BuildSchedule(model);
             int gpuIdx = 0;
             int lightAccum = 0;

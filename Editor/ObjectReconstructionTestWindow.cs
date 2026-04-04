@@ -200,8 +200,8 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            InferenceScheduler.LightOpBatchSize = 200;
-            InferenceScheduler.HeavyOpCooldownFrames = 0;
+            InferenceScheduler.HeavyOpCooldownFrames = -1;
+            AsyncHelper.SuppressYields = true;
             _timingLog = "";
             var totalSw = Stopwatch.StartNew();
             ReconstructionPipeline pipeline = null;
@@ -253,6 +253,7 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
+                ResetSchedulerDefaults();
                 pipeline?.Dispose();
                 _running = false;
                 _cts?.Dispose();
@@ -267,8 +268,8 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            InferenceScheduler.LightOpBatchSize = 200;
-            InferenceScheduler.HeavyOpCooldownFrames = 0;
+            InferenceScheduler.HeavyOpCooldownFrames = -1;
+            AsyncHelper.SuppressYields = true;
             _timingLog = "";
             RembgModel rembg = null;
 
@@ -309,6 +310,7 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
+                ResetSchedulerDefaults();
                 rembg?.Dispose();
                 _running = false;
                 _cts?.Dispose();
@@ -323,8 +325,8 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            InferenceScheduler.LightOpBatchSize = 200;
-            InferenceScheduler.HeavyOpCooldownFrames = 0;
+            InferenceScheduler.HeavyOpCooldownFrames = -1;
+            AsyncHelper.SuppressYields = true;
             _timingLog = "";
             ReconstructionPipeline pipeline = null;
 
@@ -357,6 +359,7 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
+                ResetSchedulerDefaults();
                 pipeline?.Dispose();
                 _running = false;
                 _cts?.Dispose();
@@ -380,8 +383,8 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            InferenceScheduler.LightOpBatchSize = 200;
-            InferenceScheduler.HeavyOpCooldownFrames = 0;
+            InferenceScheduler.HeavyOpCooldownFrames = -1;
+            AsyncHelper.SuppressYields = true;
             _timingLog = "";
             var totalSw = Stopwatch.StartNew();
             ReconstructionPipeline pipeline = null;
@@ -444,12 +447,19 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
+                ResetSchedulerDefaults();
                 pipeline?.Dispose();
                 _running = false;
                 _cts?.Dispose();
                 _cts = null;
                 Repaint();
             }
+        }
+
+        private static void ResetSchedulerDefaults()
+        {
+            AsyncHelper.SuppressYields = false;
+            InferenceScheduler.HeavyOpCooldownFrames = 1;
         }
 
         private ReconstructionPipeline CreatePipeline()
