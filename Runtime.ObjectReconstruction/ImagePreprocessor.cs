@@ -13,6 +13,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
     {
         /// <summary>
         /// Preprocessing for images without alpha: uses rembg mask.
+        /// Matches Python's rembg flow: uint8 quantization → GPU bilinear upscale → composite.
         /// </summary>
         internal static async Task<Tensor<float>> ApplyMaskAndCompositeAsync(
             Texture2D image, Tensor<float> alphaMask, float foregroundRatio)
@@ -25,17 +26,57 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int maskH = alphaMask.shape[alphaMask.shape.rank - 2];
             var maskData = alphaMask.DownloadToArray();
 
-            // Build alpha array from rembg mask, flipping y (texture=bottom-up, tensor=top-down)
-            var alpha = new float[srcW * srcH];
-            for (int y = 0; y < srcH; y++)
-            for (int x = 0; x < srcW; x++)
-            {
-                int mx = Mathf.Clamp((int)((float)x / srcW * maskW), 0, maskW - 1);
-                int my = maskH - 1 - Mathf.Clamp((int)((float)y / srcH * maskH), 0, maskH - 1);
-                alpha[y * srcW + x] = Mathf.Clamp01(maskData[my * maskW + mx]);
-            }
+            var alpha = UpscaleMaskGPU(maskData, maskW, maskH, srcW, srcH);
 
             return await CompositeAndResizeAsync(srcPixels, srcW, srcH, alpha, foregroundRatio);
+        }
+
+        /// <summary>
+        /// Upscales a NCHW mask tensor to (dstW, dstH) using GPU bilinear filtering.
+        /// Quantizes to uint8 first to match Python rembg's (mask*255).astype(uint8) → PIL.resize.
+        /// Returns alpha in bottom-up layout (matching GetPixels32).
+        /// </summary>
+        private static float[] UpscaleMaskGPU(float[] maskData, int maskW, int maskH, int dstW, int dstH)
+        {
+            // Build mask texture (uint8, linear color space to avoid sRGB distortion)
+            // y-flip: tensor is top-down, Unity textures are bottom-up
+            var maskTex = new Texture2D(maskW, maskH, TextureFormat.RGBA32, 1, true);
+            maskTex.filterMode = FilterMode.Bilinear;
+            maskTex.wrapMode = TextureWrapMode.Clamp;
+            var maskPixels = new Color32[maskW * maskH];
+            for (int ty = 0; ty < maskH; ty++)
+            for (int tx = 0; tx < maskW; tx++)
+            {
+                int tensorY = maskH - 1 - ty;
+                byte v = (byte)(Mathf.Clamp01(maskData[tensorY * maskW + tx]) * 255f);
+                maskPixels[ty * maskW + tx] = new Color32(v, v, v, 255);
+            }
+            maskTex.SetPixels32(maskPixels);
+            maskTex.Apply();
+
+            // GPU bilinear resize to source dimensions
+            var maskRT = RenderTexture.GetTemporary(dstW, dstH, 0, RenderTextureFormat.ARGB32,
+                RenderTextureReadWrite.Linear);
+            maskRT.filterMode = FilterMode.Bilinear;
+            Graphics.Blit(maskTex, maskRT);
+            SafeDestroy(maskTex);
+
+            // Read back upscaled mask
+            var upscaled = new Texture2D(dstW, dstH, TextureFormat.RGBA32, 1, true);
+            RenderTexture.active = maskRT;
+            upscaled.ReadPixels(new Rect(0, 0, dstW, dstH), 0, 0);
+            upscaled.Apply();
+            RenderTexture.active = null;
+            RenderTexture.ReleaseTemporary(maskRT);
+
+            var upPixels = upscaled.GetPixels32();
+            SafeDestroy(upscaled);
+
+            var alpha = new float[dstW * dstH];
+            for (int i = 0; i < alpha.Length; i++)
+                alpha[i] = upPixels[i].r / 255f;
+
+            return alpha;
         }
 
         /// <summary>
@@ -105,12 +146,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private static (Color32[] pixels, int size) BuildNativeComposite(
             Color32[] srcPixels, int srcW, int srcH, float[] alpha, float ratio)
         {
-            // Find foreground bounding box from alpha
+            // Use threshold 0.5 for bbox computation to match rembg post_process_mask behavior.
+            // Soft alpha edges (values 0.01–0.49) inflate the bbox, shrinking the object in
+            // the final 512x512 frame and degrading TripoSR quality. The actual compositing
+            // still uses the full smooth alpha for clean anti-aliased edges.
+            const float bboxThreshold = 0.5f;
             int minX = srcW, minY = srcH, maxX = 0, maxY = 0;
             for (int y = 0; y < srcH; y++)
             for (int x = 0; x < srcW; x++)
             {
-                if (alpha[y * srcW + x] > 0f)
+                if (alpha[y * srcW + x] > bboxThreshold)
                 {
                     if (x < minX) minX = x;
                     if (x > maxX) maxX = x;

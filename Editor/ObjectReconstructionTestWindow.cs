@@ -121,6 +121,10 @@ namespace Genesis.RoomScan.Editor
                     if (GUILayout.Button("Test Preprocess Only"))
                         RunPreprocessOnly();
                 }
+
+                EditorGUILayout.Space(2);
+                if (GUILayout.Button("Run from Preprocessed PNG (bypass rembg+composite)"))
+                    RunFromPreprocessedPng();
             }
 
             if (_running)
@@ -335,8 +339,99 @@ namespace Genesis.RoomScan.Editor
                 AppendTiming($"Preprocess: {sw.ElapsedMilliseconds:F0}ms");
 
                 Debug.Log($"[ReconstructionTest] Preprocessed tensor shape: {result.shape}");
+
+                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                Directory.CreateDirectory(debugDir);
+                SaveTensorAsCompositePng(result, Path.Combine(debugDir, "unity_rembg_composite.png"));
+                AppendTiming($"Composite saved to {debugDir}");
+
                 result.Dispose();
                 SetStatus("Preprocess OK!", 1f);
+            }
+            catch (Exception e)
+            {
+                SetStatus($"Error: {e.Message}", 0f);
+                Debug.LogException(e);
+            }
+            finally
+            {
+                pipeline?.Dispose();
+                _running = false;
+                _cts?.Dispose();
+                _cts = null;
+                Repaint();
+            }
+        }
+
+        private async void RunFromPreprocessedPng()
+        {
+            string pngPath = EditorUtility.OpenFilePanel(
+                "Select 512x512 preprocessed composite PNG", "", "png");
+            if (string.IsNullOrEmpty(pngPath)) return;
+
+            if (_triplaneShader == null || _surfaceNetsShader == null
+                || _marchingCubesShader == null || _postprocessShader == null)
+            {
+                EditorUtility.DisplayDialog("Missing Shaders", "Compute shaders not found.", "OK");
+                return;
+            }
+
+            _running = true;
+            _cts = new CancellationTokenSource();
+            _timingLog = "";
+            var totalSw = Stopwatch.StartNew();
+            ReconstructionPipeline pipeline = null;
+
+            try
+            {
+                // Load PNG as texture
+                var pngBytes = File.ReadAllBytes(pngPath);
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, true);
+                tex.LoadImage(pngBytes);
+                AppendTiming($"Loaded PNG: {tex.width}x{tex.height} from {Path.GetFileName(pngPath)}");
+
+                if (tex.width != 512 || tex.height != 512)
+                {
+                    DestroyImmediate(tex);
+                    SetStatus($"Error: image must be 512x512 (got {tex.width}x{tex.height})", 0f);
+                    return;
+                }
+
+                // Convert to NCHW tensor [1,3,512,512] — same as pipeline.PreprocessAsync output
+                var tensor = new Unity.InferenceEngine.Tensor<float>(
+                    new Unity.InferenceEngine.TensorShape(1, 3, 512, 512));
+                Unity.InferenceEngine.TextureConverter.ToTensor(tex, tensor,
+                    new Unity.InferenceEngine.TextureTransform());
+                DestroyImmediate(tex);
+                AppendTiming("Converted to tensor [1,3,512,512]");
+
+                pipeline = CreatePipeline();
+
+                SetStatus("Loading models (triposr + decoder)...", 0.1f);
+                var sw = Stopwatch.StartNew();
+                await pipeline.LoadModelsAsync(_cts.Token);
+                AppendTiming($"Load models: {sw.ElapsedMilliseconds:F0}ms");
+
+                SetStatus("Running TripoSR forward pass...", 0.35f);
+                sw.Restart();
+                await pipeline.RunForwardAsync(tensor, _cts.Token);
+                tensor.Dispose();
+                AppendTiming($"Forward pass: {sw.ElapsedMilliseconds:F0}ms");
+
+                SetStatus("Extracting mesh + vertex colors...", 0.60f);
+                sw.Restart();
+                var mesh = await pipeline.ExtractMeshAsync(_cts.Token);
+                AppendTiming($"Mesh extraction: {sw.ElapsedMilliseconds:F0}ms");
+
+                totalSw.Stop();
+                AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds:F0}ms ---");
+
+                ShowMeshPreview(mesh);
+                SetStatus($"Done! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris", 1f);
+            }
+            catch (OperationCanceledException)
+            {
+                SetStatus("Cancelled", 0f);
             }
             catch (Exception e)
             {
@@ -442,6 +537,31 @@ namespace Genesis.RoomScan.Editor
             if (!string.IsNullOrEmpty(_timingLog)) _timingLog += "\n";
             _timingLog += line;
             Repaint();
+        }
+
+        private static void SaveTensorAsCompositePng(Unity.InferenceEngine.Tensor<float> tensor, string path)
+        {
+            int c = tensor.shape[1];
+            int h = tensor.shape[2];
+            int w = tensor.shape[3];
+            var data = tensor.DownloadToArray();
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            var pixels = new Color32[w * h];
+            for (int py = 0; py < h; py++)
+            for (int px = 0; px < w; px++)
+            {
+                int ty = h - 1 - py; // tensor top-down → texture bottom-up
+                float r = Mathf.Clamp01(data[0 * h * w + py * w + px]);
+                float g = Mathf.Clamp01(data[1 * h * w + py * w + px]);
+                float b = Mathf.Clamp01(data[2 * h * w + py * w + px]);
+                pixels[ty * w + px] = new Color32(
+                    (byte)(r * 255), (byte)(g * 255), (byte)(b * 255), 255);
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            DestroyImmediate(tex);
+            Debug.Log($"[ReconstructionTest] Saved composite PNG: {path} ({w}x{h})");
         }
 
         private static void SaveMaskAsPng(float[] data, int w, int h, string path)
