@@ -18,7 +18,7 @@ namespace Genesis.RoomScan.Editor
     /// </summary>
     public class ObjectReconstructionTestWindow : EditorWindow
     {
-        [MenuItem("Genesis/Object Reconstruction Test")]
+        [MenuItem("RoomScan/Object Reconstruction Test")]
         public static void ShowWindow()
         {
             GetWindow<ObjectReconstructionTestWindow>("Reconstruction Test");
