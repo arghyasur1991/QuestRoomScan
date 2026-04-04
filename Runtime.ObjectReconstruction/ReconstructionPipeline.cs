@@ -58,6 +58,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
             var readable = MakeReadable(image);
             try
             {
+                bool hasAlpha = readable.format == TextureFormat.RGBA32 ||
+                                readable.format == TextureFormat.ARGB32 ||
+                                readable.format == TextureFormat.RGBA64 ||
+                                readable.format == TextureFormat.RGBAFloat ||
+                                readable.format == TextureFormat.RGBAHalf ||
+                                readable.format == TextureFormat.BGRA32;
+
+                if (hasAlpha && HasMeaningfulAlpha(readable))
+                {
+                    Logger.Info("[Pipeline] RGBA image detected — using built-in alpha (skipping rembg)");
+                    return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f);
+                }
+
+                Logger.Info("[Pipeline] Running rembg for background removal");
                 var mask = await _rembg.InferAsync(readable, ct);
                 await AsyncHelper.YieldFrame();
                 var result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, mask, 0.85f);
@@ -69,6 +83,19 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 if (readable != image)
                     SafeDestroy(readable);
             }
+        }
+
+        /// <summary>
+        /// Quick check that the alpha channel actually varies (not all 255).
+        /// Samples a few pixels to avoid scanning the entire texture.
+        /// </summary>
+        private static bool HasMeaningfulAlpha(Texture2D tex)
+        {
+            var pixels = tex.GetPixels32();
+            int step = Mathf.Max(1, pixels.Length / 200);
+            for (int i = 0; i < pixels.Length; i += step)
+                if (pixels[i].a < 250) return true;
+            return false;
         }
 
         /// <summary>
