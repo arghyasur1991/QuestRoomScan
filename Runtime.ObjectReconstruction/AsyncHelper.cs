@@ -37,6 +37,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
+        /// Global default ops-per-frame for all FrameBudget instances.
+        /// Set from <see cref="ObjectReconstructionModule"/> Inspector.
+        /// Higher = faster inference, lower FPS. Lower = smoother FPS, slower inference.
+        /// </summary>
+        internal static int DefaultOpsPerFrame = 8;
+
+        /// <summary>
         /// Tracks dispatched ops and yields after a fixed count per frame.
         /// GPU dispatches are near-instant on CPU, so time-based budgeting
         /// doesn't work — it queues hundreds of layers before yielding,
@@ -49,11 +56,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             private readonly int _maxOpsPerFrame;
 
             /// <param name="maxOpsPerFrame">
-            /// Max GPU ops to dispatch before yielding a frame. Lower values
-            /// give smoother FPS but longer total inference time.
-            /// At 72 Hz with ~3000 TripoSR layers, 4 ops/frame ≈ 10s inference.
+            /// Max GPU ops to dispatch before yielding a frame. 0 or negative
+            /// uses <see cref="DefaultOpsPerFrame"/>.
             /// </param>
-            internal FrameBudget(int maxOpsPerFrame = 4) => _maxOpsPerFrame = maxOpsPerFrame;
+            internal FrameBudget(int maxOpsPerFrame = 0)
+                => _maxOpsPerFrame = maxOpsPerFrame > 0 ? maxOpsPerFrame : DefaultOpsPerFrame;
 
             /// <summary>
             /// Call after each dispatched op. Yields a frame once the budget is hit.

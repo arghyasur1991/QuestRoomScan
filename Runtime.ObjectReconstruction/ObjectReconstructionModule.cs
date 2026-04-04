@@ -25,6 +25,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [Header("Test Images")]
         [SerializeField] private Texture2D[] testImages = Array.Empty<Texture2D>();
 
+        [Header("Performance")]
+        [SerializeField, Tooltip("GPU ops dispatched per frame during inference. " +
+            "Higher = faster inference but lower FPS. Lower = smoother FPS but slower inference. " +
+            "At 72Hz: 8 ops ≈ 15-20 FPS, 16 ops ≈ 8-12 FPS, 32 ops ≈ 4-6 FPS.")]
+        [Range(1, 64)] private int opsPerFrame = 8;
+
         [Header("Mesh Extraction")]
         [SerializeField] private int gridResolution = 256;
         [SerializeField] private float densityThreshold = 25f;
@@ -68,6 +74,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             _running = true;
             _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            AsyncHelper.DefaultOpsPerFrame = opsPerFrame;
 
             Tensor<float> preprocessed = null;
             try
