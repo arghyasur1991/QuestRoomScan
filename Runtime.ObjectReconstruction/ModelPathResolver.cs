@@ -51,22 +51,26 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 if (dir != null) Directory.CreateDirectory(dir);
 
                 var request = UnityWebRequest.Get(streamingPath);
-                var op = request.SendWebRequest();
-
-                while (!op.isDone)
+                try
                 {
-                    ct.ThrowIfCancellationRequested();
-                    await Task.Yield();
+                    var op = request.SendWebRequest();
+
+                    while (!op.isDone)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        await Task.Yield();
+                    }
+
+                    if (request.result != UnityWebRequest.Result.Success)
+                        throw new FileNotFoundException(
+                            $"Failed to load model from StreamingAssets: {request.error}", relativePath);
+
+                    File.WriteAllBytes(persistentPath, request.downloadHandler.data);
                 }
-
-                if (request.result != UnityWebRequest.Result.Success)
-                    throw new FileNotFoundException(
-                        $"Failed to load model from StreamingAssets: {request.error}", relativePath);
-
-                File.WriteAllBytes(persistentPath, request.downloadHandler.data);
-                request.Dispose();
-
-                Logger.Info($"[ModelPathResolver] Copied {relativePath} to persistentDataPath");
+                finally
+                {
+                    request.Dispose();
+                }
             }
 
             return persistentPath;

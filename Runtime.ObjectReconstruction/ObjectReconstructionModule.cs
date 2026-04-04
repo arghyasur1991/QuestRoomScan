@@ -179,8 +179,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             if (vertexColorShader != null)
                 return new Material(vertexColorShader);
+
+            Logger.Warning("[ObjectReconstruction] vertexColorShader not assigned — " +
+                "Shader.Find fallback may fail in stripped builds. Wire it via the Setup Wizard.");
             var fallback = Shader.Find("Universal Render Pipeline/Lit")
                            ?? Shader.Find("Standard");
+            if (fallback == null)
+                throw new InvalidOperationException(
+                    "No vertex color shader assigned and no fallback shader found. " +
+                    "Assign vertexColorShader in the Inspector or run the Setup Wizard.");
             return new Material(fallback);
         }
 

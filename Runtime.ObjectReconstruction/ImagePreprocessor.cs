@@ -12,11 +12,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
     internal static class ImagePreprocessor
     {
         /// <summary>
-        /// Set to a directory path to save intermediate debug images at each stage.
-        /// Null disables debug output. Matches Python's debug_preprocess.py stages.
-        /// </summary>
-        internal static string DebugOutputDir;
-        /// <summary>
         /// Preprocessing for images without alpha: uses rembg mask.
         /// </summary>
         internal static async Task<Tensor<float>> ApplyMaskAndCompositeAsync(
@@ -76,24 +71,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             await AsyncHelper.YieldFrame();
 
-            // Save debug: alpha mask visualization
-            if (DebugOutputDir != null)
-                SaveAlphaMask(alpha, srcW, srcH, System.IO.Path.Combine(DebugOutputDir, "unity_alpha_mask.png"));
-
             // Create texture with mipmaps for antialiased downsample (matches Python antialias=True)
             var compositeTex = new Texture2D(compositeSize, compositeSize, TextureFormat.RGB24, true);
             compositeTex.filterMode = FilterMode.Trilinear;
             compositeTex.SetPixels32(compositePixels);
             compositeTex.Apply(true);
-
-            // Save debug: native-res composite (before 512 resize)
-            if (DebugOutputDir != null)
-            {
-                var pngBytes = compositeTex.EncodeToPNG();
-                System.IO.File.WriteAllBytes(
-                    System.IO.Path.Combine(DebugOutputDir, $"unity_composite_{compositeSize}x{compositeSize}.png"), pngBytes);
-                Logger.Info($"[ImagePreprocessor] Saved native composite: {compositeSize}×{compositeSize}");
-            }
 
             // GPU bilinear resize to 512×512 via RenderTexture
             var rt = RenderTexture.GetTemporary(outputSize, outputSize, 0, RenderTextureFormat.ARGB32);
@@ -194,113 +176,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
 
             return (result, finalSize);
-        }
-
-        /// <summary>
-        /// Saves a rembg mask tensor as a grayscale PNG.
-        /// </summary>
-        internal static void SaveMaskDebugImage(Tensor<float> mask, string path)
-        {
-            var data = mask.DownloadToArray();
-            var shape = mask.shape;
-            int h = shape[shape.rank - 2];
-            int w = shape[shape.rank - 1];
-            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
-            var pixels = new Color32[w * h];
-
-            for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-            {
-                int ty = h - 1 - y;
-                byte v = (byte)(Mathf.Clamp01(data[y * w + x]) * 255);
-                pixels[ty * w + x] = new Color32(v, v, v, 255);
-            }
-
-            tex.SetPixels32(pixels);
-            tex.Apply();
-            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
-            SafeDestroy(tex);
-            Logger.Info($"[ImagePreprocessor] Saved mask: {path} ({w}×{h})");
-        }
-
-        private static void SaveAlphaMask(float[] alpha, int w, int h, string path)
-        {
-            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
-            var pixels = new Color32[w * h];
-            for (int i = 0; i < alpha.Length; i++)
-            {
-                byte v = (byte)(Mathf.Clamp01(alpha[i]) * 255);
-                pixels[i] = new Color32(v, v, v, 255);
-            }
-            tex.SetPixels32(pixels);
-            tex.Apply();
-            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
-            SafeDestroy(tex);
-            Logger.Info($"[ImagePreprocessor] Saved alpha mask: {path} ({w}×{h})");
-        }
-
-        internal static void SaveDebugImage(Tensor<float> tensor, string path)
-        {
-            var shape = tensor.shape;
-            int h = shape[2], w = shape[3];
-            var data = tensor.DownloadToArray();
-            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
-            var pixels = new Color32[w * h];
-
-            for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-            {
-                int ty = h - 1 - y;
-                float r = data[0 * h * w + y * w + x];
-                float g = data[1 * h * w + y * w + x];
-                float b = data[2 * h * w + y * w + x];
-                pixels[ty * w + x] = new Color32(
-                    (byte)(Mathf.Clamp01(r) * 255),
-                    (byte)(Mathf.Clamp01(g) * 255),
-                    (byte)(Mathf.Clamp01(b) * 255), 255);
-            }
-
-            tex.SetPixels32(pixels);
-            tex.Apply();
-            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
-            SafeDestroy(tex);
-
-            float min = float.MaxValue, max = float.MinValue;
-            float sumR = 0, sumG = 0, sumB = 0;
-            int chSize = h * w;
-            for (int i = 0; i < data.Length; i++)
-            {
-                if (data[i] < min) min = data[i];
-                if (data[i] > max) max = data[i];
-            }
-            for (int i = 0; i < chSize; i++) sumR += data[i];
-            for (int i = 0; i < chSize; i++) sumG += data[chSize + i];
-            for (int i = 0; i < chSize; i++) sumB += data[2 * chSize + i];
-
-            int cx = w / 2, cy = h / 2;
-            Logger.Info($"[ImagePreprocessor] Debug tensor shape: (1, 3, {h}, {w})");
-            Logger.Info($"[ImagePreprocessor] Range: [{min:F4}, {max:F4}]");
-            Logger.Info($"[ImagePreprocessor] Mean: [{sumR / chSize:F4}, {sumG / chSize:F4}, {sumB / chSize:F4}]");
-            Logger.Info($"[ImagePreprocessor] Center ({cx},{cy}): R={data[cy * w + cx]:F4} G={data[chSize + cy * w + cx]:F4} B={data[2 * chSize + cy * w + cx]:F4}");
-            Logger.Info($"[ImagePreprocessor] Corner (0,0): R={data[0]:F4} G={data[chSize]:F4} B={data[2 * chSize]:F4}");
-            Logger.Info($"[ImagePreprocessor] Saved debug image: {path}");
-        }
-
-        /// <summary>
-        /// Saves a (1,3,H,W) tensor as raw float32 binary for Python comparison.
-        /// </summary>
-        internal static void DumpTensorBinary(Tensor<float> tensor, string path)
-        {
-            var data = tensor.DownloadToArray();
-            var bytes = new byte[data.Length * sizeof(float)];
-            System.Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
-            System.IO.File.WriteAllBytes(path, bytes);
-
-            var shape = tensor.shape;
-            var metaPath = path + ".meta.txt";
-            System.IO.File.WriteAllText(metaPath,
-                $"dtype=float32\nshape={shape[0]},{shape[1]},{shape[2]},{shape[3]}\n");
-            Logger.Info($"[ImagePreprocessor] Dumped tensor: {path} ({data.Length} floats, {bytes.Length} bytes)");
         }
 
         private static void SafeDestroy(Object obj)

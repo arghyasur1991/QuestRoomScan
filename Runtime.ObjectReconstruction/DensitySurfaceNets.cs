@@ -83,10 +83,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 int idxCount = (int)Mathf.Min(counters[1], maxIndices);
 
                 if (vertCount == 0)
-                {
-                    Logger.Info("[DensitySurfaceNets] No vertices generated");
                     return new Mesh();
-                }
 
                 var gpuVertsTask = AsyncHelper.ReadbackAsync<GPUVertex>(vertexBuf, vertCount);
                 var gpuIndicesTask = AsyncHelper.ReadbackAsync<int>(indexBuf, idxCount);
@@ -109,7 +106,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 mesh.SetTriangles(gpuIndices, 0);
                 mesh.RecalculateBounds();
 
-                Logger.Info($"[DensitySurfaceNets] Extracted: {vertCount} verts, {idxCount / 3} tris");
                 return mesh;
             }
             finally

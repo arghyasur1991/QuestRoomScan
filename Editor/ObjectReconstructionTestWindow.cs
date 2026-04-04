@@ -5,7 +5,6 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Genesis.RoomScan.ObjectReconstruction;
-using Unity.InferenceEngine;
 using UnityEditor;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
@@ -42,7 +41,6 @@ namespace Genesis.RoomScan.Editor
         private GameObject _previewObj;
 
         private string _timingLog = "";
-        private bool _saveDebugImages;
 
         private ComputeShader _postprocessShader;
 
@@ -105,8 +103,6 @@ namespace Genesis.RoomScan.Editor
 
             _meshAlgorithm = (MeshAlgorithm)EditorGUILayout.EnumPopup("Mesh Algorithm", _meshAlgorithm);
 
-            _saveDebugImages = EditorGUILayout.Toggle("Save Debug Images", _saveDebugImages);
-
             EditorGUILayout.Space(4);
             DrawShaderStatus();
             EditorGUILayout.Space(8);
@@ -124,17 +120,7 @@ namespace Genesis.RoomScan.Editor
                         RunRembgOnly();
                     if (GUILayout.Button("Test Preprocess Only"))
                         RunPreprocessOnly();
-                    if (GUILayout.Button("Dump Tensor"))
-                        RunDumpTensor();
                 }
-
-                EditorGUILayout.Space(2);
-                if (GUILayout.Button("Run from Python Tensor (.bin)"))
-                    RunFromExternalTensor();
-
-                EditorGUILayout.Space(2);
-                if (GUILayout.Button("Run from ONNX directly (bypass .sentis)"))
-                    RunFromOnnxDirect();
             }
 
             if (_running)
@@ -224,28 +210,11 @@ namespace Genesis.RoomScan.Editor
                 float loadMs = sw.ElapsedMilliseconds;
                 AppendTiming($"Load models: {loadMs:F0}ms");
 
-                if (_saveDebugImages)
-                {
-                    string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
-                    Directory.CreateDirectory(debugDir);
-                    ImagePreprocessor.DebugOutputDir = debugDir;
-                }
-
                 SetStatus("Removing background (rembg)...", 0.15f);
                 sw.Restart();
                 var preprocessed = await pipeline.PreprocessAsync(_testImage, _cts.Token);
                 float rembgMs = sw.ElapsedMilliseconds;
                 AppendTiming($"Preprocess (rembg + composite): {rembgMs:F0}ms");
-
-                if (_saveDebugImages)
-                {
-                    string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
-                    Directory.CreateDirectory(debugDir);
-                    ImagePreprocessor.SaveDebugImage(preprocessed,
-                        Path.Combine(debugDir, "unity_final_512.png"));
-                    AppendTiming($"Debug images saved to {debugDir}");
-                }
-                ImagePreprocessor.DebugOutputDir = null;
 
                 SetStatus("Running TripoSR forward pass...", 0.35f);
                 sw.Restart();
@@ -375,241 +344,6 @@ namespace Genesis.RoomScan.Editor
             }
         }
 
-        private async void RunDumpTensor()
-        {
-            if (!Validate()) return;
-
-            _running = true;
-            _cts = new CancellationTokenSource();
-            _timingLog = "";
-            ReconstructionPipeline pipeline = null;
-
-            try
-            {
-                pipeline = CreatePipeline();
-
-                SetStatus("Loading models...", 0.1f);
-                await pipeline.LoadModelsAsync(_cts.Token);
-
-                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
-                Directory.CreateDirectory(debugDir);
-                ImagePreprocessor.DebugOutputDir = debugDir;
-
-                SetStatus("Preprocessing...", 0.3f);
-                var result = await pipeline.PreprocessAsync(_testImage, _cts.Token);
-
-                string binPath = Path.Combine(debugDir, "unity_preprocessed.bin");
-                ImagePreprocessor.DumpTensorBinary(result, binPath);
-                ImagePreprocessor.SaveDebugImage(result,
-                    Path.Combine(debugDir, "unity_final_512.png"));
-
-                result.Dispose();
-                ImagePreprocessor.DebugOutputDir = null;
-                SetStatus($"Tensor dumped to {binPath}", 1f);
-                AppendTiming($"Saved: {binPath}");
-            }
-            catch (Exception e)
-            {
-                SetStatus($"Error: {e.Message}", 0f);
-                Debug.LogException(e);
-            }
-            finally
-            {
-                pipeline?.Dispose();
-                _running = false;
-                _cts?.Dispose();
-                _cts = null;
-                Repaint();
-            }
-        }
-
-        private async void RunFromExternalTensor()
-        {
-            string binPath = EditorUtility.OpenFilePanel(
-                "Select preprocessed tensor .bin", 
-                Path.Combine(Application.dataPath, "../debug_reconstruction"), "bin");
-            if (string.IsNullOrEmpty(binPath)) return;
-
-            _running = true;
-            _cts = new CancellationTokenSource();
-            _timingLog = "";
-            var totalSw = Stopwatch.StartNew();
-            ReconstructionPipeline pipeline = null;
-
-            try
-            {
-                pipeline = CreatePipeline();
-
-                SetStatus("Loading models...", 0.05f);
-                var sw = Stopwatch.StartNew();
-                await pipeline.LoadModelsAsync(_cts.Token);
-                AppendTiming($"Load models: {sw.ElapsedMilliseconds:F0}ms");
-
-                SetStatus("Loading external tensor...", 0.2f);
-                var rawBytes = System.IO.File.ReadAllBytes(binPath);
-                var floats = new float[rawBytes.Length / sizeof(float)];
-                System.Buffer.BlockCopy(rawBytes, 0, floats, 0, rawBytes.Length);
-
-                var tensor = new Unity.InferenceEngine.Tensor<float>(
-                    new Unity.InferenceEngine.TensorShape(1, 3, 512, 512));
-                tensor.Upload(floats);
-                AppendTiming($"Loaded tensor: {binPath} ({floats.Length} floats)");
-
-                SetStatus("Running TripoSR forward pass (Python tensor)...", 0.35f);
-                sw.Restart();
-                await pipeline.RunForwardAsync(tensor, _cts.Token);
-                tensor.Dispose();
-                AppendTiming($"Forward pass: {sw.ElapsedMilliseconds:F0}ms");
-
-                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
-                Directory.CreateDirectory(debugDir);
-                pipeline.DebugDumpDir = debugDir;
-
-                string scPath = Path.Combine(debugDir, "sentis_scene_codes.bin");
-                pipeline.DumpSceneCodes(scPath);
-                AppendTiming($"Scene codes dumped: {scPath}");
-
-                SetStatus("Extracting mesh + vertex colors...", 0.60f);
-                sw.Restart();
-                var mesh = await pipeline.ExtractMeshAsync(_cts.Token);
-                AppendTiming($"Mesh + vertex color extraction: {sw.ElapsedMilliseconds:F0}ms");
-
-                totalSw.Stop();
-                AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds:F0}ms ---");
-
-                ShowMeshPreview(mesh);
-                SetStatus($"Done (Python tensor)! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris", 1f);
-            }
-            catch (OperationCanceledException)
-            {
-                SetStatus("Cancelled", 0f);
-            }
-            catch (Exception e)
-            {
-                SetStatus($"Error: {e.Message}", 0f);
-                Debug.LogException(e);
-            }
-            finally
-            {
-                pipeline?.Dispose();
-                _running = false;
-                _cts?.Dispose();
-                _cts = null;
-                Repaint();
-            }
-        }
-
-        private async void RunFromOnnxDirect()
-        {
-            string onnxAssetPath = EditorUtility.OpenFilePanel(
-                "Select ONNX model file",
-                Path.Combine(Application.dataPath, "Game/ObjectReconstruction/OnnxSource"), "onnx");
-            if (string.IsNullOrEmpty(onnxAssetPath)) return;
-
-            string binPath = EditorUtility.OpenFilePanel(
-                "Select preprocessed tensor .bin",
-                Path.Combine(Application.dataPath, "../debug_reconstruction"), "bin");
-            if (string.IsNullOrEmpty(binPath)) return;
-
-            // Convert absolute path to Unity asset path
-            string onnxPath = "Assets" + onnxAssetPath.Substring(Application.dataPath.Length);
-
-            _running = true;
-            _cts = new CancellationTokenSource();
-            _timingLog = "";
-            var totalSw = Stopwatch.StartNew();
-            Worker triposrWorker = null;
-
-            try
-            {
-                SetStatus("Loading tensor...", 0.05f);
-                var rawBytes = System.IO.File.ReadAllBytes(binPath);
-                var floats = new float[rawBytes.Length / sizeof(float)];
-                System.Buffer.BlockCopy(rawBytes, 0, floats, 0, rawBytes.Length);
-
-                var tensor = new Tensor<float>(new TensorShape(1, 3, 512, 512));
-                tensor.Upload(floats);
-                AppendTiming($"Loaded tensor: {binPath} ({floats.Length} floats)");
-                SetStatus($"Loading ONNX directly: {onnxPath}...", 0.15f);
-                var sw = Stopwatch.StartNew();
-                var modelAsset = AssetDatabase.LoadAssetAtPath<ModelAsset>(onnxPath);
-                if (modelAsset == null)
-                {
-                    AssetDatabase.ImportAsset(onnxPath);
-                    modelAsset = AssetDatabase.LoadAssetAtPath<ModelAsset>(onnxPath);
-                }
-                if (modelAsset == null)
-                    throw new Exception($"Failed to import {onnxPath} as ModelAsset");
-
-                var model = ModelLoader.Load(modelAsset);
-                triposrWorker = new Worker(model, BackendType.GPUCompute);
-                AppendTiming($"ONNX model loaded (direct): {sw.ElapsedMilliseconds:F0}ms");
-
-                // Run forward pass
-                SetStatus("Running TripoSR (ONNX direct)...", 0.35f);
-                sw.Restart();
-                var budget = new AsyncHelper.FrameBudget();
-                var it = triposrWorker.ScheduleIterable(tensor);
-                while (it.MoveNext())
-                {
-                    _cts.Token.ThrowIfCancellationRequested();
-                    await budget.YieldIfNeeded();
-                }
-                tensor.Dispose();
-                AppendTiming($"Forward pass (ONNX direct): {sw.ElapsedMilliseconds:F0}ms");
-
-                // Dump scene codes
-                var sceneCodes = triposrWorker.PeekOutput() as Tensor<float>;
-                var scClone = sceneCodes.ReadbackAndClone();
-                var scFloats = scClone.DownloadToArray();
-                scClone.Dispose();
-
-                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
-                Directory.CreateDirectory(debugDir);
-                string modelTag = Path.GetFileNameWithoutExtension(onnxPath).Replace(".", "_");
-                string scPath = Path.Combine(debugDir, $"sentis_direct_{modelTag}_scene_codes.bin");
-                var scBytes = new byte[scFloats.Length * sizeof(float)];
-                System.Buffer.BlockCopy(scFloats, 0, scBytes, 0, scBytes.Length);
-                System.IO.File.WriteAllBytes(scPath, scBytes);
-
-                var shape = sceneCodes.shape;
-                System.IO.File.WriteAllText(scPath + ".meta.txt",
-                    $"dtype=float32\nshape={shape[0]},{shape[1]},{shape[2]},{shape[3]},{shape[4]}\n");
-
-                float sMin = float.MaxValue, sMax = float.MinValue, sSum = 0;
-                for (int i = 0; i < scFloats.Length; i++)
-                {
-                    if (scFloats[i] < sMin) sMin = scFloats[i];
-                    if (scFloats[i] > sMax) sMax = scFloats[i];
-                    sSum += scFloats[i];
-                }
-                AppendTiming($"Scene codes: range=[{sMin:F2}, {sMax:F2}], " +
-                             $"mean={sSum / scFloats.Length:F4}");
-                AppendTiming($"Dumped to: {scPath}");
-
-                totalSw.Stop();
-                AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds:F0}ms ---");
-                SetStatus($"Done (ONNX direct)! Scene codes dumped for comparison.", 1f);
-            }
-            catch (OperationCanceledException)
-            {
-                SetStatus("Cancelled", 0f);
-            }
-            catch (Exception e)
-            {
-                SetStatus($"Error: {e.Message}", 0f);
-                Debug.LogException(e);
-            }
-            finally
-            {
-                triposrWorker?.Dispose();
-                _running = false;
-                _cts?.Dispose();
-                _cts = null;
-                Repaint();
-            }
-        }
-
         private ReconstructionPipeline CreatePipeline()
         {
             return new ReconstructionPipeline(
@@ -701,19 +435,6 @@ namespace Genesis.RoomScan.Editor
             Repaint();
         }
 
-        private static float Min(float[] arr)
-        {
-            float m = float.MaxValue;
-            foreach (var v in arr) if (v < m) m = v;
-            return m;
-        }
-
-        private static float Max(float[] arr)
-        {
-            float m = float.MinValue;
-            foreach (var v in arr) if (v > m) m = v;
-            return m;
-        }
     }
 }
 #endif
