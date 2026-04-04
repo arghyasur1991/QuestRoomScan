@@ -11,8 +11,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// Wraps the split TripoSR model (two halves). Part 1 runs the image encoder + decoder
     /// blocks 0-7, Part 2 runs blocks 8-15 + post-processor. Between the two halves, only
     /// the hidden state (~12 MB) and encoder features (~3 MB) are transferred via
-    /// ReadbackAndClone (~15 MB total, a few ms). Each half is loaded and disposed independently so peak GPU
-    /// memory is roughly halved.
+    /// Worker.CopyOutput (GPU MemCopy, zero CPU readback). Each half is loaded and disposed
+    /// independently so peak GPU memory is roughly halved.
     /// </summary>
     internal sealed class ReconstructionModel : IDisposable
     {
@@ -39,8 +39,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     await budget.YieldIfNeeded();
                 }
 
-                encoderStates = (worker.PeekOutput("/Reshape_output_0") as Tensor<float>).ReadbackAndClone();
-                hiddenStates = (worker.PeekOutput("/backbone/transformer_blocks.7/Add_2_output_0") as Tensor<float>).ReadbackAndClone();
+                Tensor encoderStatesTmp = null;
+                worker.CopyOutput("/Reshape_output_0", ref encoderStatesTmp);
+                encoderStates = encoderStatesTmp as Tensor<float>;
+
+                Tensor hiddenStatesTmp = null;
+                worker.CopyOutput("/backbone/transformer_blocks.7/Add_2_output_0", ref hiddenStatesTmp);
+                hiddenStates = hiddenStatesTmp as Tensor<float>;
             }
             await AsyncHelper.YieldFrame();
 
@@ -66,7 +71,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 encoderStates.Dispose();
                 hiddenStates.Dispose();
 
-                sceneCodes = (worker.PeekOutput() as Tensor<float>).ReadbackAndClone();
+                Tensor sceneCodesTmp = null;
+                worker.CopyOutput(0, ref sceneCodesTmp);
+                sceneCodes = sceneCodesTmp as Tensor<float>;
             }
             await AsyncHelper.YieldFrame();
 
