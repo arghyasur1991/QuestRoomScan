@@ -109,7 +109,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int featureDim = 120; // 3 planes * 40 channels
 
             var sampler = new TriplaneGridSampler(_triplaneShader, res);
-            var features = sampler.SampleFeatures(sceneCodes);
+            var featuresTensor = sampler.SampleFeatures(sceneCodes);
+            var featuresData = featuresTensor.DownloadToArray();
+            featuresTensor.Dispose();
+            sampler.Dispose();
             await Task.Yield();
             ct.ThrowIfCancellationRequested();
 
@@ -124,7 +127,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 int start = c * chunkSize;
                 int count = Mathf.Min(chunkSize, totalPoints - start);
 
-                var chunkFeatures = ExtractChunk(features, start, count, featureDim);
+                var chunkFeatures = ExtractChunk(featuresData, start, count, featureDim);
                 var chunkResult = await _decoder.InferAsync(chunkFeatures, _decoderLayersPerFrame, ct);
                 chunkFeatures.Dispose();
 
@@ -135,9 +138,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     await Task.Yield();
             }
 
-            features.Dispose();
-            sampler.Dispose();
-
             var surfaceNets = new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold);
             var mesh = surfaceNets.Extract(density, colors);
             surfaceNets.Dispose();
@@ -145,12 +145,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return mesh;
         }
 
-        private static Tensor<float> ExtractChunk(Tensor<float> features, int start, int count, int dim)
+        private static Tensor<float> ExtractChunk(float[] featuresData, int start, int count, int dim)
         {
+            var chunkData = new float[count * dim];
+            Array.Copy(featuresData, start * dim, chunkData, 0, count * dim);
             var chunk = new Tensor<float>(new TensorShape(count, dim));
-            for (int i = 0; i < count; i++)
-                for (int d = 0; d < dim; d++)
-                    chunk[i * dim + d] = features[(start + i) * dim + d];
+            chunk.Upload(chunkData);
             return chunk;
         }
 
