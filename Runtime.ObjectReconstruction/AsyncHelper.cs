@@ -1,6 +1,7 @@
 #if HAS_AI_INFERENCE
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -116,11 +117,30 @@ namespace Genesis.RoomScan.ObjectReconstruction
         ///   <c>worker.Schedule()</c> for maximum throughput (editor fast path).</item>
         /// </list>
         /// </summary>
+        private static bool s_reaperWarmedUp;
+
+        /// <summary>
+        /// Forces the static constructor of Sentis's internal ComputeTensorDataReaper
+        /// to run on the main thread. It creates a ComputeBuffer in its .cctor which
+        /// requires the main thread. Without this, the first worker.Schedule() call
+        /// inside Task.Run would trigger the .cctor on a background thread and crash.
+        /// </summary>
+        private static void WarmUpReaper()
+        {
+            if (s_reaperWarmedUp) return;
+            var reaperType = typeof(ComputeTensorData).Assembly
+                .GetType("Unity.InferenceEngine.ComputeTensorDataReaper");
+            if (reaperType != null)
+                RuntimeHelpers.RunClassConstructor(reaperType.TypeHandle);
+            s_reaperWarmedUp = true;
+        }
+
         internal static async Task RunAsync(
             Worker worker, Model model, CancellationToken ct, Tensor input = null)
         {
             if (worker.backendType == BackendType.CPU)
             {
+                WarmUpReaper();
                 await Task.Run(() =>
                 {
                     if (input != null) worker.Schedule(input); else worker.Schedule();
