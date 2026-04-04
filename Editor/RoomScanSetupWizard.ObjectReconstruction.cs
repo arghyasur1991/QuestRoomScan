@@ -27,6 +27,7 @@ namespace Genesis.RoomScan.Editor
         ObjectReconstructionModule _objectReconstruction;
         bool _reconTriplaneShaderAssigned;
         bool _reconSurfaceNetsShaderAssigned;
+        bool _reconVertexColorShaderAssigned;
         bool _reconTestImagesAssigned;
         bool _reconSentisModelsExist;
         bool _reconOnnxModelsExist;
@@ -54,6 +55,8 @@ namespace Genesis.RoomScan.Editor
                     "triplaneGridSampleShader");
                 _reconSurfaceNetsShaderAssigned = AreFieldsAssigned(_objectReconstruction,
                     "densitySurfaceNetsShader");
+                _reconVertexColorShaderAssigned = AreFieldsAssigned(_objectReconstruction,
+                    "vertexColorShader");
                 var so = new SerializedObject(_objectReconstruction);
                 var imgProp = so.FindProperty("testImages");
                 _reconTestImagesAssigned = imgProp != null && imgProp.arraySize > 0;
@@ -62,6 +65,7 @@ namespace Genesis.RoomScan.Editor
             {
                 _reconTriplaneShaderAssigned = false;
                 _reconSurfaceNetsShaderAssigned = false;
+                _reconVertexColorShaderAssigned = false;
                 _reconTestImagesAssigned = false;
             }
 
@@ -77,6 +81,7 @@ namespace Genesis.RoomScan.Editor
 
             StatusRow("  Triplane grid sample shader", _reconTriplaneShaderAssigned);
             StatusRow("  Density surface nets shader", _reconSurfaceNetsShaderAssigned);
+            StatusRow("  Vertex color shader", _reconVertexColorShaderAssigned);
             StatusRow("  Test images", _reconTestImagesAssigned);
 
             if (_reconSentisModelsExist)
@@ -131,6 +136,11 @@ namespace Genesis.RoomScan.Editor
                 StatusRow("Reconstruction density surface nets shader", false);
                 needsFix = true;
             }
+            if (!_reconVertexColorShaderAssigned)
+            {
+                StatusRow("Reconstruction vertex color shader", false);
+                needsFix = true;
+            }
             if (!_reconTestImagesAssigned)
             {
                 StatusRow("Reconstruction test images", false);
@@ -173,6 +183,8 @@ namespace Genesis.RoomScan.Editor
                 RECON_PKG_SHADERS + "TriplaneGridSample.compute");
             AssignCompute(so, "densitySurfaceNetsShader",
                 RECON_PKG_SHADERS + "DensitySurfaceNets.compute");
+            AssignAsset<Shader>(so, "vertexColorShader",
+                RECON_PKG_SHADERS + "VertexColor.shader");
 
             var imagesProp = so.FindProperty("testImages");
             if (imagesProp != null && imagesProp.arraySize == 0)

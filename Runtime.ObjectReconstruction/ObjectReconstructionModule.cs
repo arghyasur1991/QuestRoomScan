@@ -15,9 +15,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
     [DisallowMultipleComponent]
     public class ObjectReconstructionModule : MonoBehaviour, IRoomScanModule, IObjectReconstructionProvider
     {
-        [Header("Compute Shaders")]
+        [Header("Shaders")]
         [SerializeField] internal ComputeShader triplaneGridSampleShader;
         [SerializeField] internal ComputeShader densitySurfaceNetsShader;
+        [SerializeField] internal Shader vertexColorShader;
 
         [Header("Test Images")]
         [SerializeField] private Texture2D[] testImages = Array.Empty<Texture2D>();
@@ -172,12 +173,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
             Logger.Info($"[ObjectReconstruction] Mesh spawned: {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris");
         }
 
-        private static Material CreateVertexColorMaterial()
+        private Material CreateVertexColorMaterial()
         {
-            var shader = Shader.Find("Hidden/ObjectReconstruction/VertexColor");
-            if (shader == null) shader = Shader.Find("Universal Render Pipeline/Lit");
-            if (shader == null) shader = Shader.Find("Standard");
-            return new Material(shader);
+            if (vertexColorShader != null)
+                return new Material(vertexColorShader);
+            var fallback = Shader.Find("Universal Render Pipeline/Lit")
+                           ?? Shader.Find("Standard");
+            return new Material(fallback);
         }
 
         private void ReportStatus(string status)

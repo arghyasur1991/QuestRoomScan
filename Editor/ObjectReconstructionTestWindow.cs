@@ -28,6 +28,7 @@ namespace Genesis.RoomScan.Editor
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
+        private Shader _vertexColorShader;
 
         private string _status = "Ready";
         private float _progress;
@@ -47,6 +48,8 @@ namespace Genesis.RoomScan.Editor
                 SHADER_DIR + "TriplaneGridSample.compute");
             _surfaceNetsShader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
                 SHADER_DIR + "DensitySurfaceNets.compute");
+            _vertexColorShader = AssetDatabase.LoadAssetAtPath<Shader>(
+                SHADER_DIR + "VertexColor.shader");
         }
 
         private void OnDisable()
@@ -138,9 +141,9 @@ namespace Genesis.RoomScan.Editor
 
         private void DrawShaderStatus()
         {
-            bool ok = _triplaneShader != null && _surfaceNetsShader != null;
+            bool ok = _triplaneShader != null && _surfaceNetsShader != null && _vertexColorShader != null;
             if (!ok)
-                EditorGUILayout.HelpBox("Compute shaders not found at expected package path.", MessageType.Error);
+                EditorGUILayout.HelpBox("Shaders not found at expected package path.", MessageType.Error);
         }
 
         private static void StatusLabel(string label, bool ok)
@@ -357,7 +360,7 @@ namespace Genesis.RoomScan.Editor
             var mr = _previewObj.AddComponent<MeshRenderer>();
             mf.sharedMesh = mesh;
 
-            var shader = Shader.Find("Hidden/ObjectReconstruction/VertexColor")
+            var shader = _vertexColorShader
                          ?? Shader.Find("Universal Render Pipeline/Lit")
                          ?? Shader.Find("Standard");
             mr.sharedMaterial = new Material(shader);
