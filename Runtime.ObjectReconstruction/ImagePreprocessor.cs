@@ -1,4 +1,5 @@
 #if HAS_AI_INFERENCE
+using System.Threading.Tasks;
 using Unity.InferenceEngine;
 using UnityEngine;
 
@@ -14,8 +15,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// Composites the foreground (using alpha mask) onto a gray (0.5, 0.5, 0.5) background,
         /// applies resize_foreground (centers foreground at given ratio), and returns
         /// a 512x512 Tensor suitable for the reconstruction model.
+        /// CPU pixel work is offloaded to a background thread.
         /// </summary>
-        internal static Tensor<float> ApplyMaskAndComposite(
+        internal static async Task<Tensor<float>> ApplyMaskAndCompositeAsync(
             Texture2D image, Tensor<float> alphaMask, float foregroundRatio)
         {
             const int outputSize = 512;
@@ -29,28 +31,33 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int maskH = alphaMask.shape[alphaMask.shape.rank - 2];
             var maskData = alphaMask.DownloadToArray();
 
-            var composite = new Texture2D(srcW, srcH, TextureFormat.RGB24, false);
-            var outPixels = new Color32[srcW * srcH];
-
-            for (int y = 0; y < srcH; y++)
+            var outPixels = await Task.Run(() =>
             {
-                for (int x = 0; x < srcW; x++)
+                var pixels = new Color32[srcW * srcH];
+                for (int y = 0; y < srcH; y++)
                 {
-                    int srcIdx = y * srcW + x;
-                    float mx = (float)x / srcW * maskW;
-                    float my = (float)y / srcH * maskH;
-                    int mi = Mathf.Clamp((int)my, 0, maskH - 1) * maskW +
-                             Mathf.Clamp((int)mx, 0, maskW - 1);
-                    float alpha = Mathf.Clamp01(maskData[mi]);
+                    for (int x = 0; x < srcW; x++)
+                    {
+                        int srcIdx = y * srcW + x;
+                        float mx = (float)x / srcW * maskW;
+                        float my = (float)y / srcH * maskH;
+                        int mi = Mathf.Clamp((int)my, 0, maskH - 1) * maskW +
+                                 Mathf.Clamp((int)mx, 0, maskW - 1);
+                        float alpha = Mathf.Clamp01(maskData[mi]);
 
-                    var src = srcPixels[srcIdx];
-                    byte r = (byte)(src.r * alpha + grayVal * 255 * (1 - alpha));
-                    byte g = (byte)(src.g * alpha + grayVal * 255 * (1 - alpha));
-                    byte b = (byte)(src.b * alpha + grayVal * 255 * (1 - alpha));
-                    outPixels[srcIdx] = new Color32(r, g, b, 255);
+                        var src = srcPixels[srcIdx];
+                        byte r = (byte)(src.r * alpha + grayVal * 255 * (1 - alpha));
+                        byte g = (byte)(src.g * alpha + grayVal * 255 * (1 - alpha));
+                        byte b = (byte)(src.b * alpha + grayVal * 255 * (1 - alpha));
+                        pixels[srcIdx] = new Color32(r, g, b, 255);
+                    }
                 }
-            }
+                return pixels;
+            });
 
+            await AsyncHelper.YieldFrame();
+
+            var composite = new Texture2D(srcW, srcH, TextureFormat.RGB24, false);
             composite.SetPixels32(outPixels);
             composite.Apply();
 

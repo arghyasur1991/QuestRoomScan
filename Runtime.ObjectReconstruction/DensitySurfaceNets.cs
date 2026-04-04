@@ -1,5 +1,6 @@
 #if HAS_AI_INFERENCE
 using System;
+using System.Threading.Tasks;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
@@ -32,69 +33,82 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _threshold = threshold;
         }
 
-        internal Mesh Extract(float[] density, Color[] colors)
+        /// <summary>
+        /// Runs the heavy voxel traversal on a background thread, then builds
+        /// the Unity Mesh back on the main thread.
+        /// </summary>
+        internal async Task<Mesh> ExtractAsync(float[] density, Color[] colors)
         {
             int res = _resolution;
-            var vertMap = new int[res * res * res];
-            for (int i = 0; i < vertMap.Length; i++) vertMap[i] = -1;
+            float threshold = _threshold;
 
-            var vertices = new System.Collections.Generic.List<Vector3>();
-            var vertColors = new System.Collections.Generic.List<Color>();
-            var indices = new System.Collections.Generic.List<int>();
-
-            float voxSize = 1f / res;
-
-            for (int z = 0; z < res - 1; z++)
-            for (int y = 0; y < res - 1; y++)
-            for (int x = 0; x < res - 1; x++)
+            var (vertices, vertColors, indices) = await Task.Run(() =>
             {
-                int flatIdx = x + y * res + z * res * res;
-                Vector3 posSum = Vector3.zero;
-                int crossings = 0;
+                var vertMap = new int[res * res * res];
+                for (int i = 0; i < vertMap.Length; i++) vertMap[i] = -1;
 
-                for (int e = 0; e < 12; e++)
+                var verts = new System.Collections.Generic.List<Vector3>();
+                var vCols = new System.Collections.Generic.List<Color>();
+                var inds = new System.Collections.Generic.List<int>();
+
+                float voxSize = 1f / res;
+
+                for (int z = 0; z < res - 1; z++)
+                for (int y = 0; y < res - 1; y++)
+                for (int x = 0; x < res - 1; x++)
                 {
-                    var cA = new int3(x, y, z) + CornerOffsets[EdgeA[e]];
-                    var cB = new int3(x, y, z) + CornerOffsets[EdgeB[e]];
+                    int flatIdx = x + y * res + z * res * res;
+                    Vector3 posSum = Vector3.zero;
+                    int crossings = 0;
 
-                    float dA = SampleDensity(density, cA, res);
-                    float dB = SampleDensity(density, cB, res);
+                    for (int e = 0; e < 12; e++)
+                    {
+                        var cA = new int3(x, y, z) + CornerOffsets[EdgeA[e]];
+                        var cB = new int3(x, y, z) + CornerOffsets[EdgeB[e]];
 
-                    bool insideA = dA >= _threshold;
-                    bool insideB = dB >= _threshold;
-                    if (insideA == insideB) continue;
+                        float dA = SampleDensity(density, cA, res);
+                        float dB = SampleDensity(density, cB, res);
 
-                    float t = (dA - _threshold) / (dA - dB);
-                    var posCoord = new Vector3(cA.x, cA.y, cA.z) +
-                                   t * new Vector3(cB.x - cA.x, cB.y - cA.y, cB.z - cA.z);
-                    posSum += posCoord;
-                    crossings++;
+                        bool insideA = dA >= threshold;
+                        bool insideB = dB >= threshold;
+                        if (insideA == insideB) continue;
+
+                        float t = (dA - threshold) / (dA - dB);
+                        var posCoord = new Vector3(cA.x, cA.y, cA.z) +
+                                       t * new Vector3(cB.x - cA.x, cB.y - cA.y, cB.z - cA.z);
+                        posSum += posCoord;
+                        crossings++;
+                    }
+
+                    if (crossings < 3) continue;
+
+                    posSum /= crossings;
+                    var worldPos = (posSum + Vector3.one * 0.5f - Vector3.one * res * 0.5f) * voxSize;
+
+                    vertMap[flatIdx] = verts.Count;
+                    verts.Add(worldPos);
+
+                    int colorIdx = Mathf.Clamp(
+                        Mathf.RoundToInt(posSum.x) +
+                        Mathf.RoundToInt(posSum.y) * res +
+                        Mathf.RoundToInt(posSum.z) * res * res,
+                        0, colors.Length - 1);
+                    vCols.Add(colors[colorIdx]);
                 }
 
-                if (crossings < 3) continue;
+                for (int z = 0; z < res - 1; z++)
+                for (int y = 0; y < res - 1; y++)
+                for (int x = 0; x < res - 1; x++)
+                {
+                    TryEmitQuad(vertMap, density, threshold, inds, x, y, z, 1, 0, 0, 0, 0, 1, 0, 1, 0, res);
+                    TryEmitQuad(vertMap, density, threshold, inds, x, y, z, 0, 1, 0, 1, 0, 0, 0, 0, 1, res);
+                    TryEmitQuad(vertMap, density, threshold, inds, x, y, z, 0, 0, 1, 0, 1, 0, 1, 0, 0, res);
+                }
 
-                posSum /= crossings;
-                var worldPos = (posSum + Vector3.one * 0.5f - Vector3.one * res * 0.5f) * voxSize;
+                return (verts, vCols, inds);
+            });
 
-                vertMap[flatIdx] = vertices.Count;
-                vertices.Add(worldPos);
-
-                int colorIdx = Mathf.Clamp(
-                    Mathf.RoundToInt(posSum.x) +
-                    Mathf.RoundToInt(posSum.y) * res +
-                    Mathf.RoundToInt(posSum.z) * res * res,
-                    0, colors.Length - 1);
-                vertColors.Add(colors[colorIdx]);
-            }
-
-            for (int z = 0; z < res - 1; z++)
-            for (int y = 0; y < res - 1; y++)
-            for (int x = 0; x < res - 1; x++)
-            {
-                TryEmitQuad(vertMap, density, indices, x, y, z, 1, 0, 0, 0, 0, 1, 0, 1, 0, res);
-                TryEmitQuad(vertMap, density, indices, x, y, z, 0, 1, 0, 1, 0, 0, 0, 0, 1, res);
-                TryEmitQuad(vertMap, density, indices, x, y, z, 0, 0, 1, 0, 1, 0, 1, 0, 0, res);
-            }
+            await AsyncHelper.YieldFrame();
 
             var mesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
             mesh.SetVertices(vertices);
@@ -107,8 +121,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return mesh;
         }
 
-        private void TryEmitQuad(
-            int[] vertMap, float[] density,
+        private static void TryEmitQuad(
+            int[] vertMap, float[] density, float threshold,
             System.Collections.Generic.List<int> indices,
             int x, int y, int z,
             int ax, int ay, int az,
@@ -123,8 +137,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             float va = SampleDensity(density, new int3(x, y, z), res);
             float vb = SampleDensity(density, new int3(nx, ny, nz), res);
-            bool insideA = va >= _threshold;
-            bool insideB = vb >= _threshold;
+            bool insideA = va >= threshold;
+            bool insideB = vb >= threshold;
             if (insideA == insideB) return;
 
             int a = vertMap[Flatten(x, y, z, res)];

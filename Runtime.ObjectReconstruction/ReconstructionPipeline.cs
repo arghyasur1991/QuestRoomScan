@@ -59,7 +59,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             try
             {
                 var mask = await _rembg.InferAsync(readable, ct);
-                var result = ImagePreprocessor.ApplyMaskAndComposite(readable, mask, 0.85f);
+                await AsyncHelper.YieldFrame();
+                var result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, mask, 0.85f);
                 mask.Dispose();
                 return result;
             }
@@ -104,6 +105,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             var sampler = new TriplaneGridSampler(_triplaneShader, res);
             var featuresTensor = sampler.SampleFeatures(sceneCodes);
+            await AsyncHelper.YieldFrame();
             var featuresData = featuresTensor.DownloadToArray();
             featuresTensor.Dispose();
             sampler.Dispose();
@@ -126,14 +128,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 var chunkResult = await _decoder.InferAsync(chunkFeatures, ct);
                 chunkFeatures.Dispose();
 
-                WriteDecoderResults(chunkResult, density, colors, start, count);
+                var resultData = chunkResult.DownloadToArray();
                 chunkResult.Dispose();
+                await Task.Run(() => WriteDecoderResults(resultData, density, colors, start, count));
 
                 await budget.YieldIfNeeded();
             }
 
             var surfaceNets = new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold);
-            var mesh = surfaceNets.Extract(density, colors);
+            var mesh = await surfaceNets.ExtractAsync(density, colors);
             surfaceNets.Dispose();
 
             return mesh;
@@ -149,9 +152,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         private static void WriteDecoderResults(
-            Tensor<float> result, float[] density, Color[] colors, int start, int count)
+            float[] data, float[] density, Color[] colors, int start, int count)
         {
-            var data = result.DownloadToArray();
             for (int i = 0; i < count; i++)
             {
                 int idx = start + i;
