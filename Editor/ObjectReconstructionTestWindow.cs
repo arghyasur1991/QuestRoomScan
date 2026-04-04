@@ -127,6 +127,10 @@ namespace Genesis.RoomScan.Editor
                     if (GUILayout.Button("Dump Tensor"))
                         RunDumpTensor();
                 }
+
+                EditorGUILayout.Space(2);
+                if (GUILayout.Button("Run from Python Tensor (.bin)"))
+                    RunFromExternalTensor();
             }
 
             if (_running)
@@ -399,6 +403,74 @@ namespace Genesis.RoomScan.Editor
                 ImagePreprocessor.DebugOutputDir = null;
                 SetStatus($"Tensor dumped to {binPath}", 1f);
                 AppendTiming($"Saved: {binPath}");
+            }
+            catch (Exception e)
+            {
+                SetStatus($"Error: {e.Message}", 0f);
+                Debug.LogException(e);
+            }
+            finally
+            {
+                pipeline?.Dispose();
+                _running = false;
+                _cts?.Dispose();
+                _cts = null;
+                Repaint();
+            }
+        }
+
+        private async void RunFromExternalTensor()
+        {
+            string binPath = EditorUtility.OpenFilePanel(
+                "Select preprocessed tensor .bin", 
+                Path.Combine(Application.dataPath, "../debug_reconstruction"), "bin");
+            if (string.IsNullOrEmpty(binPath)) return;
+
+            _running = true;
+            _cts = new CancellationTokenSource();
+            _timingLog = "";
+            var totalSw = Stopwatch.StartNew();
+            ReconstructionPipeline pipeline = null;
+
+            try
+            {
+                pipeline = CreatePipeline();
+
+                SetStatus("Loading models...", 0.05f);
+                var sw = Stopwatch.StartNew();
+                await pipeline.LoadModelsAsync(_cts.Token);
+                AppendTiming($"Load models: {sw.ElapsedMilliseconds:F0}ms");
+
+                SetStatus("Loading external tensor...", 0.2f);
+                var rawBytes = System.IO.File.ReadAllBytes(binPath);
+                var floats = new float[rawBytes.Length / sizeof(float)];
+                System.Buffer.BlockCopy(rawBytes, 0, floats, 0, rawBytes.Length);
+
+                var tensor = new Unity.InferenceEngine.Tensor<float>(
+                    new Unity.InferenceEngine.TensorShape(1, 3, 512, 512));
+                tensor.Upload(floats);
+                AppendTiming($"Loaded tensor: {binPath} ({floats.Length} floats)");
+
+                SetStatus("Running TripoSR forward pass (Python tensor)...", 0.35f);
+                sw.Restart();
+                await pipeline.RunForwardAsync(tensor, _cts.Token);
+                tensor.Dispose();
+                AppendTiming($"Forward pass: {sw.ElapsedMilliseconds:F0}ms");
+
+                SetStatus("Extracting mesh + vertex colors...", 0.60f);
+                sw.Restart();
+                var mesh = await pipeline.ExtractMeshAsync(_cts.Token);
+                AppendTiming($"Mesh + vertex color extraction: {sw.ElapsedMilliseconds:F0}ms");
+
+                totalSw.Stop();
+                AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds:F0}ms ---");
+
+                ShowMeshPreview(mesh);
+                SetStatus($"Done (Python tensor)! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris", 1f);
+            }
+            catch (OperationCanceledException)
+            {
+                SetStatus("Cancelled", 0f);
             }
             catch (Exception e)
             {
