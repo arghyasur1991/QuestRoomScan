@@ -106,15 +106,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             int totalPoints = sampler.TotalGridPoints;
             int featureDim = sampler.FeatureDim;
-            // Larger chunks = fewer decoder calls. 131072 pts × 120 × 4 = ~63 MB
             int chunkSize = 131072;
             var budget = new AsyncHelper.FrameBudget();
             var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool gpu = sampler.UseGPU;
+
+            Logger.Info($"[Pipeline] Triplane sampling: {(gpu ? "GPU" : "CPU")}, " +
+                        $"res={res}, {totalPoints} points, chunks={chunkSize}");
 
             // --- Pass 1: sample grid chunks → decode → keep only density ---
             var density = new float[totalPoints];
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
-            Logger.Info($"[Pipeline] Pass 1: {totalPoints} grid points, {numChunks} chunks of {chunkSize}");
 
             for (int c = 0; c < numChunks; c++)
             {
@@ -122,7 +124,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 int start = c * chunkSize;
                 int count = Mathf.Min(chunkSize, totalPoints - start);
 
-                var chunkData = await Task.Run(() => sampler.SampleGridChunk(start, count));
+                float[] chunkData;
+                if (gpu)
+                    chunkData = sampler.SampleGridChunkGPU(start, count);
+                else
+                    chunkData = await Task.Run(() => sampler.SampleGridChunk(start, count));
+
                 var chunkTensor = UploadChunk(chunkData, count, featureDim);
                 var chunkResult = await _decoder.InferAsync(chunkTensor, ct);
                 chunkTensor.Dispose();
@@ -132,14 +139,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 WriteDensityOnly(resultData, density, start, count);
                 await budget.YieldIfNeeded();
             }
-            Logger.Info($"[Pipeline] Pass 1 density done: {sw.ElapsedMilliseconds}ms");
+            Logger.Info($"[Pipeline] Pass 1 density: {sw.ElapsedMilliseconds}ms ({numChunks} chunks)");
 
             // --- Surface nets: density → mesh geometry ---
             sw.Restart();
             var surfaceNets = new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold);
             var mesh = await surfaceNets.ExtractAsync(density);
             surfaceNets.Dispose();
-            Logger.Info($"[Pipeline] Surface nets done: {sw.ElapsedMilliseconds}ms");
+            Logger.Info($"[Pipeline] Surface nets: {sw.ElapsedMilliseconds}ms");
             await AsyncHelper.YieldFrame();
             ct.ThrowIfCancellationRequested();
 
@@ -147,7 +154,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             sw.Restart();
             var meshVerts = mesh.vertices;
             int numVerts = meshVerts.Length;
-            Logger.Info($"[Pipeline] Pass 2: querying colors at {numVerts} mesh vertices");
+            Logger.Info($"[Pipeline] Pass 2: {numVerts} vertex color queries ({(gpu ? "GPU" : "CPU")})");
 
             var vertColors = new Color[numVerts];
             int vertChunks = (numVerts + chunkSize - 1) / chunkSize;
@@ -159,7 +166,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 var vertsSlice = new Vector3[count];
                 Array.Copy(meshVerts, start, vertsSlice, 0, count);
-                var chunkData = await Task.Run(() => sampler.SampleFeaturesAtPositions(vertsSlice));
+
+                float[] chunkData;
+                if (gpu)
+                    chunkData = sampler.SampleFeaturesAtPositionsGPU(vertsSlice);
+                else
+                    chunkData = await Task.Run(() => sampler.SampleFeaturesAtPositions(vertsSlice));
 
                 var chunkTensor = UploadChunk(chunkData, count, featureDim);
                 var chunkResult = await _decoder.InferAsync(chunkTensor, ct);
@@ -170,7 +182,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 WriteColorsOnly(resultData, vertColors, start, count);
                 await budget.YieldIfNeeded();
             }
-            Logger.Info($"[Pipeline] Pass 2 colors done: {sw.ElapsedMilliseconds}ms");
+            Logger.Info($"[Pipeline] Pass 2 colors: {sw.ElapsedMilliseconds}ms ({vertChunks} chunks)");
 
             sampler.Dispose();
             mesh.SetColors(vertColors);

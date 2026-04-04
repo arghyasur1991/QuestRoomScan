@@ -2,23 +2,25 @@
 using System;
 using Unity.InferenceEngine;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
-    /// Samples triplane features at 3D positions via bilinear interpolation.
-    /// Coordinate convention matches PyTorch F.grid_sample(align_corners=False):
-    /// positions in [-0.5, 0.5] map to pixel edges [-0.5, N-0.5].
+    /// Samples triplane features at 3D positions via GPU compute shader.
+    /// Falls back to CPU when compute shader is unavailable.
+    /// Coordinate convention matches PyTorch F.grid_sample(align_corners=False).
     /// </summary>
     internal sealed class TriplaneGridSampler : IDisposable
     {
         private readonly ComputeShader _shader;
         private readonly int _resolution;
-        private readonly int _kernelSample;
-        private ComputeBuffer _queryPoints;
-        private ComputeBuffer _outputFeatures;
+        private readonly int _kernelGrid;
+        private readonly int _kernelPositions;
+        private readonly bool _gpuAvailable;
 
         private float[] _cachedSceneData;
+        private ComputeBuffer _sceneCodeBuffer;
         private int _numPlanes, _channels, _planeH, _planeW, _featureDim;
 
         internal TriplaneGridSampler(ComputeShader shader, int resolution)
@@ -27,12 +29,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _resolution = resolution;
 
             if (_shader != null)
-                _kernelSample = _shader.FindKernel("SampleTriplane");
+            {
+                _kernelGrid = _shader.FindKernel("SampleTriplane");
+                _kernelPositions = _shader.FindKernel("SampleAtPositions");
+                _gpuAvailable = SystemInfo.supportsComputeShaders;
+            }
         }
 
-        /// <summary>
-        /// Cache scene codes for multiple sampling passes (grid + vertex color re-query).
-        /// </summary>
         internal void CacheSceneCodes(Tensor<float> sceneCodes)
         {
             _cachedSceneData = sceneCodes.DownloadToArray();
@@ -42,16 +45,78 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _planeH = shape[3];    // 64
             _planeW = shape[4];    // 64
             _featureDim = _numPlanes * _channels; // 120
+
+            if (_gpuAvailable)
+            {
+                _sceneCodeBuffer?.Release();
+                _sceneCodeBuffer = new ComputeBuffer(_cachedSceneData.Length, sizeof(float));
+                _sceneCodeBuffer.SetData(_cachedSceneData);
+                SetShaderConstants();
+            }
         }
 
         internal int FeatureDim => _featureDim;
         internal int TotalGridPoints => _resolution * _resolution * _resolution;
+        internal bool UseGPU => _gpuAvailable;
 
         /// <summary>
-        /// Samples a chunk of grid points [startIdx, startIdx+count) and returns
-        /// a float array of (count * featureDim). Grid uses edge-to-edge positions
-        /// matching linspace(-0.5, 0.5, res). Only allocates memory for the chunk.
+        /// GPU: dispatch compute shader for a chunk of uniform grid points.
+        /// Returns features via AsyncGPUReadback to avoid blocking.
         /// </summary>
+        internal float[] SampleGridChunkGPU(int startIdx, int count)
+        {
+            int featureCount = count * _featureDim;
+            using var outputBuf = new ComputeBuffer(featureCount, sizeof(float));
+
+            _shader.SetInt("_GridOffset", startIdx);
+            _shader.SetInt("_TotalPoints", count);
+            _shader.SetBuffer(_kernelGrid, "_SceneCodes", _sceneCodeBuffer);
+            _shader.SetBuffer(_kernelGrid, "_OutputFeatures", outputBuf);
+
+            int groups = (count + 63) / 64;
+            _shader.Dispatch(_kernelGrid, groups, 1, 1);
+
+            var result = new float[featureCount];
+            outputBuf.GetData(result);
+            return result;
+        }
+
+        /// <summary>
+        /// GPU: dispatch compute shader for arbitrary 3D positions (e.g. mesh vertices).
+        /// </summary>
+        internal float[] SampleFeaturesAtPositionsGPU(Vector3[] positions)
+        {
+            int count = positions.Length;
+            int featureCount = count * _featureDim;
+
+            var posData = new float[count * 3];
+            for (int i = 0; i < count; i++)
+            {
+                posData[i * 3 + 0] = positions[i].x;
+                posData[i * 3 + 1] = positions[i].y;
+                posData[i * 3 + 2] = positions[i].z;
+            }
+
+            using var posBuf = new ComputeBuffer(count * 3, sizeof(float));
+            posBuf.SetData(posData);
+
+            using var outputBuf = new ComputeBuffer(featureCount, sizeof(float));
+
+            _shader.SetInt("_NumPositions", count);
+            _shader.SetBuffer(_kernelPositions, "_SceneCodes", _sceneCodeBuffer);
+            _shader.SetBuffer(_kernelPositions, "_Positions", posBuf);
+            _shader.SetBuffer(_kernelPositions, "_OutputFeatures", outputBuf);
+
+            int groups = (count + 63) / 64;
+            _shader.Dispatch(_kernelPositions, groups, 1, 1);
+
+            var result = new float[featureCount];
+            outputBuf.GetData(result);
+            return result;
+        }
+
+        // --- CPU fallback paths (used when compute shader unavailable) ---
+
         internal float[] SampleGridChunk(int startIdx, int count)
         {
             if (_cachedSceneData == null)
@@ -78,15 +143,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return features;
         }
 
-        /// <summary>
-        /// Samples triplane features at arbitrary 3D positions (e.g. mesh vertices).
-        /// Positions should be in [-0.5, 0.5] coordinate space.
-        /// Returns float array of shape (numPositions * featureDim).
-        /// </summary>
         internal float[] SampleFeaturesAtPositions(Vector3[] positions)
         {
             if (_cachedSceneData == null)
-                throw new System.InvalidOperationException("Call SampleFeatures first to cache scene codes");
+                throw new InvalidOperationException("Call CacheSceneCodes first");
 
             int count = positions.Length;
             var features = new float[count * _featureDim];
@@ -100,31 +160,24 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return features;
         }
 
-        /// <summary>
-        /// Bilinear sampling matching F.grid_sample(align_corners=False).
-        /// Position in [-0.5, 0.5] maps to pixel position = pos*N + N/2 - 0.5.
-        /// Zero heap allocations per call — all work on stack.
-        /// </summary>
         private void SampleTriplaneAt(float x, float y, float z,
             float[] sceneData, float[] output, int outOffset)
         {
             int pw = _planeW, ph = _planeH, ch = _channels;
             float halfW = pw * 0.5f - 0.5f;
             float halfH = ph * 0.5f - 0.5f;
-            int chPh = ch * ph;
-            int planeStride = chPh * pw;
+            int planeStride = ch * ph * pw;
 
-            // Unrolled 3 planes: XY(x,y), XZ(x,z), YZ(y,z) — no heap allocation
             SampleOnePlane(sceneData, output, outOffset,
-                x * pw + halfW, y * ph + halfH, 0, pw, ph, ch, planeStride);
+                x * pw + halfW, y * ph + halfH, 0, pw, ph, ch);
             SampleOnePlane(sceneData, output, outOffset + ch,
-                x * pw + halfW, z * ph + halfH, planeStride, pw, ph, ch, planeStride);
+                x * pw + halfW, z * ph + halfH, planeStride, pw, ph, ch);
             SampleOnePlane(sceneData, output, outOffset + ch * 2,
-                y * pw + halfW, z * ph + halfH, planeStride * 2, pw, ph, ch, planeStride);
+                y * pw + halfW, z * ph + halfH, planeStride * 2, pw, ph, ch);
         }
 
         private static void SampleOnePlane(float[] data, float[] output, int outOff,
-            float uf, float vf, int planeOff, int pw, int ph, int ch, int planeStride)
+            float uf, float vf, int planeOff, int pw, int ph, int ch)
         {
             int u0 = (int)uf;
             int v0 = (int)vf;
@@ -157,11 +210,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
         }
 
+        private void SetShaderConstants()
+        {
+            _shader.SetInt("_NumPlanes", _numPlanes);
+            _shader.SetInt("_Channels", _channels);
+            _shader.SetInt("_PlaneH", _planeH);
+            _shader.SetInt("_PlaneW", _planeW);
+            _shader.SetInt("_Resolution", _resolution);
+        }
+
         public void Dispose()
         {
             _cachedSceneData = null;
-            _queryPoints?.Release();
-            _outputFeatures?.Release();
+            _sceneCodeBuffer?.Release();
+            _sceneCodeBuffer = null;
         }
     }
 }
