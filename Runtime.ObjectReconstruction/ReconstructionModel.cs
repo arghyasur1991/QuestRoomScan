@@ -9,8 +9,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
     /// Wraps the main TripoSR model (419M params). Loads a pre-quantized .sentis file
-    /// (Uint8 ~400MB) from StreamingAssets. The forward pass is split over many frames
-    /// via <see cref="Worker.ScheduleIterable"/> to avoid GPU contention with VR rendering.
+    /// from StreamingAssets. The forward pass is split over many frames via
+    /// <see cref="Worker.ScheduleIterable"/>. Output stays on GPU — caller uses
+    /// PeekOutput() to access the scene codes tensor without readback.
     /// </summary>
     internal sealed class ReconstructionModel : IDisposable
     {
@@ -32,10 +33,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         /// <summary>
         /// Run the TripoSR forward pass on a preprocessed 512x512 image.
-        /// Returns scene_codes tensor of shape (1, 3, 40, 64, 64).
+        /// Output stays on GPU — use PeekOutput() to get the scene codes tensor.
         /// </summary>
-        internal async Task<Tensor<float>> InferAsync(
-            Tensor<float> preprocessed, CancellationToken ct)
+        internal async Task RunAsync(Tensor<float> preprocessed, CancellationToken ct)
         {
             if (!_loaded)
                 throw new InvalidOperationException("ReconstructionModel not loaded");
@@ -47,9 +47,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 ct.ThrowIfCancellationRequested();
                 await budget.YieldIfNeeded();
             }
+        }
 
-            var output = _worker.PeekOutput() as Tensor<float>;
-            return output.ReadbackAndClone();
+        /// <summary>
+        /// Returns the scene codes output tensor (shape 1,3,40,64,64).
+        /// Valid until the next RunAsync call. Do NOT dispose this tensor.
+        /// </summary>
+        internal Tensor<float> PeekOutput()
+        {
+            return _worker.PeekOutput() as Tensor<float>;
         }
 
         public void Dispose()

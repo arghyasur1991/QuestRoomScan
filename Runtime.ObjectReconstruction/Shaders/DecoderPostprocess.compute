@@ -1,0 +1,37 @@
+// GPU postprocessing for NeRF decoder output.
+// Extracts density (Pass 1) and vertex colors (Pass 2) from decoder's (N,4) output,
+// keeping all data on GPU to avoid CPU round-trips.
+
+#pragma kernel ExtractDensity
+#pragma kernel ExtractColors
+
+StructuredBuffer<float> _DecoderOutput; // (N, 4) flattened: [density, r, g, b]
+
+RWStructuredBuffer<float> _DensityVolume; // totalPoints floats
+RWStructuredBuffer<float> _ColorOutput;   // numVerts * 3 floats
+
+uint _Offset; // write offset into _DensityVolume or _ColorOutput
+uint _Count;  // number of elements in this chunk
+
+[numthreads(256, 1, 1)]
+void ExtractDensity(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Count) return;
+    float raw = _DecoderOutput[id.x * 4];
+    float clamped = clamp(raw - 1.0, -15.0, 15.0);
+    _DensityVolume[_Offset + id.x] = exp(clamped);
+}
+
+[numthreads(256, 1, 1)]
+void ExtractColors(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Count) return;
+    uint inBase = id.x * 4;
+    float r = 1.0 / (1.0 + exp(-_DecoderOutput[inBase + 1]));
+    float g = 1.0 / (1.0 + exp(-_DecoderOutput[inBase + 2]));
+    float b = 1.0 / (1.0 + exp(-_DecoderOutput[inBase + 3]));
+    uint outBase = (_Offset + id.x) * 3;
+    _ColorOutput[outBase + 0] = r;
+    _ColorOutput[outBase + 1] = g;
+    _ColorOutput[outBase + 2] = b;
+}

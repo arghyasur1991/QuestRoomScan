@@ -9,8 +9,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
     /// Wraps the NeRF decoder MLP (~170KB). Takes (N, 120) triplane features and outputs
-    /// (N, 4) [density, r, g, b]. Loaded as FP32 .sentis from StreamingAssets (too small
-    /// to benefit from quantization).
+    /// (N, 4) [density, r, g, b]. Output stays on GPU — caller uses PeekOutputBuffer()
+    /// to access the ComputeBuffer for downstream GPU compute.
     /// </summary>
     internal sealed class DecoderModel : IDisposable
     {
@@ -31,10 +31,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Run the decoder on a chunk of triplane features. Input shape: (N, 120), output: (N, 4).
+        /// Run the decoder on a chunk of triplane features. Input shape: (N, 120).
+        /// Output stays on GPU — use PeekOutputBuffer() to access it.
         /// </summary>
-        internal async Task<Tensor<float>> InferAsync(
-            Tensor<float> features, CancellationToken ct)
+        internal async Task RunAsync(Tensor<float> features, CancellationToken ct)
         {
             if (!_loaded)
                 throw new InvalidOperationException("DecoderModel not loaded");
@@ -46,9 +46,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 ct.ThrowIfCancellationRequested();
                 await budget.YieldIfNeeded();
             }
+        }
 
+        /// <summary>
+        /// Returns the ComputeBuffer backing the decoder's output tensor.
+        /// Valid until the next RunAsync call. Do NOT release this buffer.
+        /// </summary>
+        internal ComputeBuffer PeekOutputBuffer()
+        {
             var output = _worker.PeekOutput() as Tensor<float>;
-            return output.ReadbackAndClone();
+            return ComputeTensorData.Pin(output).buffer;
         }
 
         public void Dispose()

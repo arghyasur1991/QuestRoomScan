@@ -23,6 +23,7 @@ uint _GridOffset;  // flat index offset for chunked dispatch
 // Position-specific
 StructuredBuffer<float> _Positions;   // [N * 3] packed xyz
 uint _NumPositions;
+uint _PositionOffset;
 
 RWStructuredBuffer<float> _OutputFeatures;
 
@@ -99,9 +100,10 @@ void SampleAtPositions(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= _NumPositions) return;
 
-    float x = _Positions[id.x * 3 + 0];
-    float y = _Positions[id.x * 3 + 1];
-    float z = _Positions[id.x * 3 + 2];
+    uint globalIdx = _PositionOffset + id.x;
+    float x = _Positions[globalIdx * 3 + 0];
+    float y = _Positions[globalIdx * 3 + 1];
+    float z = _Positions[globalIdx * 3 + 2];
 
     uint featureDim = _NumPlanes * _Channels;
     SamplePoint(x, y, z, id.x * featureDim);

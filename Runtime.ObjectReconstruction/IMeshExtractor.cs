@@ -7,7 +7,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 {
     internal interface IMeshExtractor : IDisposable
     {
-        Task<Mesh> ExtractAsync(float[] density);
+        /// <param name="densityGPU">Pre-filled density ComputeBuffer on GPU (resolution^3 floats).</param>
+        Task<Mesh> ExtractAsync(ComputeBuffer densityGPU);
     }
 
     internal enum MeshAlgorithm

@@ -18,6 +18,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly int _kernelPositions;
 
         private ComputeBuffer _sceneCodeBuffer;
+        private bool _ownsSceneCodeBuffer;
         private int _numPlanes, _channels, _planeH, _planeW, _featureDim;
 
         internal TriplaneGridSampler(ComputeShader shader, int resolution)
@@ -28,19 +29,25 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _kernelPositions = _shader.FindKernel("SampleAtPositions");
         }
 
-        internal void CacheSceneCodes(Tensor<float> sceneCodes)
+        /// <summary>
+        /// Pins scene codes tensor to GPU and binds its ComputeBuffer directly — zero-copy.
+        /// The tensor must remain alive while this sampler is in use.
+        /// </summary>
+        internal void CacheSceneCodesGPU(Tensor<float> sceneCodes)
         {
-            var data = sceneCodes.DownloadToArray();
             var shape = sceneCodes.shape;
-            _numPlanes = shape[1]; // 3
-            _channels = shape[2];  // 40
-            _planeH = shape[3];    // 64
-            _planeW = shape[4];    // 64
-            _featureDim = _numPlanes * _channels; // 120
+            _numPlanes = shape[1];
+            _channels = shape[2];
+            _planeH = shape[3];
+            _planeW = shape[4];
+            _featureDim = _numPlanes * _channels;
 
-            _sceneCodeBuffer?.Release();
-            _sceneCodeBuffer = new ComputeBuffer(data.Length, sizeof(float));
-            _sceneCodeBuffer.SetData(data);
+            if (_ownsSceneCodeBuffer)
+                _sceneCodeBuffer?.Release();
+
+            var pinned = ComputeTensorData.Pin(sceneCodes);
+            _sceneCodeBuffer = pinned.buffer;
+            _ownsSceneCodeBuffer = false;
 
             _shader.SetInt("_NumPlanes", _numPlanes);
             _shader.SetInt("_Channels", _channels);
@@ -53,59 +60,37 @@ namespace Genesis.RoomScan.ObjectReconstruction
         internal int TotalGridPoints => _resolution * _resolution * _resolution;
 
         /// <summary>
-        /// GPU dispatch for a chunk of uniform grid points (Pass 1 density).
+        /// GPU-only grid sampling. Dispatches the compute shader to write features
+        /// directly into the provided output buffer. No CPU round-trip.
         /// </summary>
-        internal float[] SampleGridChunk(int startIdx, int count)
+        internal void SampleGridChunkGPU(int startIdx, int count, ComputeBuffer outputBuf)
         {
-            int featureCount = count * _featureDim;
-            using var outputBuf = new ComputeBuffer(featureCount, sizeof(float));
-
             _shader.SetInt("_GridOffset", startIdx);
             _shader.SetInt("_TotalPoints", count);
             _shader.SetBuffer(_kernelGrid, "_SceneCodes", _sceneCodeBuffer);
             _shader.SetBuffer(_kernelGrid, "_OutputFeatures", outputBuf);
             _shader.Dispatch(_kernelGrid, (count + 63) / 64, 1, 1);
-
-            var result = new float[featureCount];
-            outputBuf.GetData(result);
-            return result;
         }
 
         /// <summary>
-        /// GPU dispatch for arbitrary 3D positions (Pass 2 vertex colors).
+        /// GPU-only position sampling. Reads positions from the provided buffer
+        /// (starting at positionOffset) and writes features into the output buffer.
         /// </summary>
-        internal float[] SampleFeaturesAtPositions(Vector3[] positions)
+        internal void SampleAtPositionsGPU(
+            ComputeBuffer positionsBuf, int positionOffset, int count, ComputeBuffer outputBuf)
         {
-            int count = positions.Length;
-            int featureCount = count * _featureDim;
-
-            var posData = new float[count * 3];
-            for (int i = 0; i < count; i++)
-            {
-                posData[i * 3 + 0] = positions[i].x;
-                posData[i * 3 + 1] = positions[i].y;
-                posData[i * 3 + 2] = positions[i].z;
-            }
-
-            using var posBuf = new ComputeBuffer(count * 3, sizeof(float));
-            posBuf.SetData(posData);
-
-            using var outputBuf = new ComputeBuffer(featureCount, sizeof(float));
-
             _shader.SetInt("_NumPositions", count);
+            _shader.SetInt("_PositionOffset", positionOffset);
             _shader.SetBuffer(_kernelPositions, "_SceneCodes", _sceneCodeBuffer);
-            _shader.SetBuffer(_kernelPositions, "_Positions", posBuf);
+            _shader.SetBuffer(_kernelPositions, "_Positions", positionsBuf);
             _shader.SetBuffer(_kernelPositions, "_OutputFeatures", outputBuf);
             _shader.Dispatch(_kernelPositions, (count + 63) / 64, 1, 1);
-
-            var result = new float[featureCount];
-            outputBuf.GetData(result);
-            return result;
         }
 
         public void Dispose()
         {
-            _sceneCodeBuffer?.Release();
+            if (_ownsSceneCodeBuffer)
+                _sceneCodeBuffer?.Release();
             _sceneCodeBuffer = null;
         }
     }

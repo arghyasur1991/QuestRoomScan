@@ -32,14 +32,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
             EnsureTableBuffers();
         }
 
-        public async Task<Mesh> ExtractAsync(float[] density)
+        public async Task<Mesh> ExtractAsync(ComputeBuffer densityBuf)
         {
             int res = _resolution;
-            int totalVoxels = res * res * res;
             int maxVerts = Mathf.Min(res * res * 30, 4_000_000);
             int maxIndices = maxVerts;
 
-            var densityBuf = new ComputeBuffer(totalVoxels, sizeof(float));
             var vertexBuf = new ComputeBuffer(maxVerts, GpuVertexSize);
             var indexBuf = new ComputeBuffer(maxIndices, sizeof(uint));
             var counterBuf = new ComputeBuffer(2, sizeof(uint));
@@ -47,8 +45,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             try
             {
-                densityBuf.SetData(density);
-
                 _shader.SetInts("_VoxCount", res, res, res);
                 _shader.SetFloat("_VoxSize", 1f / (res - 1));
                 _shader.SetInt("_MaxVertices", maxVerts);
@@ -68,27 +64,22 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 _shader.Dispatch(_kernelBuildArgs, 1, 1, 1);
 
-                await AsyncHelper.YieldFrame();
-
-                var counters = new uint[2];
-                counterBuf.GetData(counters);
+                var counters = await AsyncHelper.ReadbackAsync<uint>(counterBuf, 2);
                 int vertCount = (int)Mathf.Min(counters[0], maxVerts);
                 int idxCount = (int)Mathf.Min(counters[1], maxIndices);
 
                 if (vertCount == 0)
                 {
                     Logger.Info("[MarchingCubes] No vertices generated");
-                    var emptyMesh = new Mesh();
-                    return emptyMesh;
+                    return new Mesh();
                 }
 
-                var gpuVerts = new GPUVertex[vertCount];
-                vertexBuf.GetData(gpuVerts, 0, 0, vertCount);
+                var gpuVertsTask = AsyncHelper.ReadbackAsync<GPUVertex>(vertexBuf, vertCount);
+                var gpuIndicesTask = AsyncHelper.ReadbackAsync<int>(indexBuf, idxCount);
+                await Task.WhenAll(gpuVertsTask, gpuIndicesTask);
 
-                var gpuIndices = new int[idxCount];
-                indexBuf.GetData(gpuIndices, 0, 0, idxCount);
-
-                await AsyncHelper.YieldFrame();
+                var gpuVerts = gpuVertsTask.Result;
+                var gpuIndices = gpuIndicesTask.Result;
 
                 var positions = new Vector3[vertCount];
                 for (int i = 0; i < vertCount; i++)
@@ -105,7 +96,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
             finally
             {
-                densityBuf.Release();
                 vertexBuf.Release();
                 indexBuf.Release();
                 counterBuf.Release();
@@ -137,7 +127,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _triTableBuf.SetData(TriTable);
         }
 
-        private const int GpuVertexSize = 32; // float3 pos + float3 norm + uint color + uint idx
+        private const int GpuVertexSize = 32;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct GPUVertex
@@ -149,7 +139,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         // Standard Lorensen-Cline / Paul Bourke marching cubes tables.
-        // Edge table: 256 entries, each a 12-bit mask of intersected edges.
         private static readonly int[] EdgeTable =
         {
             0x000, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c,
@@ -186,7 +175,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x000
         };
 
-        // Tri table: 256 rows × 16 entries. Edge index triplets, terminated by -1.
         private static readonly int[] TriTable =
         {
             -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,

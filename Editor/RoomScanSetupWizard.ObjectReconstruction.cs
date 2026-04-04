@@ -28,6 +28,7 @@ namespace Genesis.RoomScan.Editor
         bool _reconTriplaneShaderAssigned;
         bool _reconSurfaceNetsShaderAssigned;
         bool _reconMarchingCubesShaderAssigned;
+        bool _reconPostprocessShaderAssigned;
         bool _reconVertexColorShaderAssigned;
         bool _reconTestImagesAssigned;
         bool _reconSentisModelsExist;
@@ -58,6 +59,8 @@ namespace Genesis.RoomScan.Editor
                     "densitySurfaceNetsShader");
                 _reconMarchingCubesShaderAssigned = AreFieldsAssigned(_objectReconstruction,
                     "densityMarchingCubesShader");
+                _reconPostprocessShaderAssigned = AreFieldsAssigned(_objectReconstruction,
+                    "decoderPostprocessShader");
                 _reconVertexColorShaderAssigned = AreFieldsAssigned(_objectReconstruction,
                     "vertexColorShader");
                 var so = new SerializedObject(_objectReconstruction);
@@ -69,6 +72,7 @@ namespace Genesis.RoomScan.Editor
                 _reconTriplaneShaderAssigned = false;
                 _reconSurfaceNetsShaderAssigned = false;
                 _reconMarchingCubesShaderAssigned = false;
+                _reconPostprocessShaderAssigned = false;
                 _reconVertexColorShaderAssigned = false;
                 _reconTestImagesAssigned = false;
             }
@@ -86,6 +90,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("  Triplane grid sample shader", _reconTriplaneShaderAssigned);
             StatusRow("  Density surface nets shader", _reconSurfaceNetsShaderAssigned);
             StatusRow("  Marching cubes shader", _reconMarchingCubesShaderAssigned);
+            StatusRow("  Decoder postprocess shader", _reconPostprocessShaderAssigned);
             StatusRow("  Vertex color shader", _reconVertexColorShaderAssigned);
             StatusRow("  Test images", _reconTestImagesAssigned);
 
@@ -148,6 +153,11 @@ namespace Genesis.RoomScan.Editor
                 StatusRow("Reconstruction marching cubes shader", false);
                 needsFix = true;
             }
+            if (!_reconPostprocessShaderAssigned)
+            {
+                StatusRow("Reconstruction decoder postprocess shader", false);
+                needsFix = true;
+            }
             if (!_reconVertexColorShaderAssigned)
             {
                 StatusRow("Reconstruction vertex color shader", false);
@@ -197,6 +207,8 @@ namespace Genesis.RoomScan.Editor
                 RECON_PKG_SHADERS + "DensitySurfaceNets.compute");
             AssignCompute(so, "densityMarchingCubesShader",
                 RECON_PKG_SHADERS + "DensityMarchingCubes.compute");
+            AssignCompute(so, "decoderPostprocessShader",
+                RECON_PKG_SHADERS + "DecoderPostprocess.compute");
             AssignAsset<Shader>(so, "vertexColorShader",
                 RECON_PKG_SHADERS + "VertexColor.shader");
 

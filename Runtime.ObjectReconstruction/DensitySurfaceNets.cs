@@ -9,6 +9,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// <summary>
     /// GPU Surface Nets mesh extraction from a density field.
     /// Dispatches DensitySurfaceNets.compute for all kernels — no CPU fallback.
+    /// Accepts a GPU ComputeBuffer for density and uses async readback for results.
     /// </summary>
     internal sealed class DensitySurfaceNets : IMeshExtractor
     {
@@ -35,14 +36,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _kernelBuildDrawArgs = _shader.FindKernel("BuildIndirectArgs");
         }
 
-        public async Task<Mesh> ExtractAsync(float[] density)
+        public async Task<Mesh> ExtractAsync(ComputeBuffer densityBuf)
         {
             int res = _resolution;
             int totalVoxels = res * res * res;
             int maxVerts = Mathf.Min(res * res * 10, 2_000_000);
             int maxIndices = maxVerts * 6;
 
-            var densityBuf = new ComputeBuffer(totalVoxels, sizeof(float));
             var coordVertMap = new ComputeBuffer(totalVoxels, sizeof(int));
             var vertexBuf = new ComputeBuffer(maxVerts, GpuVertexSize);
             var indexBuf = new ComputeBuffer(maxIndices, sizeof(uint));
@@ -52,8 +52,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             try
             {
-                densityBuf.SetData(density);
-
                 _shader.SetInts("_VoxCount", res, res, res);
                 _shader.SetFloat("_VoxSize", 1f / (res - 1));
                 _shader.SetInt("_MaxVertices", maxVerts);
@@ -71,26 +69,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 BindAll(_kernelBuildDrawArgs, densityBuf, coordVertMap, vertexBuf, indexBuf,
                     counterBuf, dispatchArgsBuf, drawArgsBuf);
 
-                // 1. ClearCounters
                 _shader.Dispatch(_kernelClear, 1, 1, 1);
 
-                // 2. ClassifyAndEmit (3D dispatch)
                 int groups = Mathf.CeilToInt(res / 4f);
                 _shader.Dispatch(_kernelClassify, groups, groups, groups);
 
-                // 3. BuildVertexDispatchArgs
                 _shader.Dispatch(_kernelBuildVertArgs, 1, 1, 1);
-
-                // 4. GenerateIndices (indirect dispatch over vertices)
                 _shader.DispatchIndirect(_kernelGenIndices, dispatchArgsBuf);
-
-                // 5. BuildIndirectArgs
                 _shader.Dispatch(_kernelBuildDrawArgs, 1, 1, 1);
 
-                await AsyncHelper.YieldFrame();
-
-                var counters = new uint[2];
-                counterBuf.GetData(counters);
+                var counters = await AsyncHelper.ReadbackAsync<uint>(counterBuf, 2);
                 int vertCount = (int)Mathf.Min(counters[0], maxVerts);
                 int idxCount = (int)Mathf.Min(counters[1], maxIndices);
 
@@ -100,13 +88,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     return new Mesh();
                 }
 
-                var gpuVerts = new GPUVertex[vertCount];
-                vertexBuf.GetData(gpuVerts, 0, 0, vertCount);
+                var gpuVertsTask = AsyncHelper.ReadbackAsync<GPUVertex>(vertexBuf, vertCount);
+                var gpuIndicesTask = AsyncHelper.ReadbackAsync<int>(indexBuf, idxCount);
+                await Task.WhenAll(gpuVertsTask, gpuIndicesTask);
 
-                var gpuIndices = new int[idxCount];
-                indexBuf.GetData(gpuIndices, 0, 0, idxCount);
-
-                await AsyncHelper.YieldFrame();
+                var gpuVerts = gpuVertsTask.Result;
+                var gpuIndices = gpuIndicesTask.Result;
 
                 var positions = new Vector3[vertCount];
                 var normals = new Vector3[vertCount];
@@ -127,7 +114,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
             finally
             {
-                densityBuf.Release();
                 coordVertMap.Release();
                 vertexBuf.Release();
                 indexBuf.Release();

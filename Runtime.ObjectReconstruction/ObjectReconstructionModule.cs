@@ -19,6 +19,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [SerializeField] internal ComputeShader triplaneGridSampleShader;
         [SerializeField] internal ComputeShader densitySurfaceNetsShader;
         [SerializeField] internal ComputeShader densityMarchingCubesShader;
+        [SerializeField] internal ComputeShader decoderPostprocessShader;
         [SerializeField] internal Shader vertexColorShader;
 
         [Header("Test Images")]
@@ -73,7 +74,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
             Tensor<float> preprocessed = null;
-            Tensor<float> sceneCodes = null;
             try
             {
                 EnsurePipeline();
@@ -92,24 +92,22 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 sw.Restart();
 
                 ReportStatus("Running reconstruction...");
-                sceneCodes = await _pipeline.RunForwardAsync(preprocessed, _cts.Token);
+                await _pipeline.RunForwardAsync(preprocessed, _cts.Token);
                 preprocessed.Dispose();
                 preprocessed = null;
                 float forwardMs = sw.ElapsedMilliseconds;
                 sw.Restart();
 
                 ReportStatus("Extracting mesh...");
-                var mesh = await _pipeline.ExtractMeshAsync(sceneCodes, _cts.Token);
-                sceneCodes.Dispose();
-                sceneCodes = null;
+                var mesh = await _pipeline.ExtractMeshAsync(_cts.Token);
                 float meshMs = sw.ElapsedMilliseconds;
                 sw.Stop();
 
                 SpawnMesh(mesh);
 
                 float totalMs = loadMs + rembgMs + forwardMs + meshMs;
-                Logger.Info($"[ObjectReconstruction] Timing: load={loadMs:.0f}ms rembg={rembgMs:.0f}ms " +
-                    $"forward={forwardMs:.0f}ms mesh={meshMs:.0f}ms total={totalMs:.0f}ms");
+                Logger.Info($"[ObjectReconstruction] Timing: load={loadMs:F0}ms rembg={rembgMs:F0}ms " +
+                    $"forward={forwardMs:F0}ms mesh={meshMs:F0}ms total={totalMs:F0}ms");
                 ReportStatus($"Done! ({totalMs / 1000f:F1}s)");
             }
             catch (OperationCanceledException)
@@ -124,7 +122,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             finally
             {
                 preprocessed?.Dispose();
-                sceneCodes?.Dispose();
                 _running = false;
                 _cts?.Dispose();
                 _cts = null;
@@ -154,6 +151,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 triplaneGridSampleShader,
                 densitySurfaceNetsShader,
                 densityMarchingCubesShader,
+                decoderPostprocessShader,
                 meshAlgorithm);
         }
 

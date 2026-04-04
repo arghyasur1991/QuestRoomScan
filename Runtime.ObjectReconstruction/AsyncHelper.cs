@@ -1,8 +1,11 @@
 #if HAS_AI_INFERENCE
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using Unity.Collections;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan.ObjectReconstruction
 {
@@ -61,6 +64,29 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
 
             internal void Reset() => _sw.Restart();
+        }
+
+        /// <summary>
+        /// Non-blocking GPU readback of a ComputeBuffer region to managed array.
+        /// Returns a Task that completes when the GPU data is available on CPU.
+        /// </summary>
+        internal static Task<T[]> ReadbackAsync<T>(ComputeBuffer buffer, int count) where T : struct
+        {
+            var tcs = new TaskCompletionSource<T[]>();
+            int byteSize = count * Marshal.SizeOf<T>();
+            AsyncGPUReadback.Request(buffer, byteSize, 0, request =>
+            {
+                if (request.hasError)
+                {
+                    tcs.SetException(new InvalidOperationException("AsyncGPUReadback failed"));
+                    return;
+                }
+                var native = request.GetData<T>();
+                var result = new T[count];
+                NativeArray<T>.Copy(native, result, count);
+                tcs.SetResult(result);
+            });
+            return tcs.Task;
         }
     }
 }

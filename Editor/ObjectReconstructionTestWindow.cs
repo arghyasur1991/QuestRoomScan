@@ -44,6 +44,8 @@ namespace Genesis.RoomScan.Editor
         private string _timingLog = "";
         private bool _saveDebugImages;
 
+        private ComputeShader _postprocessShader;
+
         private const string SHADER_DIR = "Packages/com.genesis.roomscan/Runtime.ObjectReconstruction/Shaders/";
 
         private void OnEnable()
@@ -54,6 +56,8 @@ namespace Genesis.RoomScan.Editor
                 SHADER_DIR + "DensitySurfaceNets.compute");
             _marchingCubesShader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
                 SHADER_DIR + "DensityMarchingCubes.compute");
+            _postprocessShader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
+                SHADER_DIR + "DecoderPostprocess.compute");
             _vertexColorShader = AssetDatabase.LoadAssetAtPath<Shader>(
                 SHADER_DIR + "VertexColor.shader");
 
@@ -120,6 +124,8 @@ namespace Genesis.RoomScan.Editor
                         RunRembgOnly();
                     if (GUILayout.Button("Test Preprocess Only"))
                         RunPreprocessOnly();
+                    if (GUILayout.Button("Dump Tensor"))
+                        RunDumpTensor();
                 }
             }
 
@@ -175,7 +181,8 @@ namespace Genesis.RoomScan.Editor
         private void DrawShaderStatus()
         {
             bool ok = _triplaneShader != null && _surfaceNetsShader != null
-                && _marchingCubesShader != null && _vertexColorShader != null;
+                && _marchingCubesShader != null && _postprocessShader != null
+                && _vertexColorShader != null;
             if (!ok)
                 EditorGUILayout.HelpBox("Shaders not found at expected package path.", MessageType.Error);
         }
@@ -234,15 +241,14 @@ namespace Genesis.RoomScan.Editor
 
                 SetStatus("Running TripoSR forward pass...", 0.35f);
                 sw.Restart();
-                var sceneCodes = await pipeline.RunForwardAsync(preprocessed, _cts.Token);
+                await pipeline.RunForwardAsync(preprocessed, _cts.Token);
                 preprocessed.Dispose();
                 float forwardMs = sw.ElapsedMilliseconds;
                 AppendTiming($"Forward pass: {forwardMs:F0}ms");
 
                 SetStatus("Extracting mesh + vertex colors...", 0.60f);
                 sw.Restart();
-                var mesh = await pipeline.ExtractMeshAsync(sceneCodes, _cts.Token);
-                sceneCodes.Dispose();
+                var mesh = await pipeline.ExtractMeshAsync(_cts.Token);
                 float meshMs = sw.ElapsedMilliseconds;
                 AppendTiming($"Mesh + vertex color extraction: {meshMs:F0}ms");
 
@@ -361,6 +367,54 @@ namespace Genesis.RoomScan.Editor
             }
         }
 
+        private async void RunDumpTensor()
+        {
+            if (!Validate()) return;
+
+            _running = true;
+            _cts = new CancellationTokenSource();
+            _timingLog = "";
+            ReconstructionPipeline pipeline = null;
+
+            try
+            {
+                pipeline = CreatePipeline();
+
+                SetStatus("Loading models...", 0.1f);
+                await pipeline.LoadModelsAsync(_cts.Token);
+
+                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                Directory.CreateDirectory(debugDir);
+                ImagePreprocessor.DebugOutputDir = debugDir;
+
+                SetStatus("Preprocessing...", 0.3f);
+                var result = await pipeline.PreprocessAsync(_testImage, _cts.Token);
+
+                string binPath = Path.Combine(debugDir, "unity_preprocessed.bin");
+                ImagePreprocessor.DumpTensorBinary(result, binPath);
+                ImagePreprocessor.SaveDebugImage(result,
+                    Path.Combine(debugDir, "unity_final_512.png"));
+
+                result.Dispose();
+                ImagePreprocessor.DebugOutputDir = null;
+                SetStatus($"Tensor dumped to {binPath}", 1f);
+                AppendTiming($"Saved: {binPath}");
+            }
+            catch (Exception e)
+            {
+                SetStatus($"Error: {e.Message}", 0f);
+                Debug.LogException(e);
+            }
+            finally
+            {
+                pipeline?.Dispose();
+                _running = false;
+                _cts?.Dispose();
+                _cts = null;
+                Repaint();
+            }
+        }
+
         private ReconstructionPipeline CreatePipeline()
         {
             return new ReconstructionPipeline(
@@ -370,6 +424,7 @@ namespace Genesis.RoomScan.Editor
                 triplaneShader: _triplaneShader,
                 surfaceNetsShader: _surfaceNetsShader,
                 marchingCubesShader: _marchingCubesShader,
+                postprocessShader: _postprocessShader,
                 meshAlgorithm: _meshAlgorithm);
         }
 
@@ -380,7 +435,8 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.DisplayDialog("Missing Image", "Assign a test image first.", "OK");
                 return false;
             }
-            if (_triplaneShader == null || _surfaceNetsShader == null || _marchingCubesShader == null)
+            if (_triplaneShader == null || _surfaceNetsShader == null
+                || _marchingCubesShader == null || _postprocessShader == null)
             {
                 EditorUtility.DisplayDialog("Missing Shaders", "Compute shaders not found.", "OK");
                 return false;

@@ -2,14 +2,18 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Unity.Collections;
 using Unity.InferenceEngine;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
     /// Orchestrates the full reconstruction pipeline: rembg -> preprocess -> forward -> mesh extraction.
-    /// All inference is async with multi-frame splitting to avoid main thread stalls.
+    /// All inference is async with multi-frame splitting. Post-forward mesh extraction uses a fully
+    /// GPU-resident data flow: triplane sampling, decoder inference, density/color extraction all stay
+    /// on GPU via ComputeTensorData.Pin, with a single async readback at the end.
     /// </summary>
     internal sealed class ReconstructionPipeline : IDisposable
     {
@@ -19,12 +23,19 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly ComputeShader _triplaneShader;
         private readonly ComputeShader _surfaceNetsShader;
         private readonly ComputeShader _marchingCubesShader;
+        private readonly ComputeShader _postprocessShader;
         private readonly MeshAlgorithm _meshAlgorithm;
 
         private RembgModel _rembg;
         private ReconstructionModel _reconstruction;
         private DecoderModel _decoder;
         private bool _modelsLoaded;
+
+        private TriplaneGridSampler _sampler;
+        private IMeshExtractor _extractor;
+
+        private int _postKernelDensity;
+        private int _postKernelColors;
 
         internal ReconstructionPipeline(
             int frameBudgetMs,
@@ -33,6 +44,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             ComputeShader triplaneShader,
             ComputeShader surfaceNetsShader,
             ComputeShader marchingCubesShader,
+            ComputeShader postprocessShader,
             MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes)
         {
             _frameBudgetMs = frameBudgetMs;
@@ -41,7 +53,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _triplaneShader = triplaneShader;
             _surfaceNetsShader = surfaceNetsShader;
             _marchingCubesShader = marchingCubesShader;
+            _postprocessShader = postprocessShader;
             _meshAlgorithm = meshAlgorithm;
+
+            _postKernelDensity = _postprocessShader.FindKernel("ExtractDensity");
+            _postKernelColors = _postprocessShader.FindKernel("ExtractColors");
         }
 
         internal async Task LoadModelsAsync(CancellationToken ct)
@@ -98,7 +114,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private static bool HasMeaningfulAlpha(Texture2D tex)
         {
-            var pixels = tex.GetPixels32();
+            var pixels = tex.GetRawTextureData<Color32>();
             int step = Mathf.Max(1, pixels.Length / 200);
             for (int i = 0; i < pixels.Length; i += step)
                 if (pixels[i].a < 250) return true;
@@ -122,128 +138,178 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return copy;
         }
 
-        internal async Task<Tensor<float>> RunForwardAsync(Tensor<float> preprocessed, CancellationToken ct)
+        /// <summary>
+        /// Run the TripoSR forward pass. Scene codes stay on GPU in the worker's output.
+        /// Use ExtractMeshAsync() afterwards to get the mesh.
+        /// </summary>
+        internal async Task RunForwardAsync(Tensor<float> preprocessed, CancellationToken ct)
         {
-            return await _reconstruction.InferAsync(preprocessed, ct);
+            await _reconstruction.RunAsync(preprocessed, ct);
         }
 
-        internal async Task<Mesh> ExtractMeshAsync(Tensor<float> sceneCodes, CancellationToken ct)
+        /// <summary>
+        /// GPU-resident mesh extraction pipeline. Scene codes come from the reconstruction
+        /// worker's last output (no readback). All triplane sampling, decoder inference, and
+        /// density/color extraction happen on GPU with zero CPU round-trips per chunk.
+        /// </summary>
+        internal async Task<Mesh> ExtractMeshAsync(CancellationToken ct)
         {
             int res = _gridResolution;
-            var sampler = new TriplaneGridSampler(_triplaneShader, res);
-            sampler.CacheSceneCodes(sceneCodes);
+            var sceneCodes = _reconstruction.PeekOutput();
+
+            EnsureSampler();
+            _sampler.CacheSceneCodesGPU(sceneCodes);
             await AsyncHelper.YieldFrame();
 
-            int totalPoints = sampler.TotalGridPoints;
-            int featureDim = sampler.FeatureDim;
+            int totalPoints = _sampler.TotalGridPoints;
+            int featureDim = _sampler.FeatureDim;
             int chunkSize = 524288;
             var budget = new AsyncHelper.FrameBudget();
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
-            Logger.Info($"[Pipeline] GPU triplane sampling, res={res}, " +
+            Logger.Info($"[Pipeline] GPU-resident extraction, res={res}, " +
                         $"{totalPoints} points, chunks of {chunkSize}");
 
-            // --- Pass 1: GPU sample grid chunks -> decode -> keep only density ---
-            var density = new float[totalPoints];
+            // --- Pass 1: GPU triplane → decoder → density extraction (zero CPU transfers) ---
+            var densityBuf = new ComputeBuffer(totalPoints, sizeof(float));
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
 
-            for (int c = 0; c < numChunks; c++)
+            try
             {
+                for (int c = 0; c < numChunks; c++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    int start = c * chunkSize;
+                    int count = Mathf.Min(chunkSize, totalPoints - start);
+
+                    using var chunkTensor = new Tensor<float>(new TensorShape(count, featureDim));
+                    var pinned = ComputeTensorData.Pin(chunkTensor);
+
+                    _sampler.SampleGridChunkGPU(start, count, pinned.buffer);
+                    await _decoder.RunAsync(chunkTensor, ct);
+
+                    var decoderOutBuf = _decoder.PeekOutputBuffer();
+                    DispatchDensityExtraction(decoderOutBuf, densityBuf, start, count);
+                    await budget.YieldIfNeeded();
+                }
+                Logger.Info($"[Pipeline] Pass 1 density (GPU-resident): {sw.ElapsedMilliseconds}ms ({numChunks} chunks)");
+
+                // --- Mesh extraction: density buffer already on GPU ---
+                sw.Restart();
+                EnsureExtractor();
+                var mesh = await _extractor.ExtractAsync(densityBuf);
+                Logger.Info($"[Pipeline] {_meshAlgorithm}: {sw.ElapsedMilliseconds}ms");
+                await AsyncHelper.YieldFrame();
                 ct.ThrowIfCancellationRequested();
-                int start = c * chunkSize;
-                int count = Mathf.Min(chunkSize, totalPoints - start);
 
-                var chunkData = sampler.SampleGridChunk(start, count);
-                var chunkTensor = UploadChunk(chunkData, count, featureDim);
-                var chunkResult = await _decoder.InferAsync(chunkTensor, ct);
-                chunkTensor.Dispose();
+                // --- Pass 2: vertex color extraction (GPU-resident) ---
+                sw.Restart();
+                var meshVerts = mesh.vertices;
+                int numVerts = meshVerts.Length;
+                Logger.Info($"[Pipeline] Pass 2: {numVerts} vertex color queries");
 
-                var resultData = chunkResult.DownloadToArray();
-                chunkResult.Dispose();
-                WriteDensityOnly(resultData, density, start, count);
-                await budget.YieldIfNeeded();
+                if (numVerts == 0)
+                {
+                    Logger.Info("[Pipeline] No vertices — skipping color pass");
+                    return mesh;
+                }
+
+                var posData = new float[numVerts * 3];
+                for (int i = 0; i < numVerts; i++)
+                {
+                    posData[i * 3 + 0] = meshVerts[i].x;
+                    posData[i * 3 + 1] = meshVerts[i].y;
+                    posData[i * 3 + 2] = meshVerts[i].z;
+                }
+                var allPosBuf = new ComputeBuffer(numVerts * 3, sizeof(float));
+                allPosBuf.SetData(posData);
+
+                var colorBuf = new ComputeBuffer(numVerts * 3, sizeof(float));
+
+                try
+                {
+                    int vertChunks = (numVerts + chunkSize - 1) / chunkSize;
+                    for (int c = 0; c < vertChunks; c++)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        int start = c * chunkSize;
+                        int count = Mathf.Min(chunkSize, numVerts - start);
+
+                        using var chunkTensor = new Tensor<float>(new TensorShape(count, featureDim));
+                        var pinned = ComputeTensorData.Pin(chunkTensor);
+
+                        _sampler.SampleAtPositionsGPU(allPosBuf, start, count, pinned.buffer);
+                        await _decoder.RunAsync(chunkTensor, ct);
+
+                        var decoderOutBuf = _decoder.PeekOutputBuffer();
+                        DispatchColorExtraction(decoderOutBuf, colorBuf, start, count);
+                        await budget.YieldIfNeeded();
+                    }
+
+                    var colorData = await AsyncHelper.ReadbackAsync<float>(colorBuf, numVerts * 3);
+                    var vertColors = new Color[numVerts];
+                    for (int i = 0; i < numVerts; i++)
+                    {
+                        vertColors[i] = new Color(
+                            colorData[i * 3 + 0],
+                            colorData[i * 3 + 1],
+                            colorData[i * 3 + 2]);
+                    }
+                    mesh.SetColors(vertColors);
+
+                    Logger.Info($"[Pipeline] Pass 2 colors (GPU-resident): {sw.ElapsedMilliseconds}ms ({(numVerts + chunkSize - 1) / chunkSize} chunks)");
+                }
+                finally
+                {
+                    allPosBuf.Release();
+                    colorBuf.Release();
+                }
+
+                return mesh;
             }
-            Logger.Info($"[Pipeline] Pass 1 density: {sw.ElapsedMilliseconds}ms ({numChunks} chunks)");
+            finally
+            {
+                densityBuf.Release();
+            }
+        }
 
-            // --- Mesh extraction: density -> geometry ---
-            sw.Restart();
-            IMeshExtractor extractor = _meshAlgorithm switch
+        private void DispatchDensityExtraction(
+            ComputeBuffer decoderOutput, ComputeBuffer densityVolume, int offset, int count)
+        {
+            _postprocessShader.SetInt("_Offset", offset);
+            _postprocessShader.SetInt("_Count", count);
+            _postprocessShader.SetBuffer(_postKernelDensity, "_DecoderOutput", decoderOutput);
+            _postprocessShader.SetBuffer(_postKernelDensity, "_DensityVolume", densityVolume);
+            _postprocessShader.Dispatch(_postKernelDensity, (count + 255) / 256, 1, 1);
+        }
+
+        private void DispatchColorExtraction(
+            ComputeBuffer decoderOutput, ComputeBuffer colorOutput, int offset, int count)
+        {
+            _postprocessShader.SetInt("_Offset", offset);
+            _postprocessShader.SetInt("_Count", count);
+            _postprocessShader.SetBuffer(_postKernelColors, "_DecoderOutput", decoderOutput);
+            _postprocessShader.SetBuffer(_postKernelColors, "_ColorOutput", colorOutput);
+            _postprocessShader.Dispatch(_postKernelColors, (count + 255) / 256, 1, 1);
+        }
+
+        private void EnsureSampler()
+        {
+            _sampler ??= new TriplaneGridSampler(_triplaneShader, _gridResolution);
+        }
+
+        private void EnsureExtractor()
+        {
+            if (_extractor != null) return;
+            _extractor = _meshAlgorithm switch
             {
                 MeshAlgorithm.MarchingCubes =>
-                    new MarchingCubes(_marchingCubesShader, res, _densityThreshold),
+                    new MarchingCubes(_marchingCubesShader, _gridResolution, _densityThreshold),
                 MeshAlgorithm.SurfaceNets =>
-                    new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold),
-                _ => new MarchingCubes(_marchingCubesShader, res, _densityThreshold)
+                    new DensitySurfaceNets(_surfaceNetsShader, _gridResolution, _densityThreshold),
+                _ => new MarchingCubes(_marchingCubesShader, _gridResolution, _densityThreshold)
             };
-
-            var mesh = await extractor.ExtractAsync(density);
-            extractor.Dispose();
-            Logger.Info($"[Pipeline] {_meshAlgorithm}: {sw.ElapsedMilliseconds}ms");
-            await AsyncHelper.YieldFrame();
-            ct.ThrowIfCancellationRequested();
-
-            // --- Pass 2: GPU sample at mesh vertex positions -> decode -> vertex colors ---
-            sw.Restart();
-            var meshVerts = mesh.vertices;
-            int numVerts = meshVerts.Length;
-            Logger.Info($"[Pipeline] Pass 2: {numVerts} vertex color queries");
-
-            var vertColors = new Color[numVerts];
-            int vertChunks = (numVerts + chunkSize - 1) / chunkSize;
-            for (int c = 0; c < vertChunks; c++)
-            {
-                ct.ThrowIfCancellationRequested();
-                int start = c * chunkSize;
-                int count = Mathf.Min(chunkSize, numVerts - start);
-
-                var vertsSlice = new Vector3[count];
-                Array.Copy(meshVerts, start, vertsSlice, 0, count);
-                var chunkData = sampler.SampleFeaturesAtPositions(vertsSlice);
-
-                var chunkTensor = UploadChunk(chunkData, count, featureDim);
-                var chunkResult = await _decoder.InferAsync(chunkTensor, ct);
-                chunkTensor.Dispose();
-
-                var resultData = chunkResult.DownloadToArray();
-                chunkResult.Dispose();
-                WriteColorsOnly(resultData, vertColors, start, count);
-                await budget.YieldIfNeeded();
-            }
-            Logger.Info($"[Pipeline] Pass 2 colors: {sw.ElapsedMilliseconds}ms ({vertChunks} chunks)");
-
-            sampler.Dispose();
-            mesh.SetColors(vertColors);
-            return mesh;
         }
-
-        private static Tensor<float> UploadChunk(float[] data, int count, int dim)
-        {
-            var tensor = new Tensor<float>(new TensorShape(count, dim));
-            tensor.Upload(data);
-            return tensor;
-        }
-
-        private static void WriteDensityOnly(float[] data, float[] density, int start, int count)
-        {
-            for (int i = 0; i < count; i++)
-            {
-                float rawDensity = data[i * 4];
-                density[start + i] = Mathf.Exp(Mathf.Clamp(rawDensity - 1f, -15f, 15f));
-            }
-        }
-
-        private static void WriteColorsOnly(float[] data, Color[] colors, int start, int count)
-        {
-            for (int i = 0; i < count; i++)
-            {
-                colors[start + i] = new Color(
-                    Sigmoid(data[i * 4 + 1]),
-                    Sigmoid(data[i * 4 + 2]),
-                    Sigmoid(data[i * 4 + 3]));
-            }
-        }
-
-        private static float Sigmoid(float x) => 1f / (1f + Mathf.Exp(-x));
 
         private static void SafeDestroy(UnityEngine.Object obj)
         {
@@ -261,6 +327,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _rembg?.Dispose();
             _reconstruction?.Dispose();
             _decoder?.Dispose();
+            _sampler?.Dispose();
+            _extractor?.Dispose();
+            _sampler = null;
+            _extractor = null;
             _modelsLoaded = false;
         }
     }

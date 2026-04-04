@@ -80,10 +80,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (DebugOutputDir != null)
                 SaveAlphaMask(alpha, srcW, srcH, System.IO.Path.Combine(DebugOutputDir, "unity_alpha_mask.png"));
 
-            // Create texture at native composite resolution, then let GPU do bilinear resize
-            var compositeTex = new Texture2D(compositeSize, compositeSize, TextureFormat.RGB24, false);
+            // Create texture with mipmaps for antialiased downsample (matches Python antialias=True)
+            var compositeTex = new Texture2D(compositeSize, compositeSize, TextureFormat.RGB24, true);
+            compositeTex.filterMode = FilterMode.Trilinear;
             compositeTex.SetPixels32(compositePixels);
-            compositeTex.Apply();
+            compositeTex.Apply(true);
 
             // Save debug: native-res composite (before 512 resize)
             if (DebugOutputDir != null)
@@ -140,7 +141,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             {
                 int sz = 64;
                 var gray = new Color32[sz * sz];
-                byte g = 127;
+                byte g = 128;
                 for (int i = 0; i < gray.Length; i++)
                     gray[i] = new Color32(g, g, g, 255);
                 return (gray, sz);
@@ -157,14 +158,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int padX0 = (sqSize - cropW) / 2;
             int padY0 = (sqSize - cropH) / 2;
 
-            // Pad to achieve foreground ratio
-            int finalSize = Mathf.CeilToInt(sqSize / ratio);
+            // Pad to achieve foreground ratio — int() truncation to match Python's int(size / ratio)
+            int finalSize = (int)(sqSize / ratio);
+            if (finalSize < sqSize) finalSize = sqSize;
             int outerPadX = (finalSize - sqSize) / 2;
             int outerPadY = (finalSize - sqSize) / 2;
 
             // Composite at native finalSize resolution (NOT 512)
             var result = new Color32[finalSize * finalSize];
-            byte grayByte = 127;
+            byte grayByte = 128;
             for (int i = 0; i < result.Length; i++)
                 result[i] = new Color32(grayByte, grayByte, grayByte, 255);
 
@@ -282,6 +284,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
             Logger.Info($"[ImagePreprocessor] Center ({cx},{cy}): R={data[cy * w + cx]:F4} G={data[chSize + cy * w + cx]:F4} B={data[2 * chSize + cy * w + cx]:F4}");
             Logger.Info($"[ImagePreprocessor] Corner (0,0): R={data[0]:F4} G={data[chSize]:F4} B={data[2 * chSize]:F4}");
             Logger.Info($"[ImagePreprocessor] Saved debug image: {path}");
+        }
+
+        /// <summary>
+        /// Saves a (1,3,H,W) tensor as raw float32 binary for Python comparison.
+        /// </summary>
+        internal static void DumpTensorBinary(Tensor<float> tensor, string path)
+        {
+            var data = tensor.DownloadToArray();
+            var bytes = new byte[data.Length * sizeof(float)];
+            System.Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+            System.IO.File.WriteAllBytes(path, bytes);
+
+            var shape = tensor.shape;
+            var metaPath = path + ".meta.txt";
+            System.IO.File.WriteAllText(metaPath,
+                $"dtype=float32\nshape={shape[0]},{shape[1]},{shape[2]},{shape[3]}\n");
+            Logger.Info($"[ImagePreprocessor] Dumped tensor: {path} ({data.Length} floats, {bytes.Length} bytes)");
         }
 
         private static void SafeDestroy(Object obj)
