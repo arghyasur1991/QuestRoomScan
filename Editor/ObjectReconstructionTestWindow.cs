@@ -91,16 +91,16 @@ namespace Genesis.RoomScan.Editor
             {
                 EditorGUILayout.Space(4);
                 var rect = EditorGUILayout.GetControlRect(false, 20);
-                EditorGUI.ProgressBar(rect, _progress, _status);
+                EditorGUI.ProgressBar(rect, _progress, "");
 
                 if (GUILayout.Button("Cancel"))
                     Cancel();
             }
-            else
-            {
-                EditorGUILayout.Space(4);
-                EditorGUILayout.LabelField("Status", _status);
-            }
+
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Status", EditorStyles.boldLabel);
+            EditorGUILayout.SelectableLabel(_status, EditorStyles.wordWrappedLabel,
+                GUILayout.MinHeight(40), GUILayout.ExpandHeight(true));
 
             if (!string.IsNullOrEmpty(_timingLog))
             {

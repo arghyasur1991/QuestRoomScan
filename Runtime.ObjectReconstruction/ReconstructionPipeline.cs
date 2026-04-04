@@ -72,7 +72,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             finally
             {
                 if (readable != image)
-                    UnityEngine.Object.Destroy(readable);
+                    SafeDestroy(readable);
             }
         }
 
@@ -171,6 +171,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         private static float Sigmoid(float x) => 1f / (1f + Mathf.Exp(-x));
+
+        private static void SafeDestroy(UnityEngine.Object obj)
+        {
+            if (obj == null) return;
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+                UnityEngine.Object.DestroyImmediate(obj);
+            else
+#endif
+                UnityEngine.Object.Destroy(obj);
+        }
 
         public void Dispose()
         {

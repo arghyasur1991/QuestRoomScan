@@ -25,8 +25,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int srcH = image.height;
             var srcPixels = image.GetPixels32();
 
-            int maskW = alphaMask.shape[alphaMask.shape.length - 1];
-            int maskH = alphaMask.shape[alphaMask.shape.length - 2];
+            int maskW = alphaMask.shape[alphaMask.shape.rank - 1];
+            int maskH = alphaMask.shape[alphaMask.shape.rank - 2];
             var maskData = alphaMask.DownloadToArray();
 
             var composite = new Texture2D(srcW, srcH, TextureFormat.RGB24, false);
@@ -55,10 +55,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             composite.Apply();
 
             var resized = ResizeForeground(composite, foregroundRatio, outputSize);
-            Object.Destroy(composite);
+            SafeDestroy(composite);
 
             var tensor = TextureToTensorManual(resized, outputSize);
-            Object.Destroy(resized);
+            SafeDestroy(resized);
 
             return tensor;
         }
@@ -122,9 +122,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             result.SetPixels32(grayPixels);
             result.Apply();
-            Object.Destroy(fgTex);
+            SafeDestroy(fgTex);
 
             return result;
+        }
+
+        private static void SafeDestroy(Object obj)
+        {
+            if (obj == null) return;
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+                Object.DestroyImmediate(obj);
+            else
+#endif
+                Object.Destroy(obj);
         }
     }
 }
