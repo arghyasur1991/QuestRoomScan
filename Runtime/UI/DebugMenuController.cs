@@ -47,12 +47,13 @@ namespace Genesis.RoomScan.UI
         // Tools view
         private Button _btnExportPc, _btnClearAll;
 
-        // Reconstruct view
+        // Reconstruct view (accessed via reflection — module lives in a separate assembly)
         private Label _valReconModels, _valReconStatus, _valReconMesh;
         private VisualElement[] _reconThumbs;
         private Button _btnReconLoad, _btnReconPredict, _btnReconClear;
         private int _reconSelectedIdx = -1;
         private bool _reconAvailable;
+        private MonoBehaviour _cachedReconModule;
 
         // Footer
         private Label _valFps;
@@ -324,7 +325,11 @@ namespace Genesis.RoomScan.UI
                 var module = FindReconstructionModule();
                 if (module == null) return;
                 SetButtonBusy(_btnReconLoad, "Loading...");
-                await module.LoadModelsAsync();
+                var method = module.GetType().GetMethod("LoadModelsAsync",
+                    new[] { typeof(System.Threading.CancellationToken) });
+                if (method != null)
+                    await (System.Threading.Tasks.Task)method.Invoke(module,
+                        new object[] { default(System.Threading.CancellationToken) });
                 SetButtonReady(_btnReconLoad, "Load Models");
             });
 
@@ -332,12 +337,16 @@ namespace Genesis.RoomScan.UI
             {
                 var module = FindReconstructionModule();
                 if (module == null || _reconSelectedIdx < 0) return;
-                var images = module.TestImages;
-                if (_reconSelectedIdx >= images.Length || images[_reconSelectedIdx] == null) return;
+                var images = GetReconTestImages(module);
+                if (images == null || _reconSelectedIdx >= images.Length || images[_reconSelectedIdx] == null) return;
 
                 SetButtonBusy(_btnReconPredict, "Running...");
                 _btnReconPredict.SetEnabled(false);
-                await module.ReconstructAsync(images[_reconSelectedIdx]);
+                var method = module.GetType().GetMethod("ReconstructAsync",
+                    new[] { typeof(Texture2D), typeof(System.Threading.CancellationToken) });
+                if (method != null)
+                    await (System.Threading.Tasks.Task)method.Invoke(module,
+                        new object[] { images[_reconSelectedIdx], default(System.Threading.CancellationToken) });
                 SetButtonReady(_btnReconPredict, "Predict");
                 _btnReconPredict.SetEnabled(true);
             });
@@ -345,7 +354,8 @@ namespace Genesis.RoomScan.UI
             _btnReconClear?.RegisterCallback<ClickEvent>(_ =>
             {
                 var module = FindReconstructionModule();
-                module?.ClearMesh();
+                if (module == null) return;
+                module.GetType().GetMethod("ClearMesh")?.Invoke(module, null);
             });
         }
 
@@ -359,12 +369,19 @@ namespace Genesis.RoomScan.UI
             }
         }
 
+        private static Texture2D[] GetReconTestImages(MonoBehaviour module)
+        {
+            var prop = module.GetType().GetProperty("TestImages");
+            return prop?.GetValue(module) as Texture2D[];
+        }
+
         private void SetupReconThumbnails()
         {
             var module = FindReconstructionModule();
             if (module == null) return;
 
-            var images = module.TestImages;
+            var images = GetReconTestImages(module);
+            if (images == null) return;
             for (int i = 0; i < _reconThumbs.Length; i++)
             {
                 if (_reconThumbs[i] == null) continue;
@@ -373,13 +390,21 @@ namespace Genesis.RoomScan.UI
             }
         }
 
-        private IRoomScanModule FindReconstructionModule()
+        private MonoBehaviour FindReconstructionModule()
         {
+            if (_cachedReconModule != null) return _cachedReconModule;
+
             var scanner = RoomScanner.Instance;
             if (scanner == null) return null;
 
             foreach (var m in scanner.GetComponents<IRoomScanModule>())
-                if (m.ModuleName == "Object Reconstruction") return m;
+            {
+                if (m.ModuleName == "Object Reconstruction")
+                {
+                    _cachedReconModule = m as MonoBehaviour;
+                    return _cachedReconModule;
+                }
+            }
             return null;
         }
 
@@ -771,21 +796,16 @@ namespace Genesis.RoomScan.UI
             var module = FindReconstructionModule();
             if (module == null) return;
 
-            // Use reflection-free duck typing: cast to dynamic would be messy,
-            // so rely on the known interface. The module exposes Status and IsRunning.
-            var reconModule = module as MonoBehaviour;
-            if (reconModule == null) return;
-
-            var type = reconModule.GetType();
+            var type = module.GetType();
             var statusProp = type.GetProperty("Status");
             var runningProp = type.GetProperty("IsRunning");
 
             if (statusProp != null)
-                SetLabel(_valReconStatus, statusProp.GetValue(reconModule) as string ?? "Idle");
+                SetLabel(_valReconStatus, statusProp.GetValue(module) as string ?? "Idle");
 
             if (runningProp != null && _btnReconPredict != null)
             {
-                bool running = (bool)(runningProp.GetValue(reconModule) ?? false);
+                bool running = (bool)(runningProp.GetValue(module) ?? false);
                 if (!running && _btnReconPredict.text.Contains("Running"))
                     SetButtonReady(_btnReconPredict, "Predict");
             }
