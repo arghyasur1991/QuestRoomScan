@@ -459,7 +459,8 @@ namespace Genesis.RoomScan.Editor
         private static void ResetSchedulerDefaults()
         {
             AsyncHelper.SuppressYields = false;
-            InferenceScheduler.HeavyOpCooldownFrames = 1;
+            InferenceScheduler.LightOpBatchSize = 15;
+            InferenceScheduler.HeavyOpCooldownFrames = 4;
         }
 
         private ReconstructionPipeline CreatePipeline()

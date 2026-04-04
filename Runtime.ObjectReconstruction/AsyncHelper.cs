@@ -80,7 +80,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
     internal static class InferenceScheduler
     {
         /// <summary>Max light ops to batch in a single frame before yielding.</summary>
-        internal static int LightOpBatchSize = 20;
+        internal static int LightOpBatchSize = 15;
 
         /// <summary>
         /// Extra frames to yield after a heavy op for GPU cooldown.

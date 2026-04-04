@@ -28,11 +28,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [Header("Performance")]
         [SerializeField, Tooltip("Light ops (Reshape, Add, etc.) batched per frame. " +
             "Higher = faster inference, slightly lower FPS.")]
-        [Range(4, 64)] private int lightOpBatchSize = 20;
+        [Range(4, 64)] private int lightOpBatchSize = 15;
 
         [SerializeField, Tooltip("Extra frames to yield after heavy ops (MatMul, Conv, Softmax) " +
-            "so the GPU can finish before rendering. 1 = good balance, 2+ = smoother FPS.")]
-        [Range(0, 4)] private int heavyOpCooldownFrames = 1;
+            "so the GPU can finish before rendering. 4 = stable 20-30 FPS on Quest 3.")]
+        [Range(0, 8)] private int heavyOpCooldownFrames = 4;
 
         [Header("Mesh Extraction")]
         [SerializeField] private int gridResolution = 256;
