@@ -61,10 +61,40 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         internal async Task<Tensor<float>> PreprocessAsync(Texture2D image, CancellationToken ct)
         {
-            var mask = await _rembg.InferAsync(image, ct);
-            var result = ImagePreprocessor.ApplyMaskAndComposite(image, mask, 0.85f);
-            mask.Dispose();
-            return result;
+            var readable = MakeReadable(image);
+            try
+            {
+                var mask = await _rembg.InferAsync(readable, ct);
+                var result = ImagePreprocessor.ApplyMaskAndComposite(readable, mask, 0.85f);
+                mask.Dispose();
+                return result;
+            }
+            finally
+            {
+                if (readable != image)
+                    UnityEngine.Object.Destroy(readable);
+            }
+        }
+
+        /// <summary>
+        /// Returns a readable copy of the texture if it isn't already readable.
+        /// Uses GPU blit + ReadPixels to avoid requiring Read/Write on the import settings.
+        /// </summary>
+        private static Texture2D MakeReadable(Texture2D src)
+        {
+            if (src.isReadable) return src;
+
+            var rt = RenderTexture.GetTemporary(src.width, src.height, 0, RenderTextureFormat.ARGB32);
+            Graphics.Blit(src, rt);
+            RenderTexture.active = rt;
+
+            var copy = new Texture2D(src.width, src.height, TextureFormat.RGBA32, false);
+            copy.ReadPixels(new Rect(0, 0, src.width, src.height), 0, 0);
+            copy.Apply();
+
+            RenderTexture.active = null;
+            RenderTexture.ReleaseTemporary(rt);
+            return copy;
         }
 
         internal async Task<Tensor<float>> RunForwardAsync(Tensor<float> preprocessed, CancellationToken ct)
