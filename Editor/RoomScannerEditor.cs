@@ -131,6 +131,24 @@ namespace Genesis.RoomScan.Editor
                         EditorUtility.SetDirty(scanner.gameObject);
                     });
             }
+
+            var objReconType = AppDomain.CurrentDomain.GetAssemblies()
+                .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
+                .FirstOrDefault(t => t.Name == "ObjectReconstructionModule" && typeof(IRoomScanModule).IsAssignableFrom(t));
+
+            if (objReconType != null)
+            {
+                bool hasRecon = scanner.GetComponent(objReconType) != null;
+                if (hasRecon)
+                    menu.AddDisabledItem(new GUIContent("Object Reconstruction (attached)"));
+                else
+                    menu.AddItem(new GUIContent("Object Reconstruction"), false, () =>
+                    {
+                        Undo.RegisterCompleteObjectUndo(scanner.gameObject, "Add Object Reconstruction");
+                        RoomScanSetupWizard.SetupObjectReconstructionModule(scanner.gameObject);
+                        EditorUtility.SetDirty(scanner.gameObject);
+                    });
+            }
 #endif
 
             // Debug Menu — lives on a child GameObject with UIDocument

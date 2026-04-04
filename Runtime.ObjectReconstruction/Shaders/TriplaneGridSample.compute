@@ -1,0 +1,75 @@
+// GPU triplane grid sampling for object reconstruction.
+// Samples 3 feature planes (XY, XZ, YZ) at uniform 3D grid points
+// via bilinear interpolation, concatenating to (N, 3*C) features.
+//
+// Dispatch: 1D over total grid points, ceil(totalPoints / 64)
+
+#pragma kernel SampleTriplane
+
+// Scene codes: 3 planes, each C x H x W
+StructuredBuffer<float> _SceneCodes;
+uint _NumPlanes;   // 3
+uint _Channels;    // 40
+uint _PlaneH;      // 64
+uint _PlaneW;      // 64
+uint _Resolution;  // 256
+uint _TotalPoints;
+
+RWStructuredBuffer<float> _OutputFeatures;
+
+float BilinearSample(uint planeIdx, uint channel, float u, float v)
+{
+    int u0 = clamp((int)floor(u), 0, (int)_PlaneW - 1);
+    int v0 = clamp((int)floor(v), 0, (int)_PlaneH - 1);
+    int u1 = min(u0 + 1, (int)_PlaneW - 1);
+    int v1 = min(v0 + 1, (int)_PlaneH - 1);
+    float fu = u - u0;
+    float fv = v - v0;
+
+    uint base_offset = planeIdx * _Channels * _PlaneH * _PlaneW + channel * _PlaneH * _PlaneW;
+    float val00 = _SceneCodes[base_offset + v0 * _PlaneW + u0];
+    float val01 = _SceneCodes[base_offset + v1 * _PlaneW + u0];
+    float val10 = _SceneCodes[base_offset + v0 * _PlaneW + u1];
+    float val11 = _SceneCodes[base_offset + v1 * _PlaneW + u1];
+
+    return val00 * (1 - fu) * (1 - fv) +
+           val10 * fu * (1 - fv) +
+           val01 * (1 - fu) * fv +
+           val11 * fu * fv;
+}
+
+[numthreads(64, 1, 1)]
+void SampleTriplane(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _TotalPoints) return;
+
+    uint res = _Resolution;
+    uint idx = id.x;
+    uint ix = idx % res;
+    uint iy = (idx / res) % res;
+    uint iz = idx / (res * res);
+
+    float step = 1.0 / res;
+    float x = step * 0.5 - 0.5 + ix * step;
+    float y = step * 0.5 - 0.5 + iy * step;
+    float z = step * 0.5 - 0.5 + iz * step;
+
+    // UV coords for 3 planes: XY, XZ, YZ
+    float2 uvs[3];
+    uvs[0] = float2((x + 0.5) * (_PlaneW - 1), (y + 0.5) * (_PlaneH - 1));
+    uvs[1] = float2((x + 0.5) * (_PlaneW - 1), (z + 0.5) * (_PlaneH - 1));
+    uvs[2] = float2((y + 0.5) * (_PlaneW - 1), (z + 0.5) * (_PlaneH - 1));
+
+    uint featureDim = _NumPlanes * _Channels;
+    uint outBase = idx * featureDim;
+
+    [unroll]
+    for (uint p = 0; p < 3; p++)
+    {
+        for (uint c = 0; c < _Channels; c++)
+        {
+            _OutputFeatures[outBase + p * _Channels + c] =
+                BilinearSample(p, c, uvs[p].x, uvs[p].y);
+        }
+    }
+}

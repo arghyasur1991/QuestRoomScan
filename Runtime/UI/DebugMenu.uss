@@ -341,3 +341,31 @@
     -unity-text-align: middle-center;
     margin-top: 40px;
 }
+
+/* ===== RECONSTRUCTION THUMBNAIL GRID ===== */
+.recon-grid {
+    flex-direction: row;
+    flex-wrap: wrap;
+    margin-top: 4px;
+    margin-bottom: 4px;
+}
+
+.recon-thumb {
+    width: 72px;
+    height: 72px;
+    margin: 3px;
+    border-radius: 6px;
+    border-width: 2px;
+    border-color: rgba(60, 70, 90, 0.5);
+    background-color: rgba(25, 30, 45, 0.8);
+    -unity-background-scale-mode: scale-to-fit;
+}
+
+.recon-thumb:hover {
+    border-color: rgba(0, 160, 220, 0.6);
+}
+
+.recon-thumb--selected {
+    border-color: rgb(0, 200, 255);
+    border-width: 2px;
+}

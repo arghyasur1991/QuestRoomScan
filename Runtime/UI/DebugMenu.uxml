@@ -20,6 +20,7 @@
             <ui:Button name="nav-refine"      text="Refine"      class="nav-btn" />
             <ui:Button name="nav-training"    text="Gaussian Splat"    class="nav-btn" />
             <ui:Button name="nav-tools"       text="Tools"       class="nav-btn" />
+            <ui:Button name="nav-reconstruct" text="Reconstruct" class="nav-btn" />
 
             <ui:VisualElement class="nav-spacer" />
             <ui:Label name="val-fps" text="-- FPS" class="nav-fps" />
@@ -175,6 +176,40 @@
                 <ui:VisualElement class="btn-group">
                     <ui:Button name="btn-export-pc" text="Export Point Cloud" class="action-btn" />
                     <ui:Button name="btn-clear-all" text="Clear All Data" class="action-btn action-btn--danger" />
+                </ui:VisualElement>
+            </ui:VisualElement>
+
+            <!-- ── RECONSTRUCT VIEW ── -->
+            <ui:VisualElement name="view-reconstruct" class="detail-view" style="display:none;">
+                <ui:Label text="OBJECT RECONSTRUCTION" class="view-title" />
+
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Models" class="status-key" />
+                    <ui:Label name="val-recon-models" text="Not loaded" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Pipeline" class="status-key" />
+                    <ui:Label name="val-recon-status" text="Idle" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Mesh" class="status-key" />
+                    <ui:Label name="val-recon-mesh" text="--" class="status-val" />
+                </ui:VisualElement>
+
+                <ui:Label text="TEST IMAGES" class="view-subtitle" />
+                <ui:VisualElement name="recon-thumbnail-grid" class="recon-grid">
+                    <ui:VisualElement name="recon-thumb-0" class="recon-thumb" />
+                    <ui:VisualElement name="recon-thumb-1" class="recon-thumb" />
+                    <ui:VisualElement name="recon-thumb-2" class="recon-thumb" />
+                    <ui:VisualElement name="recon-thumb-3" class="recon-thumb" />
+                    <ui:VisualElement name="recon-thumb-4" class="recon-thumb" />
+                    <ui:VisualElement name="recon-thumb-5" class="recon-thumb" />
+                </ui:VisualElement>
+
+                <ui:VisualElement class="btn-group">
+                    <ui:Button name="btn-recon-load" text="Load Models" class="action-btn" />
+                    <ui:Button name="btn-recon-predict" text="Predict" class="action-btn action-btn--primary" />
+                    <ui:Button name="btn-recon-clear" text="Clear Mesh" class="action-btn action-btn--danger" />
                 </ui:VisualElement>
             </ui:VisualElement>
 

@@ -16,11 +16,11 @@ namespace Genesis.RoomScan.UI
         private bool _visible;
 
         // Nav buttons
-        private Button _navScan, _navSaved, _navRefine, _navTraining, _navTools;
+        private Button _navScan, _navSaved, _navRefine, _navTraining, _navTools, _navReconstruct;
         private Button[] _navButtons;
 
         // Views
-        private VisualElement _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools;
+        private VisualElement _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools, _viewReconstruct;
         private VisualElement[] _views;
 
         // Scan view elements
@@ -46,6 +46,13 @@ namespace Genesis.RoomScan.UI
 
         // Tools view
         private Button _btnExportPc, _btnClearAll;
+
+        // Reconstruct view
+        private Label _valReconModels, _valReconStatus, _valReconMesh;
+        private VisualElement[] _reconThumbs;
+        private Button _btnReconLoad, _btnReconPredict, _btnReconClear;
+        private int _reconSelectedIdx = -1;
+        private bool _reconAvailable;
 
         // Footer
         private Label _valFps;
@@ -134,7 +141,8 @@ namespace Genesis.RoomScan.UI
             _navRefine = _root.Q<Button>("nav-refine");
             _navTraining = _root.Q<Button>("nav-training");
             _navTools = _root.Q<Button>("nav-tools");
-            _navButtons = new[] { _navScan, _navSaved, _navRefine, _navTraining, _navTools };
+            _navReconstruct = _root.Q<Button>("nav-reconstruct");
+            _navButtons = new[] { _navScan, _navSaved, _navRefine, _navTraining, _navTools, _navReconstruct };
 
             // Views
             _viewScan = _root.Q<VisualElement>("view-scan");
@@ -142,7 +150,8 @@ namespace Genesis.RoomScan.UI
             _viewRefine = _root.Q<VisualElement>("view-refine");
             _viewTraining = _root.Q<VisualElement>("view-training");
             _viewTools = _root.Q<VisualElement>("view-tools");
-            _views = new[] { _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools };
+            _viewReconstruct = _root.Q<VisualElement>("view-reconstruct");
+            _views = new[] { _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools, _viewReconstruct };
 
             // Scan view
             _valScanning = _root.Q<Label>("val-scanning");
@@ -193,6 +202,17 @@ namespace Genesis.RoomScan.UI
             _btnExportPc = _root.Q<Button>("btn-export-pc");
             _btnClearAll = _root.Q<Button>("btn-clear-all");
 
+            // Reconstruct
+            _valReconModels = _root.Q<Label>("val-recon-models");
+            _valReconStatus = _root.Q<Label>("val-recon-status");
+            _valReconMesh = _root.Q<Label>("val-recon-mesh");
+            _btnReconLoad = _root.Q<Button>("btn-recon-load");
+            _btnReconPredict = _root.Q<Button>("btn-recon-predict");
+            _btnReconClear = _root.Q<Button>("btn-recon-clear");
+            _reconThumbs = new VisualElement[6];
+            for (int i = 0; i < 6; i++)
+                _reconThumbs[i] = _root.Q<VisualElement>($"recon-thumb-{i}");
+
             // Footer
             _valFps = _root.Q<Label>("val-fps");
         }
@@ -205,6 +225,7 @@ namespace Genesis.RoomScan.UI
             _navRefine?.RegisterCallback<ClickEvent>(_ => SelectNav(_navRefine));
             _navTraining?.RegisterCallback<ClickEvent>(_ => SelectNav(_navTraining));
             _navTools?.RegisterCallback<ClickEvent>(_ => SelectNav(_navTools));
+            _navReconstruct?.RegisterCallback<ClickEvent>(_ => SelectNav(_navReconstruct));
 
             // Scan view buttons
             _btnToggleScan?.RegisterCallback<ClickEvent>(_ =>
@@ -281,6 +302,85 @@ namespace Genesis.RoomScan.UI
                 RoomScanner.Instance.ClearAllDataAsync(() =>
                     SetButtonReady(_btnClearAll, "Clear All Data"));
             });
+
+            // Reconstruct
+            BindReconstructButtons();
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Reconstruct Bindings
+        // ─────────────────────────────────────────────────────────────
+
+        private void BindReconstructButtons()
+        {
+            for (int i = 0; i < _reconThumbs.Length; i++)
+            {
+                int idx = i;
+                _reconThumbs[i]?.RegisterCallback<ClickEvent>(_ => SelectReconThumb(idx));
+            }
+
+            _btnReconLoad?.RegisterCallback<ClickEvent>(async _ =>
+            {
+                var module = FindReconstructionModule();
+                if (module == null) return;
+                SetButtonBusy(_btnReconLoad, "Loading...");
+                await module.LoadModelsAsync();
+                SetButtonReady(_btnReconLoad, "Load Models");
+            });
+
+            _btnReconPredict?.RegisterCallback<ClickEvent>(async _ =>
+            {
+                var module = FindReconstructionModule();
+                if (module == null || _reconSelectedIdx < 0) return;
+                var images = module.TestImages;
+                if (_reconSelectedIdx >= images.Length || images[_reconSelectedIdx] == null) return;
+
+                SetButtonBusy(_btnReconPredict, "Running...");
+                _btnReconPredict.SetEnabled(false);
+                await module.ReconstructAsync(images[_reconSelectedIdx]);
+                SetButtonReady(_btnReconPredict, "Predict");
+                _btnReconPredict.SetEnabled(true);
+            });
+
+            _btnReconClear?.RegisterCallback<ClickEvent>(_ =>
+            {
+                var module = FindReconstructionModule();
+                module?.ClearMesh();
+            });
+        }
+
+        private void SelectReconThumb(int idx)
+        {
+            _reconSelectedIdx = idx;
+            for (int i = 0; i < _reconThumbs.Length; i++)
+            {
+                if (_reconThumbs[i] == null) continue;
+                _reconThumbs[i].EnableInClassList("recon-thumb--selected", i == idx);
+            }
+        }
+
+        private void SetupReconThumbnails()
+        {
+            var module = FindReconstructionModule();
+            if (module == null) return;
+
+            var images = module.TestImages;
+            for (int i = 0; i < _reconThumbs.Length; i++)
+            {
+                if (_reconThumbs[i] == null) continue;
+                if (i < images.Length && images[i] != null)
+                    _reconThumbs[i].style.backgroundImage = new StyleBackground(images[i]);
+            }
+        }
+
+        private IRoomScanModule FindReconstructionModule()
+        {
+            var scanner = RoomScanner.Instance;
+            if (scanner == null) return null;
+
+            foreach (var m in scanner.GetComponents<IRoomScanModule>())
+                if (m.ModuleName == "Object Reconstruction") return m;
+            return null;
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -292,9 +392,14 @@ namespace Genesis.RoomScan.UI
             var scanner = RoomScanner.Instance;
             _refineAvailable = scanner != null && scanner.HasTextureRefinementModule;
             _gsplatAvailable = scanner != null && scanner.GSplatProvider != null;
+            _reconAvailable = FindReconstructionModule() != null;
 
             SetNavAvailable(_navRefine, _refineAvailable);
             SetNavAvailable(_navTraining, _gsplatAvailable);
+            SetNavAvailable(_navReconstruct, _reconAvailable);
+
+            if (_reconAvailable)
+                SetupReconThumbnails();
         }
 
         private static void SetNavAvailable(Button btn, bool available)
@@ -470,6 +575,7 @@ namespace Genesis.RoomScan.UI
             RefreshScanView(scanner);
             RefreshRefineView(scanner);
             RefreshTrainingStatus();
+            RefreshReconstructStatus();
             RefreshDisabledStates(scanner);
 
             SetLabel(_valFps, $"{_currentFps:F0} FPS");
@@ -658,6 +764,31 @@ namespace Genesis.RoomScan.UI
             SetLabel(_valTrainElapsed, _cachedGSplat.ElapsedSeconds > 0 ? FormatElapsed(_cachedGSplat.ElapsedSeconds) : "--");
             SetLabel(_valTrainBackend, string.IsNullOrEmpty(_cachedGSplat.TrainingBackend) ? "--" : _cachedGSplat.TrainingBackend);
             SetLabel(_valTrainMessage, string.IsNullOrEmpty(_cachedGSplat.TrainingMessage) ? "--" : _cachedGSplat.TrainingMessage);
+        }
+
+        private void RefreshReconstructStatus()
+        {
+            var module = FindReconstructionModule();
+            if (module == null) return;
+
+            // Use reflection-free duck typing: cast to dynamic would be messy,
+            // so rely on the known interface. The module exposes Status and IsRunning.
+            var reconModule = module as MonoBehaviour;
+            if (reconModule == null) return;
+
+            var type = reconModule.GetType();
+            var statusProp = type.GetProperty("Status");
+            var runningProp = type.GetProperty("IsRunning");
+
+            if (statusProp != null)
+                SetLabel(_valReconStatus, statusProp.GetValue(reconModule) as string ?? "Idle");
+
+            if (runningProp != null && _btnReconPredict != null)
+            {
+                bool running = (bool)(runningProp.GetValue(reconModule) ?? false);
+                if (!running && _btnReconPredict.text.Contains("Running"))
+                    SetButtonReady(_btnReconPredict, "Predict");
+            }
         }
 
         private void RefreshDisabledStates(RoomScanner scanner)

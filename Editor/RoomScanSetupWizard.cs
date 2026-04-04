@@ -146,6 +146,7 @@ namespace Genesis.RoomScan.Editor
                 "debugOverlayShader");
             RefreshGSplat();
             RefreshAIDetection();
+            RefreshObjectReconstruction();
 
             _boundarylessManifest = ManifestHasBoundaryless();
             _cleartextAllowed = ManifestHasCleartextTraffic();
@@ -169,6 +170,15 @@ namespace Genesis.RoomScan.Editor
         partial void DrawAIDetectionShaderStatus(ref bool needsFix);
         partial void WireAIDetectionComponents();
         partial void SetupAIDetectionIfAvailable(GameObject root);
+
+        // Partial methods implemented in RoomScanSetupWizard.ObjectReconstruction.cs when
+        // HAS_AI_INFERENCE is defined; silent no-ops otherwise.
+        partial void RefreshObjectReconstruction();
+        partial void DrawObjectReconstructionOptionalStatus();
+        partial void CheckObjectReconstructionAnyMissing(ref bool anyMissing);
+        partial void DrawObjectReconstructionShaderStatus(ref bool needsFix);
+        partial void WireObjectReconstructionComponents();
+        partial void SetupObjectReconstructionIfAvailable(GameObject root);
 
         // =================================================================
         //  GUI
@@ -563,6 +573,7 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("KeyframeCollector", _keyframeCollector != null);
             DrawGSplatOptionalStatus();
             DrawAIDetectionOptionalStatus();
+            DrawObjectReconstructionOptionalStatus();
             StatusRowOptional("TextureRefinement", _roomScanner != null && _roomScanner.GetComponent<TextureRefinement>() != null);
             StatusRowOptional("RoomUnderstanding (MRUK bridge)", _roomScanner != null && _roomScanner.GetComponent<RoomUnderstanding>() != null);
             StatusRowOptional("CameraDebugOverlay", _cameraDebug != null);
@@ -575,6 +586,7 @@ namespace Genesis.RoomScan.Editor
                                       _inputHandler == null;
             CheckGSplatAnyMissing(ref anyOptionalMissing);
             CheckAIDetectionAnyMissing(ref anyOptionalMissing);
+            CheckObjectReconstructionAnyMissing(ref anyOptionalMissing);
             if (anyOptionalMissing)
             {
                 GUILayout.Space(2);
@@ -654,6 +666,7 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<RoomUnderstanding>(root);
             SetupGSplatIfAvailable(root);
             SetupAIDetectionIfAvailable(root);
+            SetupObjectReconstructionIfAvailable(root);
 
             // Optional components not covered by RequireComponent
             if (root.GetComponent<RoomScanInputHandler>() == null)
@@ -958,6 +971,7 @@ namespace Genesis.RoomScan.Editor
             if (_roomScanner != null)        { StatusRow("DebugOverlay shader (scene viz)", _debugOverlayWired);     needsFix |= !_debugOverlayWired; }
             DrawGSplatShaderStatus(ref needsFix);
             DrawAIDetectionShaderStatus(ref needsFix);
+            DrawObjectReconstructionShaderStatus(ref needsFix);
 
             if (needsFix)
             {
@@ -985,6 +999,7 @@ namespace Genesis.RoomScan.Editor
             WireComponent(tr);
             WireGSplatComponents();
             WireAIDetectionComponents();
+            WireObjectReconstructionComponents();
 
             var rayDriver = FindAny<UI.ControllerRayDriver>();
             WireComponent(rayDriver);
@@ -1177,6 +1192,7 @@ namespace Genesis.RoomScan.Editor
 #endif
 #if HAS_AI_INFERENCE
             WireAIDetectionComponent(component);
+            WireObjectReconstructionComponent(component);
 #endif
         }
 

@@ -1,0 +1,21 @@
+{
+    "rembg": {
+        "input_size": 320,
+        "model": "u2netp.sentis"
+    },
+    "reconstruction": {
+        "input_size": 512,
+        "model_uint8": "triposr_uint8.sentis",
+        "model_fp16": "triposr_fp16.sentis",
+        "scene_codes_shape": [1, 3, 40, 64, 64]
+    },
+    "decoder": {
+        "model": "nerf_decoder.sentis",
+        "input_dim": 120,
+        "output_dim": 4
+    },
+    "mesh_extraction": {
+        "grid_resolution": 256,
+        "density_threshold": 25.0
+    }
+}

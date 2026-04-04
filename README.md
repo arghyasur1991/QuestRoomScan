@@ -47,7 +47,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence
 - **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
-- **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools) and right detail views. Includes scan browser with load/delete per package (with delete confirmation), "Load Refined Only" for fast game-mode loading, context-sensitive artifact deletion, and dynamic button disabled states. Scene Objects toggle with live count. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
+- **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools, Reconstruct) and right detail views. Includes scan browser with load/delete per package (with delete confirmation), "Load Refined Only" for fast game-mode loading, context-sensitive artifact deletion, and dynamic button disabled states. Scene Objects toggle with live count. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
 - **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, GPU unsharp-mask sharpening, and Sobel normal map generation for real-time lighting. Produces sharp, seamless textures with surface detail from captured keyframes. `TextureRefinement` is an instance-based MonoBehaviour module — all configuration (xatlas options, bake settings, sharpen/seam parameters) is via inspector fields on the component.
 - **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
@@ -59,6 +59,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **MRUK Scene Understanding** — `RoomUnderstanding` module populates a `SceneObjectRegistry` from Meta's Mixed Reality Utility Kit anchors (walls, floor, ceiling, bed, TV, doors, windows, furniture). Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh for reliable detection. Event-driven anchor updates.
 - **Scene Object Debug Visualization** — Toggle world-space wireframe bounding boxes + billboard labels for all detected objects (MRUK + AI). Rendered via `DebugOverlay.shader` with per-source color coding (cyan = MRUK, yellow = AI). Count shown in debug menu button.
 - **Sobel Normal Maps** — GPU Sobel edge detection in `AtlasBakeCompute.compute` generates normal maps from the baked atlas. `RefinedMesh.shader` uses Sobel normals for real-time lighting on the refined mesh, adding depth and surface detail.
+- **Single-Image 3D Object Reconstruction** — Optional TripoSR-based reconstruction pipeline via Unity Inference Engine (Sentis). Captures a single image, removes background via u2netp, runs TripoSR (419M params, Uint8 quantized) to predict triplane features, extracts a vertex-colored mesh via GPU Surface Nets, and spawns it at the room center. Entire pipeline is async with multi-frame splitting — zero main-thread stalls. Models loaded on-demand from StreamingAssets (~410 MB Uint8). Test images selectable via debug menu thumbnail grid.
 
 ## Requirements
 
@@ -77,7 +78,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 | `com.unity.collections` | 2.4+ | NativeArray for plane detection |
 | `com.unity.mathematics` | 1.3+ | Math types used throughout |
 | `org.nesnausk.gaussian-splatting` | [fork](https://github.com/arghyasur1991/UnityGaussianSplatting) | **Optional** — Gaussian splat rendering with runtime PLY loading |
-| `com.unity.ai.inference` | 2.x+ | **Optional** — AI object detection (YOLO via Sentis). Assembly `Genesis.RoomScan.AIDetection` auto-activates when present |
+| `com.unity.ai.inference` | 2.x+ | **Optional** — AI object detection (YOLO) and single-image 3D reconstruction (TripoSR). Assemblies `Genesis.RoomScan.AIDetection` and `Genesis.RoomScan.ObjectReconstruction` auto-activate when present |
 
 Additional project-level dependencies (not in `package.json` — installed via Meta's SDK or XR plugin management):
 - `com.unity.xr.meta-openxr` (bridges Meta depth to AR Foundation)
@@ -123,7 +124,9 @@ For AI object detection (YOLO), add the Sentis inference package:
 }
 ```
 
-Both optional dependencies can be combined. The `Genesis.RoomScan.AIDetection` assembly auto-activates when `com.unity.ai.inference` is installed (via `HAS_AI_INFERENCE` define).
+Both optional dependencies can be combined. The `Genesis.RoomScan.AIDetection` and `Genesis.RoomScan.ObjectReconstruction` assemblies auto-activate when `com.unity.ai.inference` is installed (via `HAS_AI_INFERENCE` define).
+
+For Object Reconstruction, place ONNX source models (`triposr_fp32.onnx`, `nerf_decoder.onnx`, `u2netp.onnx`) in `Assets/Game/ObjectReconstruction/OnnxSource/`, then run **RoomScan > Setup Scene** and click **Convert Models** to generate pre-quantized `.sentis` files in StreamingAssets.
 
 ## Quick Start
 
@@ -284,8 +287,14 @@ RoomScanner (orchestrator, events, scan lifecycle)
   ├── RoomScanSession (high-level facade for game integration — see Game Integration Guide)
   ├── [separate assembly] GSplatManager + GSplatServerClient (Gaussian Splat training & rendering)
   │     └── requires KeyframeCollector (auto-added)
-  └── [separate assembly] ObjectDetectionModule + YoloDetectionModel (AI detection via Sentis)
-        └── requires PassthroughCameraProvider
+  ├── [separate assembly] ObjectDetectionModule + YoloDetectionModel (AI detection via Sentis)
+  │     └── requires PassthroughCameraProvider
+  └── [separate assembly] ObjectReconstructionModule (TripoSR inference + rembg + GPU mesh extraction)
+        ├── RembgModel (u2netp background removal)
+        ├── ReconstructionModel (TripoSR triplane prediction)
+        ├── DecoderModel (NeRF density + color)
+        ├── TriplaneGridSample.compute (bilinear feature extraction)
+        └── DensitySurfaceNets.compute (GPU isosurface from density)
 ```
 
 All optional modules implement `IRoomScanModule` and are discovered automatically at startup. The `GaussianSplatting` package dependency lives in the separate `Genesis.RoomScan.GSplat` assembly, and AI detection lives in `Genesis.RoomScan.AIDetection` — consumers who don't need either can omit them entirely.
@@ -350,16 +359,17 @@ Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. 
 |  DEBUG           |                                             |
 |                  |                                             |
 | [*] Scan         |  (Scan View / Saved Scans / Refine /       |
-| [ ] Saved Scans  |   Gaussian Splat / Tools)                    |
+| [ ] Saved Scans  |   Gaussian Splat / Tools / Reconstruct)      |
 | [ ] Refine       |                                             |
 | [ ] Gaussian Splat|                                             |
 | [ ] Tools        |                                             |
+| [ ] Reconstruct  |                                             |
 |                  |                                             |
 | 72 FPS           |                                             |
 +------------------+---------------------------------------------+
 ```
 
-> **Module-gated tabs:** The Refine and Gaussian Splat navigation tabs are automatically disabled (dimmed and non-clickable) when `TextureRefinement` or `GSplatManager` modules are not attached to the RoomScanner.
+> **Module-gated tabs:** The Refine, Gaussian Splat, and Reconstruct navigation tabs are automatically disabled (dimmed and non-clickable) when their respective modules (`TextureRefinement`, `GSplatManager`, `ObjectReconstructionModule`) are not attached to the RoomScanner.
 
 ### Views
 
@@ -381,6 +391,12 @@ Two-panel world-space UI Toolkit panel activated via **left thumbstick click**. 
 **Gaussian Splat** — GS training with server URL field, live progress, and Start/Cancel buttons. Tab is disabled when `GSplatManager` module is not attached.
 
 **Tools** — Export Point Cloud, Clear All Data.
+
+**Reconstruct** — Single-image 3D object reconstruction. Tab is disabled when `ObjectReconstructionModule` is not attached.
+- **3x2 Thumbnail Grid**: Six clickable test images with selection highlight. Click to select the input image.
+- **Load Models**: Pre-loads the three Sentis models (u2netp, TripoSR, NeRF decoder) from StreamingAssets. Optional — models are also loaded automatically on first Predict.
+- **Predict**: Runs the full pipeline on the selected image: background removal → TripoSR forward → triplane grid sample → decoder → Surface Nets mesh extraction → spawn at room center. Progress shown in status labels.
+- **Clear Mesh**: Destroys the spawned reconstruction mesh.
 
 ### Button Disabled States
 
@@ -419,6 +435,8 @@ Default values — all configurable per-component in the Inspector.
 | Triplanar color textures (3x RGBA8) | 3 x 4096 x 4096 | ~192 MB |
 | Triplanar depth textures (3x R8) | 3 x 4096 x 4096 | ~48 MB |
 | **Total GPU** | | **~419 MB** |
+| Object Reconstruction models (Uint8) | On-demand | ~410 MB |
+| Object Reconstruction density volume + buffers | On-demand | ~94 MB |
 
 **Disabling triplanar** (`TriplanarCache.enableTriplanar = false` in inspector) drops the total to **~179 MB** by skipping all six texture allocations. The mesh falls back to vertex colors (~5cm resolution), which are still adequate for real-time scanning visualization. This is a good option when:
 

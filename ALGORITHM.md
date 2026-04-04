@@ -964,3 +964,133 @@ URP unlit shader for debug visualization primitives:
 - Render queue: `Overlay`, `ZWrite Off`, `ZTest Always` (always on top)
 - Alpha blended, double-sided
 - Fragment: `vertexColor × _Color` — per-vertex color from `LineRenderer` with material tint
+
+## 12. Object Reconstruction Pipeline
+
+Single-image to vertex-colored 3D mesh via TripoSR (419M params, Uint8 quantized via Sentis `ModelQuantizer`). Entire pipeline is `async Task` with multi-frame splitting — zero main-thread stalls. Lives in the `Genesis.RoomScan.ObjectReconstruction` assembly, gated by `HAS_AI_INFERENCE`.
+
+### Pipeline Overview
+
+```
+Texture2D (test image)
+    │
+    ▼
+RembgModel (u2netp.sentis, ~4MB)
+    │  320×320 → alpha mask
+    ▼
+ImagePreprocessor
+    │  Alpha composite onto gray (0.5), resize_foreground 85%, 512×512 output
+    ▼
+ReconstructionModel (triposr_uint8.sentis, ~400MB)
+    │  512×512 → DINOv2 ViT-B/16 → Transformer1D (16 blocks) → scene_codes (1, 3, 40, 64, 64)
+    │  Multi-frame split: ScheduleIterable, forwardLayersPerFrame = 3
+    ▼
+TriplaneGridSampler
+    │  256³ query points → bilinear sample XY/XZ/YZ planes → (16.7M, 120) features
+    │  Chunked: 64K points/chunk, gridSampleChunksPerFrame = 8
+    ▼
+DecoderModel (nerf_decoder.sentis, ~170KB)
+    │  (chunk_size, 120) → MLP → (chunk_size, 4) [density, r, g, b]
+    │  Activation: trunc_exp(density - 1), sigmoid(color)
+    │  Multi-frame split: decoderLayersPerFrame = 8
+    ▼
+DensitySurfaceNets (DensitySurfaceNets.compute)
+    │  256³ density field → density threshold (25.0) → classify → emit vertices → generate indices
+    │  Single GPU dispatch (adapted from SurfaceNetsExtract.compute)
+    ▼
+Vertex Coloring
+    │  Grid sample + decoder for surface vertices only (~50K-200K)
+    ▼
+Mesh Spawning
+    │  Unity Mesh with vertex colors → MeshFilter + MeshRenderer → room center
+```
+
+### Background Removal (RembgModel)
+
+- **Input**: Test image resized to 320×320, normalized to [0,1] via `TextureConverter.ToTensor`
+- **Model**: u2netp (4.4MB .sentis), loaded from `StreamingAssets/ObjectReconstruction/`
+- **Inference**: `Worker(BackendType.GPUCompute)` with `ScheduleIterable`, 20 layers/frame
+- **Output**: 320×320 alpha mask tensor
+- **Post-processing**: Alpha composite source image onto gray (0.5, 0.5, 0.5) background
+
+### Image Preprocessing (ImagePreprocessor)
+
+- Resample alpha mask to source image dimensions (nearest-neighbor)
+- Per-pixel: `rgb_out = rgb_src × alpha + 0.5 × (1 - alpha)`
+- `resize_foreground`: Scale composited image to 85% of 512×512, center on gray canvas
+- Output: `Tensor<float>` shape (1, 3, 512, 512)
+
+### TripoSR Forward Pass (ReconstructionModel)
+
+- **Model**: 419M parameters, exported as FP32 ONNX, pre-quantized to Uint8 via `ModelQuantizer.QuantizeWeights(QuantizationType.Uint8)` in the Editor. Dequantized on-the-fly via GPU compute shaders during inference.
+- **Architecture**: DINOv2 ViT-B/16 image encoder → 257 image tokens → Transformer1D backbone (16 blocks, d=1024, 16 heads) → 1024 triplane tokens → reshape to scene codes
+- **Output**: `Tensor<float>` shape (1, 3, 40, 64, 64) — three 64×64 feature planes with 40 channels each
+- **Frame splitting**: `ScheduleIterable` with configurable `forwardLayersPerFrame` (default 3). Each `MoveNext()` dispatches one GPU layer. `await Task.Yield()` every N layers returns control for VR frame rendering.
+- **Estimated time**: ~3-8 seconds on Quest 3 (GPU-bound)
+
+### Triplane Grid Sampling (TriplaneGridSampler + TriplaneGridSample.compute)
+
+- Generate 256³ = 16,777,216 query points in normalized [-0.5, 0.5]³ space
+- For each point (x, y, z), project onto three planes:
+  - XY plane: sample at (x, y) → C features
+  - XZ plane: sample at (x, z) → C features
+  - YZ plane: sample at (y, z) → C features
+- Bilinear interpolation on each 64×64 feature plane
+- Concatenate: 3 × 40 = 120 features per query point
+- **GPU compute shader**: dispatches over all points with 64 threads/group
+- **Chunking**: CPU fallback processes in batches of 64K points, yielding every `gridSampleChunksPerFrame` chunks
+
+### NeRF Decoder (DecoderModel)
+
+- **Input**: (chunk_size, 120) triplane features
+- **Model**: Small MLP (~170KB), loaded as FP32 .sentis (too small for quantization benefit)
+- **Output**: (chunk_size, 4) — [raw_density, raw_r, raw_g, raw_b]
+- **Activations**:
+  - Density: `exp(clamp(raw_density - 1, -10, 10))` (trunc_exp from TripoSR)
+  - Color: `sigmoid(raw_color)` per channel
+- Builds a 256³ density volume and per-voxel color array
+
+### GPU Surface Nets (DensitySurfaceNets.compute)
+
+Adapted from `SurfaceNetsExtract.compute` used by the TSDF scan pipeline. The key difference: instead of finding zero-crossings in a signed distance field, it finds crossings of a configurable density threshold.
+
+**Dispatch sequence:**
+1. `ClearCounters` — reset vertex/index counts
+2. `ClassifyAndEmit` — 3D dispatch over 256³ volume. Per voxel: check 12 edges for density threshold crossings, interpolate vertex position, emit via atomic counter
+3. `BuildVertexDispatchArgs` — compute indirect dispatch dimensions for per-vertex kernels
+4. `GenerateIndices` — per vertex: check 3 axes for quad emission (same algorithm as TSDF Surface Nets)
+5. `BuildIndirectArgs` — pack index count into `DrawProceduralIndirect` args
+6. `WriteVertexColors` — apply pre-computed colors to vertex `packedColor` field
+
+**Output**: `StructuredBuffer<GPUVertex>` + `StructuredBuffer<uint>` indices — same layout as scan mesh.
+
+### Mesh Spawning
+
+- Creates a `UnityEngine.Mesh` from the extracted vertices and indices
+- Vertex colors applied directly (no texture atlas needed)
+- Spawned as a new `GameObject("ReconstructedObject")` with `MeshFilter` + `MeshRenderer`
+- Positioned at room center (1.5m forward from scanner), scaled to 0.5x
+- `ClearMesh()` destroys the previous reconstruction before spawning a new one
+
+### Performance Budget (Quest 3 at 72Hz)
+
+| Stage | Est. frames | GPU contention strategy |
+|-------|-------------|------------------------|
+| rembg | ~5-10 | 20 layers/frame, small model |
+| Preprocess | 1 | Single-frame GPU texture ops |
+| Forward | ~100-250 | **2-5 layers/frame** (bottleneck) |
+| Grid sample | ~7-10 | 8-10 chunks/frame |
+| Decoder | ~20-40 | 5-10 layers/frame |
+| Surface Nets | 1 | Single GPU dispatch |
+| Vertex color | ~5-15 | Same as grid sample + decoder |
+| Spawn | 1 | |
+
+Total wall-clock: ~3-8 seconds. All `layersPerFrame` values are `[SerializeField]` for runtime tuning.
+
+### Model Distribution
+
+- ONNX source models placed manually in `Assets/Game/ObjectReconstruction/OnnxSource/` (gitignored)
+- Editor tool (`RoomScanSetupWizard.ObjectReconstruction.cs`) converts ONNX → pre-quantized `.sentis` via `ModelQuantizer.QuantizeWeights()` + `ModelWriter.Save()`
+- `.sentis` files stored in `Assets/StreamingAssets/ObjectReconstruction/` (gitignored)
+- Runtime: `ModelLoader.Load(streamingAssetsPath)` — no `ModelAsset` references needed
+- Android: `UnityWebRequest.Get()` copies from APK to `persistentDataPath` on first access

@@ -1,0 +1,25 @@
+{
+  "name": "Genesis.RoomScan.ObjectReconstruction",
+  "rootNamespace": "Genesis.RoomScan.ObjectReconstruction",
+  "references": [
+    "Genesis.RoomScan",
+    "Unity.InferenceEngine"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [
+    "HAS_AI_INFERENCE"
+  ],
+  "versionDefines": [
+    {
+      "name": "com.unity.ai.inference",
+      "expression": "",
+      "define": "HAS_AI_INFERENCE"
+    }
+  ],
+  "noEngineReferences": false
+}
