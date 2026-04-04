@@ -27,6 +27,7 @@ namespace Genesis.RoomScan.Editor
         ObjectReconstructionModule _objectReconstruction;
         bool _reconTriplaneShaderAssigned;
         bool _reconSurfaceNetsShaderAssigned;
+        bool _reconMarchingCubesShaderAssigned;
         bool _reconVertexColorShaderAssigned;
         bool _reconTestImagesAssigned;
         bool _reconSentisModelsExist;
@@ -55,6 +56,8 @@ namespace Genesis.RoomScan.Editor
                     "triplaneGridSampleShader");
                 _reconSurfaceNetsShaderAssigned = AreFieldsAssigned(_objectReconstruction,
                     "densitySurfaceNetsShader");
+                _reconMarchingCubesShaderAssigned = AreFieldsAssigned(_objectReconstruction,
+                    "densityMarchingCubesShader");
                 _reconVertexColorShaderAssigned = AreFieldsAssigned(_objectReconstruction,
                     "vertexColorShader");
                 var so = new SerializedObject(_objectReconstruction);
@@ -65,6 +68,7 @@ namespace Genesis.RoomScan.Editor
             {
                 _reconTriplaneShaderAssigned = false;
                 _reconSurfaceNetsShaderAssigned = false;
+                _reconMarchingCubesShaderAssigned = false;
                 _reconVertexColorShaderAssigned = false;
                 _reconTestImagesAssigned = false;
             }
@@ -81,6 +85,7 @@ namespace Genesis.RoomScan.Editor
 
             StatusRow("  Triplane grid sample shader", _reconTriplaneShaderAssigned);
             StatusRow("  Density surface nets shader", _reconSurfaceNetsShaderAssigned);
+            StatusRow("  Marching cubes shader", _reconMarchingCubesShaderAssigned);
             StatusRow("  Vertex color shader", _reconVertexColorShaderAssigned);
             StatusRow("  Test images", _reconTestImagesAssigned);
 
@@ -185,6 +190,8 @@ namespace Genesis.RoomScan.Editor
                 RECON_PKG_SHADERS + "TriplaneGridSample.compute");
             AssignCompute(so, "densitySurfaceNetsShader",
                 RECON_PKG_SHADERS + "DensitySurfaceNets.compute");
+            AssignCompute(so, "densityMarchingCubesShader",
+                RECON_PKG_SHADERS + "DensityMarchingCubes.compute");
             AssignAsset<Shader>(so, "vertexColorShader",
                 RECON_PKG_SHADERS + "VertexColor.shader");
 

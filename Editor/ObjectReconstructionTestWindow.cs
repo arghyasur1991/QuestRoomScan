@@ -26,9 +26,11 @@ namespace Genesis.RoomScan.Editor
 
         [SerializeField] private Texture2D _testImage;
         [SerializeField] private int _gridResolution = 128;
+        [SerializeField] private MeshAlgorithm _meshAlgorithm = MeshAlgorithm.MarchingCubes;
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
+        private ComputeShader _marchingCubesShader;
         private Shader _vertexColorShader;
 
         private string _status = "Ready";
@@ -50,6 +52,8 @@ namespace Genesis.RoomScan.Editor
                 SHADER_DIR + "TriplaneGridSample.compute");
             _surfaceNetsShader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
                 SHADER_DIR + "DensitySurfaceNets.compute");
+            _marchingCubesShader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
+                SHADER_DIR + "DensityMarchingCubes.compute");
             _vertexColorShader = AssetDatabase.LoadAssetAtPath<Shader>(
                 SHADER_DIR + "VertexColor.shader");
 
@@ -94,6 +98,8 @@ namespace Genesis.RoomScan.Editor
             _gridResolution = EditorGUILayout.IntPopup("Grid Resolution",
                 _gridResolution, new[] { "64 (fast)", "128 (balanced)", "256 (quality)" },
                 new[] { 64, 128, 256 });
+
+            _meshAlgorithm = (MeshAlgorithm)EditorGUILayout.EnumPopup("Mesh Algorithm", _meshAlgorithm);
 
             _saveDebugImages = EditorGUILayout.Toggle("Save Debug Images", _saveDebugImages);
 
@@ -168,7 +174,8 @@ namespace Genesis.RoomScan.Editor
 
         private void DrawShaderStatus()
         {
-            bool ok = _triplaneShader != null && _surfaceNetsShader != null && _vertexColorShader != null;
+            bool ok = _triplaneShader != null && _surfaceNetsShader != null
+                && _marchingCubesShader != null && _vertexColorShader != null;
             if (!ok)
                 EditorGUILayout.HelpBox("Shaders not found at expected package path.", MessageType.Error);
         }
@@ -361,7 +368,9 @@ namespace Genesis.RoomScan.Editor
                 gridResolution: _gridResolution,
                 densityThreshold: 25f,
                 triplaneShader: _triplaneShader,
-                surfaceNetsShader: _surfaceNetsShader);
+                surfaceNetsShader: _surfaceNetsShader,
+                marchingCubesShader: _marchingCubesShader,
+                meshAlgorithm: _meshAlgorithm);
         }
 
         private bool Validate()
@@ -371,7 +380,7 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.DisplayDialog("Missing Image", "Assign a test image first.", "OK");
                 return false;
             }
-            if (_triplaneShader == null || _surfaceNetsShader == null)
+            if (_triplaneShader == null || _surfaceNetsShader == null || _marchingCubesShader == null)
             {
                 EditorUtility.DisplayDialog("Missing Shaders", "Compute shaders not found.", "OK");
                 return false;

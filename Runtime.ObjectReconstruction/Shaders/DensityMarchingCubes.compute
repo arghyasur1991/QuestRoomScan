@@ -1,0 +1,138 @@
+// GPU Marching Cubes mesh extraction from density field.
+// Uses SurfaceNetsCommon.hlsl for shared vertex struct, buffers, and helpers.
+// Matches Python TripoSR's torchmcubes algorithm for quality parity.
+//
+// Dispatch sequence:
+//   1. ClearCounters    (1 thread)
+//   2. ClassifyAndEmit  (3D over volume, ceil((res-1)/4)^3)
+//   3. BuildIndirectArgs (1 thread)
+
+#pragma kernel ClearCounters
+#pragma kernel ClassifyAndEmit
+#pragma kernel BuildIndirectArgs
+
+#include "Packages/com.genesis.roomscan/Runtime/Shaders/SurfaceNetsCommon.hlsl"
+
+float _DensityThreshold;
+
+StructuredBuffer<float> _DensityVolume;
+StructuredBuffer<int>   _EdgeTable;   // [256]
+StructuredBuffer<int>   _TriTable;    // [256 * 16]
+
+// Standard MC corner offsets (Paul Bourke convention)
+static const int3 kMCCorner[8] =
+{
+    int3(0,0,0), int3(1,0,0), int3(1,1,0), int3(0,1,0),
+    int3(0,0,1), int3(1,0,1), int3(1,1,1), int3(0,1,1)
+};
+
+static const uint kMCEdgeA[12] = { 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3 };
+static const uint kMCEdgeB[12] = { 1, 2, 3, 0, 5, 6, 7, 4, 4, 5, 6, 7 };
+
+float MCDensity(int3 coord)
+{
+    if (any(coord < 0) || any(coord >= (int3)_VoxCount)) return 0;
+    return _DensityVolume[Flatten(coord)];
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 0 : ClearCounters
+// ══════════════════════════════════════════════════════════════════
+[numthreads(1, 1, 1)]
+void ClearCounters(uint3 id : SV_DispatchThreadID)
+{
+    ClearCountersImpl();
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 1 : ClassifyAndEmit
+//  Per-cell MC: classify corners, interpolate edges, emit triangles.
+//  Standard convention: bit set if density < threshold.
+//  Winding reversed so normals point outward (from solid toward empty).
+// ══════════════════════════════════════════════════════════════════
+[numthreads(4, 4, 4)]
+void ClassifyAndEmit(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id >= _VoxCount - 1)) return;
+
+    int3 cell = (int3)id;
+
+    float corners[8];
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+        corners[i] = MCDensity(cell + kMCCorner[i]);
+
+    uint cubeIndex = 0;
+    [unroll]
+    for (uint j = 0; j < 8; j++)
+        if (corners[j] < _DensityThreshold)
+            cubeIndex |= (1u << j);
+
+    if (cubeIndex == 0 || cubeIndex == 255) return;
+
+    int edgeBits = _EdgeTable[cubeIndex];
+    if (edgeBits == 0) return;
+
+    float3 edgeVerts[12];
+    [unroll]
+    for (uint e = 0; e < 12; e++)
+    {
+        if ((edgeBits & (1 << e)) != 0)
+        {
+            uint a = kMCEdgeA[e];
+            uint b = kMCEdgeB[e];
+            float va = corners[a];
+            float vb = corners[b];
+            float denom = vb - va;
+            float t = (abs(denom) > 1e-8) ? saturate((_DensityThreshold - va) / denom) : 0.5;
+            float3 pA = (float3)(cell + kMCCorner[a]);
+            float3 pB = (float3)(cell + kMCCorner[b]);
+            edgeVerts[e] = pA + t * (pB - pA);
+        }
+    }
+
+    for (uint ti = 0; ti < 16; ti += 3)
+    {
+        int e0 = _TriTable[cubeIndex * 16 + ti];
+        if (e0 < 0) break;
+        int e1 = _TriTable[cubeIndex * 16 + ti + 1];
+        int e2 = _TriTable[cubeIndex * 16 + ti + 2];
+
+        float3 p0 = VoxelCoordToWorld(edgeVerts[e0]);
+        float3 p1 = VoxelCoordToWorld(edgeVerts[e1]);
+        float3 p2 = VoxelCoordToWorld(edgeVerts[e2]);
+
+        float3 faceNorm = normalize(cross(p1 - p0, p2 - p0));
+
+        uint baseVtx;
+        InterlockedAdd(_Counters[0], 3, baseVtx);
+        if (baseVtx + 2 >= _MaxVertices) return;
+
+        uint gray = PackColor(float4(0.5, 0.5, 0.5, 1));
+
+        GPUVertex v0, v1, v2;
+        v0.pos = p0; v0.norm = -faceNorm; v0.packedColor = gray; v0.voxelFlatIdx = 0;
+        v1.pos = p1; v1.norm = -faceNorm; v1.packedColor = gray; v1.voxelFlatIdx = 0;
+        v2.pos = p2; v2.norm = -faceNorm; v2.packedColor = gray; v2.voxelFlatIdx = 0;
+
+        // Reverse winding: standard MC normals point into solid; flip for outward
+        _Vertices[baseVtx + 0] = v0;
+        _Vertices[baseVtx + 1] = v2;
+        _Vertices[baseVtx + 2] = v1;
+
+        uint idxBase;
+        InterlockedAdd(_Counters[1], 3, idxBase);
+        _Indices[idxBase + 0] = baseVtx + 0;
+        _Indices[idxBase + 1] = baseVtx + 1;
+        _Indices[idxBase + 2] = baseVtx + 2;
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════
+//  Kernel 2 : BuildIndirectArgs
+// ══════════════════════════════════════════════════════════════════
+[numthreads(1, 1, 1)]
+void BuildIndirectArgs(uint3 id : SV_DispatchThreadID)
+{
+    BuildIndirectArgsImpl();
+}

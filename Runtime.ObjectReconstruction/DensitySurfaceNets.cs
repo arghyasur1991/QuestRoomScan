@@ -1,175 +1,166 @@
 #if HAS_AI_INFERENCE
 using System;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
-    /// CPU-side Surface Nets mesh extraction from a density field.
-    /// Adapted from the GPU SurfaceNetsExtract pipeline but runs on the CPU
-    /// since the density data is already readback from Sentis. For production,
-    /// this should be replaced with a GPU compute variant using DensitySurfaceNets.compute.
+    /// GPU Surface Nets mesh extraction from a density field.
+    /// Dispatches DensitySurfaceNets.compute for all kernels — no CPU fallback.
     /// </summary>
-    internal sealed class DensitySurfaceNets : IDisposable
+    internal sealed class DensitySurfaceNets : IMeshExtractor
     {
+        private readonly ComputeShader _shader;
         private readonly int _resolution;
         private readonly float _threshold;
-        private readonly ComputeShader _shader;
 
-        private static readonly int3[] CornerOffsets =
-        {
-            new(0, 0, 0), new(1, 0, 0), new(1, 0, 1), new(0, 0, 1),
-            new(0, 1, 0), new(1, 1, 0), new(1, 1, 1), new(0, 1, 1)
-        };
-
-        private static readonly int[] EdgeA = { 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3 };
-        private static readonly int[] EdgeB = { 1, 2, 3, 0, 5, 6, 7, 4, 4, 5, 6, 7 };
+        private readonly int _kernelClear;
+        private readonly int _kernelClassify;
+        private readonly int _kernelBuildVertArgs;
+        private readonly int _kernelGenIndices;
+        private readonly int _kernelBuildDrawArgs;
 
         internal DensitySurfaceNets(ComputeShader shader, int resolution, float threshold)
         {
             _shader = shader;
             _resolution = resolution;
             _threshold = threshold;
+
+            _kernelClear = _shader.FindKernel("ClearCounters");
+            _kernelClassify = _shader.FindKernel("ClassifyAndEmit");
+            _kernelBuildVertArgs = _shader.FindKernel("BuildVertexDispatchArgs");
+            _kernelGenIndices = _shader.FindKernel("GenerateIndices");
+            _kernelBuildDrawArgs = _shader.FindKernel("BuildIndirectArgs");
         }
 
-        /// <summary>
-        /// Extracts geometry only (no vertex colors). Returns mesh with vertices in
-        /// [-0.5, 0.5] coordinate space for a second-pass decoder color query.
-        /// Uses edge-to-edge positions matching Python's linspace(0, 1, res).
-        /// </summary>
-        internal async Task<Mesh> ExtractAsync(float[] density)
+        public async Task<Mesh> ExtractAsync(float[] density)
         {
             int res = _resolution;
-            float threshold = _threshold;
+            int totalVoxels = res * res * res;
+            int maxVerts = Mathf.Min(res * res * 10, 2_000_000);
+            int maxIndices = maxVerts * 6;
 
-            var (vertices, indices) = await Task.Run(() =>
+            var densityBuf = new ComputeBuffer(totalVoxels, sizeof(float));
+            var coordVertMap = new ComputeBuffer(totalVoxels, sizeof(int));
+            var vertexBuf = new ComputeBuffer(maxVerts, GpuVertexSize);
+            var indexBuf = new ComputeBuffer(maxIndices, sizeof(uint));
+            var counterBuf = new ComputeBuffer(2, sizeof(uint));
+            var dispatchArgsBuf = new ComputeBuffer(3, sizeof(uint), ComputeBufferType.IndirectArguments);
+            var drawArgsBuf = new ComputeBuffer(5, sizeof(uint), ComputeBufferType.IndirectArguments);
+
+            try
             {
-                var vertMap = new int[res * res * res];
-                for (int i = 0; i < vertMap.Length; i++) vertMap[i] = -1;
+                densityBuf.SetData(density);
 
-                var verts = new System.Collections.Generic.List<Vector3>();
-                var inds = new System.Collections.Generic.List<int>();
-                float invResM1 = 1f / (res - 1);
+                _shader.SetInts("_VoxCount", res, res, res);
+                _shader.SetFloat("_VoxSize", 1f / (res - 1));
+                _shader.SetInt("_MaxVertices", maxVerts);
+                _shader.SetFloat("_DensityThreshold", _threshold);
+                _shader.SetInt("_TotalVoxels", totalVoxels);
 
-                for (int z = 0; z < res - 1; z++)
-                for (int y = 0; y < res - 1; y++)
-                for (int x = 0; x < res - 1; x++)
+                BindAll(_kernelClear, densityBuf, coordVertMap, vertexBuf, indexBuf,
+                    counterBuf, dispatchArgsBuf, drawArgsBuf);
+                BindAll(_kernelClassify, densityBuf, coordVertMap, vertexBuf, indexBuf,
+                    counterBuf, dispatchArgsBuf, drawArgsBuf);
+                BindAll(_kernelBuildVertArgs, densityBuf, coordVertMap, vertexBuf, indexBuf,
+                    counterBuf, dispatchArgsBuf, drawArgsBuf);
+                BindAll(_kernelGenIndices, densityBuf, coordVertMap, vertexBuf, indexBuf,
+                    counterBuf, dispatchArgsBuf, drawArgsBuf);
+                BindAll(_kernelBuildDrawArgs, densityBuf, coordVertMap, vertexBuf, indexBuf,
+                    counterBuf, dispatchArgsBuf, drawArgsBuf);
+
+                // 1. ClearCounters
+                _shader.Dispatch(_kernelClear, 1, 1, 1);
+
+                // 2. ClassifyAndEmit (3D dispatch)
+                int groups = Mathf.CeilToInt(res / 4f);
+                _shader.Dispatch(_kernelClassify, groups, groups, groups);
+
+                // 3. BuildVertexDispatchArgs
+                _shader.Dispatch(_kernelBuildVertArgs, 1, 1, 1);
+
+                // 4. GenerateIndices (indirect dispatch over vertices)
+                _shader.DispatchIndirect(_kernelGenIndices, dispatchArgsBuf);
+
+                // 5. BuildIndirectArgs
+                _shader.Dispatch(_kernelBuildDrawArgs, 1, 1, 1);
+
+                await AsyncHelper.YieldFrame();
+
+                var counters = new uint[2];
+                counterBuf.GetData(counters);
+                int vertCount = (int)Mathf.Min(counters[0], maxVerts);
+                int idxCount = (int)Mathf.Min(counters[1], maxIndices);
+
+                if (vertCount == 0)
                 {
-                    int flatIdx = x + y * res + z * res * res;
-                    Vector3 posSum = Vector3.zero;
-                    int crossings = 0;
-
-                    for (int e = 0; e < 12; e++)
-                    {
-                        var cA = new int3(x, y, z) + CornerOffsets[EdgeA[e]];
-                        var cB = new int3(x, y, z) + CornerOffsets[EdgeB[e]];
-
-                        float dA = SampleDensity(density, cA, res);
-                        float dB = SampleDensity(density, cB, res);
-
-                        bool insideA = dA >= threshold;
-                        bool insideB = dB >= threshold;
-                        if (insideA == insideB) continue;
-
-                        float t = (dA - threshold) / (dA - dB);
-                        var posCoord = new Vector3(cA.x, cA.y, cA.z) +
-                                       t * new Vector3(cB.x - cA.x, cB.y - cA.y, cB.z - cA.z);
-                        posSum += posCoord;
-                        crossings++;
-                    }
-
-                    if (crossings < 3) continue;
-
-                    posSum /= crossings;
-                    // Map grid-index interpolated position to [-0.5, 0.5] using edge-to-edge formula
-                    var worldPos = new Vector3(
-                        posSum.x * invResM1 - 0.5f,
-                        posSum.y * invResM1 - 0.5f,
-                        posSum.z * invResM1 - 0.5f);
-
-                    vertMap[flatIdx] = verts.Count;
-                    verts.Add(worldPos);
+                    Logger.Info("[DensitySurfaceNets] No vertices generated");
+                    return new Mesh();
                 }
 
-                for (int z = 0; z < res - 1; z++)
-                for (int y = 0; y < res - 1; y++)
-                for (int x = 0; x < res - 1; x++)
+                var gpuVerts = new GPUVertex[vertCount];
+                vertexBuf.GetData(gpuVerts, 0, 0, vertCount);
+
+                var gpuIndices = new int[idxCount];
+                indexBuf.GetData(gpuIndices, 0, 0, idxCount);
+
+                await AsyncHelper.YieldFrame();
+
+                var positions = new Vector3[vertCount];
+                var normals = new Vector3[vertCount];
+                for (int i = 0; i < vertCount; i++)
                 {
-                    TryEmitQuad(vertMap, density, threshold, inds, x, y, z, 1, 0, 0, 0, 0, 1, 0, 1, 0, res);
-                    TryEmitQuad(vertMap, density, threshold, inds, x, y, z, 0, 1, 0, 1, 0, 0, 0, 0, 1, res);
-                    TryEmitQuad(vertMap, density, threshold, inds, x, y, z, 0, 0, 1, 0, 1, 0, 1, 0, 0, res);
+                    positions[i] = gpuVerts[i].pos;
+                    normals[i] = gpuVerts[i].norm;
                 }
 
-                return (verts, inds);
-            });
+                var mesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
+                mesh.SetVertices(positions);
+                mesh.SetNormals(normals);
+                mesh.SetTriangles(gpuIndices, 0);
+                mesh.RecalculateBounds();
 
-            await AsyncHelper.YieldFrame();
-
-            var mesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
-            mesh.SetVertices(vertices);
-            mesh.SetTriangles(indices, 0);
-            mesh.RecalculateNormals();
-            mesh.RecalculateBounds();
-
-            Logger.Info($"[DensitySurfaceNets] Extracted mesh: {vertices.Count} verts, {indices.Count / 3} tris");
-            return mesh;
-        }
-
-        private static void TryEmitQuad(
-            int[] vertMap, float[] density, float threshold,
-            System.Collections.Generic.List<int> indices,
-            int x, int y, int z,
-            int ax, int ay, int az,
-            int d1x, int d1y, int d1z,
-            int d2x, int d2y, int d2z,
-            int res)
-        {
-            int nx = x + ax, ny = y + ay, nz = z + az;
-            if (nx >= res || ny >= res || nz >= res) return;
-            if (x - d1x < 0 || y - d1y < 0 || z - d1z < 0) return;
-            if (x - d2x < 0 || y - d2y < 0 || z - d2z < 0) return;
-
-            float va = SampleDensity(density, new int3(x, y, z), res);
-            float vb = SampleDensity(density, new int3(nx, ny, nz), res);
-            bool insideA = va >= threshold;
-            bool insideB = vb >= threshold;
-            if (insideA == insideB) return;
-
-            int a = vertMap[Flatten(x, y, z, res)];
-            int b = vertMap[Flatten(x - d1x, y - d1y, z - d1z, res)];
-            int c = vertMap[Flatten(x - d1x - d2x, y - d1y - d2y, z - d1z - d2z, res)];
-            int d = vertMap[Flatten(x - d2x, y - d2y, z - d2z, res)];
-            if (a < 0 || b < 0 || c < 0 || d < 0) return;
-
-            if (insideA)
-            {
-                indices.Add(c); indices.Add(b); indices.Add(a);
-                indices.Add(d); indices.Add(c); indices.Add(a);
+                Logger.Info($"[DensitySurfaceNets] Extracted: {vertCount} verts, {idxCount / 3} tris");
+                return mesh;
             }
-            else
+            finally
             {
-                indices.Add(a); indices.Add(c); indices.Add(d);
-                indices.Add(a); indices.Add(b); indices.Add(c);
+                densityBuf.Release();
+                coordVertMap.Release();
+                vertexBuf.Release();
+                indexBuf.Release();
+                counterBuf.Release();
+                dispatchArgsBuf.Release();
+                drawArgsBuf.Release();
             }
         }
 
-        private static float SampleDensity(float[] density, int3 coord, int res)
+        private void BindAll(int kernel, ComputeBuffer density, ComputeBuffer coordMap,
+            ComputeBuffer verts, ComputeBuffer indices, ComputeBuffer counters,
+            ComputeBuffer dispatchArgs, ComputeBuffer drawArgs)
         {
-            int idx = coord.x + coord.y * res + coord.z * res * res;
-            if (idx < 0 || idx >= density.Length) return 0;
-            return density[idx];
+            _shader.SetBuffer(kernel, "_DensityVolume", density);
+            _shader.SetBuffer(kernel, "_CoordVertMap", coordMap);
+            _shader.SetBuffer(kernel, "_Vertices", verts);
+            _shader.SetBuffer(kernel, "_Indices", indices);
+            _shader.SetBuffer(kernel, "_Counters", counters);
+            _shader.SetBuffer(kernel, "_DispatchArgs", dispatchArgs);
+            _shader.SetBuffer(kernel, "_DrawIndirectArgs", drawArgs);
         }
-
-        private static int Flatten(int x, int y, int z, int res) => x + y * res + z * res * res;
 
         public void Dispose() { }
 
-        private struct int3
+        private const int GpuVertexSize = 32;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct GPUVertex
         {
-            public int x, y, z;
-            public int3(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
-            public static int3 operator +(int3 a, int3 b) => new(a.x + b.x, a.y + b.y, a.z + b.z);
+            public Vector3 pos;
+            public Vector3 norm;
+            public uint packedColor;
+            public uint voxelFlatIdx;
         }
     }
 }

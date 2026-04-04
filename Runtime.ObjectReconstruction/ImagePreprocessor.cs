@@ -127,7 +127,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             for (int y = 0; y < srcH; y++)
             for (int x = 0; x < srcW; x++)
             {
-                if (alpha[y * srcW + x] > 0.01f)
+                if (alpha[y * srcW + x] > 0f)
                 {
                     if (x < minX) minX = x;
                     if (x > maxX) maxX = x;

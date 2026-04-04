@@ -18,6 +18,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly float _densityThreshold;
         private readonly ComputeShader _triplaneShader;
         private readonly ComputeShader _surfaceNetsShader;
+        private readonly ComputeShader _marchingCubesShader;
+        private readonly MeshAlgorithm _meshAlgorithm;
 
         private RembgModel _rembg;
         private ReconstructionModel _reconstruction;
@@ -29,13 +31,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int gridResolution,
             float densityThreshold,
             ComputeShader triplaneShader,
-            ComputeShader surfaceNetsShader)
+            ComputeShader surfaceNetsShader,
+            ComputeShader marchingCubesShader,
+            MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes)
         {
             _frameBudgetMs = frameBudgetMs;
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
             _triplaneShader = triplaneShader;
             _surfaceNetsShader = surfaceNetsShader;
+            _marchingCubesShader = marchingCubesShader;
+            _meshAlgorithm = meshAlgorithm;
         }
 
         internal async Task LoadModelsAsync(CancellationToken ct)
@@ -90,10 +96,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
         }
 
-        /// <summary>
-        /// Quick check that the alpha channel actually varies (not all 255).
-        /// Samples a few pixels to avoid scanning the entire texture.
-        /// </summary>
         private static bool HasMeaningfulAlpha(Texture2D tex)
         {
             var pixels = tex.GetPixels32();
@@ -103,10 +105,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return false;
         }
 
-        /// <summary>
-        /// Returns a readable copy of the texture if it isn't already readable.
-        /// Uses GPU blit + ReadPixels to avoid requiring Read/Write on the import settings.
-        /// </summary>
         private static Texture2D MakeReadable(Texture2D src)
         {
             if (src.isReadable) return src;
@@ -138,14 +136,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             int totalPoints = sampler.TotalGridPoints;
             int featureDim = sampler.FeatureDim;
-            int chunkSize = 131072;
+            int chunkSize = 524288;
             var budget = new AsyncHelper.FrameBudget();
             var sw = System.Diagnostics.Stopwatch.StartNew();
 
             Logger.Info($"[Pipeline] GPU triplane sampling, res={res}, " +
                         $"{totalPoints} points, chunks of {chunkSize}");
 
-            // --- Pass 1: GPU sample grid chunks → decode → keep only density ---
+            // --- Pass 1: GPU sample grid chunks -> decode -> keep only density ---
             var density = new float[totalPoints];
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
 
@@ -167,16 +165,24 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
             Logger.Info($"[Pipeline] Pass 1 density: {sw.ElapsedMilliseconds}ms ({numChunks} chunks)");
 
-            // --- Surface nets: density → mesh geometry ---
+            // --- Mesh extraction: density -> geometry ---
             sw.Restart();
-            var surfaceNets = new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold);
-            var mesh = await surfaceNets.ExtractAsync(density);
-            surfaceNets.Dispose();
-            Logger.Info($"[Pipeline] Surface nets: {sw.ElapsedMilliseconds}ms");
+            IMeshExtractor extractor = _meshAlgorithm switch
+            {
+                MeshAlgorithm.MarchingCubes =>
+                    new MarchingCubes(_marchingCubesShader, res, _densityThreshold),
+                MeshAlgorithm.SurfaceNets =>
+                    new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold),
+                _ => new MarchingCubes(_marchingCubesShader, res, _densityThreshold)
+            };
+
+            var mesh = await extractor.ExtractAsync(density);
+            extractor.Dispose();
+            Logger.Info($"[Pipeline] {_meshAlgorithm}: {sw.ElapsedMilliseconds}ms");
             await AsyncHelper.YieldFrame();
             ct.ThrowIfCancellationRequested();
 
-            // --- Pass 2: GPU sample at mesh vertex positions → decode → vertex colors ---
+            // --- Pass 2: GPU sample at mesh vertex positions -> decode -> vertex colors ---
             sw.Restart();
             var meshVerts = mesh.vertices;
             int numVerts = meshVerts.Length;
@@ -222,7 +228,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             for (int i = 0; i < count; i++)
             {
                 float rawDensity = data[i * 4];
-                density[start + i] = Mathf.Exp(Mathf.Clamp(rawDensity - 1f, -10f, 10f));
+                density[start + i] = Mathf.Exp(Mathf.Clamp(rawDensity - 1f, -15f, 15f));
             }
         }
 

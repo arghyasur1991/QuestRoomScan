@@ -18,6 +18,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [Header("Shaders")]
         [SerializeField] internal ComputeShader triplaneGridSampleShader;
         [SerializeField] internal ComputeShader densitySurfaceNetsShader;
+        [SerializeField] internal ComputeShader densityMarchingCubesShader;
         [SerializeField] internal Shader vertexColorShader;
 
         [Header("Test Images")]
@@ -30,6 +31,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [Header("Mesh Extraction")]
         [SerializeField] private int gridResolution = 256;
         [SerializeField] private float densityThreshold = 25f;
+        [SerializeField] private MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes;
 
         public string ModuleName => "Object Reconstruction";
         public bool IsRunning => _running;
@@ -150,7 +152,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 gridResolution,
                 densityThreshold,
                 triplaneGridSampleShader,
-                densitySurfaceNetsShader);
+                densitySurfaceNetsShader,
+                densityMarchingCubesShader,
+                meshAlgorithm);
         }
 
         private void SpawnMesh(Mesh mesh)
