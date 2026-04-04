@@ -78,7 +78,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _reconstruction = new ReconstructionModel(_backend);
             await _reconstruction.PreloadAsync(ct);
 
-            _decoder = new DecoderModel(_backend);
+            _decoder = new DecoderModel(BackendType.GPUCompute);
             await _decoder.LoadAsync(ct);
         }
 
@@ -94,13 +94,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
                                 readable.format == TextureFormat.RGBAHalf ||
                                 readable.format == TextureFormat.BGRA32;
 
+                bool cpuOnly = _backend == BackendType.CPU;
+
                 if (hasAlpha && HasMeaningfulAlpha(readable))
-                    return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f);
+                    return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f, cpuOnly);
 
                 if (_rembg != null)
                 {
                     var mask = await _rembg.InferAsync(readable, ct);
-                    var result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, mask, 0.85f);
+                    var result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, mask, 0.85f, cpuOnly);
                     mask.Dispose();
                     return result;
                 }
@@ -110,7 +112,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 var maskLocal = await rembg.InferAsync(readable, ct);
                 rembg.Dispose();
                 await AsyncHelper.YieldFrame();
-                var resultLocal = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, maskLocal, 0.85f);
+                var resultLocal = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, maskLocal, 0.85f, cpuOnly);
                 maskLocal.Dispose();
                 return resultLocal;
             }
@@ -177,7 +179,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             bool ownsDecoder = decoder == null;
             if (ownsDecoder)
             {
-                decoder = new DecoderModel(_backend);
+                decoder = new DecoderModel(BackendType.GPUCompute);
                 await decoder.LoadAsync(ct);
             }
 

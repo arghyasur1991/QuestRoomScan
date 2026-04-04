@@ -16,7 +16,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// Matches Python's rembg flow: uint8 quantization → GPU bilinear upscale → composite.
         /// </summary>
         internal static async Task<Tensor<float>> ApplyMaskAndCompositeAsync(
-            Texture2D image, Tensor<float> alphaMask, float foregroundRatio)
+            Texture2D image, Tensor<float> alphaMask, float foregroundRatio,
+            bool cpuOnly = false)
         {
             int srcW = image.width;
             int srcH = image.height;
@@ -28,7 +29,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             var alpha = UpscaleMaskGPU(maskData, maskW, maskH, srcW, srcH);
 
-            return await CompositeAndResizeAsync(srcPixels, srcW, srcH, alpha, foregroundRatio);
+            return await CompositeAndResizeAsync(srcPixels, srcW, srcH, alpha, foregroundRatio, cpuOnly);
         }
 
         /// <summary>
@@ -84,7 +85,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// Matches Python's prepare_image path for RGBA inputs.
         /// </summary>
         internal static async Task<Tensor<float>> CompositeFromRGBAAsync(
-            Texture2D image, float foregroundRatio)
+            Texture2D image, float foregroundRatio, bool cpuOnly = false)
         {
             int srcW = image.width;
             int srcH = image.height;
@@ -95,7 +96,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             for (int i = 0; i < srcPixels.Length; i++)
                 alpha[i] = srcPixels[i].a / 255f;
 
-            return await CompositeAndResizeAsync(srcPixels, srcW, srcH, alpha, foregroundRatio);
+            return await CompositeAndResizeAsync(srcPixels, srcW, srcH, alpha, foregroundRatio, cpuOnly);
         }
 
         /// <summary>
@@ -103,7 +104,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// Matches Python's resize_foreground + ImagePreprocessor exactly.
         /// </summary>
         private static async Task<Tensor<float>> CompositeAndResizeAsync(
-            Color32[] srcPixels, int srcW, int srcH, float[] alpha, float ratio)
+            Color32[] srcPixels, int srcW, int srcH, float[] alpha, float ratio,
+            bool cpuOnly = false)
         {
             const int outputSize = 512;
 
@@ -131,11 +133,45 @@ namespace Genesis.RoomScan.ObjectReconstruction
             RenderTexture.active = null;
             RenderTexture.ReleaseTemporary(rt);
 
-            var tensor = new Tensor<float>(new TensorShape(1, 3, outputSize, outputSize));
-            TextureConverter.ToTensor(resized, tensor, new TextureTransform());
+            Tensor<float> tensor;
+            if (cpuOnly)
+            {
+                tensor = TextureToCpuTensor(resized, outputSize);
+            }
+            else
+            {
+                tensor = new Tensor<float>(new TensorShape(1, 3, outputSize, outputSize));
+                TextureConverter.ToTensor(resized, tensor, new TextureTransform());
+            }
             SafeDestroy(resized);
 
             return tensor;
+        }
+
+        /// <summary>
+        /// Converts a Texture2D to a CPU-backed NCHW tensor without touching the GPU.
+        /// Produces identical output to TextureConverter.ToTensor with default TextureTransform.
+        /// </summary>
+        internal static Tensor<float> TextureToCpuTensor(Texture2D tex, int size)
+        {
+            var pixels = tex.GetPixels32();
+            int channelSize = size * size;
+            var data = new float[3 * channelSize];
+
+            for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                // GetPixels32 is bottom-up, tensor is top-down (NCHW)
+                int texIdx = y * size + x;
+                int tensorY = size - 1 - y;
+                int idx = tensorY * size + x;
+                var c = pixels[texIdx];
+                data[0 * channelSize + idx] = c.r / 255f;
+                data[1 * channelSize + idx] = c.g / 255f;
+                data[2 * channelSize + idx] = c.b / 255f;
+            }
+
+            return new Tensor<float>(new TensorShape(1, 3, size, size), data);
         }
 
         /// <summary>

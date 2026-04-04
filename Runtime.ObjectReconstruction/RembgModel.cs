@@ -44,7 +44,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (!_loaded)
                 throw new InvalidOperationException("RembgModel not loaded");
 
-            var input = PrepareInput(image);
+            bool cpuPath = _backend == BackendType.CPU;
+            var input = cpuPath ? PrepareInputCpu(image) : PrepareInputGpu(image);
             await InferenceScheduler.RunAsync(_worker, _model, ct, input);
             input.Dispose();
 
@@ -53,17 +54,60 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Matches rembg preprocessing exactly:
-        /// 1. Resize to 320x320 (done by TextureConverter)
-        /// 2. Normalize to [0, max] (divide by per-image max)
-        /// 3. Subtract ImageNet mean, divide by ImageNet std
+        /// GPU path: TextureConverter uploads to GPU, normalize in-place.
         /// </summary>
-        private static Tensor<float> PrepareInput(Texture2D image)
+        private static Tensor<float> PrepareInputGpu(Texture2D image)
         {
             var tensor = new Tensor<float>(new TensorShape(1, 3, InputSize, InputSize));
             TextureConverter.ToTensor(image, tensor, new TextureTransform());
 
             var data = tensor.DownloadToArray();
+            NormalizeImageNet(data);
+            tensor.Upload(data);
+            return tensor;
+        }
+
+        /// <summary>
+        /// CPU path: extract pixels manually, produce a CPU-backed tensor (zero GPU).
+        /// Resizes via GPU Blit (texture op, not compute buffer) then reads back pixels.
+        /// </summary>
+        private static Tensor<float> PrepareInputCpu(Texture2D image)
+        {
+            // Resize to InputSize×InputSize using GPU blit (RenderTexture, not ComputeBuffer)
+            var rt = RenderTexture.GetTemporary(InputSize, InputSize, 0, RenderTextureFormat.ARGB32);
+            rt.filterMode = FilterMode.Bilinear;
+            Graphics.Blit(image, rt);
+
+            var resized = new Texture2D(InputSize, InputSize, TextureFormat.RGB24, false);
+            RenderTexture.active = rt;
+            resized.ReadPixels(new UnityEngine.Rect(0, 0, InputSize, InputSize), 0, 0);
+            resized.Apply();
+            RenderTexture.active = null;
+            RenderTexture.ReleaseTemporary(rt);
+
+            var pixels = resized.GetPixels32();
+            Object.Destroy(resized);
+
+            int channelSize = InputSize * InputSize;
+            var data = new float[3 * channelSize];
+            for (int y = 0; y < InputSize; y++)
+            for (int x = 0; x < InputSize; x++)
+            {
+                int texIdx = y * InputSize + x;
+                int tensorY = InputSize - 1 - y;
+                int idx = tensorY * InputSize + x;
+                var c = pixels[texIdx];
+                data[0 * channelSize + idx] = c.r / 255f;
+                data[1 * channelSize + idx] = c.g / 255f;
+                data[2 * channelSize + idx] = c.b / 255f;
+            }
+
+            NormalizeImageNet(data);
+            return new Tensor<float>(new TensorShape(1, 3, InputSize, InputSize), data);
+        }
+
+        private static void NormalizeImageNet(float[] data)
+        {
             float maxVal = 0f;
             for (int i = 0; i < data.Length; i++)
                 if (data[i] > maxVal) maxVal = data[i];
@@ -77,13 +121,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 for (int i = 0; i < channelSize; i++)
                     data[offset + i] = (data[offset + i] * inv - mean) / std;
             }
-
-            tensor.Upload(data);
-            return tensor;
         }
 
         /// <summary>
         /// Min-max normalization on output mask, matching rembg's post-processing.
+        /// Returns CPU-backed tensor (DownloadToArray → new Tensor with data).
         /// </summary>
         private static Tensor<float> MinMaxNormalize(Tensor<float> raw)
         {
@@ -99,9 +141,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             for (int i = 0; i < data.Length; i++)
                 data[i] = (data[i] - mi) / range;
 
-            var result = new Tensor<float>(raw.shape);
-            result.Upload(data);
-            return result;
+            return new Tensor<float>(raw.shape, data);
         }
 
         public void Dispose()
