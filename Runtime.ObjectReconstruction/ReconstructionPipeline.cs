@@ -78,7 +78,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _reconstruction = new ReconstructionModel(_backend);
             await _reconstruction.PreloadAsync(ct);
 
-            _decoder = new DecoderModel(BackendType.GPUCompute);
+            _decoder = new DecoderModel(_backend);
             await _decoder.LoadAsync(ct);
         }
 
@@ -179,10 +179,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             bool ownsDecoder = decoder == null;
             if (ownsDecoder)
             {
-                decoder = new DecoderModel(BackendType.GPUCompute);
+                decoder = new DecoderModel(_backend);
                 await decoder.LoadAsync(ct);
             }
 
+            bool cpuDecoder = _backend == BackendType.CPU;
             var densityBuf = new ComputeBuffer(totalPoints, sizeof(float));
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
 
@@ -194,14 +195,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     int start = c * chunkSize;
                     int count = Mathf.Min(chunkSize, totalPoints - start);
 
-                    using var chunkTensor = new Tensor<float>(new TensorShape(count, featureDim));
-                    var pinned = ComputeTensorData.Pin(chunkTensor);
+                    var decoderOutBuf = await RunDecoderChunkAsync(
+                        decoder, cpuDecoder, featureDim, count,
+                        (buf) => _sampler.SampleGridChunkGPU(start, count, buf), ct);
 
-                    _sampler.SampleGridChunkGPU(start, count, pinned.buffer);
-                    await decoder.RunAsync(chunkTensor, ct);
-
-                    var decoderOutBuf = decoder.PeekOutputBuffer();
                     DispatchDensityExtraction(decoderOutBuf, densityBuf, start, count);
+                    if (cpuDecoder) decoderOutBuf.Release();
                     await AsyncHelper.YieldFrame();
                 }
 
@@ -237,14 +236,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         int start = c * chunkSize;
                         int count = Mathf.Min(chunkSize, numVerts - start);
 
-                        using var chunkTensor = new Tensor<float>(new TensorShape(count, featureDim));
-                        var pinned = ComputeTensorData.Pin(chunkTensor);
+                        var decoderOutBuf = await RunDecoderChunkAsync(
+                            decoder, cpuDecoder, featureDim, count,
+                            (buf) => _sampler.SampleAtPositionsGPU(allPosBuf, start, count, buf), ct);
 
-                        _sampler.SampleAtPositionsGPU(allPosBuf, start, count, pinned.buffer);
-                        await decoder.RunAsync(chunkTensor, ct);
-
-                        var decoderOutBuf = decoder.PeekOutputBuffer();
                         DispatchColorExtraction(decoderOutBuf, colorBuf, start, count);
+                        if (cpuDecoder) decoderOutBuf.Release();
                         await AsyncHelper.YieldFrame();
                     }
 
@@ -272,6 +269,44 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 densityBuf.Release();
                 if (ownsDecoder) decoder.Dispose();
             }
+        }
+
+        /// <summary>
+        /// Runs a single decoder chunk through the appropriate path:
+        /// <list type="bullet">
+        /// <item><b>GPU</b>: Pin tensor → sampler fills GPU buffer → inference → return PeekOutputBuffer (owned by worker, caller must NOT release)</item>
+        /// <item><b>CPU</b>: Pin tensor → sampler fills GPU buffer → readback to CPU → inference via Task.Run → upload output to new ComputeBuffer (caller MUST release)</item>
+        /// </list>
+        /// </summary>
+        private async Task<ComputeBuffer> RunDecoderChunkAsync(
+            DecoderModel decoder, bool cpuDecoder, int featureDim, int count,
+            System.Action<ComputeBuffer> sampleAction, CancellationToken ct)
+        {
+            if (!cpuDecoder)
+            {
+                using var chunkTensor = new Tensor<float>(new TensorShape(count, featureDim));
+                var pinned = ComputeTensorData.Pin(chunkTensor);
+                sampleAction(pinned.buffer);
+                await decoder.RunAsync(chunkTensor, ct);
+                return decoder.PeekOutputBuffer();
+            }
+
+            // CPU path: GPU sample → readback → CPU inference → upload result
+            float[] sampledData;
+            {
+                using var gpuTensor = new Tensor<float>(new TensorShape(count, featureDim));
+                var pinned = ComputeTensorData.Pin(gpuTensor);
+                sampleAction(pinned.buffer);
+                sampledData = gpuTensor.DownloadToArray();
+            }
+
+            using var cpuTensor = new Tensor<float>(new TensorShape(count, featureDim), sampledData);
+            await decoder.RunAsync(cpuTensor, ct);
+
+            var outputData = decoder.PeekOutputArray();
+            var outputBuf = new ComputeBuffer(count * 4, sizeof(float));
+            outputBuf.SetData(outputData);
+            return outputBuf;
         }
 
         private void DispatchDensityExtraction(

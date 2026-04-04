@@ -47,13 +47,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Returns the ComputeBuffer backing the decoder's output tensor.
+        /// Returns the ComputeBuffer backing the decoder's output tensor (GPU path).
         /// Valid until the next RunAsync call. Do NOT release this buffer.
         /// </summary>
         internal ComputeBuffer PeekOutputBuffer()
         {
             var output = _worker.PeekOutput() as Tensor<float>;
             return ComputeTensorData.Pin(output).buffer;
+        }
+
+        /// <summary>
+        /// Downloads the decoder's output tensor to a CPU float array (CPU path).
+        /// Valid until the next RunAsync call.
+        /// </summary>
+        internal float[] PeekOutputArray()
+        {
+            var output = _worker.PeekOutput() as Tensor<float>;
+            return output.DownloadToArray();
         }
 
         public void Dispose()

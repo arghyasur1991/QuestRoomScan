@@ -26,6 +26,7 @@ namespace Genesis.RoomScan.Editor
         [SerializeField] private Texture2D _testImage;
         [SerializeField] private int _gridResolution = 128;
         [SerializeField] private MeshAlgorithm _meshAlgorithm = MeshAlgorithm.MarchingCubes;
+        [SerializeField] private Unity.InferenceEngine.BackendType _inferenceBackend = Unity.InferenceEngine.BackendType.GPUCompute;
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
@@ -102,6 +103,9 @@ namespace Genesis.RoomScan.Editor
                 new[] { 64, 128, 256 });
 
             _meshAlgorithm = (MeshAlgorithm)EditorGUILayout.EnumPopup("Mesh Algorithm", _meshAlgorithm);
+
+            _inferenceBackend = (Unity.InferenceEngine.BackendType)EditorGUILayout.EnumPopup(
+                "Inference Backend", _inferenceBackend);
 
             EditorGUILayout.Space(4);
             DrawShaderStatus();
@@ -275,7 +279,7 @@ namespace Genesis.RoomScan.Editor
 
             try
             {
-                rembg = new RembgModel();
+                rembg = new RembgModel(_inferenceBackend);
 
                 SetStatus("Loading u2netp...", 0.1f);
                 var sw = Stopwatch.StartNew();
@@ -405,10 +409,18 @@ namespace Genesis.RoomScan.Editor
                 }
 
                 // Convert to NCHW tensor [1,3,512,512] — same as pipeline.PreprocessAsync output
-                var tensor = new Unity.InferenceEngine.Tensor<float>(
-                    new Unity.InferenceEngine.TensorShape(1, 3, 512, 512));
-                Unity.InferenceEngine.TextureConverter.ToTensor(tex, tensor,
-                    new Unity.InferenceEngine.TextureTransform());
+                Unity.InferenceEngine.Tensor<float> tensor;
+                if (_inferenceBackend == Unity.InferenceEngine.BackendType.CPU)
+                {
+                    tensor = ImagePreprocessor.TextureToCpuTensor(tex, 512);
+                }
+                else
+                {
+                    tensor = new Unity.InferenceEngine.Tensor<float>(
+                        new Unity.InferenceEngine.TensorShape(1, 3, 512, 512));
+                    Unity.InferenceEngine.TextureConverter.ToTensor(tex, tensor,
+                        new Unity.InferenceEngine.TextureTransform());
+                }
                 DestroyImmediate(tex);
                 AppendTiming("Converted to tensor [1,3,512,512]");
 
@@ -473,7 +485,8 @@ namespace Genesis.RoomScan.Editor
                 marchingCubesShader: _marchingCubesShader,
                 postprocessShader: _postprocessShader,
                 meshAlgorithm: _meshAlgorithm,
-                preloadModels: true);
+                preloadModels: true,
+                inferenceBackend: _inferenceBackend);
         }
 
         private bool Validate()
