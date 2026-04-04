@@ -86,7 +86,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             RenderTexture.ReleaseTemporary(rt);
 
             var pixels = resized.GetPixels32();
-            Object.Destroy(resized);
+            UnityEngine.Object.Destroy(resized);
 
             int channelSize = InputSize * InputSize;
             var data = new float[3 * channelSize];
