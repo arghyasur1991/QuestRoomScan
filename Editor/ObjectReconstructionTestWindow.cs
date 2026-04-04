@@ -202,6 +202,13 @@ namespace Genesis.RoomScan.Editor
                 float loadMs = sw.ElapsedMilliseconds;
                 AppendTiming($"Load models: {loadMs:F0}ms");
 
+                if (_saveDebugImages)
+                {
+                    string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                    Directory.CreateDirectory(debugDir);
+                    ImagePreprocessor.DebugOutputDir = debugDir;
+                }
+
                 SetStatus("Removing background (rembg)...", 0.15f);
                 sw.Restart();
                 var preprocessed = await pipeline.PreprocessAsync(_testImage, _cts.Token);
@@ -213,9 +220,10 @@ namespace Genesis.RoomScan.Editor
                     string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
                     Directory.CreateDirectory(debugDir);
                     ImagePreprocessor.SaveDebugImage(preprocessed,
-                        Path.Combine(debugDir, "unity_preprocessed.png"));
+                        Path.Combine(debugDir, "unity_final_512.png"));
                     AppendTiming($"Debug images saved to {debugDir}");
                 }
+                ImagePreprocessor.DebugOutputDir = null;
 
                 SetStatus("Running TripoSR forward pass...", 0.35f);
                 sw.Restart();

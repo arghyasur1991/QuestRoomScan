@@ -12,6 +12,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
     internal static class ImagePreprocessor
     {
         /// <summary>
+        /// Set to a directory path to save intermediate debug images at each stage.
+        /// Null disables debug output. Matches Python's debug_preprocess.py stages.
+        /// </summary>
+        internal static string DebugOutputDir;
+        /// <summary>
         /// Preprocessing for images without alpha: uses rembg mask.
         /// </summary>
         internal static async Task<Tensor<float>> ApplyMaskAndCompositeAsync(
@@ -71,10 +76,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             await AsyncHelper.YieldFrame();
 
+            // Save debug: alpha mask visualization
+            if (DebugOutputDir != null)
+                SaveAlphaMask(alpha, srcW, srcH, System.IO.Path.Combine(DebugOutputDir, "unity_alpha_mask.png"));
+
             // Create texture at native composite resolution, then let GPU do bilinear resize
             var compositeTex = new Texture2D(compositeSize, compositeSize, TextureFormat.RGB24, false);
             compositeTex.SetPixels32(compositePixels);
             compositeTex.Apply();
+
+            // Save debug: native-res composite (before 512 resize)
+            if (DebugOutputDir != null)
+            {
+                var pngBytes = compositeTex.EncodeToPNG();
+                System.IO.File.WriteAllBytes(
+                    System.IO.Path.Combine(DebugOutputDir, $"unity_composite_{compositeSize}x{compositeSize}.png"), pngBytes);
+                Logger.Info($"[ImagePreprocessor] Saved native composite: {compositeSize}×{compositeSize}");
+            }
 
             // GPU bilinear resize to 512×512 via RenderTexture
             var rt = RenderTexture.GetTemporary(outputSize, outputSize, 0, RenderTextureFormat.ARGB32);
@@ -174,6 +192,49 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
 
             return (result, finalSize);
+        }
+
+        /// <summary>
+        /// Saves a rembg mask tensor as a grayscale PNG.
+        /// </summary>
+        internal static void SaveMaskDebugImage(Tensor<float> mask, string path)
+        {
+            var data = mask.DownloadToArray();
+            var shape = mask.shape;
+            int h = shape[shape.rank - 2];
+            int w = shape[shape.rank - 1];
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            var pixels = new Color32[w * h];
+
+            for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int ty = h - 1 - y;
+                byte v = (byte)(Mathf.Clamp01(data[y * w + x]) * 255);
+                pixels[ty * w + x] = new Color32(v, v, v, 255);
+            }
+
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            SafeDestroy(tex);
+            Logger.Info($"[ImagePreprocessor] Saved mask: {path} ({w}×{h})");
+        }
+
+        private static void SaveAlphaMask(float[] alpha, int w, int h, string path)
+        {
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            var pixels = new Color32[w * h];
+            for (int i = 0; i < alpha.Length; i++)
+            {
+                byte v = (byte)(Mathf.Clamp01(alpha[i]) * 255);
+                pixels[i] = new Color32(v, v, v, 255);
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            SafeDestroy(tex);
+            Logger.Info($"[ImagePreprocessor] Saved alpha mask: {path} ({w}×{h})");
         }
 
         internal static void SaveDebugImage(Tensor<float> tensor, string path)

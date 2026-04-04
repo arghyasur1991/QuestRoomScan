@@ -74,6 +74,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 Logger.Info("[Pipeline] Running rembg for background removal");
                 var mask = await _rembg.InferAsync(readable, ct);
                 await AsyncHelper.YieldFrame();
+
+                if (ImagePreprocessor.DebugOutputDir != null)
+                    ImagePreprocessor.SaveMaskDebugImage(mask,
+                        System.IO.Path.Combine(ImagePreprocessor.DebugOutputDir, "unity_rembg_mask.png"));
+
                 var result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, mask, 0.85f);
                 mask.Dispose();
                 return result;
