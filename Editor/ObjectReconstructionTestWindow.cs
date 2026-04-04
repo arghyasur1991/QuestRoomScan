@@ -131,6 +131,10 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.Space(2);
                 if (GUILayout.Button("Run from Python Tensor (.bin)"))
                     RunFromExternalTensor();
+
+                EditorGUILayout.Space(2);
+                if (GUILayout.Button("Run from ONNX directly (bypass .sentis)"))
+                    RunFromOnnxDirect();
             }
 
             if (_running)
@@ -488,6 +492,111 @@ namespace Genesis.RoomScan.Editor
             finally
             {
                 pipeline?.Dispose();
+                _running = false;
+                _cts?.Dispose();
+                _cts = null;
+                Repaint();
+            }
+        }
+
+        private async void RunFromOnnxDirect()
+        {
+            string binPath = EditorUtility.OpenFilePanel(
+                "Select preprocessed tensor .bin",
+                Path.Combine(Application.dataPath, "../debug_reconstruction"), "bin");
+            if (string.IsNullOrEmpty(binPath)) return;
+
+            _running = true;
+            _cts = new CancellationTokenSource();
+            _timingLog = "";
+            var totalSw = Stopwatch.StartNew();
+            Worker triposrWorker = null;
+
+            try
+            {
+                SetStatus("Loading tensor...", 0.05f);
+                var rawBytes = System.IO.File.ReadAllBytes(binPath);
+                var floats = new float[rawBytes.Length / sizeof(float)];
+                System.Buffer.BlockCopy(rawBytes, 0, floats, 0, rawBytes.Length);
+
+                var tensor = new Tensor<float>(new TensorShape(1, 3, 512, 512));
+                tensor.Upload(floats);
+                AppendTiming($"Loaded tensor: {binPath} ({floats.Length} floats)");
+
+                // Load ONNX directly as ModelAsset (bypasses .sentis serialization)
+                string onnxPath = "Assets/Game/ObjectReconstruction/OnnxSource/triposr_fp32.onnx";
+                SetStatus($"Loading ONNX directly: {onnxPath}...", 0.15f);
+                var sw = Stopwatch.StartNew();
+                var modelAsset = AssetDatabase.LoadAssetAtPath<ModelAsset>(onnxPath);
+                if (modelAsset == null)
+                {
+                    AssetDatabase.ImportAsset(onnxPath);
+                    modelAsset = AssetDatabase.LoadAssetAtPath<ModelAsset>(onnxPath);
+                }
+                if (modelAsset == null)
+                    throw new Exception($"Failed to import {onnxPath} as ModelAsset");
+
+                var model = ModelLoader.Load(modelAsset);
+                triposrWorker = new Worker(model, BackendType.GPUCompute);
+                AppendTiming($"ONNX model loaded (direct): {sw.ElapsedMilliseconds:F0}ms");
+
+                // Run forward pass
+                SetStatus("Running TripoSR (ONNX direct)...", 0.35f);
+                sw.Restart();
+                var budget = new AsyncHelper.FrameBudget();
+                var it = triposrWorker.ScheduleIterable(tensor);
+                while (it.MoveNext())
+                {
+                    _cts.Token.ThrowIfCancellationRequested();
+                    await budget.YieldIfNeeded();
+                }
+                tensor.Dispose();
+                AppendTiming($"Forward pass (ONNX direct): {sw.ElapsedMilliseconds:F0}ms");
+
+                // Dump scene codes
+                var sceneCodes = triposrWorker.PeekOutput() as Tensor<float>;
+                var scClone = sceneCodes.ReadbackAndClone();
+                var scFloats = scClone.DownloadToArray();
+                scClone.Dispose();
+
+                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                Directory.CreateDirectory(debugDir);
+                string scPath = Path.Combine(debugDir, "sentis_onnx_direct_scene_codes.bin");
+                var scBytes = new byte[scFloats.Length * sizeof(float)];
+                System.Buffer.BlockCopy(scFloats, 0, scBytes, 0, scBytes.Length);
+                System.IO.File.WriteAllBytes(scPath, scBytes);
+
+                var shape = sceneCodes.shape;
+                System.IO.File.WriteAllText(scPath + ".meta.txt",
+                    $"dtype=float32\nshape={shape[0]},{shape[1]},{shape[2]},{shape[3]},{shape[4]}\n");
+
+                float sMin = float.MaxValue, sMax = float.MinValue, sSum = 0;
+                for (int i = 0; i < scFloats.Length; i++)
+                {
+                    if (scFloats[i] < sMin) sMin = scFloats[i];
+                    if (scFloats[i] > sMax) sMax = scFloats[i];
+                    sSum += scFloats[i];
+                }
+                AppendTiming($"Scene codes: range=[{sMin:F2}, {sMax:F2}], " +
+                             $"mean={sSum / scFloats.Length:F4}");
+                AppendTiming($"Dumped to: {scPath}");
+
+                totalSw.Stop();
+                AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds:F0}ms ---");
+                SetStatus($"Done (ONNX direct)! Scene codes dumped for comparison.", 1f);
+            }
+            catch (OperationCanceledException)
+            {
+                SetStatus("Cancelled", 0f);
+            }
+            catch (Exception e)
+            {
+                SetStatus($"Error: {e.Message}", 0f);
+                Debug.LogException(e);
+            }
+            finally
+            {
+                triposrWorker?.Dispose();
                 _running = false;
                 _cts?.Dispose();
                 _cts = null;
