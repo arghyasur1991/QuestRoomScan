@@ -77,20 +77,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// <summary>Extra frames to yield after a heavy op for GPU cooldown.</summary>
         internal static int HeavyOpCooldownFrames = 1;
 
-        private static readonly HashSet<Type> HeavyOps = new()
+        private static readonly HashSet<string> HeavyOpNames = new()
         {
-            typeof(MatMul),
-            typeof(MatMul2D),
-            typeof(Dense),
-            typeof(DenseBatched),
-            typeof(Conv),
-            typeof(ConvTranspose),
-            typeof(Softmax),
-            typeof(LogSoftmax),
-            typeof(LayerNormalization),
-            typeof(RMSNormalization),
-            typeof(InstanceNormalization),
-            typeof(Einsum),
+            "MatMul",
+            "MatMul2D",
+            "Dense",
+            "DenseBatched",
+            "Conv",
+            "ConvTranspose",
+            "Softmax",
+            "LogSoftmax",
+            "LayerNormalization",
+            "RMSNormalization",
+            "InstanceNormalization",
+            "Einsum",
         };
 
         /// <summary>
@@ -140,7 +140,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             var schedule = new List<bool>();
             foreach (var layer in model.layers)
             {
-                bool isHeavy = HeavyOps.Contains(layer.GetType());
+                bool isHeavy = HeavyOpNames.Contains(layer.GetType().Name);
                 schedule.Add(isHeavy);
             }
             return schedule.ToArray();
