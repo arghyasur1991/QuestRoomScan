@@ -327,6 +327,12 @@ namespace Genesis.RoomScan.Editor
                 AppendTiming($"Preprocess: {sw.ElapsedMilliseconds:F0}ms");
 
                 Debug.Log($"[ReconstructionTest] Preprocessed tensor shape: {result.shape}");
+
+                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                Directory.CreateDirectory(debugDir);
+                SaveTensorAsCompositePng(result, Path.Combine(debugDir, "unity_rembg_composite.png"));
+                AppendTiming($"Composite saved to {debugDir}");
+
                 result.Dispose();
                 SetStatus("Preprocess OK!", 1f);
             }
@@ -519,6 +525,30 @@ namespace Genesis.RoomScan.Editor
             if (!string.IsNullOrEmpty(_timingLog)) _timingLog += "\n";
             _timingLog += line;
             Repaint();
+        }
+
+        private static void SaveTensorAsCompositePng(Unity.InferenceEngine.Tensor<float> tensor, string path)
+        {
+            int h = tensor.shape[2];
+            int w = tensor.shape[3];
+            var data = tensor.DownloadToArray();
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            var pixels = new Color32[w * h];
+            for (int py = 0; py < h; py++)
+            for (int px = 0; px < w; px++)
+            {
+                int ty = h - 1 - py;
+                float r = Mathf.Clamp01(data[0 * h * w + py * w + px]);
+                float g = Mathf.Clamp01(data[1 * h * w + py * w + px]);
+                float b = Mathf.Clamp01(data[2 * h * w + py * w + px]);
+                pixels[ty * w + px] = new Color32(
+                    (byte)(r * 255), (byte)(g * 255), (byte)(b * 255), 255);
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            DestroyImmediate(tex);
+            Debug.Log($"[ReconstructionTest] Saved composite PNG: {path} ({w}x{h})");
         }
 
     }
