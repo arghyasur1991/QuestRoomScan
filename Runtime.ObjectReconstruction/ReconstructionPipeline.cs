@@ -275,7 +275,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// Runs a single decoder chunk through the appropriate path:
         /// <list type="bullet">
         /// <item><b>GPU</b>: Pin tensor → sampler fills GPU buffer → inference → return PeekOutputBuffer (owned by worker, caller must NOT release)</item>
-        /// <item><b>CPU</b>: Pin tensor → sampler fills GPU buffer → readback to CPU → inference via Task.Run → upload output to new ComputeBuffer (caller MUST release)</item>
+        /// <item><b>CPU</b>: Pin tensor → sampler fills GPU buffer → readback to CPU → inference via ScheduleIterable → upload output to new ComputeBuffer (caller MUST release)</item>
         /// </list>
         /// </summary>
         private async Task<ComputeBuffer> RunDecoderChunkAsync(

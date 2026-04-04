@@ -1,7 +1,6 @@
 #if HAS_AI_INFERENCE
 using System;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -109,42 +108,41 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// <summary>
         /// Runs inference with backend-appropriate scheduling:
         /// <list type="bullet">
-        /// <item><b>CPU backend</b>: <c>worker.Schedule()</c> on a background thread via
-        ///   <c>Task.Run</c>. GPU stays 100% free for rendering — zero FPS impact.</item>
+        /// <item><b>CPU backend</b>: <c>ScheduleIterable</c> on the main thread. Burst jobs
+        ///   run on worker threads internally, GPU stays free for rendering. Yields after
+        ///   every layer. Heavy layers (MatMul) block per-layer but GPU renders between.</item>
         /// <item><b>GPU backend, throttled</b>: adaptive per-layer yielding — heavy ops get
         ///   cooldown frames, light ops are batched.</item>
         /// <item><b>GPU backend, unthrottled</b> (<see cref="HeavyOpCooldownFrames"/> = -1):
         ///   <c>worker.Schedule()</c> for maximum throughput (editor fast path).</item>
         /// </list>
         /// </summary>
-        private static bool s_reaperWarmedUp;
-
-        /// <summary>
-        /// Forces the static constructor of Sentis's internal ComputeTensorDataReaper
-        /// to run on the main thread. It creates a ComputeBuffer in its .cctor which
-        /// requires the main thread. Without this, the first worker.Schedule() call
-        /// inside Task.Run would trigger the .cctor on a background thread and crash.
-        /// </summary>
-        private static void WarmUpReaper()
-        {
-            if (s_reaperWarmedUp) return;
-            var reaperType = typeof(ComputeTensorData).Assembly
-                .GetType("Unity.InferenceEngine.ComputeTensorDataReaper");
-            if (reaperType != null)
-                RuntimeHelpers.RunClassConstructor(reaperType.TypeHandle);
-            s_reaperWarmedUp = true;
-        }
-
         internal static async Task RunAsync(
             Worker worker, Model model, CancellationToken ct, Tensor input = null)
         {
             if (worker.backendType == BackendType.CPU)
             {
-                WarmUpReaper();
-                await Task.Run(() =>
+                if (HeavyOpCooldownFrames < 0)
                 {
                     if (input != null) worker.Schedule(input); else worker.Schedule();
-                }, ct);
+                    return;
+                }
+
+                var cpuIt = input != null
+                    ? worker.ScheduleIterable(input)
+                    : worker.ScheduleIterable();
+
+                int cpuAccum = 0;
+                while (cpuIt.MoveNext())
+                {
+                    ct.ThrowIfCancellationRequested();
+                    cpuAccum++;
+                    if (cpuAccum >= LightOpBatchSize)
+                    {
+                        cpuAccum = 0;
+                        await AsyncHelper.YieldFrame();
+                    }
+                }
                 return;
             }
 
