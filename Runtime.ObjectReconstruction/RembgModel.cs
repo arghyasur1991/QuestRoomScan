@@ -17,9 +17,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private const int InputSize = 320;
         private const int RembgLayersPerFrame = 20;
 
+        private readonly BackendType _backend;
         private Worker _worker;
         private Model _model;
         private bool _loaded;
+
+        internal RembgModel(BackendType backend = BackendType.GPUCompute) => _backend = backend;
 
         internal async Task LoadAsync(CancellationToken ct)
         {
@@ -27,7 +30,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             string path = await ModelPathResolver.ResolveAsync(ModelFileName, ct);
             _model = await Task.Run(() => ModelLoader.Load(path), ct);
-            _worker = new Worker(_model, BackendType.GPUCompute);
+            _worker = new Worker(_model, _backend);
             _loaded = true;
             await AsyncHelper.YieldFrame();
         }

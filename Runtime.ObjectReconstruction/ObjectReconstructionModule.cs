@@ -26,12 +26,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [SerializeField] private Texture2D[] testImages = Array.Empty<Texture2D>();
 
         [Header("Performance")]
-        [SerializeField, Tooltip("Light ops (Reshape, Add, etc.) batched per frame. " +
-            "Higher = faster inference, slightly lower FPS.")]
+        [SerializeField, Tooltip("GPU: fast inference but competes with rendering (needs throttling). " +
+            "CPU: runs on background threads, zero FPS impact, but slower inference.")]
+        private BackendType inferenceBackend = BackendType.GPUCompute;
+
+        [SerializeField, Tooltip("Light ops (Reshape, Add, etc.) batched per frame. GPU only.")]
         [Range(4, 64)] private int lightOpBatchSize = 15;
 
-        [SerializeField, Tooltip("Extra frames to yield after heavy ops (MatMul, Conv, Softmax) " +
-            "so the GPU can finish before rendering. 4 = stable 20-30 FPS on Quest 3.")]
+        [SerializeField, Tooltip("Extra frames to yield after heavy ops (MatMul, Conv, Softmax). " +
+            "GPU only. 4 = stable 20-30 FPS on Quest 3.")]
         [Range(0, 8)] private int heavyOpCooldownFrames = 4;
 
         [Header("Mesh Extraction")]
@@ -158,7 +161,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 densitySurfaceNetsShader,
                 densityMarchingCubesShader,
                 decoderPostprocessShader,
-                meshAlgorithm);
+                meshAlgorithm,
+                inferenceBackend: inferenceBackend);
         }
 
         private void SpawnMesh(Mesh mesh)

@@ -27,6 +27,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly ComputeShader _postprocessShader;
         private readonly MeshAlgorithm _meshAlgorithm;
         private readonly bool _preloadModels;
+        private readonly BackendType _backend;
 
         private TriplaneGridSampler _sampler;
         private IMeshExtractor _extractor;
@@ -46,7 +47,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             ComputeShader marchingCubesShader,
             ComputeShader postprocessShader,
             MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes,
-            bool preloadModels = false)
+            bool preloadModels = false,
+            BackendType inferenceBackend = BackendType.GPUCompute)
         {
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
@@ -56,6 +58,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _postprocessShader = postprocessShader;
             _meshAlgorithm = meshAlgorithm;
             _preloadModels = preloadModels;
+            _backend = inferenceBackend;
 
             _postKernelDensity = _postprocessShader.FindKernel("ExtractDensity");
             _postKernelColors = _postprocessShader.FindKernel("ExtractColors");
@@ -69,13 +72,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             if (!_preloadModels) return;
 
-            _rembg = new RembgModel();
+            _rembg = new RembgModel(_backend);
             await _rembg.LoadAsync(ct);
 
-            _reconstruction = new ReconstructionModel();
+            _reconstruction = new ReconstructionModel(_backend);
             await _reconstruction.PreloadAsync(ct);
 
-            _decoder = new DecoderModel();
+            _decoder = new DecoderModel(_backend);
             await _decoder.LoadAsync(ct);
         }
 
@@ -102,7 +105,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     return result;
                 }
 
-                using var rembg = new RembgModel();
+                using var rembg = new RembgModel(_backend);
                 await rembg.LoadAsync(ct);
                 var maskLocal = await rembg.InferAsync(readable, ct);
                 rembg.Dispose();
@@ -155,7 +158,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 return;
             }
 
-            using var reconstruction = new ReconstructionModel();
+            using var reconstruction = new ReconstructionModel(_backend);
             var sceneCodesLocal = await reconstruction.RunAsync(preprocessed, ct);
             EnsureSampler();
             _sampler.CacheSceneCodesGPU(sceneCodesLocal);
@@ -174,7 +177,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             bool ownsDecoder = decoder == null;
             if (ownsDecoder)
             {
-                decoder = new DecoderModel();
+                decoder = new DecoderModel(_backend);
                 await decoder.LoadAsync(ct);
             }
 

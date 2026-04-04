@@ -16,9 +16,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
     {
         private const string ModelFileName = "ObjectReconstruction/nerf_decoder.sentis";
 
+        private readonly BackendType _backend;
         private Worker _worker;
         private Model _model;
         private bool _loaded;
+
+        internal DecoderModel(BackendType backend = BackendType.GPUCompute) => _backend = backend;
 
         internal async Task LoadAsync(CancellationToken ct)
         {
@@ -26,7 +29,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             string path = await ModelPathResolver.ResolveAsync(ModelFileName, ct);
             _model = await Task.Run(() => ModelLoader.Load(path), ct);
-            _worker = new Worker(_model, BackendType.GPUCompute);
+            _worker = new Worker(_model, _backend);
             _loaded = true;
             await AsyncHelper.YieldFrame();
         }

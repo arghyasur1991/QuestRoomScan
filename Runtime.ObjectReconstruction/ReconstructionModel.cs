@@ -21,9 +21,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private const string Part1FileName = "ObjectReconstruction/triposr_part1.sentis";
         private const string Part2FileName = "ObjectReconstruction/triposr_part2.sentis";
 
+        private readonly BackendType _backend;
         private Worker _worker1, _worker2;
         private Model _model1, _model2;
         private bool _preloaded;
+
+        internal ReconstructionModel(BackendType backend = BackendType.GPUCompute) => _backend = backend;
 
         /// <summary>Load both model halves and keep workers alive for reuse.</summary>
         internal async Task PreloadAsync(CancellationToken ct)
@@ -32,11 +35,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             string path1 = await ModelPathResolver.ResolveAsync(Part1FileName, ct);
             _model1 = await Task.Run(() => ModelLoader.Load(path1), ct);
-            _worker1 = new Worker(_model1, BackendType.GPUCompute);
+            _worker1 = new Worker(_model1, _backend);
 
             string path2 = await ModelPathResolver.ResolveAsync(Part2FileName, ct);
             _model2 = await Task.Run(() => ModelLoader.Load(path2), ct);
-            _worker2 = new Worker(_model2, BackendType.GPUCompute);
+            _worker2 = new Worker(_model2, _backend);
 
             _preloaded = true;
         }
@@ -81,7 +84,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             {
                 string path = await ModelPathResolver.ResolveAsync(Part1FileName, ct);
                 var model = await Task.Run(() => ModelLoader.Load(path), ct);
-                using var worker = new Worker(model, BackendType.GPUCompute);
+                using var worker = new Worker(model, _backend);
                 await AsyncHelper.YieldFrame();
 
                 await InferenceScheduler.RunAsync(worker, model, ct, preprocessed);
@@ -100,7 +103,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             {
                 string path = await ModelPathResolver.ResolveAsync(Part2FileName, ct);
                 var model = await Task.Run(() => ModelLoader.Load(path), ct);
-                using var worker = new Worker(model, BackendType.GPUCompute);
+                using var worker = new Worker(model, _backend);
                 await AsyncHelper.YieldFrame();
 
                 worker.SetInput("/Reshape_output_0", encoderStates);

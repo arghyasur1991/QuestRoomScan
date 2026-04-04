@@ -106,15 +106,28 @@ namespace Genesis.RoomScan.ObjectReconstruction
         };
 
         /// <summary>
-        /// Runs inference with adaptive per-layer throttling.
-        /// When <see cref="HeavyOpCooldownFrames"/> is -1, uses worker.Schedule()
-        /// for zero-yield maximum throughput (editor fast path).
-        /// Otherwise pre-scans the model to classify ops, batches light ops,
-        /// and yields extra frames after heavy ones.
+        /// Runs inference with backend-appropriate scheduling:
+        /// <list type="bullet">
+        /// <item><b>CPU backend</b>: <c>worker.Schedule()</c> on a background thread via
+        ///   <c>Task.Run</c>. GPU stays 100% free for rendering — zero FPS impact.</item>
+        /// <item><b>GPU backend, throttled</b>: adaptive per-layer yielding — heavy ops get
+        ///   cooldown frames, light ops are batched.</item>
+        /// <item><b>GPU backend, unthrottled</b> (<see cref="HeavyOpCooldownFrames"/> = -1):
+        ///   <c>worker.Schedule()</c> for maximum throughput (editor fast path).</item>
+        /// </list>
         /// </summary>
         internal static async Task RunAsync(
             Worker worker, Model model, CancellationToken ct, Tensor input = null)
         {
+            if (worker.backendType == BackendType.CPU)
+            {
+                await Task.Run(() =>
+                {
+                    if (input != null) worker.Schedule(input); else worker.Schedule();
+                }, ct);
+                return;
+            }
+
             if (HeavyOpCooldownFrames < 0)
             {
                 if (input != null) worker.Schedule(input); else worker.Schedule();
