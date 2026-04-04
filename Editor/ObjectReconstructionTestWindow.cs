@@ -283,8 +283,16 @@ namespace Genesis.RoomScan.Editor
                 var mask = await rembg.InferAsync(readable, _cts.Token);
                 AppendTiming($"Rembg inference: {sw.ElapsedMilliseconds:F0}ms");
 
-                Debug.Log($"[ReconstructionTest] Rembg mask: {mask.shape[3]}x{mask.shape[2]}");
-                AppendTiming($"Rembg inference: OK");
+                int maskW = mask.shape[3];
+                int maskH = mask.shape[2];
+                var maskData = mask.DownloadToArray();
+                Debug.Log($"[ReconstructionTest] Rembg mask: {maskW}x{maskH}");
+
+                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                Directory.CreateDirectory(debugDir);
+                SaveMaskAsPng(maskData, maskW, maskH,
+                    Path.Combine(debugDir, "unity_rembg_mask.png"));
+                AppendTiming($"Mask saved to {debugDir}");
 
                 mask.Dispose();
                 if (readable != _testImage) DestroyImmediate(readable);
@@ -549,6 +557,24 @@ namespace Genesis.RoomScan.Editor
             System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
             DestroyImmediate(tex);
             Debug.Log($"[ReconstructionTest] Saved composite PNG: {path} ({w}x{h})");
+        }
+
+        private static void SaveMaskAsPng(float[] data, int w, int h, string path)
+        {
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            var pixels = new Color32[w * h];
+            for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int ty = h - 1 - y;
+                byte v = (byte)(Mathf.Clamp01(data[y * w + x]) * 255);
+                pixels[ty * w + x] = new Color32(v, v, v, 255);
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            DestroyImmediate(tex);
+            Debug.Log($"[ReconstructionTest] Saved mask PNG: {path} ({w}x{h})");
         }
 
     }
