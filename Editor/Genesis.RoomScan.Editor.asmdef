@@ -5,6 +5,7 @@
     "Genesis.RoomScan",
     "Genesis.RoomScan.GSplat",
     "Genesis.RoomScan.AIDetection",
+    "Genesis.RoomScan.ObjectReconstruction",
     "Unity.XR.ARFoundation",
     "Unity.XR.CoreUtils",
     "Unity.RenderPipelines.Universal.Runtime",

@@ -13,7 +13,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// model inference, GPU mesh extraction, and mesh spawning.
     /// </summary>
     [DisallowMultipleComponent]
-    public class ObjectReconstructionModule : MonoBehaviour, IRoomScanModule
+    public class ObjectReconstructionModule : MonoBehaviour, IRoomScanModule, IObjectReconstructionProvider
     {
         [Header("Compute Shaders")]
         [SerializeField] internal ComputeShader triplaneGridSampleShader;

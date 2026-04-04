@@ -41,8 +41,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 throw new InvalidOperationException("RembgModel not loaded");
 
             using var input = new Tensor<float>(new TensorShape(1, 3, InputSize, InputSize));
-            TextureConverter.ToTensor(image, input, new TextureTransform()
-                .SetDimensions(InputSize, InputSize));
+            TextureConverter.ToTensor(image, input, new TextureTransform());
 
             var it = _worker.ScheduleIterable(input);
             int steps = 0;

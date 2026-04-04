@@ -58,8 +58,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             Object.Destroy(composite);
 
             var tensor = new Tensor<float>(new TensorShape(1, 3, outputSize, outputSize));
-            TextureConverter.ToTensor(resized, tensor, new TextureTransform()
-                .SetDimensions(outputSize, outputSize));
+            TextureConverter.ToTensor(resized, tensor, new TextureTransform());
             Object.Destroy(resized);
 
             return tensor;
