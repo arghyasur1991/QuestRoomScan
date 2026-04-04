@@ -471,7 +471,8 @@ namespace Genesis.RoomScan.Editor
                 surfaceNetsShader: _surfaceNetsShader,
                 marchingCubesShader: _marchingCubesShader,
                 postprocessShader: _postprocessShader,
-                meshAlgorithm: _meshAlgorithm);
+                meshAlgorithm: _meshAlgorithm,
+                preloadModels: true);
         }
 
         private bool Validate()

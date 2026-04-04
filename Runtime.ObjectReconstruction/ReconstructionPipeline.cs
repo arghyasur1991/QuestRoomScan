@@ -9,9 +9,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
     /// Orchestrates the full reconstruction pipeline: rembg -> preprocess -> forward -> mesh extraction.
-    /// All inference is async with multi-frame splitting. Post-forward mesh extraction uses a fully
-    /// GPU-resident data flow: triplane sampling, decoder inference, density/color extraction all stay
-    /// on GPU via ComputeTensorData.Pin, with a single async readback at the end.
+    /// Supports two modes:
+    /// <list type="bullet">
+    /// <item><b>Preload</b> (editor): All models loaded once via <see cref="LoadModelsAsync"/>,
+    ///   kept alive across runs. Zero per-run load/dispose overhead.</item>
+    /// <item><b>On-demand</b> (Quest): Each model loaded, executed, and disposed per stage
+    ///   to minimize peak GPU memory.</item>
+    /// </list>
     /// </summary>
     internal sealed class ReconstructionPipeline : IDisposable
     {
@@ -22,9 +26,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly ComputeShader _marchingCubesShader;
         private readonly ComputeShader _postprocessShader;
         private readonly MeshAlgorithm _meshAlgorithm;
+        private readonly bool _preloadModels;
 
         private TriplaneGridSampler _sampler;
         private IMeshExtractor _extractor;
+
+        private RembgModel _rembg;
+        private ReconstructionModel _reconstruction;
+        private DecoderModel _decoder;
 
         private int _postKernelDensity;
         private int _postKernelColors;
@@ -36,7 +45,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             ComputeShader surfaceNetsShader,
             ComputeShader marchingCubesShader,
             ComputeShader postprocessShader,
-            MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes)
+            MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes,
+            bool preloadModels = false)
         {
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
@@ -45,13 +55,29 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _marchingCubesShader = marchingCubesShader;
             _postprocessShader = postprocessShader;
             _meshAlgorithm = meshAlgorithm;
+            _preloadModels = preloadModels;
 
             _postKernelDensity = _postprocessShader.FindKernel("ExtractDensity");
             _postKernelColors = _postprocessShader.FindKernel("ExtractColors");
         }
 
-        /// <summary>No-op retained for API compatibility. Models are now loaded on-demand per stage.</summary>
-        internal Task LoadModelsAsync(CancellationToken ct) => Task.CompletedTask;
+        /// <summary>
+        /// In preload mode, loads all models and keeps workers alive.
+        /// In on-demand mode, this is a no-op.
+        /// </summary>
+        internal async Task LoadModelsAsync(CancellationToken ct)
+        {
+            if (!_preloadModels) return;
+
+            _rembg = new RembgModel();
+            await _rembg.LoadAsync(ct);
+
+            _reconstruction = new ReconstructionModel();
+            await _reconstruction.PreloadAsync(ct);
+
+            _decoder = new DecoderModel();
+            await _decoder.LoadAsync(ct);
+        }
 
         internal async Task<Tensor<float>> PreprocessAsync(Texture2D image, CancellationToken ct)
         {
@@ -68,16 +94,22 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 if (hasAlpha && HasMeaningfulAlpha(readable))
                     return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f);
 
+                if (_rembg != null)
+                {
+                    var mask = await _rembg.InferAsync(readable, ct);
+                    var result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, mask, 0.85f);
+                    mask.Dispose();
+                    return result;
+                }
+
                 using var rembg = new RembgModel();
                 await rembg.LoadAsync(ct);
-
-                var mask = await rembg.InferAsync(readable, ct);
+                var maskLocal = await rembg.InferAsync(readable, ct);
                 rembg.Dispose();
                 await AsyncHelper.YieldFrame();
-
-                var result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, mask, 0.85f);
-                mask.Dispose();
-                return result;
+                var resultLocal = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, maskLocal, 0.85f);
+                maskLocal.Dispose();
+                return resultLocal;
             }
             finally
             {
@@ -112,36 +144,40 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return copy;
         }
 
-        /// <summary>
-        /// Run the split TripoSR model (part 1 then part 2). Each half is loaded, executed,
-        /// and disposed independently. Scene codes are copied to the sampler's own buffer.
-        /// </summary>
         internal async Task RunForwardAsync(Tensor<float> preprocessed, CancellationToken ct)
         {
-            using var reconstruction = new ReconstructionModel();
-            var sceneCodes = await reconstruction.RunAsync(preprocessed, ct);
+            if (_reconstruction != null)
+            {
+                var sceneCodes = await _reconstruction.RunAsync(preprocessed, ct);
+                EnsureSampler();
+                _sampler.CacheSceneCodesGPU(sceneCodes);
+                sceneCodes.Dispose();
+                return;
+            }
 
+            using var reconstruction = new ReconstructionModel();
+            var sceneCodesLocal = await reconstruction.RunAsync(preprocessed, ct);
             EnsureSampler();
-            _sampler.CacheSceneCodesGPU(sceneCodes);
-            sceneCodes.Dispose();
+            _sampler.CacheSceneCodesGPU(sceneCodesLocal);
+            sceneCodesLocal.Dispose();
             await AsyncHelper.YieldFrame();
         }
 
-        /// <summary>
-        /// GPU-resident mesh extraction pipeline. Scene codes are already cached in the sampler.
-        /// Decoder is loaded on-demand and disposed when extraction is complete.
-        /// </summary>
         internal async Task<Mesh> ExtractMeshAsync(CancellationToken ct)
         {
             int totalPoints = _sampler.TotalGridPoints;
             int featureDim = _sampler.FeatureDim;
-            const int maxBufferBytes = 128 * 1024 * 1024; // Quest 3 per-buffer limit
+            const int maxBufferBytes = 128 * 1024 * 1024;
             int chunkSize = maxBufferBytes / (featureDim * sizeof(float));
 
-            using var decoder = new DecoderModel();
-            await decoder.LoadAsync(ct);
+            var decoder = _decoder;
+            bool ownsDecoder = decoder == null;
+            if (ownsDecoder)
+            {
+                decoder = new DecoderModel();
+                await decoder.LoadAsync(ct);
+            }
 
-            // --- Pass 1: GPU triplane → decoder → density extraction (zero CPU transfers) ---
             var densityBuf = new ComputeBuffer(totalPoints, sizeof(float));
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
 
@@ -163,13 +199,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     DispatchDensityExtraction(decoderOutBuf, densityBuf, start, count);
                     await AsyncHelper.YieldFrame();
                 }
-                // --- Mesh extraction: density buffer already on GPU ---
+
                 EnsureExtractor();
                 var mesh = await _extractor.ExtractAsync(densityBuf);
                 await AsyncHelper.YieldFrame();
                 ct.ThrowIfCancellationRequested();
 
-                // --- Pass 2: vertex color extraction (GPU-resident) ---
                 var meshVerts = mesh.vertices;
                 int numVerts = meshVerts.Length;
 
@@ -230,6 +265,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             finally
             {
                 densityBuf.Release();
+                if (ownsDecoder) decoder.Dispose();
             }
         }
 
@@ -284,8 +320,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         public void Dispose()
         {
+            _rembg?.Dispose();
+            _reconstruction?.Dispose();
+            _decoder?.Dispose();
             _sampler?.Dispose();
             _extractor?.Dispose();
+            _rembg = null;
+            _reconstruction = null;
+            _decoder = null;
             _sampler = null;
             _extractor = null;
         }
