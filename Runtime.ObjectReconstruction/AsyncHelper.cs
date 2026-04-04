@@ -1,4 +1,5 @@
 #if HAS_AI_INFERENCE
+using System;
 using System.Diagnostics;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -7,23 +8,29 @@ namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
     /// Async utilities for non-blocking inference. In Play mode, yields to the next
-    /// frame via the Unity synchronization context. In Edit mode (where Task.Yield is
-    /// a no-op), uses Task.Delay to actually release the main thread.
+    /// frame via the Unity synchronization context. In Edit mode, uses a pluggable
+    /// delegate (set by editor code) to yield via EditorApplication.delayCall.
     /// </summary>
     internal static class AsyncHelper
     {
         /// <summary>
-        /// Yields control back to Unity. Works in both Play mode and Edit mode.
+        /// Editor code sets this to provide real edit-mode yielding via
+        /// EditorApplication.delayCall. When null, falls back to Task.Yield.
+        /// </summary>
+        internal static Func<Task> EditModeYield;
+
+        /// <summary>
+        /// Yields control back to Unity. In Play mode uses Task.Yield (defers to
+        /// next frame via UnitySynchronizationContext). In Edit mode uses the
+        /// plugged-in EditorApplication.delayCall-based yield.
         /// </summary>
         internal static async Task YieldFrame()
         {
-#if UNITY_EDITOR
-            if (!Application.isPlaying)
+            if (EditModeYield != null)
             {
-                await Task.Delay(1);
+                await EditModeYield();
                 return;
             }
-#endif
             await Task.Yield();
         }
 

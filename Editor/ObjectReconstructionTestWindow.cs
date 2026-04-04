@@ -50,12 +50,31 @@ namespace Genesis.RoomScan.Editor
                 SHADER_DIR + "DensitySurfaceNets.compute");
             _vertexColorShader = AssetDatabase.LoadAssetAtPath<Shader>(
                 SHADER_DIR + "VertexColor.shader");
+
+            InstallEditModeYield();
         }
 
         private void OnDisable()
         {
             Cancel();
             CleanupPreview();
+            AsyncHelper.EditModeYield = null;
+        }
+
+        /// <summary>
+        /// Hooks AsyncHelper.EditModeYield to use EditorApplication.delayCall,
+        /// which genuinely yields to the editor's repaint/input loop.
+        /// </summary>
+        private static void InstallEditModeYield()
+        {
+            if (Application.isPlaying) return;
+
+            AsyncHelper.EditModeYield = () =>
+            {
+                var tcs = new TaskCompletionSource<bool>();
+                EditorApplication.delayCall += () => tcs.SetResult(true);
+                return tcs.Task;
+            };
         }
 
         private void OnGUI()
