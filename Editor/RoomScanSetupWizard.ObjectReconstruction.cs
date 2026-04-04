@@ -11,11 +11,23 @@ namespace Genesis.RoomScan.Editor
     {
         const string RECON_PKG_SHADERS = "Packages/com.genesis.roomscan/Runtime.ObjectReconstruction/Shaders/";
         const string RECON_ONNX_DIR = "Assets/Game/ObjectReconstruction/OnnxSource";
+        const string RECON_TEST_IMAGES_DIR = "Assets/Game/ObjectReconstruction/TestImages";
         const string RECON_SENTIS_DIR = "ObjectReconstruction";
+
+        static readonly string[] TestImageNames =
+        {
+            "backpack_raw",
+            "chair",
+            "clock_raw",
+            "hamburger",
+            "robot",
+            "shoe_raw",
+        };
 
         ObjectReconstructionModule _objectReconstruction;
         bool _reconTriplaneShaderAssigned;
         bool _reconSurfaceNetsShaderAssigned;
+        bool _reconTestImagesAssigned;
         bool _reconSentisModelsExist;
         bool _reconOnnxModelsExist;
 
@@ -42,11 +54,15 @@ namespace Genesis.RoomScan.Editor
                     "triplaneGridSampleShader");
                 _reconSurfaceNetsShaderAssigned = AreFieldsAssigned(_objectReconstruction,
                     "densitySurfaceNetsShader");
+                var so = new SerializedObject(_objectReconstruction);
+                var imgProp = so.FindProperty("testImages");
+                _reconTestImagesAssigned = imgProp != null && imgProp.arraySize > 0;
             }
             else
             {
                 _reconTriplaneShaderAssigned = false;
                 _reconSurfaceNetsShaderAssigned = false;
+                _reconTestImagesAssigned = false;
             }
 
             string sentisDir = Path.Combine(Application.streamingAssetsPath, RECON_SENTIS_DIR);
@@ -61,6 +77,7 @@ namespace Genesis.RoomScan.Editor
 
             StatusRow("  Triplane grid sample shader", _reconTriplaneShaderAssigned);
             StatusRow("  Density surface nets shader", _reconSurfaceNetsShaderAssigned);
+            StatusRow("  Test images", _reconTestImagesAssigned);
 
             if (_reconSentisModelsExist)
             {
@@ -114,6 +131,11 @@ namespace Genesis.RoomScan.Editor
                 StatusRow("Reconstruction density surface nets shader", false);
                 needsFix = true;
             }
+            if (!_reconTestImagesAssigned)
+            {
+                StatusRow("Reconstruction test images", false);
+                needsFix = true;
+            }
         }
 
         partial void WireObjectReconstructionComponents()
@@ -130,30 +152,7 @@ namespace Genesis.RoomScan.Editor
         static void WireObjectReconstructionComponent(Component component)
         {
             if (component is ObjectReconstructionModule orm)
-            {
-                var so = new SerializedObject(orm);
-
-                var triplaneProp = so.FindProperty("triplaneGridSampleShader");
-                if (triplaneProp != null && triplaneProp.objectReferenceValue == null)
-                {
-                    var shader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
-                        RECON_PKG_SHADERS + "TriplaneGridSample.compute");
-                    if (shader != null)
-                        triplaneProp.objectReferenceValue = shader;
-                }
-
-                var snProp = so.FindProperty("densitySurfaceNetsShader");
-                if (snProp != null && snProp.objectReferenceValue == null)
-                {
-                    var shader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
-                        RECON_PKG_SHADERS + "DensitySurfaceNets.compute");
-                    if (shader != null)
-                        snProp.objectReferenceValue = shader;
-                }
-
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(orm);
-            }
+                WireObjectReconstructionFields(orm);
         }
 
         internal static void SetupObjectReconstructionModule(GameObject root)
@@ -162,30 +161,51 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<ObjectReconstructionModule>(root);
 
             var module = root.GetComponent<ObjectReconstructionModule>();
-            if (module == null) return;
+            if (module != null)
+                WireObjectReconstructionFields(module);
+        }
 
-            var so = new SerializedObject(module);
+        private static void WireObjectReconstructionFields(ObjectReconstructionModule orm)
+        {
+            var so = new SerializedObject(orm);
 
-            var triplaneProp = so.FindProperty("triplaneGridSampleShader");
-            if (triplaneProp != null && triplaneProp.objectReferenceValue == null)
+            AssignCompute(so, "triplaneGridSampleShader",
+                RECON_PKG_SHADERS + "TriplaneGridSample.compute");
+            AssignCompute(so, "densitySurfaceNetsShader",
+                RECON_PKG_SHADERS + "DensitySurfaceNets.compute");
+
+            var imagesProp = so.FindProperty("testImages");
+            if (imagesProp != null && imagesProp.arraySize == 0)
             {
-                var shader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
-                    RECON_PKG_SHADERS + "TriplaneGridSample.compute");
-                if (shader != null)
-                    triplaneProp.objectReferenceValue = shader;
-            }
-
-            var snProp = so.FindProperty("densitySurfaceNetsShader");
-            if (snProp != null && snProp.objectReferenceValue == null)
-            {
-                var shader = AssetDatabase.LoadAssetAtPath<ComputeShader>(
-                    RECON_PKG_SHADERS + "DensitySurfaceNets.compute");
-                if (shader != null)
-                    snProp.objectReferenceValue = shader;
+                var found = FindTestImages();
+                if (found.Length > 0)
+                {
+                    imagesProp.arraySize = found.Length;
+                    for (int i = 0; i < found.Length; i++)
+                        imagesProp.GetArrayElementAtIndex(i).objectReferenceValue = found[i];
+                }
             }
 
             so.ApplyModifiedProperties();
-            EditorUtility.SetDirty(module);
+            EditorUtility.SetDirty(orm);
+        }
+
+        private static Texture2D[] FindTestImages()
+        {
+            var result = new System.Collections.Generic.List<Texture2D>();
+            foreach (var name in TestImageNames)
+            {
+                string[] guids = AssetDatabase.FindAssets($"{name} t:Texture2D",
+                    new[] { RECON_TEST_IMAGES_DIR });
+                if (guids.Length > 0)
+                {
+                    string path = AssetDatabase.GUIDToAssetPath(guids[0]);
+                    var tex = AssetDatabase.LoadAssetAtPath<Texture2D>(path);
+                    if (tex != null)
+                        result.Add(tex);
+                }
+            }
+            return result.ToArray();
         }
 
         private static bool AllSentisModelsExist(string dir)
