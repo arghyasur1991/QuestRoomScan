@@ -30,8 +30,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Pins scene codes tensor to GPU and binds its ComputeBuffer directly — zero-copy.
-        /// The tensor must remain alive while this sampler is in use.
+        /// Copies scene codes to an owned GPU buffer. The source tensor can be disposed
+        /// after this call — the sampler holds its own independent copy.
         /// </summary>
         internal void CacheSceneCodesGPU(Tensor<float> sceneCodes)
         {
@@ -45,9 +45,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (_ownsSceneCodeBuffer)
                 _sceneCodeBuffer?.Release();
 
-            var pinned = ComputeTensorData.Pin(sceneCodes);
-            _sceneCodeBuffer = pinned.buffer;
-            _ownsSceneCodeBuffer = false;
+            var data = sceneCodes.DownloadToArray();
+            _sceneCodeBuffer = new ComputeBuffer(data.Length, sizeof(float));
+            _sceneCodeBuffer.SetData(data);
+            _ownsSceneCodeBuffer = true;
 
             _shader.SetInt("_NumPlanes", _numPlanes);
             _shader.SetInt("_Channels", _channels);
