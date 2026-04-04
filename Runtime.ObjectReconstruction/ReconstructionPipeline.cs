@@ -109,12 +109,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int chunkSize = 131072;
             var budget = new AsyncHelper.FrameBudget();
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            bool gpu = sampler.UseGPU;
 
-            Logger.Info($"[Pipeline] Triplane sampling: {(gpu ? "GPU" : "CPU")}, " +
-                        $"res={res}, {totalPoints} points, chunks={chunkSize}");
+            Logger.Info($"[Pipeline] GPU triplane sampling, res={res}, " +
+                        $"{totalPoints} points, chunks of {chunkSize}");
 
-            // --- Pass 1: sample grid chunks → decode → keep only density ---
+            // --- Pass 1: GPU sample grid chunks → decode → keep only density ---
             var density = new float[totalPoints];
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
 
@@ -124,12 +123,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 int start = c * chunkSize;
                 int count = Mathf.Min(chunkSize, totalPoints - start);
 
-                float[] chunkData;
-                if (gpu)
-                    chunkData = sampler.SampleGridChunkGPU(start, count);
-                else
-                    chunkData = await Task.Run(() => sampler.SampleGridChunk(start, count));
-
+                var chunkData = sampler.SampleGridChunk(start, count);
                 var chunkTensor = UploadChunk(chunkData, count, featureDim);
                 var chunkResult = await _decoder.InferAsync(chunkTensor, ct);
                 chunkTensor.Dispose();
@@ -150,11 +144,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             await AsyncHelper.YieldFrame();
             ct.ThrowIfCancellationRequested();
 
-            // --- Pass 2: query decoder at mesh vertex positions for accurate surface colors ---
+            // --- Pass 2: GPU sample at mesh vertex positions → decode → vertex colors ---
             sw.Restart();
             var meshVerts = mesh.vertices;
             int numVerts = meshVerts.Length;
-            Logger.Info($"[Pipeline] Pass 2: {numVerts} vertex color queries ({(gpu ? "GPU" : "CPU")})");
+            Logger.Info($"[Pipeline] Pass 2: {numVerts} vertex color queries");
 
             var vertColors = new Color[numVerts];
             int vertChunks = (numVerts + chunkSize - 1) / chunkSize;
@@ -166,12 +160,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 var vertsSlice = new Vector3[count];
                 Array.Copy(meshVerts, start, vertsSlice, 0, count);
-
-                float[] chunkData;
-                if (gpu)
-                    chunkData = sampler.SampleFeaturesAtPositionsGPU(vertsSlice);
-                else
-                    chunkData = await Task.Run(() => sampler.SampleFeaturesAtPositions(vertsSlice));
+                var chunkData = sampler.SampleFeaturesAtPositions(vertsSlice);
 
                 var chunkTensor = UploadChunk(chunkData, count, featureDim);
                 var chunkResult = await _decoder.InferAsync(chunkTensor, ct);
