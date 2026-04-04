@@ -501,10 +501,18 @@ namespace Genesis.RoomScan.Editor
 
         private async void RunFromOnnxDirect()
         {
+            string onnxAssetPath = EditorUtility.OpenFilePanel(
+                "Select ONNX model file",
+                Path.Combine(Application.dataPath, "Game/ObjectReconstruction/OnnxSource"), "onnx");
+            if (string.IsNullOrEmpty(onnxAssetPath)) return;
+
             string binPath = EditorUtility.OpenFilePanel(
                 "Select preprocessed tensor .bin",
                 Path.Combine(Application.dataPath, "../debug_reconstruction"), "bin");
             if (string.IsNullOrEmpty(binPath)) return;
+
+            // Convert absolute path to Unity asset path
+            string onnxPath = "Assets" + onnxAssetPath.Substring(Application.dataPath.Length);
 
             _running = true;
             _cts = new CancellationTokenSource();
@@ -522,9 +530,6 @@ namespace Genesis.RoomScan.Editor
                 var tensor = new Tensor<float>(new TensorShape(1, 3, 512, 512));
                 tensor.Upload(floats);
                 AppendTiming($"Loaded tensor: {binPath} ({floats.Length} floats)");
-
-                // Load ONNX directly as ModelAsset (bypasses .sentis serialization)
-                string onnxPath = "Assets/Game/ObjectReconstruction/OnnxSource/triposr_fp32.onnx";
                 SetStatus($"Loading ONNX directly: {onnxPath}...", 0.15f);
                 var sw = Stopwatch.StartNew();
                 var modelAsset = AssetDatabase.LoadAssetAtPath<ModelAsset>(onnxPath);
@@ -561,7 +566,8 @@ namespace Genesis.RoomScan.Editor
 
                 string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
                 Directory.CreateDirectory(debugDir);
-                string scPath = Path.Combine(debugDir, "sentis_onnx_direct_scene_codes.bin");
+                string modelTag = Path.GetFileNameWithoutExtension(onnxPath).Replace(".", "_");
+                string scPath = Path.Combine(debugDir, $"sentis_direct_{modelTag}_scene_codes.bin");
                 var scBytes = new byte[scFloats.Length * sizeof(float)];
                 System.Buffer.BlockCopy(scFloats, 0, scBytes, 0, scBytes.Length);
                 System.IO.File.WriteAllBytes(scPath, scBytes);
