@@ -283,20 +283,8 @@ namespace Genesis.RoomScan.Editor
                 var mask = await rembg.InferAsync(readable, _cts.Token);
                 AppendTiming($"Rembg inference: {sw.ElapsedMilliseconds:F0}ms");
 
-                var maskData = mask.DownloadToArray();
-                int maskW = mask.shape[3];
-                int maskH = mask.shape[2];
-                Debug.Log($"[ReconstructionTest] Rembg mask: {maskW}x{maskH}, " +
-                    $"range=[{Mathf.Min(maskData)}, {Mathf.Max(maskData)}]");
-
-                // Save mask for Python comparison
-                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
-                Directory.CreateDirectory(debugDir);
-                SaveMaskAsPng(maskData, maskW, maskH,
-                    Path.Combine(debugDir, "unity_rembg_mask.png"));
-                SaveMaskBinary(maskData, maskW, maskH,
-                    Path.Combine(debugDir, "unity_rembg_mask.bin"));
-                AppendTiming($"Mask saved to {debugDir}");
+                Debug.Log($"[ReconstructionTest] Rembg mask: {mask.shape[3]}x{mask.shape[2]}");
+                AppendTiming($"Rembg inference: OK");
 
                 mask.Dispose();
                 if (readable != _testImage) DestroyImmediate(readable);
@@ -339,12 +327,6 @@ namespace Genesis.RoomScan.Editor
                 AppendTiming($"Preprocess: {sw.ElapsedMilliseconds:F0}ms");
 
                 Debug.Log($"[ReconstructionTest] Preprocessed tensor shape: {result.shape}");
-
-                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
-                Directory.CreateDirectory(debugDir);
-                SaveTensorAsCompositePng(result, Path.Combine(debugDir, "unity_rembg_composite.png"));
-                AppendTiming($"Composite saved to {debugDir}");
-
                 result.Dispose();
                 SetStatus("Preprocess OK!", 1f);
             }
@@ -537,59 +519,6 @@ namespace Genesis.RoomScan.Editor
             if (!string.IsNullOrEmpty(_timingLog)) _timingLog += "\n";
             _timingLog += line;
             Repaint();
-        }
-
-        private static void SaveTensorAsCompositePng(Unity.InferenceEngine.Tensor<float> tensor, string path)
-        {
-            int c = tensor.shape[1];
-            int h = tensor.shape[2];
-            int w = tensor.shape[3];
-            var data = tensor.DownloadToArray();
-            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
-            var pixels = new Color32[w * h];
-            for (int py = 0; py < h; py++)
-            for (int px = 0; px < w; px++)
-            {
-                int ty = h - 1 - py; // tensor top-down → texture bottom-up
-                float r = Mathf.Clamp01(data[0 * h * w + py * w + px]);
-                float g = Mathf.Clamp01(data[1 * h * w + py * w + px]);
-                float b = Mathf.Clamp01(data[2 * h * w + py * w + px]);
-                pixels[ty * w + px] = new Color32(
-                    (byte)(r * 255), (byte)(g * 255), (byte)(b * 255), 255);
-            }
-            tex.SetPixels32(pixels);
-            tex.Apply();
-            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
-            DestroyImmediate(tex);
-            Debug.Log($"[ReconstructionTest] Saved composite PNG: {path} ({w}x{h})");
-        }
-
-        private static void SaveMaskAsPng(float[] data, int w, int h, string path)
-        {
-            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
-            var pixels = new Color32[w * h];
-            for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-            {
-                int ty = h - 1 - y;
-                byte v = (byte)(Mathf.Clamp01(data[y * w + x]) * 255);
-                pixels[ty * w + x] = new Color32(v, v, v, 255);
-            }
-            tex.SetPixels32(pixels);
-            tex.Apply();
-            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
-            DestroyImmediate(tex);
-            Debug.Log($"[ReconstructionTest] Saved mask PNG: {path} ({w}x{h})");
-        }
-
-        private static void SaveMaskBinary(float[] data, int w, int h, string path)
-        {
-            var bytes = new byte[data.Length * sizeof(float)];
-            System.Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
-            System.IO.File.WriteAllBytes(path, bytes);
-            System.IO.File.WriteAllText(path + ".meta.txt",
-                $"dtype=float32\nshape=1,1,{h},{w}\n");
-            Debug.Log($"[ReconstructionTest] Saved mask binary: {path} ({data.Length} floats)");
         }
 
     }
