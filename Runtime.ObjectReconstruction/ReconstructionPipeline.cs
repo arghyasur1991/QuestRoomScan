@@ -138,7 +138,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             int totalPoints = _sampler.TotalGridPoints;
             int featureDim = _sampler.FeatureDim;
-            int chunkSize = 524288;
+            const int maxBufferBytes = 128 * 1024 * 1024; // Quest 3 per-buffer limit
+            int chunkSize = maxBufferBytes / (featureDim * sizeof(float));
             var budget = new AsyncHelper.FrameBudget();
 
             using var decoder = new DecoderModel();
