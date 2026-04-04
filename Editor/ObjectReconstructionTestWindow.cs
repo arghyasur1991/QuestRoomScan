@@ -285,6 +285,15 @@ namespace Genesis.RoomScan.Editor
                 Debug.Log($"[ReconstructionTest] Rembg mask: {maskW}x{maskH}, " +
                     $"range=[{Mathf.Min(maskData)}, {Mathf.Max(maskData)}]");
 
+                // Save mask for Python comparison
+                string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
+                Directory.CreateDirectory(debugDir);
+                SaveMaskAsPng(maskData, maskW, maskH,
+                    Path.Combine(debugDir, "unity_rembg_mask.png"));
+                SaveMaskBinary(maskData, maskW, maskH,
+                    Path.Combine(debugDir, "unity_rembg_mask.bin"));
+                AppendTiming($"Mask saved to {debugDir}");
+
                 mask.Dispose();
                 if (readable != _testImage) DestroyImmediate(readable);
                 SetStatus("Rembg OK!", 1f);
@@ -433,6 +442,34 @@ namespace Genesis.RoomScan.Editor
             if (!string.IsNullOrEmpty(_timingLog)) _timingLog += "\n";
             _timingLog += line;
             Repaint();
+        }
+
+        private static void SaveMaskAsPng(float[] data, int w, int h, string path)
+        {
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            var pixels = new Color32[w * h];
+            for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                int ty = h - 1 - y;
+                byte v = (byte)(Mathf.Clamp01(data[y * w + x]) * 255);
+                pixels[ty * w + x] = new Color32(v, v, v, 255);
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            DestroyImmediate(tex);
+            Debug.Log($"[ReconstructionTest] Saved mask PNG: {path} ({w}x{h})");
+        }
+
+        private static void SaveMaskBinary(float[] data, int w, int h, string path)
+        {
+            var bytes = new byte[data.Length * sizeof(float)];
+            System.Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+            System.IO.File.WriteAllBytes(path, bytes);
+            System.IO.File.WriteAllText(path + ".meta.txt",
+                $"dtype=float32\nshape=1,1,{h},{w}\n");
+            Debug.Log($"[ReconstructionTest] Saved mask binary: {path} ({data.Length} floats)");
         }
 
     }
