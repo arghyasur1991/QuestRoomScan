@@ -100,32 +100,29 @@ namespace Genesis.RoomScan.ObjectReconstruction
         internal async Task<Mesh> ExtractMeshAsync(Tensor<float> sceneCodes, CancellationToken ct)
         {
             int res = _gridResolution;
-            int totalPoints = res * res * res;
-            int featureDim = 120; // 3 planes * 40 channels
-
-            // --- Pass 1: grid sample → decoder → density → surface nets geometry ---
             var sampler = new TriplaneGridSampler(_triplaneShader, res);
-            var featuresTensor = sampler.SampleFeatures(sceneCodes);
+            sampler.CacheSceneCodes(sceneCodes);
             await AsyncHelper.YieldFrame();
-            var featuresData = featuresTensor.DownloadToArray();
-            featuresTensor.Dispose();
-            await AsyncHelper.YieldFrame();
-            ct.ThrowIfCancellationRequested();
 
-            int chunkSize = 65536;
-            var density = new float[totalPoints];
+            int totalPoints = sampler.TotalGridPoints;
+            int featureDim = sampler.FeatureDim;
+            int chunkSize = 65536; // ~31 MB per chunk at 120 features
             var budget = new AsyncHelper.FrameBudget();
 
+            // --- Pass 1: sample grid chunks → decode → keep only density ---
+            var density = new float[totalPoints];
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
+
             for (int c = 0; c < numChunks; c++)
             {
                 ct.ThrowIfCancellationRequested();
                 int start = c * chunkSize;
                 int count = Mathf.Min(chunkSize, totalPoints - start);
 
-                var chunkFeatures = ExtractChunk(featuresData, start, count, featureDim);
-                var chunkResult = await _decoder.InferAsync(chunkFeatures, ct);
-                chunkFeatures.Dispose();
+                var chunkData = await Task.Run(() => sampler.SampleGridChunk(start, count));
+                var chunkTensor = UploadChunk(chunkData, count, featureDim);
+                var chunkResult = await _decoder.InferAsync(chunkTensor, ct);
+                chunkTensor.Dispose();
 
                 var resultData = chunkResult.DownloadToArray();
                 chunkResult.Dispose();
@@ -133,6 +130,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 await budget.YieldIfNeeded();
             }
 
+            // --- Surface nets: density → mesh geometry ---
             var surfaceNets = new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold);
             var mesh = await surfaceNets.ExtractAsync(density);
             surfaceNets.Dispose();
@@ -144,11 +142,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int numVerts = meshVerts.Length;
             Logger.Info($"[Pipeline] Pass 2: querying colors at {numVerts} mesh vertices");
 
-            var vertFeatures = await Task.Run(() => sampler.SampleFeaturesAtPositions(meshVerts));
-            sampler.Dispose();
-            await AsyncHelper.YieldFrame();
-            ct.ThrowIfCancellationRequested();
-
             var vertColors = new Color[numVerts];
             int vertChunks = (numVerts + chunkSize - 1) / chunkSize;
             for (int c = 0; c < vertChunks; c++)
@@ -157,9 +150,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 int start = c * chunkSize;
                 int count = Mathf.Min(chunkSize, numVerts - start);
 
-                var chunkFeatures = ExtractChunk(vertFeatures, start, count, featureDim);
-                var chunkResult = await _decoder.InferAsync(chunkFeatures, ct);
-                chunkFeatures.Dispose();
+                var vertsSlice = new Vector3[count];
+                Array.Copy(meshVerts, start, vertsSlice, 0, count);
+                var chunkData = await Task.Run(() => sampler.SampleFeaturesAtPositions(vertsSlice));
+
+                var chunkTensor = UploadChunk(chunkData, count, featureDim);
+                var chunkResult = await _decoder.InferAsync(chunkTensor, ct);
+                chunkTensor.Dispose();
 
                 var resultData = chunkResult.DownloadToArray();
                 chunkResult.Dispose();
@@ -167,17 +164,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 await budget.YieldIfNeeded();
             }
 
+            sampler.Dispose();
             mesh.SetColors(vertColors);
             return mesh;
         }
 
-        private static Tensor<float> ExtractChunk(float[] featuresData, int start, int count, int dim)
+        private static Tensor<float> UploadChunk(float[] data, int count, int dim)
         {
-            var chunkData = new float[count * dim];
-            Array.Copy(featuresData, start * dim, chunkData, 0, count * dim);
-            var chunk = new Tensor<float>(new TensorShape(count, dim));
-            chunk.Upload(chunkData);
-            return chunk;
+            var tensor = new Tensor<float>(new TensorShape(count, dim));
+            tensor.Upload(data);
+            return tensor;
         }
 
         private static void WriteDensityOnly(float[] data, float[] density, int start, int count)

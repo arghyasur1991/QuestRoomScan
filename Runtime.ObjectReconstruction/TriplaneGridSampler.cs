@@ -44,42 +44,38 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _featureDim = _numPlanes * _channels; // 120
         }
 
+        internal int FeatureDim => _featureDim;
+        internal int TotalGridPoints => _resolution * _resolution * _resolution;
+
         /// <summary>
-        /// Samples all three planes at a uniform grid using edge-to-edge positions
-        /// matching Python's linspace(0,1,res). Returns (resolution^3, 3*C) tensor.
+        /// Samples a chunk of grid points [startIdx, startIdx+count) and returns
+        /// a float array of (count * featureDim). Grid uses edge-to-edge positions
+        /// matching linspace(-0.5, 0.5, res). Only allocates memory for the chunk.
         /// </summary>
-        internal Tensor<float> SampleFeatures(Tensor<float> sceneCodes)
+        internal float[] SampleGridChunk(int startIdx, int count)
         {
-            CacheSceneCodes(sceneCodes);
-            return SampleFeaturesAtGrid();
-        }
+            if (_cachedSceneData == null)
+                throw new InvalidOperationException("Call CacheSceneCodes first");
 
-        private Tensor<float> SampleFeaturesAtGrid()
-        {
             int res = _resolution;
-            int totalPoints = res * res * res;
-            var features = new float[totalPoints * _featureDim];
-
             float invResM1 = 1f / (res - 1);
+            var features = new float[count * _featureDim];
 
-            for (int iz = 0; iz < res; iz++)
+            for (int i = 0; i < count; i++)
             {
-                float z = iz * invResM1 - 0.5f; // linspace(-0.5, 0.5, res)
-                for (int iy = 0; iy < res; iy++)
-                {
-                    float y = iy * invResM1 - 0.5f;
-                    for (int ix = 0; ix < res; ix++)
-                    {
-                        float x = ix * invResM1 - 0.5f;
-                        int ptIdx = (iz * res * res + iy * res + ix) * _featureDim;
-                        SampleTriplaneAt(x, y, z, _cachedSceneData, features, ptIdx);
-                    }
-                }
+                int flatIdx = startIdx + i;
+                int ix = flatIdx % res;
+                int iy = (flatIdx / res) % res;
+                int iz = flatIdx / (res * res);
+
+                float x = ix * invResM1 - 0.5f;
+                float y = iy * invResM1 - 0.5f;
+                float z = iz * invResM1 - 0.5f;
+
+                SampleTriplaneAt(x, y, z, _cachedSceneData, features, i * _featureDim);
             }
 
-            var tensor = new Tensor<float>(new TensorShape(totalPoints, _featureDim));
-            tensor.Upload(features);
-            return tensor;
+            return features;
         }
 
         /// <summary>
