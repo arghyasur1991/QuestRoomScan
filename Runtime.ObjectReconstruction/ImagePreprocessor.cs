@@ -57,10 +57,32 @@ namespace Genesis.RoomScan.ObjectReconstruction
             var resized = ResizeForeground(composite, foregroundRatio, outputSize);
             Object.Destroy(composite);
 
-            var tensor = new Tensor<float>(new TensorShape(1, 3, outputSize, outputSize));
-            TextureConverter.ToTensor(resized, tensor, new TextureTransform());
+            var tensor = TextureToTensorManual(resized, outputSize);
             Object.Destroy(resized);
 
+            return tensor;
+        }
+
+        private static Tensor<float> TextureToTensorManual(Texture2D tex, int size)
+        {
+            var pixels = tex.GetPixels32();
+            int chw = 3 * size * size;
+            var data = new float[chw];
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    int flippedY = size - 1 - y;
+                    var p = pixels[flippedY * size + x];
+                    int pixIdx = y * size + x;
+                    data[0 * size * size + pixIdx] = p.r / 255f;
+                    data[1 * size * size + pixIdx] = p.g / 255f;
+                    data[2 * size * size + pixIdx] = p.b / 255f;
+                }
+            }
+
+            var tensor = new Tensor<float>(new TensorShape(1, 3, size, size));
+            tensor.Upload(data);
             return tensor;
         }
 

@@ -11,9 +11,33 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// Resolves .sentis model paths from StreamingAssets. On Android, copies files
     /// from the APK to persistentDataPath on first access since StreamingAssets
     /// are inside the compressed archive and can't be opened with File.OpenRead.
+    /// Re-copies when the app version changes to pick up updated models.
     /// </summary>
     internal static class ModelPathResolver
     {
+        private const string VersionPrefKey = "ModelPathResolver_AppVersion";
+
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+        private static void InvalidateCacheOnUpgrade()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            string currentVersion = Application.version + "|" + Application.buildGUID;
+            string cachedVersion = PlayerPrefs.GetString(VersionPrefKey, "");
+
+            if (cachedVersion != currentVersion)
+            {
+                string cacheDir = Path.Combine(Application.persistentDataPath, "ObjectReconstruction");
+                if (Directory.Exists(cacheDir))
+                {
+                    Directory.Delete(cacheDir, true);
+                    Logger.Info("[ModelPathResolver] Cleared model cache (app updated)");
+                }
+                PlayerPrefs.SetString(VersionPrefKey, currentVersion);
+                PlayerPrefs.Save();
+            }
+#endif
+        }
+
         internal static async Task<string> ResolveAsync(string relativePath, CancellationToken ct)
         {
             string streamingPath = Path.Combine(Application.streamingAssetsPath, relativePath);
