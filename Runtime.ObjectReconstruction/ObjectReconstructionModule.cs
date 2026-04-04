@@ -77,24 +77,38 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 EnsurePipeline();
                 ClearMesh();
 
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
                 ReportStatus("Loading models...");
                 await _pipeline.LoadModelsAsync(_cts.Token);
+                float loadMs = sw.ElapsedMilliseconds;
+                sw.Restart();
 
                 ReportStatus("Removing background...");
                 preprocessed = await _pipeline.PreprocessAsync(image, _cts.Token);
+                float rembgMs = sw.ElapsedMilliseconds;
+                sw.Restart();
 
                 ReportStatus("Running reconstruction...");
                 sceneCodes = await _pipeline.RunForwardAsync(preprocessed, _cts.Token);
                 preprocessed.Dispose();
                 preprocessed = null;
+                float forwardMs = sw.ElapsedMilliseconds;
+                sw.Restart();
 
                 ReportStatus("Extracting mesh...");
                 var mesh = await _pipeline.ExtractMeshAsync(sceneCodes, _cts.Token);
                 sceneCodes.Dispose();
                 sceneCodes = null;
+                float meshMs = sw.ElapsedMilliseconds;
+                sw.Stop();
 
                 SpawnMesh(mesh);
-                ReportStatus("Done!");
+
+                float totalMs = loadMs + rembgMs + forwardMs + meshMs;
+                Logger.Info($"[ObjectReconstruction] Timing: load={loadMs:.0f}ms rembg={rembgMs:.0f}ms " +
+                    $"forward={forwardMs:.0f}ms mesh={meshMs:.0f}ms total={totalMs:.0f}ms");
+                ReportStatus($"Done! ({totalMs / 1000f:F1}s)");
             }
             catch (OperationCanceledException)
             {
