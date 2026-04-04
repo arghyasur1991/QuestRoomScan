@@ -310,9 +310,7 @@ namespace Genesis.RoomScan.Editor
         private ReconstructionPipeline CreatePipeline()
         {
             return new ReconstructionPipeline(
-                forwardLayersPerFrame: 10,
-                decoderLayersPerFrame: 20,
-                gridSampleChunksPerFrame: 15,
+                frameBudgetMs: 16,
                 gridResolution: 128,
                 densityThreshold: 25f,
                 triplaneShader: _triplaneShader,
@@ -359,7 +357,8 @@ namespace Genesis.RoomScan.Editor
             var mr = _previewObj.AddComponent<MeshRenderer>();
             mf.sharedMesh = mesh;
 
-            var shader = Shader.Find("Universal Render Pipeline/Lit")
+            var shader = Shader.Find("Hidden/ObjectReconstruction/VertexColor")
+                         ?? Shader.Find("Universal Render Pipeline/Lit")
                          ?? Shader.Find("Standard");
             mr.sharedMaterial = new Material(shader);
             _previewObj.transform.localScale = Vector3.one * 0.5f;

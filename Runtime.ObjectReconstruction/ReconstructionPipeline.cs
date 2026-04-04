@@ -13,9 +13,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// </summary>
     internal sealed class ReconstructionPipeline : IDisposable
     {
-        private readonly int _forwardLayersPerFrame;
-        private readonly int _decoderLayersPerFrame;
-        private readonly int _gridSampleChunksPerFrame;
+        private readonly int _frameBudgetMs;
         private readonly int _gridResolution;
         private readonly float _densityThreshold;
         private readonly ComputeShader _triplaneShader;
@@ -27,17 +25,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private bool _modelsLoaded;
 
         internal ReconstructionPipeline(
-            int forwardLayersPerFrame,
-            int decoderLayersPerFrame,
-            int gridSampleChunksPerFrame,
+            int frameBudgetMs,
             int gridResolution,
             float densityThreshold,
             ComputeShader triplaneShader,
             ComputeShader surfaceNetsShader)
         {
-            _forwardLayersPerFrame = forwardLayersPerFrame;
-            _decoderLayersPerFrame = decoderLayersPerFrame;
-            _gridSampleChunksPerFrame = gridSampleChunksPerFrame;
+            _frameBudgetMs = frameBudgetMs;
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
             _triplaneShader = triplaneShader;
@@ -99,7 +93,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         internal async Task<Tensor<float>> RunForwardAsync(Tensor<float> preprocessed, CancellationToken ct)
         {
-            return await _reconstruction.InferAsync(preprocessed, _forwardLayersPerFrame, ct);
+            return await _reconstruction.InferAsync(preprocessed, ct);
         }
 
         internal async Task<Mesh> ExtractMeshAsync(Tensor<float> sceneCodes, CancellationToken ct)
@@ -113,13 +107,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
             var featuresData = featuresTensor.DownloadToArray();
             featuresTensor.Dispose();
             sampler.Dispose();
-            await Task.Yield();
+            await AsyncHelper.YieldFrame();
             ct.ThrowIfCancellationRequested();
 
             int chunkSize = 65536;
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
             var density = new float[totalPoints];
             var colors = new Color[totalPoints];
+            var budget = new AsyncHelper.FrameBudget();
 
             for (int c = 0; c < numChunks; c++)
             {
@@ -128,14 +123,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 int count = Mathf.Min(chunkSize, totalPoints - start);
 
                 var chunkFeatures = ExtractChunk(featuresData, start, count, featureDim);
-                var chunkResult = await _decoder.InferAsync(chunkFeatures, _decoderLayersPerFrame, ct);
+                var chunkResult = await _decoder.InferAsync(chunkFeatures, ct);
                 chunkFeatures.Dispose();
 
                 WriteDecoderResults(chunkResult, density, colors, start, count);
                 chunkResult.Dispose();
 
-                if ((c + 1) % _gridSampleChunksPerFrame == 0)
-                    await Task.Yield();
+                await budget.YieldIfNeeded();
             }
 
             var surfaceNets = new DensitySurfaceNets(_surfaceNetsShader, res, _densityThreshold);

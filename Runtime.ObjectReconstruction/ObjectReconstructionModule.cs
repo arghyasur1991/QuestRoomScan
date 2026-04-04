@@ -23,9 +23,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [SerializeField] private Texture2D[] testImages = Array.Empty<Texture2D>();
 
         [Header("Performance")]
-        [SerializeField, Range(1, 20)] private int forwardLayersPerFrame = 3;
-        [SerializeField, Range(1, 20)] private int decoderLayersPerFrame = 8;
-        [SerializeField, Range(1, 30)] private int gridSampleChunksPerFrame = 8;
+        [SerializeField, Tooltip("Max ms per frame before yielding. 8ms keeps under one 90Hz VR frame.")]
+        [Range(2, 16)] private int frameBudgetMs = 8;
 
         [Header("Mesh Extraction")]
         [SerializeField] private int gridResolution = 256;
@@ -146,9 +145,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private void EnsurePipeline()
         {
             _pipeline ??= new ReconstructionPipeline(
-                forwardLayersPerFrame,
-                decoderLayersPerFrame,
-                gridSampleChunksPerFrame,
+                frameBudgetMs,
                 gridResolution,
                 densityThreshold,
                 triplaneGridSampleShader,
@@ -177,12 +174,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private static Material CreateVertexColorMaterial()
         {
-            var shader = Shader.Find("Universal Render Pipeline/Lit");
+            var shader = Shader.Find("Hidden/ObjectReconstruction/VertexColor");
+            if (shader == null) shader = Shader.Find("Universal Render Pipeline/Lit");
             if (shader == null) shader = Shader.Find("Standard");
-            var mat = new Material(shader);
-            mat.SetFloat("_Glossiness", 0f);
-            mat.SetFloat("_Smoothness", 0f);
-            return mat;
+            return new Material(shader);
         }
 
         private void ReportStatus(string status)

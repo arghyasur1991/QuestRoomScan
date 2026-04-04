@@ -1,6 +1,5 @@
 #if HAS_AI_INFERENCE
 using System;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Unity.InferenceEngine;
@@ -26,10 +25,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (_loaded) return;
 
             string path = await ModelPathResolver.ResolveAsync(ModelFileName, ct);
-            var model = ModelLoader.Load(path);
+            var model = await Task.Run(() => ModelLoader.Load(path), ct);
             _worker = new Worker(model, BackendType.GPUCompute);
             _loaded = true;
-            await Task.Yield();
+            await AsyncHelper.YieldFrame();
         }
 
         /// <summary>
@@ -37,17 +36,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// Returns scene_codes tensor of shape (1, 3, 40, 64, 64).
         /// </summary>
         internal async Task<Tensor<float>> InferAsync(
-            Tensor<float> preprocessed, int layersPerFrame, CancellationToken ct)
+            Tensor<float> preprocessed, CancellationToken ct)
         {
             if (!_loaded)
                 throw new InvalidOperationException("ReconstructionModel not loaded");
 
+            var budget = new AsyncHelper.FrameBudget();
             var it = _worker.ScheduleIterable(preprocessed);
-            int steps = 0;
             while (it.MoveNext())
             {
                 ct.ThrowIfCancellationRequested();
-                if (++steps % layersPerFrame == 0) await Task.Yield();
+                await budget.YieldIfNeeded();
             }
 
             var output = _worker.PeekOutput() as Tensor<float>;
