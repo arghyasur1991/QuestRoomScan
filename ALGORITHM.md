@@ -981,7 +981,7 @@ RembgModel (u2netp.sentis, ~4MB)
 ImagePreprocessor
     │  Alpha composite onto gray (0.5), resize_foreground 85%, 512×512 output
     ▼
-ReconstructionModel (triposr_uint8.sentis, ~400MB)
+ReconstructionModel (triposr.sentis)
     │  512×512 → DINOv2 ViT-B/16 → Transformer1D (16 blocks) → scene_codes (1, 3, 40, 64, 64)
     │  Multi-frame split: ScheduleIterable, forwardLayersPerFrame = 3
     ▼

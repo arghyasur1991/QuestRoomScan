@@ -151,12 +151,12 @@ namespace Genesis.RoomScan.Editor
         {
             string sentisDir = Path.Combine(Application.streamingAssetsPath, "ObjectReconstruction");
             bool hasRembg = File.Exists(Path.Combine(sentisDir, "u2netp.sentis"));
-            bool hasTriposr = File.Exists(Path.Combine(sentisDir, "triposr_uint8.sentis"));
+            bool hasTriposr = File.Exists(Path.Combine(sentisDir, "triposr.sentis"));
             bool hasDecoder = File.Exists(Path.Combine(sentisDir, "nerf_decoder.sentis"));
 
             EditorGUILayout.LabelField("Models", EditorStyles.boldLabel);
             StatusLabel("  u2netp.sentis", hasRembg);
-            StatusLabel("  triposr_uint8.sentis", hasTriposr);
+            StatusLabel("  triposr.sentis", hasTriposr);
             StatusLabel("  nerf_decoder.sentis", hasDecoder);
 
             if (!hasRembg || !hasTriposr || !hasDecoder)

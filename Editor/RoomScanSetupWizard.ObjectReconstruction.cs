@@ -34,19 +34,14 @@ namespace Genesis.RoomScan.Editor
 
         static readonly string[] SentisModelNames =
         {
+            "triposr.sentis",
             "nerf_decoder.sentis",
             "u2netp.sentis"
-        };
-        static readonly string[] TriposrSentisVariants =
-        {
-            "triposr_uint8.sentis",
-            "triposr_fp16.sentis",
-            "triposr_fp32.sentis",
         };
 
         static readonly (string onnx, string sentis, bool quantize)[] ModelConversions =
         {
-            ("triposr_fp32.onnx", "triposr_uint8.sentis", true),
+            ("triposr_fp32.onnx", "triposr.sentis", true),
             ("nerf_decoder.onnx", "nerf_decoder.sentis", false),
             ("u2netp.onnx", "u2netp.sentis", false),
         };
@@ -231,10 +226,7 @@ namespace Genesis.RoomScan.Editor
         {
             foreach (var name in SentisModelNames)
                 if (!File.Exists(Path.Combine(dir, name))) return false;
-            bool hasTriposr = false;
-            foreach (var name in TriposrSentisVariants)
-                if (File.Exists(Path.Combine(dir, name))) { hasTriposr = true; break; }
-            return hasTriposr;
+            return true;
         }
 
         private static bool AllOnnxModelsExist()
@@ -259,9 +251,6 @@ namespace Genesis.RoomScan.Editor
             for (int i = 0; i < total; i++)
             {
                 var (onnxName, sentisName, shouldQuantize) = ModelConversions[i];
-
-                if (shouldQuantize)
-                    sentisName = sentisName.Replace("uint8", quantLabel);
 
                 string onnxPath = Path.Combine(RECON_ONNX_DIR, onnxName);
                 string sentisPath = Path.Combine(sentisDir, sentisName);

@@ -14,12 +14,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// </summary>
     internal sealed class ReconstructionModel : IDisposable
     {
-        private static readonly string[] ModelVariants =
-        {
-            "ObjectReconstruction/triposr_fp32.sentis",
-            "ObjectReconstruction/triposr_fp16.sentis",
-            "ObjectReconstruction/triposr_uint8.sentis",
-        };
+        private const string ModelFileName = "ObjectReconstruction/triposr.sentis";
 
         private Worker _worker;
         private bool _loaded;
@@ -28,8 +23,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             if (_loaded) return;
 
-            string path = await ModelPathResolver.ResolveFirstAsync(ModelVariants, ct);
-            Logger.Info($"[ReconstructionModel] Loading: {System.IO.Path.GetFileName(path)}");
+            string path = await ModelPathResolver.ResolveAsync(ModelFileName, ct);
             var model = await Task.Run(() => ModelLoader.Load(path), ct);
             _worker = new Worker(model, BackendType.GPUCompute);
             _loaded = true;

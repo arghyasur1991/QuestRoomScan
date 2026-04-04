@@ -5,8 +5,7 @@
     },
     "reconstruction": {
         "input_size": 512,
-        "model_uint8": "triposr_uint8.sentis",
-        "model_fp16": "triposr_fp16.sentis",
+        "model": "triposr.sentis",
         "scene_codes_shape": [1, 3, 40, 64, 64]
     },
     "decoder": {
