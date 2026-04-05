@@ -151,26 +151,32 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
 
             _running = true;
+            float loadMs = 0, inferMs = 0;
             try
             {
                 EnsurePipeline();
-                var sw = System.Diagnostics.Stopwatch.StartNew();
 
-                ReportStatus($"Rembg test (EP={executionProvider})...");
-                var mask = await _pipeline.TestRembgAsync(image, ct);
-                float totalMs = sw.ElapsedMilliseconds;
+                ReportStatus($"Loading rembg (EP={executionProvider})...");
+                var mask = await _pipeline.TestRembgAsync(image, ct,
+                    lm => { loadMs = lm; ReportStatus($"Rembg loaded ({lm:F0}ms), inferring..."); },
+                    im => { inferMs = im; });
 
-                Logger.Info($"[ObjectReconstruction] Rembg test: EP={executionProvider} " +
-                    $"total={totalMs:F0}ms mask={mask?.Length ?? 0} values");
+                float totalMs = loadMs + inferMs;
+                string result = $"EP={executionProvider} load={loadMs:F0}ms infer={inferMs:F0}ms total={totalMs:F0}ms";
+                Logger.Info($"[ObjectReconstruction] Rembg test: {result}");
 
                 var tex = MaskToTexture(mask, 320, 320);
-                ReportStatus($"Rembg done ({totalMs:F0}ms, EP={executionProvider})");
+                ReportStatus(result);
                 return tex;
             }
             catch (Exception e)
             {
-                Logger.Error($"[ObjectReconstruction] Rembg test failed: {e.Message}");
-                ReportStatus($"Rembg error: {e.Message}");
+                string phase = loadMs == 0 ? "LOAD FAILED" : "INFER FAILED";
+                string msg = $"{phase} (EP={executionProvider}): {e.Message}";
+                Logger.Error($"[ObjectReconstruction] Rembg test {msg}");
+                if (e.InnerException != null)
+                    Logger.Error($"[ObjectReconstruction] Inner: {e.InnerException.Message}");
+                ReportStatus(msg);
                 return null;
             }
             finally

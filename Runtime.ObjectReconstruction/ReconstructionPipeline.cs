@@ -109,15 +109,30 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// <summary>
         /// Runs rembg only on a real image. Returns the mask as float[320*320].
         /// Uses load-execute-dispose pattern (independent of preload mode).
+        /// Outputs load/infer timing via out parameters.
         /// </summary>
-        internal async Task<float[]> TestRembgAsync(Texture2D image, CancellationToken ct)
+        internal async Task<float[]> TestRembgAsync(
+            Texture2D image, CancellationToken ct,
+            System.Action<float> onLoadMs, System.Action<float> onInferMs)
         {
             var readable = MakeReadable(image);
             try
             {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
                 using var rembg = new OrtRembgModel();
                 await rembg.LoadAsync(_executionProvider, _mobileOptimized, ct);
-                return await rembg.InferAsync(readable, ct);
+                float loadMs = sw.ElapsedMilliseconds;
+                onLoadMs?.Invoke(loadMs);
+                Logger.Info($"[Pipeline] Rembg model loaded: EP={_executionProvider} loadMs={loadMs:F0}");
+                sw.Restart();
+
+                var mask = await rembg.InferAsync(readable, ct);
+                float inferMs = sw.ElapsedMilliseconds;
+                onInferMs?.Invoke(inferMs);
+                Logger.Info($"[Pipeline] Rembg inference done: inferMs={inferMs:F0}");
+
+                return mask;
             }
             finally
             {
