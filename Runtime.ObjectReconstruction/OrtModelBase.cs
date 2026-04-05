@@ -36,7 +36,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             var task = new Task(() =>
             {
-                _session = new InferenceSession(modelPath, options);
+                _session = ep == ExecutionProvider.CoreML
+                    ? CreateSessionWithCoreMLRecovery(modelPath, options)
+                    : new InferenceSession(modelPath, options);
             });
             OrtLoadQueue.Enqueue(task, Path.GetFileNameWithoutExtension(relativePath));
             await task;
@@ -93,9 +95,25 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return options;
         }
 
+        private static string _coremlCacheDir;
+
+        private static string GetCoreMLCacheDirectory()
+        {
+            if (_coremlCacheDir != null) return _coremlCacheDir;
+            var dataPath = Application.platform == RuntimePlatform.IPhonePlayer
+                ? Application.persistentDataPath
+                : Application.dataPath;
+            _coremlCacheDir = Path.Combine(dataPath, "Models", "coreml_cache");
+            return _coremlCacheDir;
+        }
+
+        /// <summary>
+        /// Configures CoreML with MLProgram format, GPU compute, model caching,
+        /// and cache corruption recovery (LiveTalk pattern).
+        /// </summary>
         private static void ConfigureCoreML(SessionOptions options)
         {
-            string cacheDir = Path.Combine(Application.dataPath, "Models", "coreml_cache");
+            string cacheDir = GetCoreMLCacheDirectory();
             if (!Directory.Exists(cacheDir))
                 Directory.CreateDirectory(cacheDir);
 
@@ -125,6 +143,28 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 {
                     Logger.Warning($"[OrtModelBase] CoreML flags fallback also failed ({e2.Message}), using CPU");
                 }
+            }
+        }
+
+        /// <summary>
+        /// Creates session with CoreML cache corruption recovery.
+        /// On Manifest.json / cache errors, waits and retries once before giving up.
+        /// </summary>
+        private static InferenceSession CreateSessionWithCoreMLRecovery(
+            string modelPath, SessionOptions options)
+        {
+            try
+            {
+                return new InferenceSession(modelPath, options);
+            }
+            catch (Exception e) when (
+                e.Message.Contains("Manifest.json") ||
+                e.Message.Contains("coreml_cache") ||
+                e.Message.Contains("manifest does not exist"))
+            {
+                Logger.Warning($"[OrtModelBase] CoreML cache corruption detected, retrying: {e.Message}");
+                Thread.Sleep(1000);
+                return new InferenceSession(modelPath, options);
             }
         }
 
