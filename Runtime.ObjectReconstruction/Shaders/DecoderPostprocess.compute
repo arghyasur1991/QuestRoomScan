@@ -1,35 +1,42 @@
 // GPU postprocessing for NeRF decoder output.
-// Extracts density (Pass 1), smooths density (Pass 2), and extracts colors (Pass 3)
-// from decoder's (N,4) output, keeping all data on GPU to avoid CPU round-trips.
+//   ExtractRawDensity — stores raw (pre-activation) density for smoothing
+//   SmoothRaw        — 3x3x3 blur in log-space (before exp), where INT8 noise is uniform
+//   CopyBuffer       — identity copy for odd-pass ping-pong
+//   ActivateDensity  — applies exp(smoothed_raw - 1) to produce final density
+//   ExtractDensity   — fused path: exp(raw-1) in one pass (when smoothing disabled)
+//   ExtractColors    — sigmoid on RGB channels
 
+#pragma kernel ExtractRawDensity
+#pragma kernel SmoothRaw
+#pragma kernel CopyBuffer
+#pragma kernel ActivateDensity
 #pragma kernel ExtractDensity
-#pragma kernel SmoothDensity
-#pragma kernel CopyDensity
 #pragma kernel ExtractColors
 
 StructuredBuffer<float> _DecoderOutput; // (N, 4) flattened: [density, r, g, b]
 
 RWStructuredBuffer<float> _DensityVolume; // totalPoints floats
-StructuredBuffer<float> _DensityInput;    // source for smoothing pass
+StructuredBuffer<float> _RawInput;        // source for smoothing / activation
+RWStructuredBuffer<float> _RawOutput;     // destination for smoothing
 RWStructuredBuffer<float> _ColorOutput;   // numVerts * 3 floats
 
-uint _Offset; // write offset into _DensityVolume or _ColorOutput
-uint _Count;  // number of elements in this chunk
-uint _SmoothRes; // grid resolution for smoothing
+uint _Offset;
+uint _Count;
+uint _SmoothRes;
 
+// Store raw decoder density output without activation (for smoothing path)
 [numthreads(256, 1, 1)]
-void ExtractDensity(uint3 id : SV_DispatchThreadID)
+void ExtractRawDensity(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= _Count) return;
-    float raw = _DecoderOutput[id.x * 4];
-    float clamped = clamp(raw - 1.0, -15.0, 15.0);
-    _DensityVolume[_Offset + id.x] = exp(clamped);
+    _RawOutput[_Offset + id.x] = _DecoderOutput[id.x * 4];
 }
 
-// 3x3x3 Gaussian-weighted blur to smooth INT8 quantization noise in the density field.
-// Weights: center=8, face=4, edge=2, corner=1 (total=64). Boundary voxels are clamped.
+// 3x3x3 Gaussian-weighted blur on RAW (pre-exp) density values.
+// INT8 quantization noise is additive and uniform in this space,
+// so a linear filter cleanly removes it without smudging edges.
 [numthreads(256, 1, 1)]
-void SmoothDensity(uint3 id : SV_DispatchThreadID)
+void SmoothRaw(uint3 id : SV_DispatchThreadID)
 {
     uint res = _SmoothRes;
     uint total = res * res * res;
@@ -59,19 +66,39 @@ void SmoothDensity(uint3 id : SV_DispatchThreadID)
                   dist == 1 ? 4.0 :
                   dist == 2 ? 2.0 : 1.0;
 
-        sum += _DensityInput[(uint)nz * res * res + (uint)ny * res + (uint)nx] * w;
+        sum += _RawInput[(uint)nz * res * res + (uint)ny * res + (uint)nx] * w;
         wt += w;
     }
 
-    _DensityVolume[id.x] = sum / wt;
+    _RawOutput[id.x] = sum / wt;
 }
 
 [numthreads(256, 1, 1)]
-void CopyDensity(uint3 id : SV_DispatchThreadID)
+void CopyBuffer(uint3 id : SV_DispatchThreadID)
 {
     uint total = _SmoothRes * _SmoothRes * _SmoothRes;
     if (id.x >= total) return;
-    _DensityVolume[id.x] = _DensityInput[id.x];
+    _RawOutput[id.x] = _RawInput[id.x];
+}
+
+// Apply exp(raw - 1) activation after smoothing
+[numthreads(256, 1, 1)]
+void ActivateDensity(uint3 id : SV_DispatchThreadID)
+{
+    uint total = _SmoothRes * _SmoothRes * _SmoothRes;
+    if (id.x >= total) return;
+    float clamped = clamp(_RawInput[id.x] - 1.0, -15.0, 15.0);
+    _DensityVolume[id.x] = exp(clamped);
+}
+
+// Fused path: extract + activate in one pass (when smoothing is disabled)
+[numthreads(256, 1, 1)]
+void ExtractDensity(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _Count) return;
+    float raw = _DecoderOutput[id.x * 4];
+    float clamped = clamp(raw - 1.0, -15.0, 15.0);
+    _DensityVolume[_Offset + id.x] = exp(clamped);
 }
 
 [numthreads(256, 1, 1)]

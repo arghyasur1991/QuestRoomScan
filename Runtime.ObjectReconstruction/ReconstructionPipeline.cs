@@ -32,9 +32,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private OrtReconstructionModel _reconstruction;
         private OrtDecoderModel _decoder;
 
+        private int _postKernelExtractRaw;
+        private int _postKernelSmoothRaw;
+        private int _postKernelCopyBuf;
+        private int _postKernelActivate;
         private int _postKernelDensity;
-        private int _postKernelSmooth;
-        private int _postKernelCopy;
         private int _postKernelColors;
 
         // Reusable buffers for decoder hot path
@@ -67,9 +69,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _mobileOptimized = mobileOptimized;
             _densitySmoothPasses = densitySmoothPasses;
 
+            _postKernelExtractRaw = _postprocessShader.FindKernel("ExtractRawDensity");
+            _postKernelSmoothRaw = _postprocessShader.FindKernel("SmoothRaw");
+            _postKernelCopyBuf = _postprocessShader.FindKernel("CopyBuffer");
+            _postKernelActivate = _postprocessShader.FindKernel("ActivateDensity");
             _postKernelDensity = _postprocessShader.FindKernel("ExtractDensity");
-            _postKernelSmooth = _postprocessShader.FindKernel("SmoothDensity");
-            _postKernelCopy = _postprocessShader.FindKernel("CopyDensity");
             _postKernelColors = _postprocessShader.FindKernel("ExtractColors");
         }
 
@@ -191,6 +195,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             EnsureFeatureBuffer(chunkSize, featureDim);
             var densityBuf = new ComputeBuffer(totalPoints, sizeof(float));
+            ComputeBuffer rawDensityBuf = _densitySmoothPasses > 0
+                ? new ComputeBuffer(totalPoints, sizeof(float))
+                : null;
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
 
             try
@@ -210,13 +217,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     EnsureUploadBuffer(count * 4);
                     _uploadBuffer.SetData(decoderOut, 0, 0, count * 4);
 
-                    DispatchDensityExtraction(_uploadBuffer, densityBuf, start, count);
+                    if (_densitySmoothPasses > 0)
+                        DispatchExtractRaw(_uploadBuffer, rawDensityBuf, start, count);
+                    else
+                        DispatchDensityExtraction(_uploadBuffer, densityBuf, start, count);
                     await AsyncHelper.YieldFrame();
                 }
 
                 if (_densitySmoothPasses > 0)
                 {
-                    SmoothDensityVolume(densityBuf, totalPoints);
+                    SmoothAndActivate(rawDensityBuf, densityBuf, totalPoints);
                     await AsyncHelper.YieldFrame();
                 }
 
@@ -288,6 +298,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             finally
             {
                 densityBuf.Release();
+                rawDensityBuf?.Release();
                 if (ownsDecoder) decoder.Dispose();
             }
         }
@@ -327,36 +338,54 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _postprocessShader.Dispatch(_postKernelColors, (count + 255) / 256, 1, 1);
         }
 
-        /// <summary>
-        /// 3x3x3 Gaussian-weighted smoothing on the density volume to filter
-        /// INT8 quantization noise amplified by exp(). Ping-pongs between two buffers.
-        /// </summary>
-        private void SmoothDensityVolume(ComputeBuffer densityBuf, int totalPoints)
+        private void DispatchExtractRaw(
+            ComputeBuffer decoderOutput, ComputeBuffer rawBuf, int offset, int count)
         {
-            var tempBuf = new ComputeBuffer(totalPoints, sizeof(float));
+            _postprocessShader.SetInt("_Offset", offset);
+            _postprocessShader.SetInt("_Count", count);
+            _postprocessShader.SetBuffer(_postKernelExtractRaw, "_DecoderOutput", decoderOutput);
+            _postprocessShader.SetBuffer(_postKernelExtractRaw, "_RawOutput", rawBuf);
+            _postprocessShader.Dispatch(_postKernelExtractRaw, (count + 255) / 256, 1, 1);
+        }
+
+        /// <summary>
+        /// Smooth raw (pre-exp) density values, then apply exp(raw-1) activation.
+        /// Smoothing in log-space filters additive INT8 quantization noise uniformly
+        /// without smudging edges or colors in the final density field.
+        /// </summary>
+        private void SmoothAndActivate(ComputeBuffer rawBuf, ComputeBuffer densityBuf, int totalPoints)
+        {
             int groups = (totalPoints + 255) / 256;
             _postprocessShader.SetInt("_SmoothRes", _gridResolution);
 
+            var tempBuf = new ComputeBuffer(totalPoints, sizeof(float));
             try
             {
-                var src = densityBuf;
+                var src = rawBuf;
                 var dst = tempBuf;
 
                 for (int pass = 0; pass < _densitySmoothPasses; pass++)
                 {
-                    _postprocessShader.SetBuffer(_postKernelSmooth, "_DensityInput", src);
-                    _postprocessShader.SetBuffer(_postKernelSmooth, "_DensityVolume", dst);
-                    _postprocessShader.Dispatch(_postKernelSmooth, groups, 1, 1);
+                    _postprocessShader.SetBuffer(_postKernelSmoothRaw, "_RawInput", src);
+                    _postprocessShader.SetBuffer(_postKernelSmoothRaw, "_RawOutput", dst);
+                    _postprocessShader.Dispatch(_postKernelSmoothRaw, groups, 1, 1);
 
                     (src, dst) = (dst, src);
                 }
 
-                if (src != densityBuf)
+                // Result is in 'src'. If it's tempBuf (odd passes), copy to rawBuf first.
+                if (src != rawBuf)
                 {
-                    _postprocessShader.SetBuffer(_postKernelCopy, "_DensityInput", src);
-                    _postprocessShader.SetBuffer(_postKernelCopy, "_DensityVolume", densityBuf);
-                    _postprocessShader.Dispatch(_postKernelCopy, groups, 1, 1);
+                    _postprocessShader.SetBuffer(_postKernelCopyBuf, "_RawInput", src);
+                    _postprocessShader.SetBuffer(_postKernelCopyBuf, "_RawOutput", rawBuf);
+                    _postprocessShader.Dispatch(_postKernelCopyBuf, groups, 1, 1);
+                    src = rawBuf;
                 }
+
+                // Apply exp(smoothed_raw - 1) → final density
+                _postprocessShader.SetBuffer(_postKernelActivate, "_RawInput", src);
+                _postprocessShader.SetBuffer(_postKernelActivate, "_DensityVolume", densityBuf);
+                _postprocessShader.Dispatch(_postKernelActivate, groups, 1, 1);
             }
             finally
             {
