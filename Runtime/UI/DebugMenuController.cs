@@ -340,6 +340,7 @@ namespace Genesis.RoomScan.UI
                 SetButtonBusy(_btnReconPredict, "Running...");
                 _btnReconPredict.SetEnabled(false);
                 var mesh = await module.ReconstructAsync(images[_reconSelectedIdx]);
+                Debug.Log($"[DebugMenu] ReconstructAsync returned mesh={mesh != null}, verts={mesh?.vertexCount ?? 0}");
                 if (mesh != null)
                     SpawnReconstructedMesh(mesh);
                 SetButtonReady(_btnReconPredict, "Predict");
@@ -400,12 +401,14 @@ namespace Genesis.RoomScan.UI
             ClearReconstructedMesh();
 
             var module = FindReconstructionModule();
+            var mat = module?.CreateMaterial();
+            Debug.Log($"[DebugMenu] SpawnReconstructedMesh: verts={mesh.vertexCount}, mat={mat != null}");
 
             _spawnedReconMesh = new GameObject("ReconstructedObject");
             var mf = _spawnedReconMesh.AddComponent<MeshFilter>();
             var mr = _spawnedReconMesh.AddComponent<MeshRenderer>();
             mf.sharedMesh = mesh;
-            mr.sharedMaterial = module?.CreateMaterial();
+            mr.sharedMaterial = mat;
 
             var anchorMgr = RoomAnchorManager.Instance;
             if (anchorMgr != null && anchorMgr.IsRoomLoaded)
@@ -414,6 +417,7 @@ namespace Genesis.RoomScan.UI
                 var floorCenter = (Vector3)roomMatrix.GetColumn(3);
                 floorCenter.y += 1.0f;
                 _spawnedReconMesh.transform.position = floorCenter;
+                Debug.Log($"[DebugMenu] Spawned at room floor center: {floorCenter}");
             }
             else
             {
@@ -422,6 +426,7 @@ namespace Genesis.RoomScan.UI
                     ? cam.transform.position + cam.transform.forward * 1.5f
                     : Vector3.forward * 1.5f;
                 _spawnedReconMesh.transform.position = spawnPos;
+                Debug.Log($"[DebugMenu] Spawned at camera fallback: {spawnPos}");
             }
 
             _spawnedReconMesh.transform.localScale = Vector3.one * 0.5f;
