@@ -12,14 +12,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// reconstruct_compare.py / _extract_mesh_onnx_decoder flow.
     /// Runs entirely on background threads — zero GPU usage.
     ///
-    /// Pipeline:
-    ///   1. Generate grid positions in [-0.5, 0.5]
-    ///   2. Bilinear-sample triplane features (matches F.grid_sample align_corners=False, padding_mode='zeros')
-    ///   3. Run ORT decoder → [density, r, g, b]
-    ///   4. Density activation: exp(raw - 1)
-    ///   5. Marching cubes on density volume
-    ///   6. Re-sample triplane features at vertex positions
-    ///   7. Run ORT decoder for vertex colors → sigmoid(rgb)
+    /// Performance: uses Parallel.For + unsafe pointers for multi-core throughput
+    /// on triplane sampling and marching cubes. Buffer pooling eliminates GC pressure.
     /// </summary>
     internal sealed class CpuMeshExtractor
     {
@@ -32,10 +26,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _threshold = threshold;
         }
 
-        /// <summary>
-        /// Full CPU mesh extraction. Caller provides scene codes and a loaded decoder.
-        /// Everything runs on background thread via Task.Run.
-        /// </summary>
         internal async Task<Mesh> ExtractAsync(
             float[] sceneCodes, int numPlanes, int channels, int planeH, int planeW,
             OrtDecoderModel decoder, CancellationToken ct)
@@ -46,97 +36,57 @@ namespace Genesis.RoomScan.ObjectReconstruction
             const int chunkSize = 65536;
 
             var density = new float[totalPoints];
+            var featureBuf = new float[chunkSize * featureDim];
 
-            // Pass 1: density field
+            float invResM1 = 1f / (res - 1);
+            float halfW = planeW * 0.5f - 0.5f;
+            float halfH = planeH * 0.5f - 0.5f;
+
+            // Pass 1: density field — parallel triplane sampling + ORT decoder
             for (int start = 0; start < totalPoints; start += chunkSize)
             {
                 ct.ThrowIfCancellationRequested();
                 int count = Math.Min(chunkSize, totalPoints - start);
 
-                var features = await Task.Run(() =>
-                {
-                    var feat = new float[count * featureDim];
-                    for (int i = 0; i < count; i++)
-                    {
-                        int globalIdx = start + i;
-                        int ix = globalIdx % res;
-                        int iy = (globalIdx / res) % res;
-                        int iz = globalIdx / (res * res);
+                SampleGridChunkParallel(sceneCodes, featureBuf, start, count,
+                    res, invResM1, halfW, halfH, channels, planeH, planeW);
 
-                        float invResM1 = 1f / (res - 1);
-                        float x = ix * invResM1 - 0.5f;
-                        float y = iy * invResM1 - 0.5f;
-                        float z = iz * invResM1 - 0.5f;
+                float[] decoderOut = await decoder.RunChunkAsync(featureBuf, count);
 
-                        SampleTriplaneFeatures(sceneCodes, x, y, z,
-                            numPlanes, channels, planeH, planeW,
-                            feat, i * featureDim);
-                    }
-                    return feat;
-                });
-
-                float[] decoderOut = await decoder.RunChunkAsync(features, count);
-
-                await Task.Run(() =>
-                {
-                    for (int i = 0; i < count; i++)
-                    {
-                        float raw = decoderOut[i * 4];
-                        density[start + i] = MathF.Exp(raw - 1f);
-                    }
-                });
+                ApplyDensityActivationParallel(decoderOut, density, start, count);
 
                 await AsyncHelper.YieldFrame();
             }
 
-            // Pass 2: marching cubes
+            // Pass 2: parallel marching cubes
             Vector3[] verts = null;
             int[] tris = null;
-            await Task.Run(() => MarchingCubesCPU(density, res, _threshold, out verts, out tris));
+            await Task.Run(() => MarchingCubesParallel(density, res, _threshold, out verts, out tris));
             ct.ThrowIfCancellationRequested();
 
             if (verts.Length == 0)
                 return new Mesh();
 
-            // Pass 3: vertex colors
+            // Pass 3: vertex colors — parallel triplane sampling + ORT decoder
             var colors = new Color[verts.Length];
             for (int start = 0; start < verts.Length; start += chunkSize)
             {
                 ct.ThrowIfCancellationRequested();
                 int count = Math.Min(chunkSize, verts.Length - start);
-                int startCopy = start;
 
-                var features = await Task.Run(() =>
-                {
-                    var feat = new float[count * featureDim];
-                    for (int i = 0; i < count; i++)
-                    {
-                        var v = verts[startCopy + i];
-                        SampleTriplaneFeatures(sceneCodes, v.x, v.y, v.z,
-                            numPlanes, channels, planeH, planeW,
-                            feat, i * featureDim);
-                    }
-                    return feat;
-                });
+                if (featureBuf.Length < count * featureDim)
+                    featureBuf = new float[count * featureDim];
 
-                float[] decoderOut = await decoder.RunChunkAsync(features, count);
+                SamplePositionsParallel(sceneCodes, featureBuf, verts, start, count,
+                    halfW, halfH, channels, planeH, planeW);
 
-                await Task.Run(() =>
-                {
-                    for (int i = 0; i < count; i++)
-                    {
-                        int b = i * 4;
-                        colors[startCopy + i] = new Color(
-                            Sigmoid(decoderOut[b + 1]),
-                            Sigmoid(decoderOut[b + 2]),
-                            Sigmoid(decoderOut[b + 3]));
-                    }
-                });
+                float[] decoderOut = await decoder.RunChunkAsync(featureBuf, count);
+
+                ApplyColorActivationParallel(decoderOut, colors, start, count);
 
                 await AsyncHelper.YieldFrame();
             }
 
-            // Build mesh on main thread
             var mesh = new Mesh { indexFormat = UnityEngine.Rendering.IndexFormat.UInt32 };
             mesh.SetVertices(verts);
             mesh.SetTriangles(tris, 0);
@@ -146,44 +96,91 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return mesh;
         }
 
-        #region Triplane Sampling — matches F.grid_sample(align_corners=False, padding_mode='zeros')
+        #region Parallel Triplane Sampling
 
-        /// <summary>
-        /// Bilinear-sample triplane features at position (x, y, z) in [-0.5, 0.5].
-        /// Exactly replicates PyTorch F.grid_sample with align_corners=False, padding_mode='zeros'.
-        /// Plane 0: (x, y), Plane 1: (x, z), Plane 2: (y, z).
-        /// </summary>
-        private static void SampleTriplaneFeatures(
-            float[] sceneCodes, float x, float y, float z,
-            int numPlanes, int channels, int planeH, int planeW,
-            float[] output, int outOffset)
+        private static unsafe void SampleGridChunkParallel(
+            float[] sceneCodes, float[] output, int startIdx, int count,
+            int res, float invResM1, float halfW, float halfH,
+            int channels, int planeH, int planeW)
         {
-            // Map from [-0.5, 0.5] → pixel coords matching align_corners=False:
-            // px = (pos + 0.5) * W - 0.5   (since pos in [-0.5, 0.5] maps to x in [-1,1] as x = pos*2)
-            // Equivalently: px = pos * W + W/2 - 0.5
-            float halfW = planeW * 0.5f - 0.5f;
-            float halfH = planeH * 0.5f - 0.5f;
+            int featureDim = 3 * channels;
+            int resRes = res * res;
 
-            float u0 = x * planeW + halfW;
-            float v0 = y * planeH + halfH;
-            float u1 = x * planeW + halfW;
-            float v1 = z * planeH + halfH;
-            float u2 = y * planeW + halfW;
-            float v2 = z * planeH + halfH;
+            fixed (float* scPtr = sceneCodes, outPtr = output)
+            {
+                float* scLocal = scPtr;
+                float* outLocal = outPtr;
 
-            int off = outOffset;
-            BilinearSampleZeroPad(sceneCodes, 0, channels, planeH, planeW, u0, v0, output, ref off);
-            BilinearSampleZeroPad(sceneCodes, 1, channels, planeH, planeW, u1, v1, output, ref off);
-            BilinearSampleZeroPad(sceneCodes, 2, channels, planeH, planeW, u2, v2, output, ref off);
+                Parallel.For(0, count, i =>
+                {
+                    int globalIdx = startIdx + i;
+                    int ix = globalIdx % res;
+                    int iy = (globalIdx / res) % res;
+                    int iz = globalIdx / resRes;
+
+                    float x = ix * invResM1 - 0.5f;
+                    float y = iy * invResM1 - 0.5f;
+                    float z = iz * invResM1 - 0.5f;
+
+                    float* dst = outLocal + i * featureDim;
+                    SampleTriplaneFeaturesUnsafe(scLocal, x, y, z,
+                        channels, planeH, planeW, halfW, halfH, dst);
+                });
+            }
+        }
+
+        private static unsafe void SamplePositionsParallel(
+            float[] sceneCodes, float[] output, Vector3[] positions, int posStart, int count,
+            float halfW, float halfH, int channels, int planeH, int planeW)
+        {
+            int featureDim = 3 * channels;
+
+            fixed (float* scPtr = sceneCodes, outPtr = output)
+            fixed (Vector3* posPtr = positions)
+            {
+                float* scLocal = scPtr;
+                float* outLocal = outPtr;
+                Vector3* posLocal = posPtr;
+
+                Parallel.For(0, count, i =>
+                {
+                    var v = posLocal[posStart + i];
+                    float* dst = outLocal + i * featureDim;
+                    SampleTriplaneFeaturesUnsafe(scLocal, v.x, v.y, v.z,
+                        channels, planeH, planeW, halfW, halfH, dst);
+                });
+            }
         }
 
         /// <summary>
-        /// Bilinear interpolation with zero-padding (matching PyTorch default padding_mode='zeros').
-        /// Out-of-bounds samples contribute 0 instead of clamped edge values.
+        /// Bilinear-sample 3 triplane planes at (x,y,z) in [-0.5, 0.5].
+        /// Matches F.grid_sample(align_corners=False, padding_mode='zeros').
+        /// All pointer arithmetic — no bounds checking.
         /// </summary>
-        private static void BilinearSampleZeroPad(
-            float[] sceneCodes, int planeIdx, int channels, int planeH, int planeW,
-            float u, float v, float[] output, ref int outIdx)
+        private static unsafe void SampleTriplaneFeaturesUnsafe(
+            float* sceneCodes, float x, float y, float z,
+            int channels, int planeH, int planeW,
+            float halfW, float halfH, float* output)
+        {
+            int planeStride = channels * planeH * planeW;
+            int chanStride = planeH * planeW;
+
+            // Plane 0: (x, y), Plane 1: (x, z), Plane 2: (y, z)
+            float* planeBase0 = sceneCodes;
+            float* planeBase1 = sceneCodes + planeStride;
+            float* planeBase2 = sceneCodes + planeStride * 2;
+
+            SamplePlaneUnsafe(planeBase0, x * planeW + halfW, y * planeH + halfH,
+                channels, planeH, planeW, chanStride, output);
+            SamplePlaneUnsafe(planeBase1, x * planeW + halfW, z * planeH + halfH,
+                channels, planeH, planeW, chanStride, output + channels);
+            SamplePlaneUnsafe(planeBase2, y * planeW + halfW, z * planeH + halfH,
+                channels, planeH, planeW, chanStride, output + channels * 2);
+        }
+
+        private static unsafe void SamplePlaneUnsafe(
+            float* planeBase, float u, float v,
+            int channels, int planeH, int planeW, int chanStride, float* output)
         {
             int u0 = (int)MathF.Floor(u);
             int v0 = (int)MathF.Floor(v);
@@ -193,130 +190,193 @@ namespace Genesis.RoomScan.ObjectReconstruction
             float fu = u - u0;
             float fv = v - v0;
 
-            bool u0Valid = u0 >= 0 && u0 < planeW;
-            bool u1Valid = u1 >= 0 && u1 < planeW;
-            bool v0Valid = v0 >= 0 && v0 < planeH;
-            bool v1Valid = v1 >= 0 && v1 < planeH;
-
             float w00 = (1f - fu) * (1f - fv);
             float w10 = fu * (1f - fv);
             float w01 = (1f - fu) * fv;
             float w11 = fu * fv;
 
-            int planeBase = planeIdx * channels * planeH * planeW;
+            bool u0ok = (uint)u0 < (uint)planeW;
+            bool u1ok = (uint)u1 < (uint)planeW;
+            bool v0ok = (uint)v0 < (uint)planeH;
+            bool v1ok = (uint)v1 < (uint)planeH;
+
+            bool has00 = u0ok & v0ok;
+            bool has10 = u1ok & v0ok;
+            bool has01 = u0ok & v1ok;
+            bool has11 = u1ok & v1ok;
+
+            int idx00 = v0 * planeW + u0;
+            int idx10 = v0 * planeW + u1;
+            int idx01 = v1 * planeW + u0;
+            int idx11 = v1 * planeW + u1;
 
             for (int c = 0; c < channels; c++)
             {
-                int chanBase = planeBase + c * planeH * planeW;
+                float* ch = planeBase + c * chanStride;
                 float val = 0f;
-
-                if (u0Valid && v0Valid) val += w00 * sceneCodes[chanBase + v0 * planeW + u0];
-                if (u1Valid && v0Valid) val += w10 * sceneCodes[chanBase + v0 * planeW + u1];
-                if (u0Valid && v1Valid) val += w01 * sceneCodes[chanBase + v1 * planeW + u0];
-                if (u1Valid && v1Valid) val += w11 * sceneCodes[chanBase + v1 * planeW + u1];
-
-                output[outIdx++] = val;
+                if (has00) val += w00 * ch[idx00];
+                if (has10) val += w10 * ch[idx10];
+                if (has01) val += w01 * ch[idx01];
+                if (has11) val += w11 * ch[idx11];
+                output[c] = val;
             }
         }
 
         #endregion
 
-        #region Activations
+        #region Parallel Activations
+
+        private static unsafe void ApplyDensityActivationParallel(
+            float[] decoderOut, float[] density, int dstOffset, int count)
+        {
+            fixed (float* decPtr = decoderOut, denPtr = density)
+            {
+                float* decLocal = decPtr;
+                float* denLocal = denPtr + dstOffset;
+
+                Parallel.For(0, count, i =>
+                {
+                    denLocal[i] = MathF.Exp(decLocal[i * 4] - 1f);
+                });
+            }
+        }
+
+        private static void ApplyColorActivationParallel(
+            float[] decoderOut, Color[] colors, int dstOffset, int count)
+        {
+            Parallel.For(0, count, i =>
+            {
+                int b = i * 4;
+                colors[dstOffset + i] = new Color(
+                    Sigmoid(decoderOut[b + 1]),
+                    Sigmoid(decoderOut[b + 2]),
+                    Sigmoid(decoderOut[b + 3]));
+            });
+        }
 
         private static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));
 
         #endregion
 
-        #region CPU Marching Cubes — matches Python torchmcubes / skimage
+        #region Parallel Marching Cubes
 
-        private static void MarchingCubesCPU(
+        private static void MarchingCubesParallel(
             float[] density, int res, float threshold,
             out Vector3[] vertices, out int[] triangles)
         {
-            var vertList = new List<Vector3>();
-            var triList = new List<int>();
             float voxSize = 1f / (res - 1);
+            float halfRes = res / 2f;
+            int sliceCount = res - 1;
 
-            for (int iz = 0; iz < res - 1; iz++)
-            for (int iy = 0; iy < res - 1; iy++)
-            for (int ix = 0; ix < res - 1; ix++)
+            // Per-slice vertex/index lists — no contention between threads
+            var sliceVerts = new List<Vector3>[sliceCount];
+            var sliceTris = new List<int>[sliceCount];
+
+            Parallel.For(0, sliceCount, iz =>
             {
-                float[] corners = new float[8];
-                corners[0] = density[Flat(ix, iy, iz, res)];
-                corners[1] = density[Flat(ix + 1, iy, iz, res)];
-                corners[2] = density[Flat(ix + 1, iy + 1, iz, res)];
-                corners[3] = density[Flat(ix, iy + 1, iz, res)];
-                corners[4] = density[Flat(ix, iy, iz + 1, res)];
-                corners[5] = density[Flat(ix + 1, iy, iz + 1, res)];
-                corners[6] = density[Flat(ix + 1, iy + 1, iz + 1, res)];
-                corners[7] = density[Flat(ix, iy + 1, iz + 1, res)];
+                var vList = new List<Vector3>(1024);
+                var tList = new List<int>(1024);
 
-                int cubeIndex = 0;
-                for (int j = 0; j < 8; j++)
-                    if (corners[j] < threshold) cubeIndex |= (1 << j);
-
-                if (cubeIndex == 0 || cubeIndex == 255) continue;
-                int edgeBits = EdgeTable[cubeIndex];
-                if (edgeBits == 0) continue;
-
-                var edgeVerts = new Vector3[12];
-                for (int e = 0; e < 12; e++)
+                for (int iy = 0; iy < res - 1; iy++)
+                for (int ix = 0; ix < res - 1; ix++)
                 {
-                    if ((edgeBits & (1 << e)) == 0) continue;
-                    int a = MCEdgeA[e], b = MCEdgeB[e];
-                    float va = corners[a], vb = corners[b];
-                    float denom = vb - va;
-                    float t = MathF.Abs(denom) > 1e-8f
-                        ? Math.Clamp((threshold - va) / denom, 0f, 1f)
-                        : 0.5f;
+                    float c0 = density[Flat(ix, iy, iz, res)];
+                    float c1 = density[Flat(ix + 1, iy, iz, res)];
+                    float c2 = density[Flat(ix + 1, iy + 1, iz, res)];
+                    float c3 = density[Flat(ix, iy + 1, iz, res)];
+                    float c4 = density[Flat(ix, iy, iz + 1, res)];
+                    float c5 = density[Flat(ix + 1, iy, iz + 1, res)];
+                    float c6 = density[Flat(ix + 1, iy + 1, iz + 1, res)];
+                    float c7 = density[Flat(ix, iy + 1, iz + 1, res)];
 
-                    var pA = CornerPos(ix, iy, iz, a);
-                    var pB = CornerPos(ix, iy, iz, b);
-                    var worldA = VoxToWorld(pA, res, voxSize);
-                    var worldB = VoxToWorld(pB, res, voxSize);
-                    edgeVerts[e] = Vector3.Lerp(worldA, worldB, t);
+                    int cubeIndex = 0;
+                    if (c0 < threshold) cubeIndex |= 1;
+                    if (c1 < threshold) cubeIndex |= 2;
+                    if (c2 < threshold) cubeIndex |= 4;
+                    if (c3 < threshold) cubeIndex |= 8;
+                    if (c4 < threshold) cubeIndex |= 16;
+                    if (c5 < threshold) cubeIndex |= 32;
+                    if (c6 < threshold) cubeIndex |= 64;
+                    if (c7 < threshold) cubeIndex |= 128;
+
+                    if (cubeIndex == 0 || cubeIndex == 255) continue;
+                    int edgeBits = EdgeTable[cubeIndex];
+                    if (edgeBits == 0) continue;
+
+                    // Pack corners for edge interpolation
+                    float* corners = stackalloc float[8];
+                    corners[0] = c0; corners[1] = c1; corners[2] = c2; corners[3] = c3;
+                    corners[4] = c4; corners[5] = c5; corners[6] = c6; corners[7] = c7;
+
+                    Vector3* edgeVerts = stackalloc Vector3[12];
+                    for (int e = 0; e < 12; e++)
+                    {
+                        if ((edgeBits & (1 << e)) == 0) continue;
+                        int a = MCEdgeA[e], b = MCEdgeB[e];
+                        float va = corners[a], vb = corners[b];
+                        float denom = vb - va;
+                        float t = MathF.Abs(denom) > 1e-8f
+                            ? Math.Clamp((threshold - va) / denom, 0f, 1f)
+                            : 0.5f;
+
+                        float ax = ix + MCCornerX[a], ay = iy + MCCornerY[a], az = iz + MCCornerZ[a];
+                        float bx = ix + MCCornerX[b], by = iy + MCCornerY[b], bz = iz + MCCornerZ[b];
+
+                        edgeVerts[e] = new Vector3(
+                            (ax + t * (bx - ax) + 0.5f - halfRes) * voxSize,
+                            (ay + t * (by - ay) + 0.5f - halfRes) * voxSize,
+                            (az + t * (bz - az) + 0.5f - halfRes) * voxSize);
+                    }
+
+                    for (int ti = 0; ti < 16; ti += 3)
+                    {
+                        int e0 = TriTable[cubeIndex * 16 + ti];
+                        if (e0 < 0) break;
+                        int e1 = TriTable[cubeIndex * 16 + ti + 1];
+                        int e2 = TriTable[cubeIndex * 16 + ti + 2];
+
+                        int baseIdx = vList.Count;
+                        vList.Add(edgeVerts[e0]);
+                        vList.Add(edgeVerts[e2]); // reversed winding
+                        vList.Add(edgeVerts[e1]);
+
+                        tList.Add(baseIdx);
+                        tList.Add(baseIdx + 1);
+                        tList.Add(baseIdx + 2);
+                    }
                 }
 
-                for (int ti = 0; ti < 16; ti += 3)
-                {
-                    int e0 = TriTable[cubeIndex * 16 + ti];
-                    if (e0 < 0) break;
-                    int e1 = TriTable[cubeIndex * 16 + ti + 1];
-                    int e2 = TriTable[cubeIndex * 16 + ti + 2];
+                sliceVerts[iz] = vList;
+                sliceTris[iz] = tList;
+            });
 
-                    int baseIdx = vertList.Count;
-                    vertList.Add(edgeVerts[e0]);
-                    // Reversed winding to match GPU shader (normals point outward)
-                    vertList.Add(edgeVerts[e2]);
-                    vertList.Add(edgeVerts[e1]);
-
-                    triList.Add(baseIdx);
-                    triList.Add(baseIdx + 1);
-                    triList.Add(baseIdx + 2);
-                }
+            // Merge slices — sequential but fast (just array concatenation)
+            int totalVerts = 0, totalTris = 0;
+            for (int i = 0; i < sliceCount; i++)
+            {
+                totalVerts += sliceVerts[i].Count;
+                totalTris += sliceTris[i].Count;
             }
 
-            vertices = vertList.ToArray();
-            triangles = triList.ToArray();
+            vertices = new Vector3[totalVerts];
+            triangles = new int[totalTris];
+            int vOff = 0, tOff = 0;
+            for (int i = 0; i < sliceCount; i++)
+            {
+                var sv = sliceVerts[i];
+                var st = sliceTris[i];
+                int baseV = vOff;
+
+                sv.CopyTo(0, vertices, vOff, sv.Count);
+                vOff += sv.Count;
+
+                for (int j = 0; j < st.Count; j++)
+                    triangles[tOff + j] = st[j] + baseV;
+                tOff += st.Count;
+            }
         }
 
         private static int Flat(int x, int y, int z, int res) => z * res * res + y * res + x;
-
-        private static Vector3 CornerPos(int cellX, int cellY, int cellZ, int corner)
-        {
-            return new Vector3(
-                cellX + MCCornerX[corner],
-                cellY + MCCornerY[corner],
-                cellZ + MCCornerZ[corner]);
-        }
-
-        private static Vector3 VoxToWorld(Vector3 c, int res, float voxSize)
-        {
-            return new Vector3(
-                (c.x + 0.5f - res / 2f) * voxSize,
-                (c.y + 0.5f - res / 2f) * voxSize,
-                (c.z + 0.5f - res / 2f) * voxSize);
-        }
 
         #endregion
 
