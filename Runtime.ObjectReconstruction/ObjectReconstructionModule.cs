@@ -38,10 +38,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [SerializeField] private float densityThreshold = 25f;
         [SerializeField] private MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes;
 
-        [SerializeField, Tooltip("3x3x3 Gaussian smoothing passes on the density volume before " +
-            "marching cubes. Filters INT8 quantization noise amplified by exp(). " +
-            "0 = disabled, 1 = recommended for INT8, 2+ = more smoothing.")]
-        private int densitySmoothPasses = 1;
+        [SerializeField, Tooltip("3x3x3 Gaussian smoothing passes on raw density (pre-exp) volume. " +
+            "Workaround for ORT < 1.24 INT8 quantization noise. " +
+            "0 = disabled (default), 1+ = smoothing passes. Not needed with ORT >= 1.24.")]
+        private int densitySmoothPasses = 0;
 
         public string ModuleName => "Object Reconstruction";
         public bool IsRunning => _running;
