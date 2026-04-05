@@ -269,21 +269,17 @@ namespace Genesis.RoomScan.Editor
 
         /// <summary>
         /// Check if a complete set of models exists in OnnxSource for the given precision.
-        /// u2netp uses FP32 for FP32/FP16/INT8 (FP16 broken, INT8 same size),
-        /// but uses QDQ variant for INT8_QDQ (70% smaller, works on QNN HTP).
+        /// u2netp always uses FP32 (FP16 broken, INT8 same size, QDQ fails on device).
         /// </summary>
         private static bool IsPrecisionAvailable(ModelPrecision precision)
         {
             string suffix = PrecisionSuffixes[(int)precision];
-            string u2netpName = precision == ModelPrecision.INT8_QDQ
-                ? "u2netp_int8_qdq.onnx"
-                : "u2netp.onnx";
             string[] required =
             {
                 $"triposr_part1_{suffix}.onnx",
                 $"triposr_part2_{suffix}.onnx",
                 $"nerf_decoder_{suffix}.onnx",
-                u2netpName,
+                "u2netp.onnx",
             };
 
             foreach (var name in required)
@@ -325,16 +321,12 @@ namespace Genesis.RoomScan.Editor
             string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
             Directory.CreateDirectory(streamingDir);
 
-            string u2netpSrc = precision == ModelPrecision.INT8_QDQ
-                ? "u2netp_int8_qdq.onnx"
-                : "u2netp.onnx";
-
             (string src, string dst)[] models =
             {
                 ($"triposr_part1_{suffix}.onnx", "triposr_part1.onnx"),
                 ($"triposr_part2_{suffix}.onnx", "triposr_part2.onnx"),
                 ($"nerf_decoder_{suffix}.onnx", "nerf_decoder.onnx"),
-                (u2netpSrc, "u2netp.onnx"),
+                ("u2netp.onnx", "u2netp.onnx"),
             };
 
             for (int i = 0; i < models.Length; i++)
