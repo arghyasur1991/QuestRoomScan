@@ -21,7 +21,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private const string Part1FileName = "ObjectReconstruction/triposr_part1.onnx";
         private const string Part2FileName = "ObjectReconstruction/triposr_part2.onnx";
 
-        private const string ImageInputName = "image";
         private const string EncoderOutputName = "/Reshape_output_0";
         private const string HiddenOutputName = "/backbone/transformer_blocks.7/Add_2_output_0";
 
@@ -73,8 +72,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             var hiddenStates = ExtractTensor(results1, HiddenOutputName);
 
             var part2 = (PartModel)_part2;
-            if (part2.NeedsInput(ImageInputName))
-                part2.SetInput(ImageInputName, inputTensor);
             part2.SetInput(EncoderOutputName, encoderStates);
             part2.SetInput(HiddenOutputName, hiddenStates);
             using var results2 = await part2.RunDisposablePublic();
@@ -111,11 +108,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 await part2.LoadAsync(Part2FileName, _ep, _mobileOptimized, ct);
                 await AsyncHelper.YieldFrame();
 
-                if (part2.NeedsInput(ImageInputName))
-                {
-                    var imgTensor = new DenseTensor<float>(preprocessed, new[] { 1, 3, 512, 512 });
-                    part2.SetInput(ImageInputName, imgTensor);
-                }
                 part2.SetInput(EncoderOutputName, encoderStates);
                 part2.SetInput(HiddenOutputName, hiddenStates);
                 using var results2 = await part2.RunDisposablePublic();
@@ -161,8 +153,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             {
                 await LoadSessionAsync(relativePath, ep, mobileOptimized, ct);
             }
-
-            internal bool NeedsInput(string name) => _inputNames.Contains(name);
 
             internal void SetInput(DenseTensor<float> tensor)
             {
