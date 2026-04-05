@@ -90,6 +90,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             {
                 EnsurePipeline();
 
+                Logger.Info($"[ObjectReconstruction] Starting: EP={executionProvider} " +
+                    $"Mobile={mobileOptimized} Grid={gridResolution} Backend={meshExtractionBackend}");
                 var sw = System.Diagnostics.Stopwatch.StartNew();
 
                 ReportStatus("Loading models...");
@@ -114,9 +116,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 sw.Stop();
 
                 float totalMs = loadMs + rembgMs + forwardMs + meshMs;
-                Logger.Info($"[ObjectReconstruction] Timing: load={loadMs:F0}ms rembg={rembgMs:F0}ms " +
-                    $"forward={forwardMs:F0}ms mesh={meshMs:F0}ms total={totalMs:F0}ms");
-                ReportStatus($"Done! ({totalMs / 1000f:F1}s)");
+                Logger.Info($"[ObjectReconstruction] Done: EP={executionProvider} " +
+                    $"load={loadMs:F0}ms rembg={rembgMs:F0}ms forward={forwardMs:F0}ms " +
+                    $"mesh={meshMs:F0}ms total={totalMs:F0}ms");
+                ReportStatus($"Done! ({totalMs / 1000f:F1}s, EP={executionProvider})");
 
                 return mesh;
             }
@@ -137,6 +140,54 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 _cts?.Dispose();
                 _cts = null;
             }
+        }
+
+        public async Task<Texture2D> TestRembgAsync(Texture2D image, CancellationToken ct = default)
+        {
+            if (_running)
+            {
+                Logger.Warning("[ObjectReconstruction] Pipeline already in progress");
+                return null;
+            }
+
+            _running = true;
+            try
+            {
+                EnsurePipeline();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                ReportStatus($"Rembg test (EP={executionProvider})...");
+                var mask = await _pipeline.TestRembgAsync(image, ct);
+                float totalMs = sw.ElapsedMilliseconds;
+
+                Logger.Info($"[ObjectReconstruction] Rembg test: EP={executionProvider} " +
+                    $"total={totalMs:F0}ms mask={mask?.Length ?? 0} values");
+
+                var tex = MaskToTexture(mask, 320, 320);
+                ReportStatus($"Rembg done ({totalMs:F0}ms, EP={executionProvider})");
+                return tex;
+            }
+            catch (Exception e)
+            {
+                Logger.Error($"[ObjectReconstruction] Rembg test failed: {e.Message}");
+                ReportStatus($"Rembg error: {e.Message}");
+                return null;
+            }
+            finally
+            {
+                _running = false;
+            }
+        }
+
+        private static Texture2D MaskToTexture(float[] mask, int w, int h)
+        {
+            if (mask == null || mask.Length != w * h) return null;
+            var tex = new Texture2D(w, h, TextureFormat.R8, false);
+            var pixels = tex.GetRawTextureData<byte>();
+            for (int i = 0; i < mask.Length; i++)
+                pixels[i] = (byte)(Mathf.Clamp01(mask[i]) * 255f);
+            tex.Apply();
+            return tex;
         }
 
         public void Cancel()

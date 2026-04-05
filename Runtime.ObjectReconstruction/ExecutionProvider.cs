@@ -6,7 +6,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         CPU,
         NNAPI,
         XNNPACK,
-        CoreML
+        CoreML,
+        QNN_HTP
     }
 }
 #endif

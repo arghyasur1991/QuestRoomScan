@@ -27,5 +27,11 @@ namespace Genesis.RoomScan
         /// Creates a material suitable for rendering the reconstructed mesh (vertex colors).
         /// </summary>
         Material CreateMaterial();
+
+        /// <summary>
+        /// Runs rembg only on a test image and returns the mask as a Texture2D for preview.
+        /// Useful for quick EP validation (e.g. QNN HTP) without running the full pipeline.
+        /// </summary>
+        Task<Texture2D> TestRembgAsync(Texture2D image, CancellationToken ct = default);
     }
 }

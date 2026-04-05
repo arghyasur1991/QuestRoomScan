@@ -116,6 +116,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 case ExecutionProvider.CoreML:
                     ConfigureCoreML(options, modelCacheDir);
                     break;
+                case ExecutionProvider.QNN_HTP:
+                    ConfigureQnn(options);
+                    break;
             }
 
             return options;
@@ -202,6 +205,27 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     Logger.Warning($"[OrtModelBase] CoreML flags fallback also failed ({e2.Message}), using CPU");
                 }
             }
+        }
+
+        private static void ConfigureQnn(SessionOptions options)
+        {
+            QnnEnvironment.Initialize();
+
+            string backendPath = "libQnnHtp.so";
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (!string.IsNullOrEmpty(QnnEnvironment.NativeLibDir))
+                backendPath = System.IO.Path.Combine(QnnEnvironment.NativeLibDir, "libQnnHtp.so");
+#endif
+
+            var qnnOptions = new Dictionary<string, string>
+            {
+                ["backend_path"] = backendPath,
+                ["htp_performance_mode"] = "burst",
+                ["enable_htp_fp16_precision"] = "1",
+            };
+
+            Logger.Info($"[OrtModelBase] QNN HTP backend_path={backendPath}");
+            options.AppendExecutionProvider("QNN", qnnOptions);
         }
 
         /// <summary>

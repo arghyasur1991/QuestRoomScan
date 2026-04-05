@@ -211,6 +211,16 @@
                     <ui:Button name="btn-recon-predict" text="Predict" class="action-btn action-btn--primary" />
                     <ui:Button name="btn-recon-clear" text="Clear Mesh" class="action-btn action-btn--danger" />
                 </ui:VisualElement>
+
+                <ui:Label text="EXPERIMENTS" class="view-subtitle" />
+                <ui:VisualElement class="btn-group">
+                    <ui:Button name="btn-recon-rembg-test" text="Rembg Test" class="action-btn" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Result" class="status-key" />
+                    <ui:Label name="val-recon-experiment" text="--" class="status-val" style="white-space: normal;" />
+                </ui:VisualElement>
+                <ui:VisualElement name="recon-mask-preview" style="width: 160px; height: 160px; background-color: rgb(34, 34, 34);" />
             </ui:VisualElement>
 
         </ui:VisualElement>

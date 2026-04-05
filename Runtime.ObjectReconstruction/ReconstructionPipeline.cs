@@ -106,6 +106,26 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 await _decoder.LoadAsync(_executionProvider, _mobileOptimized, ct);
         }
 
+        /// <summary>
+        /// Runs rembg only on a real image. Returns the mask as float[320*320].
+        /// Uses load-execute-dispose pattern (independent of preload mode).
+        /// </summary>
+        internal async Task<float[]> TestRembgAsync(Texture2D image, CancellationToken ct)
+        {
+            var readable = MakeReadable(image);
+            try
+            {
+                using var rembg = new OrtRembgModel();
+                await rembg.LoadAsync(_executionProvider, _mobileOptimized, ct);
+                return await rembg.InferAsync(readable, ct);
+            }
+            finally
+            {
+                if (readable != image)
+                    SafeDestroy(readable);
+            }
+        }
+
         internal async Task<float[]> PreprocessAsync(Texture2D image, CancellationToken ct)
         {
             var readable = MakeReadable(image);

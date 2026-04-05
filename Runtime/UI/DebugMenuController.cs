@@ -51,6 +51,9 @@ namespace Genesis.RoomScan.UI
         private Label _valReconModels, _valReconStatus, _valReconMesh;
         private VisualElement[] _reconThumbs;
         private Button _btnReconLoad, _btnReconPredict, _btnReconClear;
+        private Button _btnReconRembgTest;
+        private Label _valReconExperiment;
+        private VisualElement _reconMaskPreview;
         private int _reconSelectedIdx = -1;
         private bool _reconAvailable;
         private IObjectReconstructionProvider _cachedReconModule;
@@ -211,6 +214,9 @@ namespace Genesis.RoomScan.UI
             _btnReconLoad = _root.Q<Button>("btn-recon-load");
             _btnReconPredict = _root.Q<Button>("btn-recon-predict");
             _btnReconClear = _root.Q<Button>("btn-recon-clear");
+            _btnReconRembgTest = _root.Q<Button>("btn-recon-rembg-test");
+            _valReconExperiment = _root.Q<Label>("val-recon-experiment");
+            _reconMaskPreview = _root.Q<VisualElement>("recon-mask-preview");
             _reconThumbs = new VisualElement[6];
             for (int i = 0; i < 6; i++)
                 _reconThumbs[i] = _root.Q<VisualElement>($"recon-thumb-{i}");
@@ -350,6 +356,22 @@ namespace Genesis.RoomScan.UI
             _btnReconClear?.RegisterCallback<ClickEvent>(_ =>
             {
                 ClearReconstructedMesh();
+            });
+
+            _btnReconRembgTest?.RegisterCallback<ClickEvent>(async _ =>
+            {
+                var module = FindReconstructionModule();
+                if (module == null || _reconSelectedIdx < 0) return;
+                var images = module.TestImages;
+                if (images == null || _reconSelectedIdx >= images.Length || images[_reconSelectedIdx] == null) return;
+
+                SetButtonBusy(_btnReconRembgTest, "Running...");
+                SetLabel(_valReconExperiment, "Running rembg...");
+                var maskTex = await module.TestRembgAsync(images[_reconSelectedIdx]);
+                SetLabel(_valReconExperiment, module.Status ?? "--");
+                if (maskTex != null && _reconMaskPreview != null)
+                    _reconMaskPreview.style.backgroundImage = new StyleBackground(maskTex);
+                SetButtonReady(_btnReconRembgTest, "Rembg Test");
             });
         }
 
