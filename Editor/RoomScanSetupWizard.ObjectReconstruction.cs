@@ -23,13 +23,18 @@ namespace Genesis.RoomScan.Editor
             "shoe_raw",
         };
 
-        static readonly string[] OnnxModelNames =
+        static readonly string[] DeployedModelNames =
         {
             "triposr_part1.onnx",
             "triposr_part2.onnx",
             "nerf_decoder.onnx",
             "u2netp.onnx"
         };
+
+        enum ModelPrecision { FP32, FP16, INT8 }
+
+        static readonly string[] PrecisionSuffixes = { "fp32", "fp16", "int8" };
+        static readonly string[] PrecisionLabels = { "FP32 (1.7GB)", "FP16 (840MB)", "INT8 (460MB)" };
 
         ObjectReconstructionModule _objectReconstruction;
         bool _reconTriplaneShaderAssigned;
@@ -39,7 +44,8 @@ namespace Genesis.RoomScan.Editor
         bool _reconVertexColorShaderAssigned;
         bool _reconTestImagesAssigned;
         bool _reconOnnxModelsDeployed;
-        bool _reconOnnxSourcesExist;
+        string _reconDeployedPrecision;
+        bool[] _reconAvailablePrecisions = new bool[3];
 
         partial void RefreshObjectReconstruction()
         {
@@ -71,8 +77,11 @@ namespace Genesis.RoomScan.Editor
             }
 
             string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
-            _reconOnnxModelsDeployed = AllOnnxModelsDeployed(streamingDir);
-            _reconOnnxSourcesExist = AllOnnxSourcesExist();
+            _reconOnnxModelsDeployed = AllDeployedModelsExist(streamingDir);
+            _reconDeployedPrecision = DetectDeployedPrecision(streamingDir);
+
+            for (int i = 0; i < 3; i++)
+                _reconAvailablePrecisions[i] = IsPrecisionAvailable((ModelPrecision)i);
         }
 
         partial void DrawObjectReconstructionOptionalStatus()
@@ -91,28 +100,44 @@ namespace Genesis.RoomScan.Editor
             {
                 EditorGUILayout.BeginHorizontal();
                 EditorGUILayout.LabelField("  Models (.onnx)", EditorStyles.label);
-                GUILayout.Label("OK", EditorStyles.boldLabel);
+                string deployLabel = string.IsNullOrEmpty(_reconDeployedPrecision)
+                    ? "OK"
+                    : $"OK ({_reconDeployedPrecision.ToUpper()})";
+                GUILayout.Label(deployLabel, EditorStyles.boldLabel);
                 EditorGUILayout.EndHorizontal();
             }
-            else if (_reconOnnxSourcesExist)
-            {
-                EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField("  Models", EditorStyles.label);
-                GUILayout.Label("Needs Deploy", EditorStyles.boldLabel);
-                EditorGUILayout.EndHorizontal();
 
-                if (GUILayout.Button("Deploy Models to StreamingAssets", GUILayout.Height(24)))
-                    DeployOnnxModels();
+            bool anyAvailable = _reconAvailablePrecisions[0]
+                             || _reconAvailablePrecisions[1]
+                             || _reconAvailablePrecisions[2];
+
+            if (anyAvailable)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField("  Deploy Models to StreamingAssets:",
+                    EditorStyles.miniLabel);
+
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(20);
+                for (int i = 0; i < 3; i++)
+                {
+                    using (new EditorGUI.DisabledScope(!_reconAvailablePrecisions[i]))
+                    {
+                        if (GUILayout.Button(PrecisionLabels[i], GUILayout.Height(22)))
+                            DeployOnnxModels((ModelPrecision)i);
+                    }
+                }
+                EditorGUILayout.EndHorizontal();
             }
-            else
+            else if (!_reconOnnxModelsDeployed)
             {
                 EditorGUILayout.BeginHorizontal();
                 EditorGUILayout.LabelField("  Models", EditorStyles.label);
                 GUILayout.Label("Missing", EditorStyles.boldLabel);
                 EditorGUILayout.EndHorizontal();
                 EditorGUILayout.HelpBox(
-                    $"Place triposr_part1.onnx, triposr_part2.onnx, nerf_decoder.onnx, and u2netp.onnx in {RECON_ONNX_DIR}/\n" +
-                    "Generate split ONNX via: python TripoSR/split_triposr.py",
+                    $"Run: python TripoSR/export_onnx.py --deploy all\n" +
+                    $"This generates and copies all model variants to {RECON_ONNX_DIR}/",
                     MessageType.Warning);
             }
         }
@@ -234,34 +259,81 @@ namespace Genesis.RoomScan.Editor
             return result.ToArray();
         }
 
-        private static bool AllOnnxModelsDeployed(string dir)
+        private static bool AllDeployedModelsExist(string dir)
         {
-            foreach (var name in OnnxModelNames)
+            foreach (var name in DeployedModelNames)
                 if (!File.Exists(Path.Combine(dir, name))) return false;
             return true;
         }
 
-        private static bool AllOnnxSourcesExist()
+        /// <summary>
+        /// Check if a complete set of models exists in OnnxSource for the given precision.
+        /// u2netp is always FP32 (FP16 broken, INT8 same size).
+        /// </summary>
+        private static bool IsPrecisionAvailable(ModelPrecision precision)
         {
-            foreach (var name in OnnxModelNames)
+            string suffix = PrecisionSuffixes[(int)precision];
+            string[] required =
             {
-                string path = Path.Combine(RECON_ONNX_DIR, name);
-                if (!File.Exists(path)) return false;
-            }
+                $"triposr_part1_{suffix}.onnx",
+                $"triposr_part2_{suffix}.onnx",
+                $"nerf_decoder_{suffix}.onnx",
+                "u2netp.onnx",
+            };
+
+            foreach (var name in required)
+                if (!File.Exists(Path.Combine(RECON_ONNX_DIR, name))) return false;
             return true;
         }
 
-        private static void DeployOnnxModels()
+        /// <summary>
+        /// Detect which precision is currently deployed via the .precision marker,
+        /// falling back to file size comparison against OnnxSource variants.
+        /// </summary>
+        private static string DetectDeployedPrecision(string streamingDir)
         {
+            string markerPath = Path.Combine(streamingDir, ".precision");
+            if (File.Exists(markerPath))
+            {
+                string marker = File.ReadAllText(markerPath).Trim();
+                if (!string.IsNullOrEmpty(marker)) return marker;
+            }
+
+            string deployedPart1 = Path.Combine(streamingDir, "triposr_part1.onnx");
+            if (!File.Exists(deployedPart1)) return null;
+
+            long deployedSize = new FileInfo(deployedPart1).Length;
+            for (int i = 2; i >= 0; i--)
+            {
+                string suffix = PrecisionSuffixes[i];
+                string srcPath = Path.Combine(RECON_ONNX_DIR, $"triposr_part1_{suffix}.onnx");
+                if (File.Exists(srcPath) && new FileInfo(srcPath).Length == deployedSize)
+                    return suffix;
+            }
+
+            return null;
+        }
+
+        private static void DeployOnnxModels(ModelPrecision precision)
+        {
+            string suffix = PrecisionSuffixes[(int)precision];
             string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
             Directory.CreateDirectory(streamingDir);
 
-            int total = OnnxModelNames.Length;
-            for (int i = 0; i < total; i++)
+            // Map: source name in OnnxSource -> deployed name in StreamingAssets
+            (string src, string dst)[] models =
             {
-                string onnxName = OnnxModelNames[i];
-                string srcPath = Path.Combine(RECON_ONNX_DIR, onnxName);
-                string dstPath = Path.Combine(streamingDir, onnxName);
+                ($"triposr_part1_{suffix}.onnx", "triposr_part1.onnx"),
+                ($"triposr_part2_{suffix}.onnx", "triposr_part2.onnx"),
+                ($"nerf_decoder_{suffix}.onnx", "nerf_decoder.onnx"),
+                ("u2netp.onnx", "u2netp.onnx"),
+            };
+
+            for (int i = 0; i < models.Length; i++)
+            {
+                var (srcName, dstName) = models[i];
+                string srcPath = Path.Combine(RECON_ONNX_DIR, srcName);
+                string dstPath = Path.Combine(streamingDir, dstName);
 
                 if (!File.Exists(srcPath))
                 {
@@ -269,17 +341,23 @@ namespace Genesis.RoomScan.Editor
                     continue;
                 }
 
-                EditorUtility.DisplayProgressBar("Deploying Models",
-                    $"Copying {onnxName}... ({i + 1}/{total})", (float)i / total);
+                EditorUtility.DisplayProgressBar($"Deploying {suffix.ToUpper()} Models",
+                    $"Copying {srcName} → {dstName}... ({i + 1}/{models.Length})",
+                    (float)i / models.Length);
 
                 File.Copy(srcPath, dstPath, overwrite: true);
                 var fi = new FileInfo(dstPath);
-                Debug.Log($"[ObjectReconstruction] Deployed {dstPath} ({fi.Length / 1048576} MB)");
+                Debug.Log($"[ObjectReconstruction] Deployed {dstName} ← {srcName} " +
+                          $"({fi.Length / 1048576} MB)");
             }
+
+            // Write a marker file so we can detect which precision is deployed
+            string markerPath = Path.Combine(streamingDir, ".precision");
+            File.WriteAllText(markerPath, suffix);
 
             EditorUtility.ClearProgressBar();
             AssetDatabase.Refresh();
-            Debug.Log("[ObjectReconstruction] Model deployment complete");
+            Debug.Log($"[ObjectReconstruction] {suffix.ToUpper()} model deployment complete");
         }
     }
 }
