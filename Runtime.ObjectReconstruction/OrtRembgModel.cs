@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
@@ -42,7 +43,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return MinMaxNormalize(raw);
         }
 
-        private static float[] PrepareInput(Texture2D image)
+        /// <summary>
+        /// GPU bilinear resize → Frame extraction → unsafe NCHW conversion with
+        /// max-normalize + ImageNet normalization fused in a single pass.
+        /// </summary>
+        private static unsafe float[] PrepareInput(Texture2D image)
         {
             var rt = RenderTexture.GetTemporary(InputSize, InputSize, 0, RenderTextureFormat.ARGB32);
             rt.filterMode = FilterMode.Bilinear;
@@ -55,32 +60,53 @@ namespace Genesis.RoomScan.ObjectReconstruction
             RenderTexture.active = null;
             RenderTexture.ReleaseTemporary(rt);
 
-            var pixels = resized.GetPixels32();
-            SafeDestroy(resized);
+            var pixelData = resized.GetPixelData<byte>(0);
+            byte* srcPtr = (byte*)pixelData.GetUnsafeReadOnlyPtr();
 
             int channelSize = InputSize * InputSize;
             var data = new float[3 * channelSize];
 
-            float maxVal = 0f;
-            for (int y = 0; y < InputSize; y++)
-            for (int x = 0; x < InputSize; x++)
+            // Pass 1: HWC→NCHW with Y-flip + find max value (thread-local max for Parallel.For)
+            float globalMax = 0f;
+            var threadMaxes = new float[Environment.ProcessorCount];
+
+            fixed (float* dataPtrFixed = data)
             {
-                int texIdx = y * InputSize + x;
-                int tensorY = InputSize - 1 - y;
-                int idx = tensorY * InputSize + x;
-                var c = pixels[texIdx];
-                float r = c.r / 255f;
-                float g = c.g / 255f;
-                float b = c.b / 255f;
-                data[0 * channelSize + idx] = r;
-                data[1 * channelSize + idx] = g;
-                data[2 * channelSize + idx] = b;
-                float m = Mathf.Max(r, Mathf.Max(g, b));
-                if (m > maxVal) maxVal = m;
+                byte* srcLocal = srcPtr;
+                float* dstLocal = dataPtrFixed;
+
+                System.Threading.Tasks.Parallel.For(0, InputSize, () => 0f, (y, _, localMax) =>
+                {
+                    int unityY = InputSize - 1 - y;
+                    for (int x = 0; x < InputSize; x++)
+                    {
+                        int srcIdx = (unityY * InputSize + x) * 3;
+                        int dstIdx = y * InputSize + x;
+                        float r = srcLocal[srcIdx + 0] / 255f;
+                        float g = srcLocal[srcIdx + 1] / 255f;
+                        float b = srcLocal[srcIdx + 2] / 255f;
+                        dstLocal[0 * channelSize + dstIdx] = r;
+                        dstLocal[1 * channelSize + dstIdx] = g;
+                        dstLocal[2 * channelSize + dstIdx] = b;
+                        float m = r > g ? r : g;
+                        if (b > m) m = b;
+                        if (m > localMax) localMax = m;
+                    }
+                    return localMax;
+                }, localMax =>
+                {
+                    lock (threadMaxes)
+                    {
+                        if (localMax > globalMax) globalMax = localMax;
+                    }
+                });
             }
 
-            if (maxVal < 1e-6f) maxVal = 1e-6f;
-            float inv = 1f / maxVal;
+            SafeDestroy(resized);
+
+            // Pass 2: max-normalize + ImageNet normalization
+            if (globalMax < 1e-6f) globalMax = 1e-6f;
+            float inv = 1f / globalMax;
             for (int ch = 0; ch < 3; ch++)
             {
                 float mean = Mean[ch], std = Std[ch];
