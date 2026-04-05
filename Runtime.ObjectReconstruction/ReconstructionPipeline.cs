@@ -34,6 +34,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private int _postKernelDensity;
         private int _postKernelSmooth;
+        private int _postKernelCopy;
         private int _postKernelColors;
 
         // Reusable buffers for decoder hot path
@@ -68,6 +69,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             _postKernelDensity = _postprocessShader.FindKernel("ExtractDensity");
             _postKernelSmooth = _postprocessShader.FindKernel("SmoothDensity");
+            _postKernelCopy = _postprocessShader.FindKernel("CopyDensity");
             _postKernelColors = _postprocessShader.FindKernel("ExtractColors");
         }
 
@@ -349,9 +351,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     (src, dst) = (dst, src);
                 }
 
-                // After all passes, result is in 'src'. If it's tempBuf, copy back.
                 if (src != densityBuf)
-                    Graphics.CopyBuffer(src, densityBuf);
+                {
+                    _postprocessShader.SetBuffer(_postKernelCopy, "_DensityInput", src);
+                    _postprocessShader.SetBuffer(_postKernelCopy, "_DensityVolume", densityBuf);
+                    _postprocessShader.Dispatch(_postKernelCopy, groups, 1, 1);
+                }
             }
             finally
             {

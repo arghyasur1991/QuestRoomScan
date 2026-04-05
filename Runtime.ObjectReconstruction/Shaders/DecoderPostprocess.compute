@@ -4,6 +4,7 @@
 
 #pragma kernel ExtractDensity
 #pragma kernel SmoothDensity
+#pragma kernel CopyDensity
 #pragma kernel ExtractColors
 
 StructuredBuffer<float> _DecoderOutput; // (N, 4) flattened: [density, r, g, b]
@@ -63,6 +64,14 @@ void SmoothDensity(uint3 id : SV_DispatchThreadID)
     }
 
     _DensityVolume[id.x] = sum / wt;
+}
+
+[numthreads(256, 1, 1)]
+void CopyDensity(uint3 id : SV_DispatchThreadID)
+{
+    uint total = _SmoothRes * _SmoothRes * _SmoothRes;
+    if (id.x >= total) return;
+    _DensityVolume[id.x] = _DensityInput[id.x];
 }
 
 [numthreads(256, 1, 1)]
