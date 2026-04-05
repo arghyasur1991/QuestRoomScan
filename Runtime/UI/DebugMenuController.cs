@@ -407,11 +407,23 @@ namespace Genesis.RoomScan.UI
             mf.sharedMesh = mesh;
             mr.sharedMaterial = module?.CreateMaterial();
 
-            var scanner = RoomScanner.Instance;
-            var center = scanner != null
-                ? scanner.transform.position + scanner.transform.forward * 1.5f
-                : Vector3.forward * 1.5f;
-            _spawnedReconMesh.transform.position = center;
+            var anchorMgr = RoomAnchorManager.Instance;
+            if (anchorMgr != null && anchorMgr.IsRoomLoaded)
+            {
+                var roomMatrix = anchorMgr.GetRoomLocalToWorldForPersistence();
+                var floorCenter = (Vector3)roomMatrix.GetColumn(3);
+                floorCenter.y += 1.0f;
+                _spawnedReconMesh.transform.position = floorCenter;
+            }
+            else
+            {
+                var cam = Camera.main;
+                var spawnPos = cam != null
+                    ? cam.transform.position + cam.transform.forward * 1.5f
+                    : Vector3.forward * 1.5f;
+                _spawnedReconMesh.transform.position = spawnPos;
+            }
+
             _spawnedReconMesh.transform.localScale = Vector3.one * 0.5f;
         }
 
