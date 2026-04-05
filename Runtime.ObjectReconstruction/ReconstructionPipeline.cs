@@ -91,15 +91,19 @@ namespace Genesis.RoomScan.ObjectReconstruction
         internal async Task LoadModelsAsync(CancellationToken ct)
         {
             if (!_preloadModels) return;
+            if (_rembg != null && _reconstruction != null && _decoder != null) return;
 
-            _rembg = new OrtRembgModel();
-            await _rembg.LoadAsync(_executionProvider, _mobileOptimized, ct);
+            _rembg ??= new OrtRembgModel();
+            if (!_rembg.IsLoaded)
+                await _rembg.LoadAsync(_executionProvider, _mobileOptimized, ct);
 
-            _reconstruction = new OrtReconstructionModel(_executionProvider, _mobileOptimized);
-            await _reconstruction.PreloadAsync(ct);
+            _reconstruction ??= new OrtReconstructionModel(_executionProvider, _mobileOptimized);
+            if (!_reconstruction.IsLoaded)
+                await _reconstruction.PreloadAsync(ct);
 
-            _decoder = new OrtDecoderModel();
-            await _decoder.LoadAsync(_executionProvider, _mobileOptimized, ct);
+            _decoder ??= new OrtDecoderModel();
+            if (!_decoder.IsLoaded)
+                await _decoder.LoadAsync(_executionProvider, _mobileOptimized, ct);
         }
 
         internal async Task<float[]> PreprocessAsync(Texture2D image, CancellationToken ct)

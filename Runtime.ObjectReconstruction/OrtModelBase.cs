@@ -24,7 +24,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         protected List<NamedOnnxValue> _preallocatedOutputs;
         private bool _disposed;
 
-        protected bool IsLoaded => _session != null;
+        internal bool IsLoaded => _session != null;
 
         #region Loading
 

@@ -30,6 +30,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private OrtModelBase _part1;
         private OrtModelBase _part2;
         private bool _preloaded;
+        internal bool IsLoaded => _preloaded;
 
         internal OrtReconstructionModel(ExecutionProvider ep, bool mobileOptimized)
         {
