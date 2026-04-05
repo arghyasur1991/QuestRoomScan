@@ -16,5 +16,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
         MarchingCubes,
         SurfaceNets
     }
+
+    internal enum MeshExtractionBackend
+    {
+        GPU,
+        CPU
+    }
 }
 #endif

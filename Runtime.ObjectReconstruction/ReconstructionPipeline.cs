@@ -24,6 +24,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly ExecutionProvider _executionProvider;
         private readonly bool _mobileOptimized;
         private readonly int _densitySmoothPasses;
+        private readonly MeshExtractionBackend _meshBackend;
 
         private TriplaneGridSampler _sampler;
         private IMeshExtractor _extractor;
@@ -39,10 +40,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private int _postKernelDensity;
         private int _postKernelColors;
 
-        // Reusable buffers for decoder hot path
+        // Reusable buffers for decoder hot path (GPU path)
         private ComputeBuffer _featureBuffer;
         private float[] _readbackBuffer;
         private ComputeBuffer _uploadBuffer;
+
+        // Cached scene codes for CPU mesh extraction path
+        private float[] _sceneCodes;
+        private int _sceneNumPlanes, _sceneChannels, _scenePlaneH, _scenePlaneW;
 
         internal ReconstructionPipeline(
             int gridResolution,
@@ -55,7 +60,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             bool preloadModels = false,
             ExecutionProvider executionProvider = ExecutionProvider.CPU,
             bool mobileOptimized = false,
-            int densitySmoothPasses = 1)
+            int densitySmoothPasses = 1,
+            MeshExtractionBackend meshBackend = MeshExtractionBackend.GPU)
         {
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
@@ -68,6 +74,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _executionProvider = executionProvider;
             _mobileOptimized = mobileOptimized;
             _densitySmoothPasses = densitySmoothPasses;
+            _meshBackend = meshBackend;
 
             _postKernelExtractRaw = _postprocessShader.FindKernel("ExtractRawDensity");
             _postKernelSmoothRaw = _postprocessShader.FindKernel("SmoothRaw");
@@ -172,13 +179,54 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 await AsyncHelper.YieldFrame();
             }
 
-            EnsureSampler();
-            // TripoSR scene codes shape: [1, numPlanes, channels, planeH, planeW]
-            // For the split model: typically [1, 3, 40, 64, 64]
-            _sampler.CacheSceneCodesGPU(sceneCodes, 3, 40, 64, 64);
+            _sceneNumPlanes = 3;
+            _sceneChannels = 40;
+            _scenePlaneH = 64;
+            _scenePlaneW = 64;
+
+            if (_meshBackend == MeshExtractionBackend.CPU)
+            {
+                _sceneCodes = sceneCodes;
+            }
+            else
+            {
+                EnsureSampler();
+                _sampler.CacheSceneCodesGPU(sceneCodes, _sceneNumPlanes, _sceneChannels, _scenePlaneH, _scenePlaneW);
+            }
         }
 
         internal async Task<Mesh> ExtractMeshAsync(CancellationToken ct)
+        {
+            if (_meshBackend == MeshExtractionBackend.CPU)
+                return await ExtractMeshCpuAsync(ct);
+
+            return await ExtractMeshGpuAsync(ct);
+        }
+
+        private async Task<Mesh> ExtractMeshCpuAsync(CancellationToken ct)
+        {
+            var decoder = _decoder;
+            bool ownsDecoder = decoder == null;
+            if (ownsDecoder)
+            {
+                decoder = new OrtDecoderModel();
+                await decoder.LoadAsync(_executionProvider, _mobileOptimized, ct);
+            }
+
+            try
+            {
+                var cpuExtractor = new CpuMeshExtractor(_gridResolution, _densityThreshold);
+                return await cpuExtractor.ExtractAsync(
+                    _sceneCodes, _sceneNumPlanes, _sceneChannels, _scenePlaneH, _scenePlaneW,
+                    decoder, ct);
+            }
+            finally
+            {
+                if (ownsDecoder) decoder.Dispose();
+            }
+        }
+
+        private async Task<Mesh> ExtractMeshGpuAsync(CancellationToken ct)
         {
             int totalPoints = _sampler.TotalGridPoints;
             int featureDim = _sampler.FeatureDim;

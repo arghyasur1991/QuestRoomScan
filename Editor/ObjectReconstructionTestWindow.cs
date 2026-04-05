@@ -29,6 +29,7 @@ namespace Genesis.RoomScan.Editor
         [SerializeField] private MeshAlgorithm _meshAlgorithm = MeshAlgorithm.MarchingCubes;
         [SerializeField] private ExecutionProvider _executionProvider = ExecutionProvider.CoreML;
         [SerializeField] private int _densitySmoothPasses = 0;
+        [SerializeField] private MeshExtractionBackend _meshExtractionBackend = MeshExtractionBackend.GPU;
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
@@ -107,6 +108,9 @@ namespace Genesis.RoomScan.Editor
 
             _densitySmoothPasses = EditorGUILayout.IntSlider(
                 "Density Smooth Passes", _densitySmoothPasses, 0, 3);
+
+            _meshExtractionBackend = (MeshExtractionBackend)EditorGUILayout.EnumPopup(
+                "Mesh Extraction", _meshExtractionBackend);
 
             EditorGUILayout.Space(4);
             DrawShaderStatus();
@@ -484,6 +488,7 @@ namespace Genesis.RoomScan.Editor
             so.FindProperty("meshAlgorithm").intValue = (int)_meshAlgorithm;
             so.FindProperty("executionProvider").intValue = (int)_executionProvider;
             so.FindProperty("densitySmoothPasses").intValue = _densitySmoothPasses;
+            so.FindProperty("meshExtractionBackend").intValue = (int)_meshExtractionBackend;
             so.FindProperty("mobileOptimized").boolValue = false;
             so.ApplyModifiedPropertiesWithoutUndo();
             module.ResetPipeline();
@@ -501,7 +506,8 @@ namespace Genesis.RoomScan.Editor
                 meshAlgorithm: _meshAlgorithm,
                 preloadModels: true,
                 executionProvider: _executionProvider,
-                densitySmoothPasses: _densitySmoothPasses);
+                densitySmoothPasses: _densitySmoothPasses,
+                meshBackend: _meshExtractionBackend);
         }
 
         private bool Validate()

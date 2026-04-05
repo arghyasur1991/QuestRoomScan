@@ -43,6 +43,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
             "0 = disabled (default), 1+ = smoothing passes. Not needed with ORT >= 1.24.")]
         private int densitySmoothPasses = 0;
 
+        [SerializeField, Tooltip("GPU: uses compute shaders for triplane sampling, postprocessing, " +
+            "and marching cubes (fast, but uses GPU and causes FPS drops). " +
+            "CPU: pure background-thread pipeline matching Python exactly (no FPS impact, " +
+            "useful for quality parity testing and when GPU is constrained).")]
+        private MeshExtractionBackend meshExtractionBackend = MeshExtractionBackend.GPU;
+
         public string ModuleName => "Object Reconstruction";
         public bool IsRunning => _running;
         public string Status => _status;
@@ -156,7 +162,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 meshAlgorithm,
                 executionProvider: executionProvider,
                 mobileOptimized: mobileOptimized,
-                densitySmoothPasses: densitySmoothPasses);
+                densitySmoothPasses: densitySmoothPasses,
+                meshBackend: meshExtractionBackend);
         }
 
         public Material CreateMaterial()
