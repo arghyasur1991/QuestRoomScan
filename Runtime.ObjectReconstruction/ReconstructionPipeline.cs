@@ -1,21 +1,15 @@
-#if HAS_AI_INFERENCE
+#if HAS_ONNXRUNTIME
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Unity.InferenceEngine;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
-    /// Orchestrates the full reconstruction pipeline: rembg -> preprocess -> forward -> mesh extraction.
-    /// Supports two modes:
-    /// <list type="bullet">
-    /// <item><b>Preload</b> (editor): All models loaded once via <see cref="LoadModelsAsync"/>,
-    ///   kept alive across runs. Zero per-run load/dispose overhead.</item>
-    /// <item><b>On-demand</b> (Quest): Each model loaded, executed, and disposed per stage
-    ///   to minimize peak GPU memory.</item>
-    /// </list>
+    /// Orchestrates the full reconstruction pipeline: rembg → preprocess → forward → mesh extraction.
+    /// All neural network inference runs on background threads via Task.Run (ORT).
+    /// Main thread only handles pixel ops, GPU compute dispatch, and async readback.
     /// </summary>
     internal sealed class ReconstructionPipeline : IDisposable
     {
@@ -27,17 +21,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly ComputeShader _postprocessShader;
         private readonly MeshAlgorithm _meshAlgorithm;
         private readonly bool _preloadModels;
-        private readonly BackendType _backend;
+        private readonly ExecutionProvider _executionProvider;
+        private readonly bool _mobileOptimized;
 
         private TriplaneGridSampler _sampler;
         private IMeshExtractor _extractor;
 
-        private RembgModel _rembg;
-        private ReconstructionModel _reconstruction;
-        private DecoderModel _decoder;
+        private OrtRembgModel _rembg;
+        private OrtReconstructionModel _reconstruction;
+        private OrtDecoderModel _decoder;
 
         private int _postKernelDensity;
         private int _postKernelColors;
+
+        // Reusable buffers for decoder hot path
+        private ComputeBuffer _featureBuffer;
+        private float[] _readbackBuffer;
+        private ComputeBuffer _uploadBuffer;
 
         internal ReconstructionPipeline(
             int gridResolution,
@@ -48,7 +48,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             ComputeShader postprocessShader,
             MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes,
             bool preloadModels = false,
-            BackendType inferenceBackend = BackendType.GPUCompute)
+            ExecutionProvider executionProvider = ExecutionProvider.CPU,
+            bool mobileOptimized = false)
         {
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
@@ -58,31 +59,32 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _postprocessShader = postprocessShader;
             _meshAlgorithm = meshAlgorithm;
             _preloadModels = preloadModels;
-            _backend = inferenceBackend;
+            _executionProvider = executionProvider;
+            _mobileOptimized = mobileOptimized;
 
             _postKernelDensity = _postprocessShader.FindKernel("ExtractDensity");
             _postKernelColors = _postprocessShader.FindKernel("ExtractColors");
         }
 
         /// <summary>
-        /// In preload mode, loads all models and keeps workers alive.
+        /// In preload mode, loads all models and keeps sessions alive.
         /// In on-demand mode, this is a no-op.
         /// </summary>
         internal async Task LoadModelsAsync(CancellationToken ct)
         {
             if (!_preloadModels) return;
 
-            _rembg = new RembgModel(_backend);
-            await _rembg.LoadAsync(ct);
+            _rembg = new OrtRembgModel();
+            await _rembg.LoadAsync(_executionProvider, _mobileOptimized, ct);
 
-            _reconstruction = new ReconstructionModel(_backend);
+            _reconstruction = new OrtReconstructionModel(_executionProvider, _mobileOptimized);
             await _reconstruction.PreloadAsync(ct);
 
-            _decoder = new DecoderModel(_backend);
-            await _decoder.LoadAsync(ct);
+            _decoder = new OrtDecoderModel();
+            await _decoder.LoadAsync(_executionProvider, _mobileOptimized, ct);
         }
 
-        internal async Task<Tensor<float>> PreprocessAsync(Texture2D image, CancellationToken ct)
+        internal async Task<float[]> PreprocessAsync(Texture2D image, CancellationToken ct)
         {
             var readable = MakeReadable(image);
             try
@@ -94,27 +96,22 @@ namespace Genesis.RoomScan.ObjectReconstruction
                                 readable.format == TextureFormat.RGBAHalf ||
                                 readable.format == TextureFormat.BGRA32;
 
-                bool cpuOnly = _backend == BackendType.CPU;
-
                 if (hasAlpha && HasMeaningfulAlpha(readable))
-                    return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f, cpuOnly);
+                    return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f);
 
                 if (_rembg != null)
                 {
                     var mask = await _rembg.InferAsync(readable, ct);
-                    var result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, mask, 0.85f, cpuOnly);
-                    mask.Dispose();
-                    return result;
+                    return await ImagePreprocessor.ApplyMaskAndCompositeAsync(
+                        readable, mask, 320, 320, 0.85f);
                 }
 
-                using var rembg = new RembgModel(_backend);
-                await rembg.LoadAsync(ct);
+                using var rembg = new OrtRembgModel();
+                await rembg.LoadAsync(_executionProvider, _mobileOptimized, ct);
                 var maskLocal = await rembg.InferAsync(readable, ct);
-                rembg.Dispose();
                 await AsyncHelper.YieldFrame();
-                var resultLocal = await ImagePreprocessor.ApplyMaskAndCompositeAsync(readable, maskLocal, 0.85f, cpuOnly);
-                maskLocal.Dispose();
-                return resultLocal;
+                return await ImagePreprocessor.ApplyMaskAndCompositeAsync(
+                    readable, maskLocal, 320, 320, 0.85f);
             }
             finally
             {
@@ -149,23 +146,25 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return copy;
         }
 
-        internal async Task RunForwardAsync(Tensor<float> preprocessed, CancellationToken ct)
+        internal async Task RunForwardAsync(float[] preprocessed, CancellationToken ct)
         {
+            float[] sceneCodes;
+
             if (_reconstruction != null)
             {
-                var sceneCodes = await _reconstruction.RunAsync(preprocessed, ct);
-                EnsureSampler();
-                _sampler.CacheSceneCodesGPU(sceneCodes);
-                sceneCodes.Dispose();
-                return;
+                sceneCodes = await _reconstruction.RunAsync(preprocessed, ct);
+            }
+            else
+            {
+                using var reconstruction = new OrtReconstructionModel(_executionProvider, _mobileOptimized);
+                sceneCodes = await reconstruction.RunAsync(preprocessed, ct);
+                await AsyncHelper.YieldFrame();
             }
 
-            using var reconstruction = new ReconstructionModel(_backend);
-            var sceneCodesLocal = await reconstruction.RunAsync(preprocessed, ct);
             EnsureSampler();
-            _sampler.CacheSceneCodesGPU(sceneCodesLocal);
-            sceneCodesLocal.Dispose();
-            await AsyncHelper.YieldFrame();
+            // TripoSR scene codes shape: [1, numPlanes, channels, planeH, planeW]
+            // For the split model: typically [1, 3, 40, 64, 64]
+            _sampler.CacheSceneCodesGPU(sceneCodes, 3, 40, 64, 64);
         }
 
         internal async Task<Mesh> ExtractMeshAsync(CancellationToken ct)
@@ -179,11 +178,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             bool ownsDecoder = decoder == null;
             if (ownsDecoder)
             {
-                decoder = new DecoderModel(_backend);
-                await decoder.LoadAsync(ct);
+                decoder = new OrtDecoderModel();
+                await decoder.LoadAsync(_executionProvider, _mobileOptimized, ct);
             }
 
-            bool cpuDecoder = _backend == BackendType.CPU;
+            EnsureFeatureBuffer(chunkSize, featureDim);
             var densityBuf = new ComputeBuffer(totalPoints, sizeof(float));
             int numChunks = (totalPoints + chunkSize - 1) / chunkSize;
 
@@ -195,12 +194,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     int start = c * chunkSize;
                     int count = Mathf.Min(chunkSize, totalPoints - start);
 
-                    var decoderOutBuf = await RunDecoderChunkAsync(
-                        decoder, cpuDecoder, featureDim, count,
-                        (buf) => _sampler.SampleGridChunkGPU(start, count, buf), ct);
+                    _sampler.SampleGridChunkGPU(start, count, _featureBuffer);
 
-                    DispatchDensityExtraction(decoderOutBuf, densityBuf, start, count);
-                    if (cpuDecoder) decoderOutBuf.Release();
+                    await AsyncHelper.ReadbackAsync(_featureBuffer, ref _readbackBuffer, count * featureDim);
+
+                    float[] decoderOut = await decoder.RunChunkAsync(_readbackBuffer, count);
+
+                    EnsureUploadBuffer(count * 4);
+                    _uploadBuffer.SetData(decoderOut, 0, 0, count * 4);
+
+                    DispatchDensityExtraction(_uploadBuffer, densityBuf, start, count);
                     await AsyncHelper.YieldFrame();
                 }
 
@@ -236,12 +239,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         int start = c * chunkSize;
                         int count = Mathf.Min(chunkSize, numVerts - start);
 
-                        var decoderOutBuf = await RunDecoderChunkAsync(
-                            decoder, cpuDecoder, featureDim, count,
-                            (buf) => _sampler.SampleAtPositionsGPU(allPosBuf, start, count, buf), ct);
+                        EnsureFeatureBuffer(count, featureDim);
+                        _sampler.SampleAtPositionsGPU(allPosBuf, start, count, _featureBuffer);
 
-                        DispatchColorExtraction(decoderOutBuf, colorBuf, start, count);
-                        if (cpuDecoder) decoderOutBuf.Release();
+                        await AsyncHelper.ReadbackAsync(_featureBuffer, ref _readbackBuffer, count * featureDim);
+
+                        float[] decoderOut = await decoder.RunChunkAsync(_readbackBuffer, count);
+
+                        EnsureUploadBuffer(count * 4);
+                        _uploadBuffer.SetData(decoderOut, 0, 0, count * 4);
+
+                        DispatchColorExtraction(_uploadBuffer, colorBuf, start, count);
                         await AsyncHelper.YieldFrame();
                     }
 
@@ -271,42 +279,19 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
         }
 
-        /// <summary>
-        /// Runs a single decoder chunk through the appropriate path:
-        /// <list type="bullet">
-        /// <item><b>GPU</b>: Pin tensor → sampler fills GPU buffer → inference → return PeekOutputBuffer (owned by worker, caller must NOT release)</item>
-        /// <item><b>CPU</b>: Pin tensor → sampler fills GPU buffer → readback to CPU → inference via ScheduleIterable → upload output to new ComputeBuffer (caller MUST release)</item>
-        /// </list>
-        /// </summary>
-        private async Task<ComputeBuffer> RunDecoderChunkAsync(
-            DecoderModel decoder, bool cpuDecoder, int featureDim, int count,
-            System.Action<ComputeBuffer> sampleAction, CancellationToken ct)
+        private void EnsureFeatureBuffer(int count, int featureDim)
         {
-            if (!cpuDecoder)
-            {
-                using var chunkTensor = new Tensor<float>(new TensorShape(count, featureDim));
-                var pinned = ComputeTensorData.Pin(chunkTensor);
-                sampleAction(pinned.buffer);
-                await decoder.RunAsync(chunkTensor, ct);
-                return decoder.PeekOutputBuffer();
-            }
+            int needed = count * featureDim;
+            if (_featureBuffer != null && _featureBuffer.count >= needed) return;
+            _featureBuffer?.Release();
+            _featureBuffer = new ComputeBuffer(needed, sizeof(float));
+        }
 
-            // CPU path: GPU sample → readback → CPU inference → upload result
-            float[] sampledData;
-            {
-                using var gpuTensor = new Tensor<float>(new TensorShape(count, featureDim));
-                var pinned = ComputeTensorData.Pin(gpuTensor);
-                sampleAction(pinned.buffer);
-                sampledData = gpuTensor.DownloadToArray();
-            }
-
-            using var cpuTensor = new Tensor<float>(new TensorShape(count, featureDim), sampledData);
-            await decoder.RunAsync(cpuTensor, ct);
-
-            var outputData = decoder.PeekOutputArray();
-            var outputBuf = new ComputeBuffer(count * 4, sizeof(float));
-            outputBuf.SetData(outputData);
-            return outputBuf;
+        private void EnsureUploadBuffer(int minCount)
+        {
+            if (_uploadBuffer != null && _uploadBuffer.count >= minCount) return;
+            _uploadBuffer?.Release();
+            _uploadBuffer = new ComputeBuffer(minCount, sizeof(float));
         }
 
         private void DispatchDensityExtraction(
@@ -365,11 +350,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _decoder?.Dispose();
             _sampler?.Dispose();
             _extractor?.Dispose();
+            _featureBuffer?.Release();
+            _uploadBuffer?.Release();
             _rembg = null;
             _reconstruction = null;
             _decoder = null;
             _sampler = null;
             _extractor = null;
+            _featureBuffer = null;
+            _uploadBuffer = null;
         }
     }
 }

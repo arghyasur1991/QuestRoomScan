@@ -11,6 +11,7 @@
     "Unity.RenderPipelines.Universal.Runtime",
     "Unity.RenderPipelines.Core.Runtime",
     "Unity.InferenceEngine",
+    "com.github.asus4.onnxruntime",
     "meta.xr.mrutilitykit",
     "Oculus.VR",
     "Oculus.VR.Editor",
@@ -36,6 +37,11 @@
       "name": "com.unity.ai.inference",
       "expression": "",
       "define": "HAS_AI_INFERENCE"
+    },
+    {
+      "name": "com.github.asus4.onnxruntime",
+      "expression": "",
+      "define": "HAS_ONNXRUNTIME"
     }
   ],
   "noEngineReferences": false

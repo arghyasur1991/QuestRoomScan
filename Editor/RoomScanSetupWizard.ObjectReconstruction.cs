@@ -1,7 +1,6 @@
-#if HAS_AI_INFERENCE
+#if HAS_ONNXRUNTIME
 using System.IO;
 using Genesis.RoomScan.ObjectReconstruction;
-using Unity.InferenceEngine;
 using UnityEditor;
 using UnityEngine;
 
@@ -12,7 +11,7 @@ namespace Genesis.RoomScan.Editor
         const string RECON_PKG_SHADERS = "Packages/com.genesis.roomscan/Runtime.ObjectReconstruction/Shaders/";
         const string RECON_ONNX_DIR = "Assets/Game/ObjectReconstruction/OnnxSource";
         const string RECON_TEST_IMAGES_DIR = "Assets/Game/ObjectReconstruction/TestImages";
-        const string RECON_SENTIS_DIR = "ObjectReconstruction";
+        const string RECON_STREAMING_DIR = "ObjectReconstruction";
 
         static readonly string[] TestImageNames =
         {
@@ -24,6 +23,14 @@ namespace Genesis.RoomScan.Editor
             "shoe_raw",
         };
 
+        static readonly string[] OnnxModelNames =
+        {
+            "triposr_part1.onnx",
+            "triposr_part2.onnx",
+            "nerf_decoder.onnx",
+            "u2netp.onnx"
+        };
+
         ObjectReconstructionModule _objectReconstruction;
         bool _reconTriplaneShaderAssigned;
         bool _reconSurfaceNetsShaderAssigned;
@@ -31,24 +38,8 @@ namespace Genesis.RoomScan.Editor
         bool _reconPostprocessShaderAssigned;
         bool _reconVertexColorShaderAssigned;
         bool _reconTestImagesAssigned;
-        bool _reconSentisModelsExist;
-        bool _reconOnnxModelsExist;
-
-        static readonly string[] SentisModelNames =
-        {
-            "triposr_part1.sentis",
-            "triposr_part2.sentis",
-            "nerf_decoder.sentis",
-            "u2netp.sentis"
-        };
-
-        static readonly (string onnx, string sentis, bool quantize)[] ModelConversions =
-        {
-            ("triposr_part1.onnx", "triposr_part1.sentis", true),
-            ("triposr_part2.onnx", "triposr_part2.sentis", true),
-            ("nerf_decoder.onnx", "nerf_decoder.sentis", false),
-            ("u2netp.onnx", "u2netp.sentis", false),
-        };
+        bool _reconOnnxModelsDeployed;
+        bool _reconOnnxSourcesExist;
 
         partial void RefreshObjectReconstruction()
         {
@@ -79,9 +70,9 @@ namespace Genesis.RoomScan.Editor
                 _reconTestImagesAssigned = false;
             }
 
-            string sentisDir = Path.Combine(Application.streamingAssetsPath, RECON_SENTIS_DIR);
-            _reconSentisModelsExist = AllSentisModelsExist(sentisDir);
-            _reconOnnxModelsExist = AllOnnxModelsExist();
+            string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
+            _reconOnnxModelsDeployed = AllOnnxModelsDeployed(streamingDir);
+            _reconOnnxSourcesExist = AllOnnxSourcesExist();
         }
 
         partial void DrawObjectReconstructionOptionalStatus()
@@ -96,28 +87,22 @@ namespace Genesis.RoomScan.Editor
             StatusRow("  Vertex color shader", _reconVertexColorShaderAssigned);
             StatusRow("  Test images", _reconTestImagesAssigned);
 
-            if (_reconSentisModelsExist)
+            if (_reconOnnxModelsDeployed)
             {
                 EditorGUILayout.BeginHorizontal();
-                EditorGUILayout.LabelField("  Models (.sentis)", EditorStyles.label);
+                EditorGUILayout.LabelField("  Models (.onnx)", EditorStyles.label);
                 GUILayout.Label("OK", EditorStyles.boldLabel);
                 EditorGUILayout.EndHorizontal();
             }
-            else if (_reconOnnxModelsExist)
+            else if (_reconOnnxSourcesExist)
             {
                 EditorGUILayout.BeginHorizontal();
                 EditorGUILayout.LabelField("  Models", EditorStyles.label);
-                GUILayout.Label("Needs Conversion", EditorStyles.boldLabel);
+                GUILayout.Label("Needs Deploy", EditorStyles.boldLabel);
                 EditorGUILayout.EndHorizontal();
 
-                EditorGUILayout.BeginHorizontal();
-                if (GUILayout.Button("Uint8", GUILayout.Height(24)))
-                    ConvertModels(QuantizationType.Uint8);
-                if (GUILayout.Button("FP16", GUILayout.Height(24)))
-                    ConvertModels(QuantizationType.Float16);
-                if (GUILayout.Button("FP32 (no quant)", GUILayout.Height(24)))
-                    ConvertModels(null);
-                EditorGUILayout.EndHorizontal();
+                if (GUILayout.Button("Deploy Models to StreamingAssets", GUILayout.Height(24)))
+                    DeployOnnxModels();
             }
             else
             {
@@ -249,80 +234,52 @@ namespace Genesis.RoomScan.Editor
             return result.ToArray();
         }
 
-        private static bool AllSentisModelsExist(string dir)
+        private static bool AllOnnxModelsDeployed(string dir)
         {
-            foreach (var name in SentisModelNames)
+            foreach (var name in OnnxModelNames)
                 if (!File.Exists(Path.Combine(dir, name))) return false;
             return true;
         }
 
-        private static bool AllOnnxModelsExist()
+        private static bool AllOnnxSourcesExist()
         {
-            foreach (var (onnx, _, _) in ModelConversions)
+            foreach (var name in OnnxModelNames)
             {
-                string path = Path.Combine(RECON_ONNX_DIR, onnx);
+                string path = Path.Combine(RECON_ONNX_DIR, name);
                 if (!File.Exists(path)) return false;
             }
             return true;
         }
 
-        private static void ConvertModels(QuantizationType? quantType)
+        private static void DeployOnnxModels()
         {
-            string sentisDir = Path.Combine(Application.streamingAssetsPath, RECON_SENTIS_DIR);
-            Directory.CreateDirectory(sentisDir);
+            string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
+            Directory.CreateDirectory(streamingDir);
 
-            string quantLabel = quantType == null ? "fp32"
-                : quantType == QuantizationType.Float16 ? "fp16" : "uint8";
-
-            int total = ModelConversions.Length;
+            int total = OnnxModelNames.Length;
             for (int i = 0; i < total; i++)
             {
-                var (onnxName, sentisName, shouldQuantize) = ModelConversions[i];
+                string onnxName = OnnxModelNames[i];
+                string srcPath = Path.Combine(RECON_ONNX_DIR, onnxName);
+                string dstPath = Path.Combine(streamingDir, onnxName);
 
-                string onnxPath = Path.Combine(RECON_ONNX_DIR, onnxName);
-                string sentisPath = Path.Combine(sentisDir, sentisName);
-
-                if (!File.Exists(onnxPath))
+                if (!File.Exists(srcPath))
                 {
-                    Debug.LogWarning($"[ObjectReconstruction] ONNX not found: {onnxPath}");
+                    Debug.LogWarning($"[ObjectReconstruction] ONNX not found: {srcPath}");
                     continue;
                 }
 
-                EditorUtility.DisplayProgressBar("Converting Models",
-                    $"Converting {onnxName} → {quantLabel}... ({i + 1}/{total})", (float)i / total);
+                EditorUtility.DisplayProgressBar("Deploying Models",
+                    $"Copying {onnxName}... ({i + 1}/{total})", (float)i / total);
 
-                try
-                {
-                    var modelAsset = AssetDatabase.LoadAssetAtPath<ModelAsset>(onnxPath);
-                    if (modelAsset == null)
-                    {
-                        AssetDatabase.ImportAsset(onnxPath);
-                        modelAsset = AssetDatabase.LoadAssetAtPath<ModelAsset>(onnxPath);
-                    }
-
-                    if (modelAsset == null)
-                    {
-                        Debug.LogError($"[ObjectReconstruction] Failed to import {onnxPath} as ModelAsset");
-                        continue;
-                    }
-
-                    var model = ModelLoader.Load(modelAsset);
-
-                    if (shouldQuantize && quantType.HasValue)
-                        ModelQuantizer.QuantizeWeights(quantType.Value, ref model);
-
-                    ModelWriter.Save(sentisPath, model);
-                    Debug.Log($"[ObjectReconstruction] Saved {sentisPath} ({new FileInfo(sentisPath).Length / 1048576} MB)");
-                }
-                catch (System.Exception e)
-                {
-                    Debug.LogError($"[ObjectReconstruction] Failed to convert {onnxName}: {e.Message}");
-                }
+                File.Copy(srcPath, dstPath, overwrite: true);
+                var fi = new FileInfo(dstPath);
+                Debug.Log($"[ObjectReconstruction] Deployed {dstPath} ({fi.Length / 1048576} MB)");
             }
 
             EditorUtility.ClearProgressBar();
             AssetDatabase.Refresh();
-            Debug.Log($"[ObjectReconstruction] Model conversion complete ({quantLabel})");
+            Debug.Log("[ObjectReconstruction] Model deployment complete");
         }
     }
 }

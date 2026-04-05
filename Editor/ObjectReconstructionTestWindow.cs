@@ -1,4 +1,4 @@
-#if HAS_AI_INFERENCE
+#if HAS_ONNXRUNTIME
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -14,6 +14,7 @@ namespace Genesis.RoomScan.Editor
     /// <summary>
     /// Editor window for testing the Object Reconstruction pipeline in Edit mode.
     /// Runs rembg, TripoSR forward, and mesh extraction without entering Play mode.
+    /// ORT inference naturally runs on background threads — no throttling needed.
     /// </summary>
     public class ObjectReconstructionTestWindow : EditorWindow
     {
@@ -26,7 +27,7 @@ namespace Genesis.RoomScan.Editor
         [SerializeField] private Texture2D _testImage;
         [SerializeField] private int _gridResolution = 128;
         [SerializeField] private MeshAlgorithm _meshAlgorithm = MeshAlgorithm.MarchingCubes;
-        [SerializeField] private Unity.InferenceEngine.BackendType _inferenceBackend = Unity.InferenceEngine.BackendType.GPUCompute;
+        [SerializeField] private ExecutionProvider _executionProvider = ExecutionProvider.CoreML;
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
@@ -70,10 +71,6 @@ namespace Genesis.RoomScan.Editor
             AsyncHelper.EditModeYield = null;
         }
 
-        /// <summary>
-        /// Hooks AsyncHelper.EditModeYield to use EditorApplication.delayCall,
-        /// which genuinely yields to the editor's repaint/input loop.
-        /// </summary>
         private static void InstallEditModeYield()
         {
             if (Application.isPlaying) return;
@@ -104,8 +101,8 @@ namespace Genesis.RoomScan.Editor
 
             _meshAlgorithm = (MeshAlgorithm)EditorGUILayout.EnumPopup("Mesh Algorithm", _meshAlgorithm);
 
-            _inferenceBackend = (Unity.InferenceEngine.BackendType)EditorGUILayout.EnumPopup(
-                "Inference Backend", _inferenceBackend);
+            _executionProvider = (ExecutionProvider)EditorGUILayout.EnumPopup(
+                "Execution Provider", _executionProvider);
 
             EditorGUILayout.Space(4);
             DrawShaderStatus();
@@ -166,18 +163,20 @@ namespace Genesis.RoomScan.Editor
 
         private void DrawModelStatus()
         {
-            string sentisDir = Path.Combine(Application.streamingAssetsPath, "ObjectReconstruction");
-            bool hasRembg = File.Exists(Path.Combine(sentisDir, "u2netp.sentis"));
-            bool hasTriposr = File.Exists(Path.Combine(sentisDir, "triposr.sentis"));
-            bool hasDecoder = File.Exists(Path.Combine(sentisDir, "nerf_decoder.sentis"));
+            string onnxDir = Path.Combine(Application.streamingAssetsPath, "ObjectReconstruction");
+            bool hasRembg = File.Exists(Path.Combine(onnxDir, "u2netp.onnx"));
+            bool hasPart1 = File.Exists(Path.Combine(onnxDir, "triposr_part1.onnx"));
+            bool hasPart2 = File.Exists(Path.Combine(onnxDir, "triposr_part2.onnx"));
+            bool hasDecoder = File.Exists(Path.Combine(onnxDir, "nerf_decoder.onnx"));
 
-            EditorGUILayout.LabelField("Models", EditorStyles.boldLabel);
-            StatusLabel("  u2netp.sentis", hasRembg);
-            StatusLabel("  triposr.sentis", hasTriposr);
-            StatusLabel("  nerf_decoder.sentis", hasDecoder);
+            EditorGUILayout.LabelField("Models (.onnx)", EditorStyles.boldLabel);
+            StatusLabel("  u2netp.onnx", hasRembg);
+            StatusLabel("  triposr_part1.onnx", hasPart1);
+            StatusLabel("  triposr_part2.onnx", hasPart2);
+            StatusLabel("  nerf_decoder.onnx", hasDecoder);
 
-            if (!hasRembg || !hasTriposr || !hasDecoder)
-                EditorGUILayout.HelpBox("Run 'Convert Models' in RoomScan Setup Wizard first.", MessageType.Warning);
+            if (!hasRembg || !hasPart1 || !hasPart2 || !hasDecoder)
+                EditorGUILayout.HelpBox("Run 'Deploy Models' in RoomScan Setup Wizard first.", MessageType.Warning);
         }
 
         private void DrawShaderStatus()
@@ -204,7 +203,6 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            InferenceScheduler.HeavyOpCooldownFrames = -1;
             AsyncHelper.SuppressYields = true;
             _timingLog = "";
             var totalSw = Stopwatch.StartNew();
@@ -229,7 +227,6 @@ namespace Genesis.RoomScan.Editor
                 SetStatus("Running TripoSR forward pass...", 0.35f);
                 sw.Restart();
                 await pipeline.RunForwardAsync(preprocessed, _cts.Token);
-                preprocessed.Dispose();
                 float forwardMs = sw.ElapsedMilliseconds;
                 AppendTiming($"Forward pass: {forwardMs:F0}ms");
 
@@ -257,7 +254,7 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
-                ResetSchedulerDefaults();
+                AsyncHelper.SuppressYields = false;
                 pipeline?.Dispose();
                 _running = false;
                 _cts?.Dispose();
@@ -272,18 +269,17 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            InferenceScheduler.HeavyOpCooldownFrames = -1;
             AsyncHelper.SuppressYields = true;
             _timingLog = "";
-            RembgModel rembg = null;
+            OrtRembgModel rembg = null;
 
             try
             {
-                rembg = new RembgModel(_inferenceBackend);
+                rembg = new OrtRembgModel();
 
                 SetStatus("Loading u2netp...", 0.1f);
                 var sw = Stopwatch.StartNew();
-                await rembg.LoadAsync(_cts.Token);
+                await rembg.LoadAsync(_executionProvider, false, _cts.Token);
                 AppendTiming($"Load u2netp: {sw.ElapsedMilliseconds:F0}ms");
 
                 SetStatus("Running rembg inference...", 0.4f);
@@ -292,18 +288,15 @@ namespace Genesis.RoomScan.Editor
                 var mask = await rembg.InferAsync(readable, _cts.Token);
                 AppendTiming($"Rembg inference: {sw.ElapsedMilliseconds:F0}ms");
 
-                int maskW = mask.shape[3];
-                int maskH = mask.shape[2];
-                var maskData = mask.DownloadToArray();
+                int maskW = 320, maskH = 320;
                 Debug.Log($"[ReconstructionTest] Rembg mask: {maskW}x{maskH}");
 
                 string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
                 Directory.CreateDirectory(debugDir);
-                SaveMaskAsPng(maskData, maskW, maskH,
+                SaveMaskAsPng(mask, maskW, maskH,
                     Path.Combine(debugDir, "unity_rembg_mask.png"));
                 AppendTiming($"Mask saved to {debugDir}");
 
-                mask.Dispose();
                 if (readable != _testImage) DestroyImmediate(readable);
                 SetStatus("Rembg OK!", 1f);
             }
@@ -314,7 +307,7 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
-                ResetSchedulerDefaults();
+                AsyncHelper.SuppressYields = false;
                 rembg?.Dispose();
                 _running = false;
                 _cts?.Dispose();
@@ -329,7 +322,6 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            InferenceScheduler.HeavyOpCooldownFrames = -1;
             AsyncHelper.SuppressYields = true;
             _timingLog = "";
             ReconstructionPipeline pipeline = null;
@@ -346,14 +338,13 @@ namespace Genesis.RoomScan.Editor
                 var result = await pipeline.PreprocessAsync(_testImage, _cts.Token);
                 AppendTiming($"Preprocess: {sw.ElapsedMilliseconds:F0}ms");
 
-                Debug.Log($"[ReconstructionTest] Preprocessed tensor shape: {result.shape}");
+                Debug.Log($"[ReconstructionTest] Preprocessed NCHW array length: {result.Length}");
 
                 string debugDir = Path.Combine(Application.dataPath, "../debug_reconstruction");
                 Directory.CreateDirectory(debugDir);
-                SaveTensorAsCompositePng(result, Path.Combine(debugDir, "unity_rembg_composite.png"));
+                SaveNCHWAsPng(result, 512, 512, Path.Combine(debugDir, "unity_rembg_composite.png"));
                 AppendTiming($"Composite saved to {debugDir}");
 
-                result.Dispose();
                 SetStatus("Preprocess OK!", 1f);
             }
             catch (Exception e)
@@ -363,7 +354,7 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
-                ResetSchedulerDefaults();
+                AsyncHelper.SuppressYields = false;
                 pipeline?.Dispose();
                 _running = false;
                 _cts?.Dispose();
@@ -387,7 +378,6 @@ namespace Genesis.RoomScan.Editor
 
             _running = true;
             _cts = new CancellationTokenSource();
-            InferenceScheduler.HeavyOpCooldownFrames = -1;
             AsyncHelper.SuppressYields = true;
             _timingLog = "";
             var totalSw = Stopwatch.StartNew();
@@ -395,7 +385,6 @@ namespace Genesis.RoomScan.Editor
 
             try
             {
-                // Load PNG as texture
                 var pngBytes = File.ReadAllBytes(pngPath);
                 var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, true);
                 tex.LoadImage(pngBytes);
@@ -408,21 +397,20 @@ namespace Genesis.RoomScan.Editor
                     return;
                 }
 
-                // Convert to NCHW tensor [1,3,512,512] — same as pipeline.PreprocessAsync output
-                Unity.InferenceEngine.Tensor<float> tensor;
-                if (_inferenceBackend == Unity.InferenceEngine.BackendType.CPU)
-                {
-                    tensor = ImagePreprocessor.TextureToCpuTensor(tex, 512);
-                }
-                else
-                {
-                    tensor = new Unity.InferenceEngine.Tensor<float>(
-                        new Unity.InferenceEngine.TensorShape(1, 3, 512, 512));
-                    Unity.InferenceEngine.TextureConverter.ToTensor(tex, tensor,
-                        new Unity.InferenceEngine.TextureTransform());
-                }
+                // Convert to NCHW float[] [1,3,512,512]
+                var resized = new Texture2D(512, 512, TextureFormat.RGB24, false);
+                var rt = RenderTexture.GetTemporary(512, 512, 0, RenderTextureFormat.ARGB32);
+                Graphics.Blit(tex, rt);
+                RenderTexture.active = rt;
+                resized.ReadPixels(new Rect(0, 0, 512, 512), 0, 0);
+                resized.Apply();
+                RenderTexture.active = null;
+                RenderTexture.ReleaseTemporary(rt);
                 DestroyImmediate(tex);
-                AppendTiming("Converted to tensor [1,3,512,512]");
+
+                float[] preprocessed = ImagePreprocessor.TextureToNCHW(resized, 512);
+                DestroyImmediate(resized);
+                AppendTiming("Converted to NCHW float[] [1,3,512,512]");
 
                 pipeline = CreatePipeline();
 
@@ -433,8 +421,7 @@ namespace Genesis.RoomScan.Editor
 
                 SetStatus("Running TripoSR forward pass...", 0.35f);
                 sw.Restart();
-                await pipeline.RunForwardAsync(tensor, _cts.Token);
-                tensor.Dispose();
+                await pipeline.RunForwardAsync(preprocessed, _cts.Token);
                 AppendTiming($"Forward pass: {sw.ElapsedMilliseconds:F0}ms");
 
                 SetStatus("Extracting mesh + vertex colors...", 0.60f);
@@ -459,20 +446,13 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
-                ResetSchedulerDefaults();
+                AsyncHelper.SuppressYields = false;
                 pipeline?.Dispose();
                 _running = false;
                 _cts?.Dispose();
                 _cts = null;
                 Repaint();
             }
-        }
-
-        private static void ResetSchedulerDefaults()
-        {
-            AsyncHelper.SuppressYields = false;
-            InferenceScheduler.LightOpBatchSize = 15;
-            InferenceScheduler.HeavyOpCooldownFrames = 4;
         }
 
         private ReconstructionPipeline CreatePipeline()
@@ -486,7 +466,7 @@ namespace Genesis.RoomScan.Editor
                 postprocessShader: _postprocessShader,
                 meshAlgorithm: _meshAlgorithm,
                 preloadModels: true,
-                inferenceBackend: _inferenceBackend);
+                executionProvider: _executionProvider);
         }
 
         private bool Validate()
@@ -567,11 +547,8 @@ namespace Genesis.RoomScan.Editor
             Repaint();
         }
 
-        private static void SaveTensorAsCompositePng(Unity.InferenceEngine.Tensor<float> tensor, string path)
+        private static void SaveNCHWAsPng(float[] data, int w, int h, string path)
         {
-            int h = tensor.shape[2];
-            int w = tensor.shape[3];
-            var data = tensor.DownloadToArray();
             var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
             var pixels = new Color32[w * h];
             for (int py = 0; py < h; py++)
@@ -586,7 +563,7 @@ namespace Genesis.RoomScan.Editor
             }
             tex.SetPixels32(pixels);
             tex.Apply();
-            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            File.WriteAllBytes(path, tex.EncodeToPNG());
             DestroyImmediate(tex);
             Debug.Log($"[ReconstructionTest] Saved composite PNG: {path} ({w}x{h})");
         }
@@ -604,11 +581,10 @@ namespace Genesis.RoomScan.Editor
             }
             tex.SetPixels32(pixels);
             tex.Apply();
-            System.IO.File.WriteAllBytes(path, tex.EncodeToPNG());
+            File.WriteAllBytes(path, tex.EncodeToPNG());
             DestroyImmediate(tex);
             Debug.Log($"[ReconstructionTest] Saved mask PNG: {path} ({w}x{h})");
         }
-
     }
 }
 #endif

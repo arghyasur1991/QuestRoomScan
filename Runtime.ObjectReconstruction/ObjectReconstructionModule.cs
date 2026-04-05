@@ -1,16 +1,15 @@
-#if HAS_AI_INFERENCE
+#if HAS_ONNXRUNTIME
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Unity.InferenceEngine;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
-    /// Single-image 3D object reconstruction via TripoSR. Implements <see cref="IRoomScanModule"/>
-    /// for automatic discovery by <see cref="RoomScanner"/>. Orchestrates background removal,
-    /// model inference, GPU mesh extraction, and mesh spawning.
+    /// Single-image 3D object reconstruction via TripoSR + ONNX Runtime.
+    /// Implements <see cref="IRoomScanModule"/> for automatic discovery by <see cref="RoomScanner"/>.
+    /// All neural network inference runs on background threads — no main-thread blocking.
     /// </summary>
     [DisallowMultipleComponent]
     public class ObjectReconstructionModule : MonoBehaviour, IRoomScanModule, IObjectReconstructionProvider
@@ -25,17 +24,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [Header("Test Images")]
         [SerializeField] private Texture2D[] testImages = Array.Empty<Texture2D>();
 
-        [Header("Performance")]
-        [SerializeField, Tooltip("GPU: fast inference but competes with rendering (needs throttling). " +
-            "CPU: runs on background threads, zero FPS impact, but slower inference.")]
-        private BackendType inferenceBackend = BackendType.GPUCompute;
+        [Header("Inference")]
+        [SerializeField, Tooltip("CPU: works everywhere. NNAPI: Android GPU/NPU. " +
+            "XNNPACK: optimized CPU. CoreML: macOS/iOS acceleration.")]
+        private ExecutionProvider executionProvider = ExecutionProvider.CPU;
 
-        [SerializeField, Tooltip("Light ops (Reshape, Add, etc.) batched per frame. GPU only.")]
-        [Range(4, 64)] private int lightOpBatchSize = 15;
-
-        [SerializeField, Tooltip("Extra frames to yield after heavy ops (MatMul, Conv, Softmax). " +
-            "GPU only. 4 = stable 20-30 FPS on Quest 3.")]
-        [Range(0, 8)] private int heavyOpCooldownFrames = 4;
+        [SerializeField, Tooltip("Enable mobile-optimized session options (disable memory patterns, " +
+            "single thread). Recommended for Quest 3.")]
+        private bool mobileOptimized = true;
 
         [Header("Mesh Extraction")]
         [SerializeField] private int gridResolution = 256;
@@ -80,10 +76,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             _running = true;
             _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            InferenceScheduler.LightOpBatchSize = lightOpBatchSize;
-            InferenceScheduler.HeavyOpCooldownFrames = heavyOpCooldownFrames;
 
-            Tensor<float> preprocessed = null;
+            float[] preprocessed = null;
             try
             {
                 EnsurePipeline();
@@ -103,7 +97,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 ReportStatus("Running reconstruction...");
                 await _pipeline.RunForwardAsync(preprocessed, _cts.Token);
-                preprocessed.Dispose();
                 preprocessed = null;
                 float forwardMs = sw.ElapsedMilliseconds;
                 sw.Restart();
@@ -131,7 +124,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
             finally
             {
-                preprocessed?.Dispose();
                 _running = false;
                 _cts?.Dispose();
                 _cts = null;
@@ -162,7 +154,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 densityMarchingCubesShader,
                 decoderPostprocessShader,
                 meshAlgorithm,
-                inferenceBackend: inferenceBackend);
+                executionProvider: executionProvider,
+                mobileOptimized: mobileOptimized);
         }
 
         private void SpawnMesh(Mesh mesh)

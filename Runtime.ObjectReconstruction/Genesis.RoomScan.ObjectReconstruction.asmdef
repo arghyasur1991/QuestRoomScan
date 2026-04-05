@@ -3,22 +3,22 @@
   "rootNamespace": "Genesis.RoomScan.ObjectReconstruction",
   "references": [
     "Genesis.RoomScan",
-    "Unity.InferenceEngine"
+    "com.github.asus4.onnxruntime"
   ],
   "includePlatforms": [],
   "excludePlatforms": [],
-  "allowUnsafeCode": false,
+  "allowUnsafeCode": true,
   "overrideReferences": false,
   "precompiledReferences": [],
   "autoReferenced": true,
   "defineConstraints": [
-    "HAS_AI_INFERENCE"
+    "HAS_ONNXRUNTIME"
   ],
   "versionDefines": [
     {
-      "name": "com.unity.ai.inference",
+      "name": "com.github.asus4.onnxruntime",
       "expression": "",
-      "define": "HAS_AI_INFERENCE"
+      "define": "HAS_ONNXRUNTIME"
     }
   ],
   "noEngineReferences": false

@@ -1,18 +1,15 @@
-#if HAS_AI_INFERENCE
+#if HAS_ONNXRUNTIME
 using System;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using System.Threading;
 using System.Threading.Tasks;
 using Unity.Collections;
-using Unity.InferenceEngine;
 using UnityEngine;
 using UnityEngine.Rendering;
 
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
-    /// Async utilities for non-blocking inference. In Play mode, yields to the next
+    /// Async utilities for non-blocking operations. In Play mode, yields to the next
     /// frame via the Unity synchronization context. In Edit mode, uses a pluggable
     /// delegate (set by editor code) to yield via EditorApplication.delayCall.
     /// </summary>
@@ -48,8 +45,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Non-blocking GPU readback of a ComputeBuffer region to managed array.
-        /// Returns a Task that completes when the GPU data is available on CPU.
+        /// Non-blocking GPU readback of a ComputeBuffer region to a new managed array.
         /// </summary>
         internal static Task<T[]> ReadbackAsync<T>(ComputeBuffer buffer, int count) where T : struct
         {
@@ -69,132 +65,32 @@ namespace Genesis.RoomScan.ObjectReconstruction
             });
             return tcs.Task;
         }
-    }
-
-    /// <summary>
-    /// Adaptive inference scheduler. Pre-scans model layers and classifies each as
-    /// heavy (MatMul, Dense, Conv, Softmax, LayerNorm) or light (Reshape, Add, etc.).
-    /// Heavy ops get exclusive frames + cooldown; light ops are batched aggressively.
-    /// This maximizes FPS during inference by preventing GPU starvation for rendering.
-    /// </summary>
-    internal static class InferenceScheduler
-    {
-        /// <summary>Max light ops to batch in a single frame before yielding.</summary>
-        internal static int LightOpBatchSize = 15;
 
         /// <summary>
-        /// Extra frames to yield after a heavy op for GPU cooldown.
-        /// Set to -1 to disable all throttling (editor fast path): uses
-        /// worker.Schedule() instead of ScheduleIterable — zero yields.
+        /// Non-blocking GPU readback into a pre-existing destination array (avoids allocation).
+        /// Grows the destination if needed.
         /// </summary>
-        internal static int HeavyOpCooldownFrames = 1;
-
-        private static readonly HashSet<string> HeavyOpNames = new()
+        internal static Task<float[]> ReadbackAsync(
+            ComputeBuffer buffer, ref float[] destination, int count)
         {
-            "MatMul",
-            "MatMul2D",
-            "Dense",
-            "DenseBatched",
-            "Conv",
-            "ConvTranspose",
-            "Softmax",
-            "LogSoftmax",
-            "LayerNormalization",
-            "RMSNormalization",
-            "InstanceNormalization",
-            "Einsum",
-        };
+            if (destination == null || destination.Length < count)
+                destination = new float[count];
 
-        /// <summary>
-        /// Runs inference with backend-appropriate scheduling:
-        /// <list type="bullet">
-        /// <item><b>CPU backend</b>: <c>ScheduleIterable</c> on the main thread. Burst jobs
-        ///   run on worker threads internally, GPU stays free for rendering. Yields after
-        ///   every layer. Heavy layers (MatMul) block per-layer but GPU renders between.</item>
-        /// <item><b>GPU backend, throttled</b>: adaptive per-layer yielding — heavy ops get
-        ///   cooldown frames, light ops are batched.</item>
-        /// <item><b>GPU backend, unthrottled</b> (<see cref="HeavyOpCooldownFrames"/> = -1):
-        ///   <c>worker.Schedule()</c> for maximum throughput (editor fast path).</item>
-        /// </list>
-        /// </summary>
-        internal static async Task RunAsync(
-            Worker worker, Model model, CancellationToken ct, Tensor input = null)
-        {
-            if (worker.backendType == BackendType.CPU)
+            var dest = destination;
+            var tcs = new TaskCompletionSource<float[]>();
+            int byteSize = count * sizeof(float);
+            AsyncGPUReadback.Request(buffer, byteSize, 0, request =>
             {
-                if (HeavyOpCooldownFrames < 0)
+                if (request.hasError)
                 {
-                    if (input != null) worker.Schedule(input); else worker.Schedule();
+                    tcs.SetException(new InvalidOperationException("AsyncGPUReadback failed"));
                     return;
                 }
-
-                var cpuIt = input != null
-                    ? worker.ScheduleIterable(input)
-                    : worker.ScheduleIterable();
-
-                int cpuAccum = 0;
-                while (cpuIt.MoveNext())
-                {
-                    ct.ThrowIfCancellationRequested();
-                    cpuAccum++;
-                    if (cpuAccum >= LightOpBatchSize)
-                    {
-                        cpuAccum = 0;
-                        await AsyncHelper.YieldFrame();
-                    }
-                }
-                return;
-            }
-
-            if (HeavyOpCooldownFrames < 0)
-            {
-                if (input != null) worker.Schedule(input); else worker.Schedule();
-                return;
-            }
-
-            var schedule = BuildSchedule(model);
-            int gpuIdx = 0;
-            int lightAccum = 0;
-
-            var it = input != null
-                ? worker.ScheduleIterable(input)
-                : worker.ScheduleIterable();
-
-            while (it.MoveNext())
-            {
-                ct.ThrowIfCancellationRequested();
-
-                bool heavy = gpuIdx < schedule.Length && schedule[gpuIdx];
-                gpuIdx++;
-
-                if (heavy)
-                {
-                    lightAccum = 0;
-                    for (int f = 0; f <= HeavyOpCooldownFrames; f++)
-                        await AsyncHelper.YieldFrame();
-                }
-                else
-                {
-                    lightAccum++;
-                    if (lightAccum >= LightOpBatchSize)
-                    {
-                        lightAccum = 0;
-                        await AsyncHelper.YieldFrame();
-                    }
-                }
-            }
-        }
-
-        /// <returns>Boolean array — true if the GPU layer at that index is heavy.</returns>
-        private static bool[] BuildSchedule(Model model)
-        {
-            var schedule = new List<bool>();
-            foreach (var layer in model.layers)
-            {
-                bool isHeavy = HeavyOpNames.Contains(layer.GetType().Name);
-                schedule.Add(isHeavy);
-            }
-            return schedule.ToArray();
+                var native = request.GetData<float>();
+                NativeArray<float>.Copy(native, dest, count);
+                tcs.SetResult(dest);
+            });
+            return tcs.Task;
         }
     }
 }

@@ -1,4 +1,4 @@
-#if HAS_AI_INFERENCE
+#if HAS_ONNXRUNTIME
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,10 +8,10 @@ using UnityEngine.Networking;
 namespace Genesis.RoomScan.ObjectReconstruction
 {
     /// <summary>
-    /// Resolves .sentis model paths from StreamingAssets. On Android, copies files
+    /// Resolves .onnx model paths from StreamingAssets. On Android, copies files
     /// from the APK to persistentDataPath on first access since StreamingAssets
-    /// are inside the compressed archive and can't be opened with File.OpenRead.
-    /// Re-copies when the app version changes to pick up updated models.
+    /// are inside the compressed archive and ORT's InferenceSession needs a real
+    /// filesystem path. Re-copies when the app version changes to pick up updated models.
     /// </summary>
     internal static class ModelPathResolver
     {
@@ -77,7 +77,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 #else
             if (!File.Exists(streamingPath))
                 throw new FileNotFoundException(
-                    $"Model not found at {streamingPath}. Run 'Convert Models' in the Setup Wizard.", relativePath);
+                    $"Model not found at {streamingPath}. Run 'Deploy Models' in the Setup Wizard.", relativePath);
 
             await Task.CompletedTask;
             return streamingPath;

@@ -131,7 +131,9 @@ namespace Genesis.RoomScan.Editor
                         EditorUtility.SetDirty(scanner.gameObject);
                     });
             }
+#endif
 
+#if HAS_ONNXRUNTIME
             var objReconType = AppDomain.CurrentDomain.GetAssemblies()
                 .SelectMany(a => { try { return a.GetTypes(); } catch { return Type.EmptyTypes; } })
                 .FirstOrDefault(t => t.Name == "ObjectReconstructionModule" && typeof(IRoomScanModule).IsAssignableFrom(t));

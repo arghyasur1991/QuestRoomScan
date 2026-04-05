@@ -1,4 +1,4 @@
-#if HAS_AI_INFERENCE
+#if HAS_ONNXRUNTIME
 using System;
 using System.Threading.Tasks;
 using UnityEngine;

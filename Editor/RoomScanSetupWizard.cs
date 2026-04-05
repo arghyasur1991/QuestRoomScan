@@ -172,7 +172,7 @@ namespace Genesis.RoomScan.Editor
         partial void SetupAIDetectionIfAvailable(GameObject root);
 
         // Partial methods implemented in RoomScanSetupWizard.ObjectReconstruction.cs when
-        // HAS_AI_INFERENCE is defined; silent no-ops otherwise.
+        // HAS_ONNXRUNTIME is defined; silent no-ops otherwise.
         partial void RefreshObjectReconstruction();
         partial void DrawObjectReconstructionOptionalStatus();
         partial void CheckObjectReconstructionAnyMissing(ref bool anyMissing);
@@ -1192,6 +1192,8 @@ namespace Genesis.RoomScan.Editor
 #endif
 #if HAS_AI_INFERENCE
             WireAIDetectionComponent(component);
+#endif
+#if HAS_ONNXRUNTIME
             WireObjectReconstructionComponent(component);
 #endif
         }

@@ -1,6 +1,5 @@
-#if HAS_AI_INFERENCE
+#if HAS_ONNXRUNTIME
 using System;
-using Unity.InferenceEngine;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
@@ -30,22 +29,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Copies scene codes to an owned GPU buffer. The source tensor can be disposed
-        /// after this call — the sampler holds its own independent copy.
+        /// Copies scene codes from a flat float[] to an owned GPU buffer.
+        /// The source array can be discarded after this call.
         /// </summary>
-        internal void CacheSceneCodesGPU(Tensor<float> sceneCodes)
+        internal void CacheSceneCodesGPU(float[] data, int numPlanes, int channels, int planeH, int planeW)
         {
-            var shape = sceneCodes.shape;
-            _numPlanes = shape[1];
-            _channels = shape[2];
-            _planeH = shape[3];
-            _planeW = shape[4];
+            _numPlanes = numPlanes;
+            _channels = channels;
+            _planeH = planeH;
+            _planeW = planeW;
             _featureDim = _numPlanes * _channels;
 
             if (_ownsSceneCodeBuffer)
                 _sceneCodeBuffer?.Release();
 
-            var data = sceneCodes.DownloadToArray();
             _sceneCodeBuffer = new ComputeBuffer(data.Length, sizeof(float));
             _sceneCodeBuffer.SetData(data);
             _ownsSceneCodeBuffer = true;
