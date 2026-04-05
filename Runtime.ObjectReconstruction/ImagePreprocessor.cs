@@ -1,5 +1,6 @@
 #if HAS_ONNXRUNTIME
 using System.Threading.Tasks;
+using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
@@ -126,30 +127,35 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         /// <summary>
         /// Converts a Texture2D to a CPU float[] in NCHW layout.
-        /// Uses GetPixelData for zero-copy access and Parallel.For for throughput.
+        /// Uses unsafe pointer access + Parallel.For for maximum throughput.
         /// </summary>
-        internal static float[] TextureToNCHW(Texture2D tex, int size)
+        internal static unsafe float[] TextureToNCHW(Texture2D tex, int size)
         {
             var pixels = tex.GetPixelData<byte>(0);
-            var pixelArray = pixels.ToArray();
+            byte* srcPtr = (byte*)pixels.GetUnsafeReadOnlyPtr();
             var result = new float[3 * size * size];
 
             int channelSize = size * size;
             const int bytesPerPixel = 3; // RGB24
 
-            System.Threading.Tasks.Parallel.For(0, size, y =>
+            fixed (float* dstPtrFixed = result)
             {
-                int unityY = size - 1 - y;
-                for (int x = 0; x < size; x++)
-                {
-                    int srcIdx = (unityY * size + x) * bytesPerPixel;
-                    int dstIdx = y * size + x;
-                    result[0 * channelSize + dstIdx] = pixelArray[srcIdx + 0] / 255f;
-                    result[1 * channelSize + dstIdx] = pixelArray[srcIdx + 1] / 255f;
-                    result[2 * channelSize + dstIdx] = pixelArray[srcIdx + 2] / 255f;
-                }
-            });
+                byte* srcPtrLocal = srcPtr;
+                float* dstPtrLocal = dstPtrFixed;
 
+                Parallel.For(0, size, y =>
+                {
+                    int unityY = size - 1 - y;
+                    for (int x = 0; x < size; x++)
+                    {
+                        int srcIdx = (unityY * size + x) * bytesPerPixel;
+                        int dstIdx = y * size + x;
+                        dstPtrLocal[0 * channelSize + dstIdx] = srcPtrLocal[srcIdx + 0] / 255f;
+                        dstPtrLocal[1 * channelSize + dstIdx] = srcPtrLocal[srcIdx + 1] / 255f;
+                        dstPtrLocal[2 * channelSize + dstIdx] = srcPtrLocal[srcIdx + 2] / 255f;
+                    }
+                });
+            }
             return result;
         }
 
