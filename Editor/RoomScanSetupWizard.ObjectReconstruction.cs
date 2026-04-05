@@ -351,7 +351,6 @@ namespace Genesis.RoomScan.Editor
                           $"({fi.Length / 1048576} MB)");
             }
 
-            // Write a marker file so we can detect which precision is deployed
             string markerPath = Path.Combine(streamingDir, ".precision");
             File.WriteAllText(markerPath, suffix);
 

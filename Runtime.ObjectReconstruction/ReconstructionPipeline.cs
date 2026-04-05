@@ -23,6 +23,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly bool _preloadModels;
         private readonly ExecutionProvider _executionProvider;
         private readonly bool _mobileOptimized;
+        private readonly int _densitySmoothPasses;
 
         private TriplaneGridSampler _sampler;
         private IMeshExtractor _extractor;
@@ -32,6 +33,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private OrtDecoderModel _decoder;
 
         private int _postKernelDensity;
+        private int _postKernelSmooth;
         private int _postKernelColors;
 
         // Reusable buffers for decoder hot path
@@ -49,7 +51,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes,
             bool preloadModels = false,
             ExecutionProvider executionProvider = ExecutionProvider.CPU,
-            bool mobileOptimized = false)
+            bool mobileOptimized = false,
+            int densitySmoothPasses = 1)
         {
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
@@ -61,8 +64,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _preloadModels = preloadModels;
             _executionProvider = executionProvider;
             _mobileOptimized = mobileOptimized;
+            _densitySmoothPasses = densitySmoothPasses;
 
             _postKernelDensity = _postprocessShader.FindKernel("ExtractDensity");
+            _postKernelSmooth = _postprocessShader.FindKernel("SmoothDensity");
             _postKernelColors = _postprocessShader.FindKernel("ExtractColors");
         }
 
@@ -207,6 +212,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     await AsyncHelper.YieldFrame();
                 }
 
+                if (_densitySmoothPasses > 0)
+                {
+                    SmoothDensityVolume(densityBuf, totalPoints);
+                    await AsyncHelper.YieldFrame();
+                }
+
                 EnsureExtractor();
                 var mesh = await _extractor.ExtractAsync(densityBuf);
                 await AsyncHelper.YieldFrame();
@@ -312,6 +323,40 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _postprocessShader.SetBuffer(_postKernelColors, "_DecoderOutput", decoderOutput);
             _postprocessShader.SetBuffer(_postKernelColors, "_ColorOutput", colorOutput);
             _postprocessShader.Dispatch(_postKernelColors, (count + 255) / 256, 1, 1);
+        }
+
+        /// <summary>
+        /// 3x3x3 Gaussian-weighted smoothing on the density volume to filter
+        /// INT8 quantization noise amplified by exp(). Ping-pongs between two buffers.
+        /// </summary>
+        private void SmoothDensityVolume(ComputeBuffer densityBuf, int totalPoints)
+        {
+            var tempBuf = new ComputeBuffer(totalPoints, sizeof(float));
+            int groups = (totalPoints + 255) / 256;
+            _postprocessShader.SetInt("_SmoothRes", _gridResolution);
+
+            try
+            {
+                var src = densityBuf;
+                var dst = tempBuf;
+
+                for (int pass = 0; pass < _densitySmoothPasses; pass++)
+                {
+                    _postprocessShader.SetBuffer(_postKernelSmooth, "_DensityInput", src);
+                    _postprocessShader.SetBuffer(_postKernelSmooth, "_DensityVolume", dst);
+                    _postprocessShader.Dispatch(_postKernelSmooth, groups, 1, 1);
+
+                    (src, dst) = (dst, src);
+                }
+
+                // After all passes, result is in 'src'. If it's tempBuf, copy back.
+                if (src != densityBuf)
+                    Graphics.CopyBuffer(src, densityBuf);
+            }
+            finally
+            {
+                tempBuf.Release();
+            }
         }
 
         private void EnsureSampler()

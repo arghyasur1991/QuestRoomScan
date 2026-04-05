@@ -28,6 +28,7 @@ namespace Genesis.RoomScan.Editor
         [SerializeField] private int _gridResolution = 128;
         [SerializeField] private MeshAlgorithm _meshAlgorithm = MeshAlgorithm.MarchingCubes;
         [SerializeField] private ExecutionProvider _executionProvider = ExecutionProvider.CoreML;
+        [SerializeField] private int _densitySmoothPasses = 1;
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
@@ -103,6 +104,9 @@ namespace Genesis.RoomScan.Editor
 
             _executionProvider = (ExecutionProvider)EditorGUILayout.EnumPopup(
                 "Execution Provider", _executionProvider);
+
+            _densitySmoothPasses = EditorGUILayout.IntSlider(
+                "Density Smooth Passes", _densitySmoothPasses, 0, 3);
 
             EditorGUILayout.Space(4);
             DrawShaderStatus();
@@ -466,7 +470,8 @@ namespace Genesis.RoomScan.Editor
                 postprocessShader: _postprocessShader,
                 meshAlgorithm: _meshAlgorithm,
                 preloadModels: true,
-                executionProvider: _executionProvider);
+                executionProvider: _executionProvider,
+                densitySmoothPasses: _densitySmoothPasses);
         }
 
         private bool Validate()

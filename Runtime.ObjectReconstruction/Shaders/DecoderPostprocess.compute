@@ -1,17 +1,20 @@
 // GPU postprocessing for NeRF decoder output.
-// Extracts density (Pass 1) and vertex colors (Pass 2) from decoder's (N,4) output,
-// keeping all data on GPU to avoid CPU round-trips.
+// Extracts density (Pass 1), smooths density (Pass 2), and extracts colors (Pass 3)
+// from decoder's (N,4) output, keeping all data on GPU to avoid CPU round-trips.
 
 #pragma kernel ExtractDensity
+#pragma kernel SmoothDensity
 #pragma kernel ExtractColors
 
 StructuredBuffer<float> _DecoderOutput; // (N, 4) flattened: [density, r, g, b]
 
 RWStructuredBuffer<float> _DensityVolume; // totalPoints floats
+StructuredBuffer<float> _DensityInput;    // source for smoothing pass
 RWStructuredBuffer<float> _ColorOutput;   // numVerts * 3 floats
 
 uint _Offset; // write offset into _DensityVolume or _ColorOutput
 uint _Count;  // number of elements in this chunk
+uint _SmoothRes; // grid resolution for smoothing
 
 [numthreads(256, 1, 1)]
 void ExtractDensity(uint3 id : SV_DispatchThreadID)
@@ -20,6 +23,46 @@ void ExtractDensity(uint3 id : SV_DispatchThreadID)
     float raw = _DecoderOutput[id.x * 4];
     float clamped = clamp(raw - 1.0, -15.0, 15.0);
     _DensityVolume[_Offset + id.x] = exp(clamped);
+}
+
+// 3x3x3 Gaussian-weighted blur to smooth INT8 quantization noise in the density field.
+// Weights: center=8, face=4, edge=2, corner=1 (total=64). Boundary voxels are clamped.
+[numthreads(256, 1, 1)]
+void SmoothDensity(uint3 id : SV_DispatchThreadID)
+{
+    uint res = _SmoothRes;
+    uint total = res * res * res;
+    if (id.x >= total) return;
+
+    uint ix = id.x % res;
+    uint iy = (id.x / res) % res;
+    uint iz = id.x / (res * res);
+
+    float sum = 0.0;
+    float wt = 0.0;
+
+    for (int dz = -1; dz <= 1; dz++)
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        int nx = (int)ix + dx;
+        int ny = (int)iy + dy;
+        int nz = (int)iz + dz;
+        if (nx < 0 || nx >= (int)res ||
+            ny < 0 || ny >= (int)res ||
+            nz < 0 || nz >= (int)res)
+            continue;
+
+        int dist = abs(dx) + abs(dy) + abs(dz);
+        float w = dist == 0 ? 8.0 :
+                  dist == 1 ? 4.0 :
+                  dist == 2 ? 2.0 : 1.0;
+
+        sum += _DensityInput[(uint)nz * res * res + (uint)ny * res + (uint)nx] * w;
+        wt += w;
+    }
+
+    _DensityVolume[id.x] = sum / wt;
 }
 
 [numthreads(256, 1, 1)]

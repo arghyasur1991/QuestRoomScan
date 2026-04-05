@@ -38,6 +38,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [SerializeField] private float densityThreshold = 25f;
         [SerializeField] private MeshAlgorithm meshAlgorithm = MeshAlgorithm.MarchingCubes;
 
+        [SerializeField, Tooltip("3x3x3 Gaussian smoothing passes on the density volume before " +
+            "marching cubes. Filters INT8 quantization noise amplified by exp(). " +
+            "0 = disabled, 1 = recommended for INT8, 2+ = more smoothing.")]
+        private int densitySmoothPasses = 1;
+
         public string ModuleName => "Object Reconstruction";
         public bool IsRunning => _running;
         public string Status => _status;
@@ -155,7 +160,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 decoderPostprocessShader,
                 meshAlgorithm,
                 executionProvider: executionProvider,
-                mobileOptimized: mobileOptimized);
+                mobileOptimized: mobileOptimized,
+                densitySmoothPasses: densitySmoothPasses);
         }
 
         private void SpawnMesh(Mesh mesh)
