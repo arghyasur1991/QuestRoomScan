@@ -20,20 +20,59 @@ namespace Genesis.RoomScan.ObjectReconstruction
     internal abstract class OrtModelBase : IDisposable
     {
         private static bool _ortLoggingInitialized;
+        private static OrtLoggingLevel _ortLogLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
 
         /// <summary>
-        /// Initializes ORT environment with custom Unity logging callback (LiveTalk pattern).
-        /// Routes ORT internal logs (EP assignments, graph partitioning) to Unity console.
-        /// Must be called before first session creation. Idempotent.
+        /// Earliest possible runtime init — runs before any SessionOptions can be created,
+        /// ensuring OrtEnv is created with our custom callback (Spark-TTS / LiveTalk pattern).
+        /// SubsystemRegistration fires before BeforeSceneLoad and AfterSceneLoad.
+        /// </summary>
+        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+        private static void EarlyInitOrtLogging()
+        {
+            _ortLoggingInitialized = false;
+            InitializeOrtLogging(OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO);
+        }
+
+        /// <summary>
+        /// Initializes ORT environment with custom Unity logging callback.
+        /// Routes ALL ORT internal logs (EP assignments, graph partitioning, QNN decisions)
+        /// through Unity's Logger so they appear in logcat with the [RoomScan] tag.
+        /// If OrtEnv was already created (e.g. by another package), updates its log level.
         /// </summary>
         internal static void InitializeOrtLogging(OrtLoggingLevel level = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING)
         {
-            if (_ortLoggingInitialized) return;
+            _ortLogLevel = level;
+
+            if (_ortLoggingInitialized)
+            {
+                // Already initialized with callback — just update the level if needed
+                if (OrtEnv.IsCreated)
+                {
+                    try
+                    {
+                        OrtEnv.Instance().EnvLogLevel = level;
+                    }
+                    catch (Exception) { /* best effort */ }
+                }
+                return;
+            }
             _ortLoggingInitialized = true;
 
             if (OrtEnv.IsCreated)
             {
-                Logger.Info("[OrtModelBase] OrtEnv already created, custom logging skipped");
+                // OrtEnv was created before us (e.g. by asus4 bootstrap).
+                // Can't install callback, but CAN update the log level.
+                Logger.Info("[OrtModelBase] OrtEnv already created, updating log level only");
+                try
+                {
+                    OrtEnv.Instance().EnvLogLevel = level;
+                    Logger.Info($"[OrtModelBase] OrtEnv log level updated to {level}");
+                }
+                catch (Exception e)
+                {
+                    Logger.Warning($"[OrtModelBase] Failed to update OrtEnv log level: {e.Message}");
+                }
                 return;
             }
 
@@ -46,7 +85,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     loggingFunction = OrtLoggingCallback,
                 };
                 OrtEnv.CreateInstanceWithOptions(ref options);
-                Logger.Info($"[OrtModelBase] ORT logging initialized (level={level})");
+                Logger.Info($"[OrtModelBase] ORT env created with custom callback (level={level})");
             }
             catch (Exception e)
             {
@@ -123,7 +162,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 {
                     try
                     {
+                        Logger.Info($"[OrtModelBase] Creating QNN HTP session for {modelName}...");
                         _session = new InferenceSession(modelPath, options);
+                        Logger.Info($"[OrtModelBase] QNN HTP session created OK for {modelName}");
                     }
                     catch (Exception e)
                     {
@@ -133,7 +174,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         Logger.Info($"[OrtModelBase] Falling back to CPU for {modelName}");
                         _profilingEnabled = false;
                         var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized);
+                        cpuOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO;
                         _session = new InferenceSession(modelPath, cpuOptions);
+                        Logger.Info($"[OrtModelBase] CPU fallback session created for {modelName}");
                     }
                 }
                 else
@@ -170,7 +213,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             var options = new SessionOptions
             {
-                LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING
+                LogSeverityLevel = (ep == ExecutionProvider.QNN_HTP)
+                    ? OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO
+                    : OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING
             };
 
             if (mobileOptimized)
@@ -286,6 +331,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private static void ConfigureQnn(SessionOptions options)
         {
+            // Bump env log level to INFO so QNN EP decisions are visible
             InitializeOrtLogging(OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO);
 
             QnnEnvironment.Initialize();
@@ -303,8 +349,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 ["enable_htp_fp16_precision"] = "1",
             };
 
-            options.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO;
-
             string profileDir = Path.Combine(Application.persistentDataPath, "ort_profiles");
             Directory.CreateDirectory(profileDir);
             string profilePrefix = Path.Combine(profileDir, "qnn_");
@@ -312,7 +356,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             options.EnableProfiling = true;
             Logger.Info($"[OrtModelBase] QNN profiling enabled, prefix={profilePrefix}");
 
-            // Fail-fast instead of silent CPU fallback -- surfaces exact rejection reasons in logs
             options.AddSessionConfigEntry("session.disable_cpu_ep_fallback", "1");
 
             Logger.Info($"[OrtModelBase] QNN HTP backend_path={backendPath} (CPU fallback disabled)");
