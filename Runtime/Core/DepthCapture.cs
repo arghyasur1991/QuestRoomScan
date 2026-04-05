@@ -391,7 +391,7 @@ namespace Genesis.RoomScan
             {
                 _lastLogTime = t;
                 var sub = _arOcclusionManager != null ? _arOcclusionManager.subsystem : null;
-                Logger.Info($"DepthCapture: frames={_frameCount}, depthAvail={DepthAvailable}, " +
+                Logger.Verbose($"DepthCapture: frames={_frameCount}, depthAvail={DepthAvailable}, " +
                           $"occMgr.enabled={_arOcclusionManager?.enabled}, sub={sub?.GetType().Name ?? "null"}, " +
                           $"running={sub?.running}");
             }

@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
@@ -18,11 +19,69 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// </summary>
     internal abstract class OrtModelBase : IDisposable
     {
+        private static bool _ortLoggingInitialized;
+
+        /// <summary>
+        /// Initializes ORT environment with custom Unity logging callback (LiveTalk pattern).
+        /// Routes ORT internal logs (EP assignments, graph partitioning) to Unity console.
+        /// Must be called before first session creation. Idempotent.
+        /// </summary>
+        internal static void InitializeOrtLogging(OrtLoggingLevel level = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING)
+        {
+            if (_ortLoggingInitialized) return;
+            _ortLoggingInitialized = true;
+
+            if (OrtEnv.IsCreated)
+            {
+                Logger.Info("[OrtModelBase] OrtEnv already created, custom logging skipped");
+                return;
+            }
+
+            try
+            {
+                var options = new EnvironmentCreationOptions
+                {
+                    logLevel = level,
+                    logId = "Sentience",
+                    loggingFunction = OrtLoggingCallback,
+                };
+                OrtEnv.CreateInstanceWithOptions(ref options);
+                Logger.Info($"[OrtModelBase] ORT logging initialized (level={level})");
+            }
+            catch (Exception e)
+            {
+                Logger.Warning($"[OrtModelBase] ORT logging init failed: {e.Message}");
+            }
+        }
+
+        private static void OrtLoggingCallback(
+            IntPtr param, OrtLoggingLevel severity, string category,
+            string logId, string codeLocation, string message)
+        {
+            string tag = $"[ORT/{category}]";
+            switch (severity)
+            {
+                case OrtLoggingLevel.ORT_LOGGING_LEVEL_VERBOSE:
+                    Logger.Verbose($"{tag} {message}");
+                    break;
+                case OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO:
+                    Logger.Info($"{tag} {message}");
+                    break;
+                case OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING:
+                    Logger.Warning($"{tag} {message}");
+                    break;
+                default:
+                    Logger.Error($"{tag} {message}");
+                    break;
+            }
+        }
+
         protected InferenceSession _session;
         protected List<string> _inputNames;
         protected readonly List<NamedOnnxValue> _inputs = new();
         protected List<NamedOnnxValue> _preallocatedOutputs;
         private bool _disposed;
+        private bool _profilingEnabled;
 
         internal bool IsLoaded => _session != null;
 
@@ -68,6 +127,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             OrtLoadQueue.Enqueue(task, modelName);
             await task;
 
+            _profilingEnabled = (ep == ExecutionProvider.QNN_HTP);
             _inputNames = _session.InputMetadata.Keys.ToList();
 
             _preallocatedOutputs = new List<NamedOnnxValue>();
@@ -209,6 +269,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private static void ConfigureQnn(SessionOptions options)
         {
+            InitializeOrtLogging(OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO);
+
             QnnEnvironment.Initialize();
 
             string backendPath = "libQnnHtp.so";
@@ -223,6 +285,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 ["htp_performance_mode"] = "burst",
                 ["enable_htp_fp16_precision"] = "1",
             };
+
+            options.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO;
+
+            string profileDir = Path.Combine(Application.persistentDataPath, "ort_profiles");
+            Directory.CreateDirectory(profileDir);
+            string profilePrefix = Path.Combine(profileDir, "qnn_");
+            options.ProfileOutputPathPrefix = profilePrefix;
+            options.EnableProfiling = true;
+            Logger.Info($"[OrtModelBase] QNN profiling enabled, prefix={profilePrefix}");
 
             Logger.Info($"[OrtModelBase] QNN HTP backend_path={backendPath}");
             options.AppendExecutionProvider("QNN", qnnOptions);
@@ -275,10 +346,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             try
             {
-                var runOptions = new RunOptions
-                {
-                    LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING
-                };
+                var logLevel = _profilingEnabled
+                    ? OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO
+                    : OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
+                var runOptions = new RunOptions { LogSeverityLevel = logLevel };
                 await Task.Run(() => _session.Run(_inputs, _preallocatedOutputs, runOptions));
             }
             finally
@@ -294,10 +365,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             try
             {
-                var runOptions = new RunOptions
-                {
-                    LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING
-                };
+                var logLevel = _profilingEnabled
+                    ? OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO
+                    : OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
+                var runOptions = new RunOptions { LogSeverityLevel = logLevel };
                 return await Task.Run(() =>
                     _session.Run(_inputs, _session.OutputNames, runOptions));
             }
@@ -345,6 +416,18 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (_disposed) return;
             if (disposing)
             {
+                if (_profilingEnabled && _session != null)
+                {
+                    try
+                    {
+                        string profileFile = _session.EndProfiling();
+                        Logger.Info($"[OrtModelBase] QNN profile written: {profileFile}");
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Warning($"[OrtModelBase] EndProfiling failed: {e.Message}");
+                    }
+                }
                 _session?.Dispose();
                 _session = null;
                 _preallocatedOutputs?.Clear();
