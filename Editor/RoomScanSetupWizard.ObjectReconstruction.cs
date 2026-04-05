@@ -31,10 +31,10 @@ namespace Genesis.RoomScan.Editor
             "u2netp.onnx"
         };
 
-        enum ModelPrecision { FP32, FP16, INT8 }
+        enum ModelPrecision { FP32, FP16, INT8, INT8_QDQ }
 
-        static readonly string[] PrecisionSuffixes = { "fp32", "fp16", "int8" };
-        static readonly string[] PrecisionLabels = { "FP32 (1.7GB)", "FP16 (840MB)", "INT8 (460MB)" };
+        static readonly string[] PrecisionSuffixes = { "fp32", "fp16", "int8", "int8_qdq" };
+        static readonly string[] PrecisionLabels = { "FP32 (1.7GB)", "FP16 (840MB)", "INT8 (460MB)", "QDQ (415MB)" };
 
         ObjectReconstructionModule _objectReconstruction;
         bool _reconTriplaneShaderAssigned;
@@ -45,7 +45,7 @@ namespace Genesis.RoomScan.Editor
         bool _reconTestImagesAssigned;
         bool _reconOnnxModelsDeployed;
         string _reconDeployedPrecision;
-        bool[] _reconAvailablePrecisions = new bool[3];
+        bool[] _reconAvailablePrecisions = new bool[4];
 
         partial void RefreshObjectReconstruction()
         {
@@ -80,7 +80,7 @@ namespace Genesis.RoomScan.Editor
             _reconOnnxModelsDeployed = AllDeployedModelsExist(streamingDir);
             _reconDeployedPrecision = DetectDeployedPrecision(streamingDir);
 
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 4; i++)
                 _reconAvailablePrecisions[i] = IsPrecisionAvailable((ModelPrecision)i);
         }
 
@@ -109,7 +109,8 @@ namespace Genesis.RoomScan.Editor
 
             bool anyAvailable = _reconAvailablePrecisions[0]
                              || _reconAvailablePrecisions[1]
-                             || _reconAvailablePrecisions[2];
+                             || _reconAvailablePrecisions[2]
+                             || _reconAvailablePrecisions[3];
 
             if (anyAvailable)
             {
@@ -119,7 +120,7 @@ namespace Genesis.RoomScan.Editor
 
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.Space(20);
-                for (int i = 0; i < 3; i++)
+                for (int i = 0; i < 4; i++)
                 {
                     using (new EditorGUI.DisabledScope(!_reconAvailablePrecisions[i]))
                     {
@@ -303,7 +304,7 @@ namespace Genesis.RoomScan.Editor
             if (!File.Exists(deployedPart1)) return null;
 
             long deployedSize = new FileInfo(deployedPart1).Length;
-            for (int i = 2; i >= 0; i--)
+            for (int i = PrecisionSuffixes.Length - 1; i >= 0; i--)
             {
                 string suffix = PrecisionSuffixes[i];
                 string srcPath = Path.Combine(RECON_ONNX_DIR, $"triposr_part1_{suffix}.onnx");
