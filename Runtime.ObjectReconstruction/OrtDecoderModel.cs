@@ -63,13 +63,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             await RunPreallocated();
 
+            return CopyOutput(count);
+        }
+
+        private float[] CopyOutput(int count)
+        {
             var output = GetPreallocatedOutput<float>();
             int totalOut = count * OutputDim;
             if (_outputBuffer == null || _outputBuffer.Length < totalOut)
                 _outputBuffer = new float[totalOut];
 
-            var srcSpan = output.Buffer.Span;
-            srcSpan.Slice(0, totalOut).CopyTo(_outputBuffer.AsSpan(0, totalOut));
+            output.Buffer.Span.Slice(0, totalOut).CopyTo(_outputBuffer.AsSpan(0, totalOut));
             return _outputBuffer;
         }
     }

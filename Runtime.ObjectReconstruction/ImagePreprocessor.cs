@@ -1,6 +1,5 @@
 #if HAS_ONNXRUNTIME
 using System.Threading.Tasks;
-using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
@@ -127,32 +126,30 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         /// <summary>
         /// Converts a Texture2D to a CPU float[] in NCHW layout.
-        /// Uses unsafe pointer access for performance.
+        /// Uses GetPixelData for zero-copy access and Parallel.For for throughput.
         /// </summary>
-        internal static unsafe float[] TextureToNCHW(Texture2D tex, int size)
+        internal static float[] TextureToNCHW(Texture2D tex, int size)
         {
             var pixels = tex.GetPixelData<byte>(0);
-            byte* srcPtr = (byte*)pixels.GetUnsafeReadOnlyPtr();
+            var pixelArray = pixels.ToArray();
             var result = new float[3 * size * size];
 
             int channelSize = size * size;
-            int bytesPerPixel = 3; // RGB24
+            const int bytesPerPixel = 3; // RGB24
 
-            fixed (float* dstPtr = result)
+            System.Threading.Tasks.Parallel.For(0, size, y =>
             {
-                System.Threading.Tasks.Parallel.For(0, size, y =>
+                int unityY = size - 1 - y;
+                for (int x = 0; x < size; x++)
                 {
-                    int unityY = size - 1 - y;
-                    for (int x = 0; x < size; x++)
-                    {
-                        int srcIdx = (unityY * size + x) * bytesPerPixel;
-                        int dstIdx = y * size + x;
-                        dstPtr[0 * channelSize + dstIdx] = srcPtr[srcIdx + 0] / 255f;
-                        dstPtr[1 * channelSize + dstIdx] = srcPtr[srcIdx + 1] / 255f;
-                        dstPtr[2 * channelSize + dstIdx] = srcPtr[srcIdx + 2] / 255f;
-                    }
-                });
-            }
+                    int srcIdx = (unityY * size + x) * bytesPerPixel;
+                    int dstIdx = y * size + x;
+                    result[0 * channelSize + dstIdx] = pixelArray[srcIdx + 0] / 255f;
+                    result[1 * channelSize + dstIdx] = pixelArray[srcIdx + 1] / 255f;
+                    result[2 * channelSize + dstIdx] = pixelArray[srcIdx + 2] / 255f;
+                }
+            });
+
             return result;
         }
 
