@@ -32,8 +32,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
             string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct)
         {
             string modelPath = await ModelPathResolver.ResolveAsync(relativePath, ct);
-            var options = CreateSessionOptions(ep, mobileOptimized);
             string modelName = Path.GetFileNameWithoutExtension(relativePath);
+
+            string modelCacheDir = null;
+            if (ep == ExecutionProvider.CoreML)
+                modelCacheDir = GetPerModelCacheDir(modelPath, modelName);
+
+            var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir);
 
             var task = new Task(() =>
             {
@@ -83,7 +88,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
         }
 
-        private static SessionOptions CreateSessionOptions(ExecutionProvider ep, bool mobileOptimized)
+        private static SessionOptions CreateSessionOptions(
+            ExecutionProvider ep, bool mobileOptimized, string modelCacheDir = null)
         {
             var options = new SessionOptions
             {
@@ -108,7 +114,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         new Dictionary<string, string>());
                     break;
                 case ExecutionProvider.CoreML:
-                    ConfigureCoreML(options);
+                    ConfigureCoreML(options, modelCacheDir);
                     break;
             }
 
@@ -128,12 +134,44 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
+        /// Returns a per-model cache subdirectory keyed by file size. Different model
+        /// precisions (FP32/INT8) get isolated cache dirs automatically, preventing
+        /// stale compiled-model collisions when models share the same filename.
+        /// Also cleans up old cache dirs for the same model name with different sizes.
+        /// </summary>
+        private static string GetPerModelCacheDir(string modelPath, string modelName)
+        {
+            long fileSize = new FileInfo(modelPath).Length;
+            string baseDir = GetCoreMLCacheDirectory();
+            string modelCacheDir = Path.Combine(baseDir, $"{modelName}_{fileSize}");
+
+            if (!Directory.Exists(modelCacheDir))
+            {
+                if (Directory.Exists(baseDir))
+                {
+                    foreach (var oldDir in Directory.GetDirectories(baseDir, $"{modelName}_*"))
+                    {
+                        if (oldDir != modelCacheDir)
+                        {
+                            Logger.Info($"[OrtModelBase] Removing stale CoreML cache: {Path.GetFileName(oldDir)}");
+                            try { Directory.Delete(oldDir, true); }
+                            catch (Exception e) { Logger.Warning($"[OrtModelBase] Cleanup failed: {e.Message}"); }
+                        }
+                    }
+                }
+                Directory.CreateDirectory(modelCacheDir);
+            }
+
+            return modelCacheDir;
+        }
+
+        /// <summary>
         /// Configures CoreML with MLProgram format, GPU compute, model caching,
         /// and cache corruption recovery (LiveTalk pattern).
         /// </summary>
-        private static void ConfigureCoreML(SessionOptions options)
+        private static void ConfigureCoreML(SessionOptions options, string modelCacheDir = null)
         {
-            string cacheDir = GetCoreMLCacheDirectory();
+            string cacheDir = modelCacheDir ?? GetCoreMLCacheDirectory();
             if (!Directory.Exists(cacheDir))
                 Directory.CreateDirectory(cacheDir);
 
