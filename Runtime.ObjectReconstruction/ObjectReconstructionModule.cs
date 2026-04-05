@@ -160,6 +160,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 densityMarchingCubesShader,
                 decoderPostprocessShader,
                 meshAlgorithm,
+                preloadModels: !mobileOptimized,
                 executionProvider: executionProvider,
                 mobileOptimized: mobileOptimized,
                 densitySmoothPasses: densitySmoothPasses,
