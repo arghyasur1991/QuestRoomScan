@@ -215,36 +215,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Shared logic: crop fg bbox → pad square → pad ratio → composite → bilinear resize to 512 → NCHW float[].
+        /// Shared logic: crop fg bbox → pad square → pad ratio → composite in float32 →
+        /// CPU bilinear resize to 512 → NCHW float[].
+        /// All processing stays in float space to match Python's pipeline and avoid
+        /// uint8 quantization artifacts that degrade INT8 model quality.
         /// </summary>
         private static async Task<float[]> CompositeAndResizeAsync(
             Frame srcFrame, float[] alpha, float ratio)
         {
             const int outputSize = 512;
 
-            var (compositeFrame, compositeSize) = await Task.Run(() =>
-                BuildNativeComposite(srcFrame, alpha, ratio));
+            var result = await Task.Run(() =>
+            {
+                var (compositeHWC, compositeSize) = BuildFloatComposite(srcFrame, alpha, ratio);
+                return BilinearResizeToNCHW(compositeHWC, compositeSize, compositeSize, outputSize);
+            });
 
             await AsyncHelper.YieldFrame();
-
-            var compositeTex = FrameToTexture2D(compositeFrame);
-            compositeTex.filterMode = FilterMode.Trilinear;
-            compositeTex.Apply(true);
-
-            var rt = RenderTexture.GetTemporary(outputSize, outputSize, 0, RenderTextureFormat.ARGB32);
-            rt.filterMode = FilterMode.Bilinear;
-            Graphics.Blit(compositeTex, rt);
-            SafeDestroy(compositeTex);
-
-            var resized = new Texture2D(outputSize, outputSize, TextureFormat.RGB24, false);
-            RenderTexture.active = rt;
-            resized.ReadPixels(new Rect(0, 0, outputSize, outputSize), 0, 0);
-            resized.Apply();
-            RenderTexture.active = null;
-            RenderTexture.ReleaseTemporary(rt);
-
-            var result = TextureToNCHW(resized, outputSize);
-            SafeDestroy(resized);
             return result;
         }
 
@@ -314,15 +301,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Builds the composite at native resolution (not 512x512).
-        /// Operates entirely on Frame byte[] — no Color32 allocations.
-        /// Matches Python's resize_foreground: crop bbox → pad square → pad ratio → composite.
+        /// Builds the composite at native resolution in float32 HWC format.
+        /// Matches Python's resize_foreground exactly:
+        /// - bbox threshold: alpha > 0 (any non-zero, not 0.5)
+        /// - composite: rgb * alpha + 0.5 * (1 - alpha) in float space
+        /// - background: exactly 0.5f (not 128/255 = 0.50196)
+        /// Returns float[] in HWC layout (R,G,B,R,G,B,...).
         /// </summary>
-        private static unsafe (Frame frame, int size) BuildNativeComposite(
+        private static unsafe (float[] hwc, int size) BuildFloatComposite(
             Frame src, float[] alpha, float ratio)
         {
             int srcW = src.width, srcH = src.height;
-            const float bboxThreshold = 0.5f;
             int minX = srcW, minY = srcH, maxX = 0, maxY = 0;
 
             fixed (float* alphaPtr = alpha)
@@ -331,7 +320,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 for (int y = 0; y < srcH; y++)
                 for (int x = 0; x < srcW; x++)
                 {
-                    if (aLocal[y * srcW + x] > bboxThreshold)
+                    if (aLocal[y * srcW + x] > 0f)
                     {
                         if (x < minX) minX = x;
                         if (x > maxX) maxX = x;
@@ -344,9 +333,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (maxX <= minX || maxY <= minY)
             {
                 int sz = 64;
-                var grayData = new byte[sz * sz * 3];
-                Array.Fill(grayData, (byte)128);
-                return (new Frame(grayData, sz, sz), sz);
+                var grayData = new float[sz * sz * 3];
+                Array.Fill(grayData, 0.5f);
+                return (grayData, sz);
             }
 
             int cropW = maxX - minX;
@@ -363,17 +352,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int outerPadX = (finalSize - sqSize) / 2;
             int outerPadY = (finalSize - sqSize) / 2;
 
-            var resultData = new byte[finalSize * finalSize * 3];
-            Array.Fill(resultData, (byte)128);
+            var resultData = new float[finalSize * finalSize * 3];
+            Array.Fill(resultData, 0.5f);
 
             fixed (byte* srcPtrFixed = src.data)
-            fixed (byte* dstPtrFixed = resultData)
+            fixed (float* dstPtrFixed = resultData)
             fixed (float* alphaPtrFixed = alpha)
             {
                 byte* srcLocal = srcPtrFixed;
-                byte* dstLocal = dstPtrFixed;
+                float* dstLocal = dstPtrFixed;
                 float* aLocal = alphaPtrFixed;
-                const byte grayByte = 128;
 
                 Parallel.For(0, finalSize, fy =>
                 {
@@ -389,19 +377,79 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                         int si = srcY * srcW + srcX;
                         float a = aLocal[si];
-                        if (a < 0.001f) continue;
+                        if (a < 1e-6f) continue;
 
                         int srcIdx = si * 3;
                         int dstIdx = (fy * finalSize + fx) * 3;
                         float invA = 1f - a;
-                        dstLocal[dstIdx + 0] = (byte)(srcLocal[srcIdx + 0] * a + grayByte * invA);
-                        dstLocal[dstIdx + 1] = (byte)(srcLocal[srcIdx + 1] * a + grayByte * invA);
-                        dstLocal[dstIdx + 2] = (byte)(srcLocal[srcIdx + 2] * a + grayByte * invA);
+                        dstLocal[dstIdx + 0] = srcLocal[srcIdx + 0] / 255f * a + 0.5f * invA;
+                        dstLocal[dstIdx + 1] = srcLocal[srcIdx + 1] / 255f * a + 0.5f * invA;
+                        dstLocal[dstIdx + 2] = srcLocal[srcIdx + 2] / 255f * a + 0.5f * invA;
                     }
                 });
             }
 
-            return (new Frame(resultData, finalSize, finalSize), finalSize);
+            return (resultData, finalSize);
+        }
+
+        /// <summary>
+        /// CPU bilinear resize from float HWC (srcW x srcH x 3) to NCHW (1 x 3 x dstSize x dstSize).
+        /// Stays in float space throughout — no uint8 quantization roundtrip.
+        /// </summary>
+        private static unsafe float[] BilinearResizeToNCHW(
+            float[] srcHWC, int srcW, int srcH, int dstSize)
+        {
+            int channelSize = dstSize * dstSize;
+            var result = new float[3 * channelSize];
+
+            fixed (float* srcPtr = srcHWC)
+            fixed (float* dstPtr = result)
+            {
+                float* srcLocal = srcPtr;
+                float* dstLocal = dstPtr;
+
+                Parallel.For(0, dstSize, dy =>
+                {
+                    float sy = (dy + 0.5f) * srcH / dstSize - 0.5f;
+                    int y0 = (int)MathF.Floor(sy);
+                    int y1 = y0 + 1;
+                    float fy = sy - y0;
+                    if (y0 < 0) { y0 = 0; fy = 0; }
+                    if (y1 >= srcH) y1 = srcH - 1;
+
+                    for (int dx = 0; dx < dstSize; dx++)
+                    {
+                        float sx = (dx + 0.5f) * srcW / dstSize - 0.5f;
+                        int x0 = (int)MathF.Floor(sx);
+                        int x1 = x0 + 1;
+                        float fx = sx - x0;
+                        if (x0 < 0) { x0 = 0; fx = 0; }
+                        if (x1 >= srcW) x1 = srcW - 1;
+
+                        int dstIdx = dy * dstSize + dx;
+                        float w00 = (1 - fy) * (1 - fx);
+                        float w01 = (1 - fy) * fx;
+                        float w10 = fy * (1 - fx);
+                        float w11 = fy * fx;
+
+                        int i00 = (y0 * srcW + x0) * 3;
+                        int i01 = (y0 * srcW + x1) * 3;
+                        int i10 = (y1 * srcW + x0) * 3;
+                        int i11 = (y1 * srcW + x1) * 3;
+
+                        for (int c = 0; c < 3; c++)
+                        {
+                            dstLocal[c * channelSize + dstIdx] =
+                                srcLocal[i00 + c] * w00 +
+                                srcLocal[i01 + c] * w01 +
+                                srcLocal[i10 + c] * w10 +
+                                srcLocal[i11 + c] * w11;
+                        }
+                    }
+                });
+            }
+
+            return result;
         }
 
         private static Texture2D EnsureRGB24(Texture2D tex)
