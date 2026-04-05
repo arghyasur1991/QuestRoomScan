@@ -16,7 +16,16 @@ namespace Genesis.RoomScan
         Texture2D[] TestImages { get; }
 
         Task LoadModelsAsync(CancellationToken ct = default);
-        Task ReconstructAsync(Texture2D image, CancellationToken ct = default);
-        void ClearMesh();
+
+        /// <summary>
+        /// Runs reconstruction and returns the resulting mesh.
+        /// The caller is responsible for spawning/positioning the mesh in the scene.
+        /// </summary>
+        Task<Mesh> ReconstructAsync(Texture2D image, CancellationToken ct = default);
+
+        /// <summary>
+        /// Creates a material suitable for rendering the reconstructed mesh (vertex colors).
+        /// </summary>
+        Material CreateMaterial();
     }
 }

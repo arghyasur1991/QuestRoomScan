@@ -54,6 +54,7 @@ namespace Genesis.RoomScan.UI
         private int _reconSelectedIdx = -1;
         private bool _reconAvailable;
         private IObjectReconstructionProvider _cachedReconModule;
+        private GameObject _spawnedReconMesh;
 
         // Footer
         private Label _valFps;
@@ -338,14 +339,16 @@ namespace Genesis.RoomScan.UI
 
                 SetButtonBusy(_btnReconPredict, "Running...");
                 _btnReconPredict.SetEnabled(false);
-                await module.ReconstructAsync(images[_reconSelectedIdx]);
+                var mesh = await module.ReconstructAsync(images[_reconSelectedIdx]);
+                if (mesh != null)
+                    SpawnReconstructedMesh(mesh);
                 SetButtonReady(_btnReconPredict, "Predict");
                 _btnReconPredict.SetEnabled(true);
             });
 
             _btnReconClear?.RegisterCallback<ClickEvent>(_ =>
             {
-                FindReconstructionModule()?.ClearMesh();
+                ClearReconstructedMesh();
             });
         }
 
@@ -390,6 +393,35 @@ namespace Genesis.RoomScan.UI
                 }
             }
             return null;
+        }
+
+        private void SpawnReconstructedMesh(Mesh mesh)
+        {
+            ClearReconstructedMesh();
+
+            var module = FindReconstructionModule();
+
+            _spawnedReconMesh = new GameObject("ReconstructedObject");
+            var mf = _spawnedReconMesh.AddComponent<MeshFilter>();
+            var mr = _spawnedReconMesh.AddComponent<MeshRenderer>();
+            mf.sharedMesh = mesh;
+            mr.sharedMaterial = module?.CreateMaterial();
+
+            var scanner = RoomScanner.Instance;
+            var center = scanner != null
+                ? scanner.transform.position + scanner.transform.forward * 1.5f
+                : Vector3.forward * 1.5f;
+            _spawnedReconMesh.transform.position = center;
+            _spawnedReconMesh.transform.localScale = Vector3.one * 0.5f;
+        }
+
+        private void ClearReconstructedMesh()
+        {
+            if (_spawnedReconMesh != null)
+            {
+                Destroy(_spawnedReconMesh);
+                _spawnedReconMesh = null;
+            }
         }
 
         // ─────────────────────────────────────────────────────────────

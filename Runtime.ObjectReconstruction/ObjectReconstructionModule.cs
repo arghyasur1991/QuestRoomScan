@@ -50,16 +50,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         public event Action<string> StatusChanged;
 
-        private RoomScanner _scanner;
         private ReconstructionPipeline _pipeline;
         private bool _running;
         private string _status = "Idle";
         private CancellationTokenSource _cts;
-        private GameObject _spawnedMesh;
 
         public void OnModuleInitialize(RoomScanner scanner)
         {
-            _scanner = scanner;
             Logger.Info("[ObjectReconstruction] Module initialized");
         }
 
@@ -71,12 +68,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
             ReportStatus("Models loaded");
         }
 
-        public async Task ReconstructAsync(Texture2D image, CancellationToken ct = default)
+        public async Task<Mesh> ReconstructAsync(Texture2D image, CancellationToken ct = default)
         {
             if (_running)
             {
                 Logger.Warning("[ObjectReconstruction] Reconstruction already in progress");
-                return;
+                return null;
             }
 
             _running = true;
@@ -86,7 +83,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             try
             {
                 EnsurePipeline();
-                ClearMesh();
 
                 var sw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -111,21 +107,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 float meshMs = sw.ElapsedMilliseconds;
                 sw.Stop();
 
-                SpawnMesh(mesh);
-
                 float totalMs = loadMs + rembgMs + forwardMs + meshMs;
                 Logger.Info($"[ObjectReconstruction] Timing: load={loadMs:F0}ms rembg={rembgMs:F0}ms " +
                     $"forward={forwardMs:F0}ms mesh={meshMs:F0}ms total={totalMs:F0}ms");
                 ReportStatus($"Done! ({totalMs / 1000f:F1}s)");
+
+                return mesh;
             }
             catch (OperationCanceledException)
             {
                 ReportStatus("Cancelled");
+                return null;
             }
             catch (Exception e)
             {
                 Logger.Error($"[ObjectReconstruction] {e.Message}");
                 ReportStatus($"Error: {e.Message}");
+                return null;
             }
             finally
             {
@@ -138,15 +136,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
         public void Cancel()
         {
             _cts?.Cancel();
-        }
-
-        public void ClearMesh()
-        {
-            if (_spawnedMesh != null)
-            {
-                Destroy(_spawnedMesh);
-                _spawnedMesh = null;
-            }
         }
 
         private void EnsurePipeline()
@@ -164,39 +153,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 densitySmoothPasses: densitySmoothPasses);
         }
 
-        private void SpawnMesh(Mesh mesh)
-        {
-            ClearMesh();
-
-            _spawnedMesh = new GameObject("ReconstructedObject");
-            var mf = _spawnedMesh.AddComponent<MeshFilter>();
-            var mr = _spawnedMesh.AddComponent<MeshRenderer>();
-
-            mf.sharedMesh = mesh;
-            mr.sharedMaterial = CreateVertexColorMaterial();
-
-            var center = _scanner != null
-                ? _scanner.transform.position + Vector3.forward * 1.5f
-                : Vector3.forward * 1.5f;
-            _spawnedMesh.transform.position = center;
-            _spawnedMesh.transform.localScale = Vector3.one * 0.5f;
-
-            Logger.Info($"[ObjectReconstruction] Mesh spawned: {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris");
-        }
-
-        private Material CreateVertexColorMaterial()
+        public Material CreateMaterial()
         {
             if (vertexColorShader != null)
                 return new Material(vertexColorShader);
 
-            Logger.Warning("[ObjectReconstruction] vertexColorShader not assigned — " +
-                "Shader.Find fallback may fail in stripped builds. Wire it via the Setup Wizard.");
             var fallback = Shader.Find("Universal Render Pipeline/Lit")
                            ?? Shader.Find("Standard");
             if (fallback == null)
                 throw new InvalidOperationException(
-                    "No vertex color shader assigned and no fallback shader found. " +
-                    "Assign vertexColorShader in the Inspector or run the Setup Wizard.");
+                    "No vertex color shader assigned and no fallback shader found.");
             return new Material(fallback);
         }
 
@@ -210,7 +176,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             _cts?.Cancel();
             _pipeline?.Dispose();
-            ClearMesh();
         }
     }
 }
