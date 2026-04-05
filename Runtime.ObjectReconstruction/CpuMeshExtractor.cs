@@ -260,92 +260,68 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         #region Parallel Marching Cubes
 
-        private static void MarchingCubesParallel(
+        private static unsafe void MarchingCubesParallel(
             float[] density, int res, float threshold,
             out Vector3[] vertices, out int[] triangles)
         {
             float voxSize = 1f / (res - 1);
             float halfRes = res / 2f;
             int sliceCount = res - 1;
+            int resRes = res * res;
 
-            // Per-slice vertex/index lists — no contention between threads
             var sliceVerts = new List<Vector3>[sliceCount];
             var sliceTris = new List<int>[sliceCount];
 
-            Parallel.For(0, sliceCount, iz =>
+            fixed (float* denPtrFixed = density)
             {
-                var vList = new List<Vector3>(1024);
-                var tList = new List<int>(1024);
+                float* denPtr = denPtrFixed;
 
-                for (int iy = 0; iy < res - 1; iy++)
-                for (int ix = 0; ix < res - 1; ix++)
+                Parallel.For(0, sliceCount, iz =>
                 {
-                    float c0 = density[Flat(ix, iy, iz, res)];
-                    float c1 = density[Flat(ix + 1, iy, iz, res)];
-                    float c2 = density[Flat(ix + 1, iy + 1, iz, res)];
-                    float c3 = density[Flat(ix, iy + 1, iz, res)];
-                    float c4 = density[Flat(ix, iy, iz + 1, res)];
-                    float c5 = density[Flat(ix + 1, iy, iz + 1, res)];
-                    float c6 = density[Flat(ix + 1, iy + 1, iz + 1, res)];
-                    float c7 = density[Flat(ix, iy + 1, iz + 1, res)];
+                    var vList = new List<Vector3>(1024);
+                    var tList = new List<int>(1024);
 
-                    int cubeIndex = 0;
-                    if (c0 < threshold) cubeIndex |= 1;
-                    if (c1 < threshold) cubeIndex |= 2;
-                    if (c2 < threshold) cubeIndex |= 4;
-                    if (c3 < threshold) cubeIndex |= 8;
-                    if (c4 < threshold) cubeIndex |= 16;
-                    if (c5 < threshold) cubeIndex |= 32;
-                    if (c6 < threshold) cubeIndex |= 64;
-                    if (c7 < threshold) cubeIndex |= 128;
-
-                    if (cubeIndex == 0 || cubeIndex == 255) continue;
-                    int edgeBits = EdgeTable[cubeIndex];
-                    if (edgeBits == 0) continue;
-
-                    var corners = new float[] { c0, c1, c2, c3, c4, c5, c6, c7 };
-                    var edgeVerts = new Vector3[12];
-
-                    for (int e = 0; e < 12; e++)
+                    for (int iy = 0; iy < res - 1; iy++)
+                    for (int ix = 0; ix < res - 1; ix++)
                     {
-                        if ((edgeBits & (1 << e)) == 0) continue;
-                        int a = MCEdgeA[e], b = MCEdgeB[e];
-                        float va = corners[a], vb = corners[b];
-                        float denom = vb - va;
-                        float t = MathF.Abs(denom) > 1e-8f
-                            ? Math.Clamp((threshold - va) / denom, 0f, 1f)
-                            : 0.5f;
+                        int i0 = iz * resRes + iy * res + ix;
+                        int i1 = i0 + 1;
+                        int i2 = i0 + res + 1;
+                        int i3 = i0 + res;
+                        int i4 = i0 + resRes;
+                        int i5 = i4 + 1;
+                        int i6 = i4 + res + 1;
+                        int i7 = i4 + res;
 
-                        float ax = ix + MCCornerX[a], ay = iy + MCCornerY[a], az = iz + MCCornerZ[a];
-                        float bx = ix + MCCornerX[b], by = iy + MCCornerY[b], bz = iz + MCCornerZ[b];
+                        float c0 = denPtr[i0], c1 = denPtr[i1];
+                        float c2 = denPtr[i2], c3 = denPtr[i3];
+                        float c4 = denPtr[i4], c5 = denPtr[i5];
+                        float c6 = denPtr[i6], c7 = denPtr[i7];
 
-                        edgeVerts[e] = new Vector3(
-                            (ax + t * (bx - ax) + 0.5f - halfRes) * voxSize,
-                            (ay + t * (by - ay) + 0.5f - halfRes) * voxSize,
-                            (az + t * (bz - az) + 0.5f - halfRes) * voxSize);
+                        int cubeIndex = 0;
+                        if (c0 < threshold) cubeIndex |= 1;
+                        if (c1 < threshold) cubeIndex |= 2;
+                        if (c2 < threshold) cubeIndex |= 4;
+                        if (c3 < threshold) cubeIndex |= 8;
+                        if (c4 < threshold) cubeIndex |= 16;
+                        if (c5 < threshold) cubeIndex |= 32;
+                        if (c6 < threshold) cubeIndex |= 64;
+                        if (c7 < threshold) cubeIndex |= 128;
+
+                        if (cubeIndex == 0 || cubeIndex == 255) continue;
+                        int edgeBits = EdgeTable[cubeIndex];
+                        if (edgeBits == 0) continue;
+
+                        var ev = new Vector3[12];
+                        EmitMCCell(ix, iy, iz, c0, c1, c2, c3, c4, c5, c6, c7,
+                            threshold, edgeBits, cubeIndex, voxSize, halfRes,
+                            ev, vList, tList);
                     }
 
-                    for (int ti = 0; ti < 16; ti += 3)
-                    {
-                        int e0 = TriTable[cubeIndex * 16 + ti];
-                        if (e0 < 0) break;
-                        int e1 = TriTable[cubeIndex * 16 + ti + 1];
-                        int e2 = TriTable[cubeIndex * 16 + ti + 2];
-
-                        int baseIdx = vList.Count;
-                        vList.Add(edgeVerts[e0]);
-                        vList.Add(edgeVerts[e2]);
-                        vList.Add(edgeVerts[e1]);
-
-                        tList.Add(baseIdx);
-                        tList.Add(baseIdx + 1);
-                        tList.Add(baseIdx + 2);
-                    }
-                }
-
-                sliceVerts[iz] = vList;
-                sliceTris[iz] = tList;
-            });
+                    sliceVerts[iz] = vList;
+                    sliceTris[iz] = tList;
+                });
+            }
 
             // Merge slices — sequential but fast (just array concatenation)
             int totalVerts = 0, totalTris = 0;
@@ -370,6 +346,53 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 for (int j = 0; j < st.Count; j++)
                     triangles[tOff + j] = st[j] + baseV;
                 tOff += st.Count;
+            }
+        }
+
+        private static unsafe void EmitMCCell(
+            int ix, int iy, int iz,
+            float c0, float c1, float c2, float c3,
+            float c4, float c5, float c6, float c7,
+            float threshold, int edgeBits, int cubeIndex,
+            float voxSize, float halfRes,
+            Vector3[] ev, List<Vector3> vList, List<int> tList)
+        {
+            float* corners = stackalloc float[] { c0, c1, c2, c3, c4, c5, c6, c7 };
+
+            for (int e = 0; e < 12; e++)
+            {
+                if ((edgeBits & (1 << e)) == 0) continue;
+                int a = MCEdgeA[e], b = MCEdgeB[e];
+                float va = corners[a], vb = corners[b];
+                float denom = vb - va;
+                float t = MathF.Abs(denom) > 1e-8f
+                    ? Math.Clamp((threshold - va) / denom, 0f, 1f)
+                    : 0.5f;
+
+                float ax = ix + MCCornerX[a], ay = iy + MCCornerY[a], az = iz + MCCornerZ[a];
+                float bx = ix + MCCornerX[b], by = iy + MCCornerY[b], bz = iz + MCCornerZ[b];
+
+                ev[e] = new Vector3(
+                    (ax + t * (bx - ax) + 0.5f - halfRes) * voxSize,
+                    (ay + t * (by - ay) + 0.5f - halfRes) * voxSize,
+                    (az + t * (bz - az) + 0.5f - halfRes) * voxSize);
+            }
+
+            for (int ti = 0; ti < 16; ti += 3)
+            {
+                int e0 = TriTable[cubeIndex * 16 + ti];
+                if (e0 < 0) break;
+                int e1 = TriTable[cubeIndex * 16 + ti + 1];
+                int e2 = TriTable[cubeIndex * 16 + ti + 2];
+
+                int baseIdx = vList.Count;
+                vList.Add(ev[e0]);
+                vList.Add(ev[e2]);
+                vList.Add(ev[e1]);
+
+                tList.Add(baseIdx);
+                tList.Add(baseIdx + 1);
+                tList.Add(baseIdx + 2);
             }
         }
 
