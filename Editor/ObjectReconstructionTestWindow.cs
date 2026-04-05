@@ -34,6 +34,7 @@ namespace Genesis.RoomScan.Editor
         private ComputeShader _surfaceNetsShader;
         private ComputeShader _marchingCubesShader;
         private Shader _vertexColorShader;
+        private ComputeShader _postprocessShader;
 
         private string _status = "Ready";
         private float _progress;
@@ -44,8 +45,7 @@ namespace Genesis.RoomScan.Editor
         private GameObject _previewObj;
 
         private string _timingLog = "";
-
-        private ComputeShader _postprocessShader;
+        private Stopwatch _stepSw;
 
         private const string SHADER_DIR = "Packages/com.genesis.roomscan/Runtime.ObjectReconstruction/Shaders/";
 
@@ -203,49 +203,50 @@ namespace Genesis.RoomScan.Editor
 
         private async void RunPipeline()
         {
-            if (!Validate()) return;
+            if (_testImage == null)
+            {
+                EditorUtility.DisplayDialog("Missing Image", "Assign a test image first.", "OK");
+                return;
+            }
+
+            var module = FindOrCreateModule();
+            if (module == null) return;
+
+            SyncModuleConfig(module);
 
             _running = true;
             _cts = new CancellationTokenSource();
             AsyncHelper.SuppressYields = true;
             _timingLog = "";
+            _stepSw = Stopwatch.StartNew();
             var totalSw = Stopwatch.StartNew();
-            ReconstructionPipeline pipeline = null;
 
+            void OnStatus(string status)
+            {
+                AppendTiming($"{status}: {_stepSw.ElapsedMilliseconds:F0}ms");
+                _stepSw.Restart();
+                Repaint();
+            }
+
+            module.StatusChanged += OnStatus;
             try
             {
-                pipeline = CreatePipeline();
-
-                SetStatus("Loading models...", 0.05f);
-                var sw = Stopwatch.StartNew();
-                await pipeline.LoadModelsAsync(_cts.Token);
-                float loadMs = sw.ElapsedMilliseconds;
-                AppendTiming($"Load models: {loadMs:F0}ms");
-
-                SetStatus("Removing background (rembg)...", 0.15f);
-                sw.Restart();
-                var preprocessed = await pipeline.PreprocessAsync(_testImage, _cts.Token);
-                float rembgMs = sw.ElapsedMilliseconds;
-                AppendTiming($"Preprocess (rembg + composite): {rembgMs:F0}ms");
-
-                SetStatus("Running TripoSR forward pass...", 0.35f);
-                sw.Restart();
-                await pipeline.RunForwardAsync(preprocessed, _cts.Token);
-                float forwardMs = sw.ElapsedMilliseconds;
-                AppendTiming($"Forward pass: {forwardMs:F0}ms");
-
-                SetStatus("Extracting mesh + vertex colors...", 0.60f);
-                sw.Restart();
-                var mesh = await pipeline.ExtractMeshAsync(_cts.Token);
-                float meshMs = sw.ElapsedMilliseconds;
-                AppendTiming($"Mesh + vertex color extraction: {meshMs:F0}ms");
+                SetStatus("Running full pipeline via module...", 0.1f);
+                var mesh = await module.ReconstructAsync(_testImage, _cts.Token);
 
                 totalSw.Stop();
                 AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds:F0}ms ---");
 
-                ShowMeshPreview(mesh);
-                SetStatus($"Done! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris", 1f);
-                Debug.Log($"[ReconstructionTest] Pipeline complete in {totalSw.ElapsedMilliseconds}ms");
+                if (mesh != null)
+                {
+                    ShowMeshPreview(mesh, module.CreateMaterial());
+                    SetStatus($"Done! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris", 1f);
+                    Debug.Log($"[ReconstructionTest] Pipeline complete in {totalSw.ElapsedMilliseconds}ms");
+                }
+                else
+                {
+                    SetStatus("Pipeline returned no mesh", 0f);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -258,8 +259,8 @@ namespace Genesis.RoomScan.Editor
             }
             finally
             {
+                module.StatusChanged -= OnStatus;
                 AsyncHelper.SuppressYields = false;
-                pipeline?.Dispose();
                 _running = false;
                 _cts?.Dispose();
                 _cts = null;
@@ -459,6 +460,35 @@ namespace Genesis.RoomScan.Editor
             }
         }
 
+        private ObjectReconstructionModule FindOrCreateModule()
+        {
+            var module = FindAnyObjectByType<ObjectReconstructionModule>();
+            if (module != null) return module;
+
+            var go = new GameObject("[ReconstructionTest] Module") { hideFlags = HideFlags.DontSave };
+            module = go.AddComponent<ObjectReconstructionModule>();
+
+            module.triplaneGridSampleShader = _triplaneShader;
+            module.densitySurfaceNetsShader = _surfaceNetsShader;
+            module.densityMarchingCubesShader = _marchingCubesShader;
+            module.decoderPostprocessShader = _postprocessShader;
+            module.vertexColorShader = _vertexColorShader;
+
+            return module;
+        }
+
+        private void SyncModuleConfig(ObjectReconstructionModule module)
+        {
+            var so = new SerializedObject(module);
+            so.FindProperty("gridResolution").intValue = _gridResolution;
+            so.FindProperty("meshAlgorithm").intValue = (int)_meshAlgorithm;
+            so.FindProperty("executionProvider").intValue = (int)_executionProvider;
+            so.FindProperty("densitySmoothPasses").intValue = _densitySmoothPasses;
+            so.FindProperty("mobileOptimized").boolValue = false;
+            so.ApplyModifiedPropertiesWithoutUndo();
+            module.ResetPipeline();
+        }
+
         private ReconstructionPipeline CreatePipeline()
         {
             return new ReconstructionPipeline(
@@ -504,7 +534,7 @@ namespace Genesis.RoomScan.Editor
             return copy;
         }
 
-        private void ShowMeshPreview(Mesh mesh)
+        private void ShowMeshPreview(Mesh mesh, Material material = null)
         {
             CleanupPreview();
             _resultMesh = mesh;
@@ -515,10 +545,18 @@ namespace Genesis.RoomScan.Editor
             var mr = _previewObj.AddComponent<MeshRenderer>();
             mf.sharedMesh = mesh;
 
-            var shader = _vertexColorShader
-                         ?? Shader.Find("Universal Render Pipeline/Lit")
-                         ?? Shader.Find("Standard");
-            mr.sharedMaterial = new Material(shader);
+            if (material != null)
+            {
+                mr.sharedMaterial = material;
+            }
+            else
+            {
+                var shader = _vertexColorShader
+                             ?? Shader.Find("Universal Render Pipeline/Lit")
+                             ?? Shader.Find("Standard");
+                mr.sharedMaterial = new Material(shader);
+            }
+
             _previewObj.transform.localScale = Vector3.one * 0.5f;
 
             Selection.activeGameObject = _previewObj;

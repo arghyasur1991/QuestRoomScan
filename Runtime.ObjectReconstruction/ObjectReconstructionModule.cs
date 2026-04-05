@@ -138,6 +138,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _cts?.Cancel();
         }
 
+        internal void ResetPipeline()
+        {
+            _pipeline?.Dispose();
+            _pipeline = null;
+        }
+
         private void EnsurePipeline()
         {
             _pipeline ??= new ReconstructionPipeline(
