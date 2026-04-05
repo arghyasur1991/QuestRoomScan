@@ -60,9 +60,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
             await AsyncHelper.YieldFrame();
 
-            // Build occupied mask: threshold + 1-voxel dilation
+            // Build occupied mask: use 1% of threshold for coarse pass to catch thin
+            // structures (e.g. plates, edges) where the coarse grid center may miss the surface.
+            // Then dilate by 2 voxels for extra safety margin.
+            float coarseThreshold = _threshold * 0.01f;
             var occupied = await Task.Run(() =>
-                BuildOccupiedMask(coarseDensity, coarseRes, _threshold));
+                BuildOccupiedMask(coarseDensity, coarseRes, coarseThreshold, dilationRadius: 2));
             ct.ThrowIfCancellationRequested();
 
             int occupiedCount = 0;
@@ -297,35 +300,40 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         #region Coarse-to-Fine Helpers
 
-        private static bool[] BuildOccupiedMask(float[] coarseDensity, int coarseRes, float threshold)
+        private static bool[] BuildOccupiedMask(
+            float[] coarseDensity, int coarseRes, float threshold, int dilationRadius = 1)
         {
             int total = coarseRes * coarseRes * coarseRes;
             var raw = new bool[total];
             for (int i = 0; i < total; i++)
                 raw[i] = coarseDensity[i] >= threshold;
 
-            // Dilate by 1 voxel in all 6 directions to capture surfaces
-            var dilated = new bool[total];
+            var current = raw;
             int cr2 = coarseRes * coarseRes;
-            for (int iz = 0; iz < coarseRes; iz++)
-            for (int iy = 0; iy < coarseRes; iy++)
-            for (int ix = 0; ix < coarseRes; ix++)
+            for (int pass = 0; pass < dilationRadius; pass++)
             {
-                int idx = iz * cr2 + iy * coarseRes + ix;
-                if (raw[idx]) { dilated[idx] = true; continue; }
-
-                if ((ix > 0 && raw[idx - 1]) ||
-                    (ix < coarseRes - 1 && raw[idx + 1]) ||
-                    (iy > 0 && raw[idx - coarseRes]) ||
-                    (iy < coarseRes - 1 && raw[idx + coarseRes]) ||
-                    (iz > 0 && raw[idx - cr2]) ||
-                    (iz < coarseRes - 1 && raw[idx + cr2]))
+                var dilated = new bool[total];
+                for (int iz = 0; iz < coarseRes; iz++)
+                for (int iy = 0; iy < coarseRes; iy++)
+                for (int ix = 0; ix < coarseRes; ix++)
                 {
-                    dilated[idx] = true;
+                    int idx = iz * cr2 + iy * coarseRes + ix;
+                    if (current[idx]) { dilated[idx] = true; continue; }
+
+                    if ((ix > 0 && current[idx - 1]) ||
+                        (ix < coarseRes - 1 && current[idx + 1]) ||
+                        (iy > 0 && current[idx - coarseRes]) ||
+                        (iy < coarseRes - 1 && current[idx + coarseRes]) ||
+                        (iz > 0 && current[idx - cr2]) ||
+                        (iz < coarseRes - 1 && current[idx + cr2]))
+                    {
+                        dilated[idx] = true;
+                    }
                 }
+                current = dilated;
             }
 
-            return dilated;
+            return current;
         }
 
         private static int[] BuildFineIndices(bool[] occupied, int coarseRes, int fineRatio, int fineRes)
