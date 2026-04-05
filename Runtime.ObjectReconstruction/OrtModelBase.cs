@@ -138,6 +138,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir);
 
+            bool qnnAccepted = false;
             var task = new Task(() =>
             {
                 if (ep == ExecutionProvider.CoreML)
@@ -164,6 +165,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     {
                         Logger.Info($"[OrtModelBase] Creating QNN HTP session for {modelName}...");
                         _session = new InferenceSession(modelPath, options);
+                        qnnAccepted = true;
                         Logger.Info($"[OrtModelBase] QNN HTP session created OK for {modelName}");
                     }
                     catch (Exception e)
@@ -172,7 +174,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         if (e.InnerException != null)
                             Logger.Warning($"[OrtModelBase] QNN inner: {e.InnerException.Message}");
                         Logger.Info($"[OrtModelBase] Falling back to CPU for {modelName}");
-                        _profilingEnabled = false;
                         var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized);
                         cpuOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO;
                         _session = new InferenceSession(modelPath, cpuOptions);
@@ -187,7 +188,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             OrtLoadQueue.Enqueue(task, modelName);
             await task;
 
-            _profilingEnabled = (ep == ExecutionProvider.QNN_HTP);
+            _profilingEnabled = (ep == ExecutionProvider.QNN_HTP && qnnAccepted);
             _inputNames = _session.InputMetadata.Keys.ToList();
 
             _preallocatedOutputs = new List<NamedOnnxValue>();
@@ -409,10 +410,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             try
             {
-                var logLevel = _profilingEnabled
-                    ? OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO
-                    : OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
-                var runOptions = new RunOptions { LogSeverityLevel = logLevel };
+                var runOptions = new RunOptions { LogSeverityLevel = _ortLogLevel };
                 await Task.Run(() => _session.Run(_inputs, _preallocatedOutputs, runOptions));
             }
             finally
@@ -428,10 +426,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             try
             {
-                var logLevel = _profilingEnabled
-                    ? OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO
-                    : OrtLoggingLevel.ORT_LOGGING_LEVEL_WARNING;
-                var runOptions = new RunOptions { LogSeverityLevel = logLevel };
+                var runOptions = new RunOptions { LogSeverityLevel = _ortLogLevel };
                 return await Task.Run(() =>
                     _session.Run(_inputs, _session.OutputNames, runOptions));
             }
