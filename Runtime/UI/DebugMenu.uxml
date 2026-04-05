@@ -184,12 +184,8 @@
                 <ui:Label text="OBJECT RECONSTRUCTION" class="view-title" />
 
                 <ui:VisualElement class="status-row">
-                    <ui:Label text="Models" class="status-key" />
-                    <ui:Label name="val-recon-models" text="Not loaded" class="status-val" />
-                </ui:VisualElement>
-                <ui:VisualElement class="status-row">
                     <ui:Label text="Pipeline" class="status-key" />
-                    <ui:Label name="val-recon-status" text="Idle" class="status-val" />
+                    <ui:Label name="val-recon-status" text="Idle" class="status-val" style="white-space: normal;" />
                 </ui:VisualElement>
                 <ui:VisualElement class="status-row">
                     <ui:Label text="Mesh" class="status-key" />
@@ -207,7 +203,6 @@
                 </ui:VisualElement>
 
                 <ui:VisualElement class="btn-group">
-                    <ui:Button name="btn-recon-load" text="Load Models" class="action-btn" />
                     <ui:Button name="btn-recon-predict" text="Predict" class="action-btn action-btn--primary" />
                     <ui:Button name="btn-recon-clear" text="Clear Mesh" class="action-btn action-btn--danger" />
                 </ui:VisualElement>

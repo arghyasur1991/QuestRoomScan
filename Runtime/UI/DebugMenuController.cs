@@ -48,9 +48,9 @@ namespace Genesis.RoomScan.UI
         private Button _btnExportPc, _btnClearAll;
 
         // Reconstruct view
-        private Label _valReconModels, _valReconStatus, _valReconMesh;
+        private Label _valReconStatus, _valReconMesh;
         private VisualElement[] _reconThumbs;
-        private Button _btnReconLoad, _btnReconPredict, _btnReconClear;
+        private Button _btnReconPredict, _btnReconClear;
         private Button _btnReconRembgTest;
         private Label _valReconExperiment;
         private VisualElement _reconMaskPreview;
@@ -208,10 +208,8 @@ namespace Genesis.RoomScan.UI
             _btnClearAll = _root.Q<Button>("btn-clear-all");
 
             // Reconstruct
-            _valReconModels = _root.Q<Label>("val-recon-models");
             _valReconStatus = _root.Q<Label>("val-recon-status");
             _valReconMesh = _root.Q<Label>("val-recon-mesh");
-            _btnReconLoad = _root.Q<Button>("btn-recon-load");
             _btnReconPredict = _root.Q<Button>("btn-recon-predict");
             _btnReconClear = _root.Q<Button>("btn-recon-clear");
             _btnReconRembgTest = _root.Q<Button>("btn-recon-rembg-test");
@@ -326,15 +324,6 @@ namespace Genesis.RoomScan.UI
                 int idx = i;
                 _reconThumbs[i]?.RegisterCallback<ClickEvent>(_ => SelectReconThumb(idx));
             }
-
-            _btnReconLoad?.RegisterCallback<ClickEvent>(async _ =>
-            {
-                var module = FindReconstructionModule();
-                if (module == null) return;
-                SetButtonBusy(_btnReconLoad, "Loading...");
-                await module.LoadModelsAsync();
-                SetButtonReady(_btnReconLoad, "Load Models");
-            });
 
             _btnReconPredict?.RegisterCallback<ClickEvent>(async _ =>
             {

@@ -136,7 +136,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (ep == ExecutionProvider.CoreML)
                 modelCacheDir = GetPerModelCacheDir(modelPath, modelName);
 
-            var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir);
+            var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir, modelName);
 
             bool qnnAccepted = false;
             var task = new Task(() =>
@@ -155,7 +155,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     {
                         Logger.Warning($"[OrtModelBase] CoreML incompatible with {modelName} " +
                                        $"(likely INT8 quantized), falling back to CPU: {e.Message}");
-                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized);
+                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized, modelName: modelName);
                         _session = new InferenceSession(modelPath, cpuOptions);
                     }
                 }
@@ -174,7 +174,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         if (e.InnerException != null)
                             Logger.Warning($"[OrtModelBase] QNN inner: {e.InnerException.Message}");
                         Logger.Info($"[OrtModelBase] Falling back to CPU for {modelName}");
-                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized);
+                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized, modelName: modelName);
                         cpuOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO;
                         _session = new InferenceSession(modelPath, cpuOptions);
                         Logger.Info($"[OrtModelBase] CPU fallback session created for {modelName}");
@@ -210,7 +210,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         private static SessionOptions CreateSessionOptions(
-            ExecutionProvider ep, bool mobileOptimized, string modelCacheDir = null)
+            ExecutionProvider ep, bool mobileOptimized,
+            string modelCacheDir = null, string modelName = null)
         {
             var options = new SessionOptions
             {
@@ -221,9 +222,18 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             if (mobileOptimized)
             {
+                options.IntraOpNumThreads = 4;
+                options.InterOpNumThreads = 2;
                 options.EnableMemoryPattern = false;
-                options.EnableCpuMemArena = false;
-                options.IntraOpNumThreads = 1;
+                options.EnableCpuMemArena = true;
+                options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
+
+                if (!string.IsNullOrEmpty(modelName) && ep != ExecutionProvider.QNN_HTP)
+                {
+                    string optDir = Path.Combine(Application.persistentDataPath, "ort_opt_cache");
+                    Directory.CreateDirectory(optDir);
+                    options.OptimizedModelFilePath = Path.Combine(optDir, $"{modelName}_opt.onnx");
+                }
             }
 
             switch (ep)

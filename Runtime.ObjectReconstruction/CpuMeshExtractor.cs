@@ -31,34 +31,73 @@ namespace Genesis.RoomScan.ObjectReconstruction
             OrtDecoderModel decoder, CancellationToken ct)
         {
             int res = _resolution;
-            int totalPoints = res * res * res;
             int featureDim = numPlanes * channels;
-            const int chunkSize = 65536;
+            const int chunkSize = 131072;
 
-            var density = new float[totalPoints];
-            var featureBuf = new float[chunkSize * featureDim];
-
-            float invResM1 = 1f / (res - 1);
             float halfW = planeW * 0.5f - 0.5f;
             float halfH = planeH * 0.5f - 0.5f;
 
-            // Pass 1: density field — parallel triplane sampling + ORT decoder
-            for (int start = 0; start < totalPoints; start += chunkSize)
+            // ---- Coarse-to-fine density evaluation ----
+            int coarseRes = Math.Max(res / 4, 16);
+            int coarseTotal = coarseRes * coarseRes * coarseRes;
+            int fineRatio = res / coarseRes;
+
+            // Coarse pass: evaluate density on low-res grid
+            var coarseDensity = new float[coarseTotal];
+            var featureBuf = new float[chunkSize * featureDim];
+            float coarseInvResM1 = 1f / (coarseRes - 1);
+
+            for (int start = 0; start < coarseTotal; start += chunkSize)
             {
                 ct.ThrowIfCancellationRequested();
-                int count = Math.Min(chunkSize, totalPoints - start);
+                int count = Math.Min(chunkSize, coarseTotal - start);
 
                 SampleGridChunkParallel(sceneCodes, featureBuf, start, count,
-                    res, invResM1, halfW, halfH, channels, planeH, planeW);
+                    coarseRes, coarseInvResM1, halfW, halfH, channels, planeH, planeW);
 
                 float[] decoderOut = await decoder.RunChunkAsync(featureBuf, count);
+                ApplyDensityActivationParallel(decoderOut, coarseDensity, start, count);
+            }
+            await AsyncHelper.YieldFrame();
 
-                ApplyDensityActivationParallel(decoderOut, density, start, count);
+            // Build occupied mask: threshold + 1-voxel dilation
+            var occupied = await Task.Run(() =>
+                BuildOccupiedMask(coarseDensity, coarseRes, _threshold));
+            ct.ThrowIfCancellationRequested();
+
+            int occupiedCount = 0;
+            for (int i = 0; i < occupied.Length; i++)
+                if (occupied[i]) occupiedCount++;
+
+            float occupiedPct = 100f * occupiedCount / coarseTotal;
+            Logger.Info($"[CpuMeshExtractor] Coarse {coarseRes}^3: {occupiedCount}/{coarseTotal} " +
+                $"occupied ({occupiedPct:F1}%), fine ratio {fineRatio}x");
+
+            // Fine pass: only sample sub-voxels inside occupied coarse cells
+            int totalPoints = res * res * res;
+            var density = new float[totalPoints];
+            float fineInvResM1 = 1f / (res - 1);
+
+            var fineIndices = BuildFineIndices(occupied, coarseRes, fineRatio, res);
+            int fineCount = fineIndices.Length;
+            Logger.Info($"[CpuMeshExtractor] Fine pass: {fineCount}/{totalPoints} points " +
+                $"({100f * fineCount / totalPoints:F1}%)");
+
+            for (int start = 0; start < fineCount; start += chunkSize)
+            {
+                ct.ThrowIfCancellationRequested();
+                int count = Math.Min(chunkSize, fineCount - start);
+
+                SampleIndexedGridChunkParallel(sceneCodes, featureBuf, fineIndices, start, count,
+                    res, fineInvResM1, halfW, halfH, channels, planeH, planeW);
+
+                float[] decoderOut = await decoder.RunChunkAsync(featureBuf, count);
+                ApplyIndexedDensityActivationParallel(decoderOut, density, fineIndices, start, count);
 
                 await AsyncHelper.YieldFrame();
             }
 
-            // Pass 2: parallel marching cubes
+            // Marching cubes on full-res density (unsampled voxels stay 0 = below threshold)
             Vector3[] verts = null;
             int[] tris = null;
             await Task.Run(() => MarchingCubesParallel(density, res, _threshold, out verts, out tris));
@@ -67,7 +106,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (verts.Length == 0)
                 return new Mesh();
 
-            // Pass 3: vertex colors — parallel triplane sampling + ORT decoder
+            // Vertex colors
             var colors = new Color[verts.Length];
             for (int start = 0; start < verts.Length; start += chunkSize)
             {
@@ -81,7 +120,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     halfW, halfH, channels, planeH, planeW);
 
                 float[] decoderOut = await decoder.RunChunkAsync(featureBuf, count);
-
                 ApplyColorActivationParallel(decoderOut, colors, start, count);
 
                 await AsyncHelper.YieldFrame();
@@ -222,6 +260,104 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
         }
 
+        private static unsafe void SampleIndexedGridChunkParallel(
+            float[] sceneCodes, float[] output, int[] globalIndices, int indexStart, int count,
+            int res, float invResM1, float halfW, float halfH,
+            int channels, int planeH, int planeW)
+        {
+            int featureDim = 3 * channels;
+            int resRes = res * res;
+
+            fixed (float* scPtr = sceneCodes, outPtr = output)
+            fixed (int* idxPtr = globalIndices)
+            {
+                float* scLocal = scPtr;
+                float* outLocal = outPtr;
+                int* idxLocal = idxPtr;
+
+                Parallel.For(0, count, i =>
+                {
+                    int globalIdx = idxLocal[indexStart + i];
+                    int ix = globalIdx % res;
+                    int iy = (globalIdx / res) % res;
+                    int iz = globalIdx / resRes;
+
+                    float x = ix * invResM1 - 0.5f;
+                    float y = iy * invResM1 - 0.5f;
+                    float z = iz * invResM1 - 0.5f;
+
+                    float* dst = outLocal + i * featureDim;
+                    SampleTriplaneFeaturesUnsafe(scLocal, x, y, z,
+                        channels, planeH, planeW, halfW, halfH, dst);
+                });
+            }
+        }
+
+        #endregion
+
+        #region Coarse-to-Fine Helpers
+
+        private static bool[] BuildOccupiedMask(float[] coarseDensity, int coarseRes, float threshold)
+        {
+            int total = coarseRes * coarseRes * coarseRes;
+            var raw = new bool[total];
+            for (int i = 0; i < total; i++)
+                raw[i] = coarseDensity[i] >= threshold;
+
+            // Dilate by 1 voxel in all 6 directions to capture surfaces
+            var dilated = new bool[total];
+            int cr2 = coarseRes * coarseRes;
+            for (int iz = 0; iz < coarseRes; iz++)
+            for (int iy = 0; iy < coarseRes; iy++)
+            for (int ix = 0; ix < coarseRes; ix++)
+            {
+                int idx = iz * cr2 + iy * coarseRes + ix;
+                if (raw[idx]) { dilated[idx] = true; continue; }
+
+                if ((ix > 0 && raw[idx - 1]) ||
+                    (ix < coarseRes - 1 && raw[idx + 1]) ||
+                    (iy > 0 && raw[idx - coarseRes]) ||
+                    (iy < coarseRes - 1 && raw[idx + coarseRes]) ||
+                    (iz > 0 && raw[idx - cr2]) ||
+                    (iz < coarseRes - 1 && raw[idx + cr2]))
+                {
+                    dilated[idx] = true;
+                }
+            }
+
+            return dilated;
+        }
+
+        private static int[] BuildFineIndices(bool[] occupied, int coarseRes, int fineRatio, int fineRes)
+        {
+            var indices = new List<int>(occupied.Length * fineRatio * fineRatio * fineRatio / 4);
+            int cr2 = coarseRes * coarseRes;
+            int fr2 = fineRes * fineRes;
+
+            for (int cz = 0; cz < coarseRes; cz++)
+            for (int cy = 0; cy < coarseRes; cy++)
+            for (int cx = 0; cx < coarseRes; cx++)
+            {
+                if (!occupied[cz * cr2 + cy * coarseRes + cx]) continue;
+
+                int fxStart = cx * fineRatio;
+                int fyStart = cy * fineRatio;
+                int fzStart = cz * fineRatio;
+                int fxEnd = Math.Min(fxStart + fineRatio, fineRes);
+                int fyEnd = Math.Min(fyStart + fineRatio, fineRes);
+                int fzEnd = Math.Min(fzStart + fineRatio, fineRes);
+
+                for (int fz = fzStart; fz < fzEnd; fz++)
+                for (int fy = fyStart; fy < fyEnd; fy++)
+                for (int fx = fxStart; fx < fxEnd; fx++)
+                {
+                    indices.Add(fz * fr2 + fy * fineRes + fx);
+                }
+            }
+
+            return indices.ToArray();
+        }
+
         #endregion
 
         #region Parallel Activations
@@ -237,6 +373,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 Parallel.For(0, count, i =>
                 {
                     denLocal[i] = MathF.Exp(decLocal[i * 4] - 1f);
+                });
+            }
+        }
+
+        private static unsafe void ApplyIndexedDensityActivationParallel(
+            float[] decoderOut, float[] density, int[] globalIndices, int indexStart, int count)
+        {
+            fixed (float* decPtr = decoderOut, denPtr = density)
+            fixed (int* idxPtr = globalIndices)
+            {
+                float* decLocal = decPtr;
+                float* denLocal = denPtr;
+                int* idxLocal = idxPtr;
+
+                Parallel.For(0, count, i =>
+                {
+                    denLocal[idxLocal[indexStart + i]] = MathF.Exp(decLocal[i * 4] - 1f);
                 });
             }
         }
