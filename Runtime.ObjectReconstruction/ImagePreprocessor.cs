@@ -153,15 +153,24 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// <summary>
         /// Preprocessing for RGBA images: uses the texture's built-in alpha channel.
         /// </summary>
-        internal static unsafe async Task<float[]> CompositeFromRGBAAsync(
+        internal static async Task<float[]> CompositeFromRGBAAsync(
             Texture2D image, float foregroundRatio)
         {
-            var tex = EnsureReadable(image);
+            var (srcFrame, alpha) = ExtractRGBAFrame(EnsureReadable(image));
+            return await CompositeAndResizeAsync(srcFrame, alpha, foregroundRatio);
+        }
+
+        /// <summary>
+        /// Extracts RGB frame + alpha from an RGBA/BGRA texture via unsafe pointers.
+        /// Separated from async method because C# forbids await in unsafe context.
+        /// </summary>
+        private static unsafe (Frame frame, float[] alpha) ExtractRGBAFrame(Texture2D tex)
+        {
             int w = tex.width, h = tex.height;
             var pixelData = tex.GetPixelData<byte>(0);
             byte* srcPtr = (byte*)pixelData.GetUnsafeReadOnlyPtr();
             int bpp = GetBytesPerPixel(tex.format);
-            int alphaOffset = (tex.format == TextureFormat.BGRA32) ? 3 : 3;
+            bool isBGRA = tex.format == TextureFormat.BGRA32;
             bool hasAlphaChannel = bpp == 4;
 
             var frameData = new byte[w * h * 3];
@@ -183,11 +192,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         int dstIdx = (y * w + x) * 3;
                         int flatIdx = y * w + x;
 
-                        if (tex.format == TextureFormat.BGRA32)
+                        if (isBGRA)
                         {
-                            dstLocal[dstIdx + 0] = srcLocal[srcIdx + 2]; // B→R
-                            dstLocal[dstIdx + 1] = srcLocal[srcIdx + 1]; // G
-                            dstLocal[dstIdx + 2] = srcLocal[srcIdx + 0]; // R→B
+                            dstLocal[dstIdx + 0] = srcLocal[srcIdx + 2];
+                            dstLocal[dstIdx + 1] = srcLocal[srcIdx + 1];
+                            dstLocal[dstIdx + 2] = srcLocal[srcIdx + 0];
                         }
                         else
                         {
@@ -196,14 +205,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
                             dstLocal[dstIdx + 2] = srcLocal[srcIdx + 2];
                         }
                         alphaLocal[flatIdx] = hasAlphaChannel
-                            ? srcLocal[srcIdx + alphaOffset] / 255f
+                            ? srcLocal[srcIdx + 3] / 255f
                             : 1f;
                     }
                 });
             }
 
-            var srcFrame = new Frame(frameData, w, h);
-            return await CompositeAndResizeAsync(srcFrame, alpha, foregroundRatio);
+            return (new Frame(frameData, w, h), alpha);
         }
 
         /// <summary>
