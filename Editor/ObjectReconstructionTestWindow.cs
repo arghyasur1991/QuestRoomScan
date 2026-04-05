@@ -224,19 +224,36 @@ namespace Genesis.RoomScan.Editor
             _timingLog = "";
             _stepSw = Stopwatch.StartNew();
             var totalSw = Stopwatch.StartNew();
+            string _prevStep = null;
+
+            // Maps status strings to approximate progress for the bar
+            float ProgressFor(string s)
+            {
+                if (s.Contains("Loading")) return 0.1f;
+                if (s.Contains("background")) return 0.25f;
+                if (s.Contains("reconstruction") || s.Contains("Reconstruction")) return 0.45f;
+                if (s.Contains("mesh") || s.Contains("Mesh")) return 0.7f;
+                if (s.Contains("Done")) return 1f;
+                return _progress;
+            }
 
             void OnStatus(string status)
             {
-                AppendTiming($"{status}: {_stepSw.ElapsedMilliseconds:F0}ms");
+                if (_prevStep != null)
+                    AppendTiming($"{_prevStep} {_stepSw.ElapsedMilliseconds:F0}ms");
+                _prevStep = status;
                 _stepSw.Restart();
-                Repaint();
+                SetStatus(status, ProgressFor(status));
             }
 
             module.StatusChanged += OnStatus;
             try
             {
-                SetStatus("Running full pipeline via module...", 0.1f);
+                SetStatus("Starting pipeline...", 0.05f);
                 var mesh = await module.ReconstructAsync(_testImage, _cts.Token);
+
+                if (_prevStep != null)
+                    AppendTiming($"{_prevStep} {_stepSw.ElapsedMilliseconds:F0}ms");
 
                 totalSw.Stop();
                 AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds:F0}ms ---");
