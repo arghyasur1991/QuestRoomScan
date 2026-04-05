@@ -203,6 +203,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return copy;
         }
 
+        /// <summary>Timing from the most recent forward pass (populated after RunForwardAsync).</summary>
+        internal ForwardTiming LastForwardTiming { get; private set; }
+
         internal async Task RunForwardAsync(float[] preprocessed, CancellationToken ct)
         {
             float[] sceneCodes;
@@ -210,11 +213,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (_reconstruction != null)
             {
                 sceneCodes = await _reconstruction.RunAsync(preprocessed, ct);
+                LastForwardTiming = _reconstruction.LastTiming;
             }
             else
             {
                 using var reconstruction = new OrtReconstructionModel(_executionProvider, _mobileOptimized);
                 sceneCodes = await reconstruction.RunAsync(preprocessed, ct);
+                LastForwardTiming = reconstruction.LastTiming;
                 await AsyncHelper.YieldFrame();
             }
 

@@ -1,5 +1,6 @@
 #if HAS_ONNXRUNTIME
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,6 +9,19 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 
 namespace Genesis.RoomScan.ObjectReconstruction
 {
+    /// <summary>Per-sub-phase timing breakdown for the forward pass.</summary>
+    internal struct ForwardTiming
+    {
+        internal float Part1LoadMs;
+        internal float Part1RunMs;
+        internal float Part2LoadMs;
+        internal float Part2RunMs;
+
+        public override string ToString() =>
+            $"p1Load={Part1LoadMs / 1000f:F1}s p1Run={Part1RunMs / 1000f:F1}s " +
+            $"p2Load={Part2LoadMs / 1000f:F1}s p2Run={Part2RunMs / 1000f:F1}s";
+    }
+
     /// <summary>
     /// Wraps the split TripoSR model (Part1 + Part2) via ONNX Runtime.
     /// <list type="bullet">
@@ -31,6 +45,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private OrtModelBase _part2;
         private bool _preloaded;
         internal bool IsLoaded => _preloaded;
+
+        /// <summary>Timing from the most recent RunAsync call (populated after completion).</summary>
+        internal ForwardTiming LastTiming { get; private set; }
 
         internal OrtReconstructionModel(ExecutionProvider ep, bool mobileOptimized)
         {
@@ -83,18 +100,29 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private async Task<float[]> RunSequentialAsync(float[] preprocessed, CancellationToken ct)
         {
+            var timing = new ForwardTiming();
+            var sw = Stopwatch.StartNew();
+
             DenseTensor<float> encoderStates;
             DenseTensor<float> hiddenStates;
 
             {
                 var part1 = new PartModel();
-                await part1.LoadAsync(Part1FileName, _ep, _mobileOptimized, ct);
+                await part1.LoadAsync(Part1FileName, _ep, _mobileOptimized, ct,
+                    batchInference: true);
+                timing.Part1LoadMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[TripoSR] Part1 loaded: {timing.Part1LoadMs:F0}ms");
+                sw.Restart();
                 await AsyncHelper.YieldFrame();
 
                 var inputTensor = new DenseTensor<float>(preprocessed, new[] { 1, 3, 512, 512 });
                 part1.SetInput(inputTensor);
                 using var results1 = await part1.RunDisposablePublic();
                 ct.ThrowIfCancellationRequested();
+
+                timing.Part1RunMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[TripoSR] Part1 infer: {timing.Part1RunMs:F0}ms");
+                sw.Restart();
 
                 encoderStates = CloneTensor(ExtractTensor(results1, EncoderOutputName));
                 hiddenStates = CloneTensor(ExtractTensor(results1, HiddenOutputName));
@@ -106,7 +134,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             float[] sceneCodes;
             {
                 var part2 = new PartModel();
-                await part2.LoadAsync(Part2FileName, _ep, _mobileOptimized, ct);
+                await part2.LoadAsync(Part2FileName, _ep, _mobileOptimized, ct,
+                    batchInference: true);
+                timing.Part2LoadMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[TripoSR] Part2 loaded: {timing.Part2LoadMs:F0}ms");
+                sw.Restart();
                 await AsyncHelper.YieldFrame();
 
                 part2.SetInput(EncoderOutputName, encoderStates);
@@ -114,10 +146,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 using var results2 = await part2.RunDisposablePublic();
                 ct.ThrowIfCancellationRequested();
 
+                timing.Part2RunMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[TripoSR] Part2 infer: {timing.Part2RunMs:F0}ms");
+                sw.Stop();
+
                 sceneCodes = results2.First().AsTensor<float>().ToArray();
                 part2.Dispose();
             }
             await AsyncHelper.YieldFrame();
+
+            LastTiming = timing;
+            Logger.Info($"[TripoSR] Forward breakdown: {timing}");
 
             return sceneCodes;
         }
@@ -150,9 +189,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private sealed class PartModel : OrtModelBase
         {
             internal async Task LoadAsync(
-                string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct)
+                string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct,
+                bool batchInference = false)
             {
-                await LoadSessionAsync(relativePath, ep, mobileOptimized, ct);
+                await LoadSessionAsync(relativePath, ep, mobileOptimized, ct,
+                    batchInference: batchInference);
             }
 
             internal void SetInput(DenseTensor<float> tensor)

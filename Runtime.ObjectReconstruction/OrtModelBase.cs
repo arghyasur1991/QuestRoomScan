@@ -127,7 +127,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         #region Loading
 
         protected async Task LoadSessionAsync(
-            string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct)
+            string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct,
+            bool batchInference = false)
         {
             string modelPath = await ModelPathResolver.ResolveAsync(relativePath, ct);
             string modelName = Path.GetFileNameWithoutExtension(relativePath);
@@ -136,7 +137,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (ep == ExecutionProvider.CoreML)
                 modelCacheDir = GetPerModelCacheDir(modelPath, modelName);
 
-            var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir, modelName);
+            var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir, modelName,
+                batchInference: batchInference);
 
             bool qnnAccepted = false;
             var task = new Task(() =>
@@ -155,7 +157,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     {
                         Logger.Warning($"[OrtModelBase] CoreML incompatible with {modelName} " +
                                        $"(likely INT8 quantized), falling back to CPU: {e.Message}");
-                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized, modelName: modelName);
+                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized,
+                            modelName: modelName, batchInference: batchInference);
                         _session = new InferenceSession(modelPath, cpuOptions);
                     }
                 }
@@ -174,7 +177,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         if (e.InnerException != null)
                             Logger.Warning($"[OrtModelBase] QNN inner: {e.InnerException.Message}");
                         Logger.Info($"[OrtModelBase] Falling back to CPU for {modelName}");
-                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized, modelName: modelName);
+                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized,
+                            modelName: modelName, batchInference: batchInference);
                         cpuOptions.LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_INFO;
                         _session = new InferenceSession(modelPath, cpuOptions);
                         Logger.Info($"[OrtModelBase] CPU fallback session created for {modelName}");
@@ -211,7 +215,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private static SessionOptions CreateSessionOptions(
             ExecutionProvider ep, bool mobileOptimized,
-            string modelCacheDir = null, string modelName = null)
+            string modelCacheDir = null, string modelName = null,
+            bool batchInference = false)
         {
             var options = new SessionOptions
             {
@@ -222,7 +227,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             if (mobileOptimized)
             {
-                options.IntraOpNumThreads = 4;
+                options.IntraOpNumThreads = batchInference ? 8 : 4;
                 options.InterOpNumThreads = 2;
                 options.EnableMemoryPattern = false;
                 options.EnableCpuMemArena = true;

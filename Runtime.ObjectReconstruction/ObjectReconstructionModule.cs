@@ -118,8 +118,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 float totalMs = loadMs + rembgMs + forwardMs + meshMs;
                 string timing = $"load={loadMs / 1000f:F1}s rembg={rembgMs / 1000f:F1}s " +
                     $"fwd={forwardMs / 1000f:F1}s mesh={meshMs / 1000f:F1}s | total={totalMs / 1000f:F1}s";
+                var fwd = _pipeline.LastForwardTiming;
+                string fwdDetail = $"fwd: {fwd}";
                 Logger.Info($"[ObjectReconstruction] Done: EP={executionProvider} {timing}");
-                ReportStatus($"Done ({totalMs / 1000f:F1}s)\n{timing}");
+                Logger.Info($"[ObjectReconstruction] {fwdDetail}");
+                ReportStatus($"Done ({totalMs / 1000f:F1}s)\n{timing}\n{fwdDetail}");
 
                 return mesh;
             }
