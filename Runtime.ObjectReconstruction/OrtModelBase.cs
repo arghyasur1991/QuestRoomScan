@@ -33,14 +33,34 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             string modelPath = await ModelPathResolver.ResolveAsync(relativePath, ct);
             var options = CreateSessionOptions(ep, mobileOptimized);
+            string modelName = Path.GetFileNameWithoutExtension(relativePath);
 
             var task = new Task(() =>
             {
-                _session = ep == ExecutionProvider.CoreML
-                    ? CreateSessionWithCoreMLRecovery(modelPath, options)
-                    : new InferenceSession(modelPath, options);
+                if (ep == ExecutionProvider.CoreML)
+                {
+                    try
+                    {
+                        _session = CreateSessionWithCoreMLRecovery(modelPath, options);
+                    }
+                    catch (Exception e) when (
+                        e.Message.Contains("output_features has no value") ||
+                        e.Message.Contains("gemm_input") ||
+                        e.Message.Contains("DynamicQuantizeLinear") ||
+                        e.Message.Contains("QuantizeLinear"))
+                    {
+                        Logger.Warning($"[OrtModelBase] CoreML incompatible with {modelName} " +
+                                       $"(likely INT8 quantized), falling back to CPU: {e.Message}");
+                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized);
+                        _session = new InferenceSession(modelPath, cpuOptions);
+                    }
+                }
+                else
+                {
+                    _session = new InferenceSession(modelPath, options);
+                }
             });
-            OrtLoadQueue.Enqueue(task, Path.GetFileNameWithoutExtension(relativePath));
+            OrtLoadQueue.Enqueue(task, modelName);
             await task;
 
             _inputNames = _session.InputMetadata.Keys.ToList();
