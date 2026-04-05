@@ -303,12 +303,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     int edgeBits = EdgeTable[cubeIndex];
                     if (edgeBits == 0) continue;
 
-                    // Pack corners for edge interpolation
-                    float* corners = stackalloc float[8];
-                    corners[0] = c0; corners[1] = c1; corners[2] = c2; corners[3] = c3;
-                    corners[4] = c4; corners[5] = c5; corners[6] = c6; corners[7] = c7;
+                    var corners = new float[] { c0, c1, c2, c3, c4, c5, c6, c7 };
+                    var edgeVerts = new Vector3[12];
 
-                    Vector3* edgeVerts = stackalloc Vector3[12];
                     for (int e = 0; e < 12; e++)
                     {
                         if ((edgeBits & (1 << e)) == 0) continue;
@@ -337,7 +334,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                         int baseIdx = vList.Count;
                         vList.Add(edgeVerts[e0]);
-                        vList.Add(edgeVerts[e2]); // reversed winding
+                        vList.Add(edgeVerts[e2]);
                         vList.Add(edgeVerts[e1]);
 
                         tList.Add(baseIdx);
