@@ -119,6 +119,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         _session = new InferenceSession(modelPath, cpuOptions);
                     }
                 }
+                else if (ep == ExecutionProvider.QNN_HTP)
+                {
+                    try
+                    {
+                        _session = new InferenceSession(modelPath, options);
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Warning($"[OrtModelBase] QNN HTP rejected {modelName}: {e.Message}");
+                        if (e.InnerException != null)
+                            Logger.Warning($"[OrtModelBase] QNN inner: {e.InnerException.Message}");
+                        Logger.Info($"[OrtModelBase] Falling back to CPU for {modelName}");
+                        _profilingEnabled = false;
+                        var cpuOptions = CreateSessionOptions(ExecutionProvider.CPU, mobileOptimized);
+                        _session = new InferenceSession(modelPath, cpuOptions);
+                    }
+                }
                 else
                 {
                     _session = new InferenceSession(modelPath, options);
@@ -295,7 +312,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             options.EnableProfiling = true;
             Logger.Info($"[OrtModelBase] QNN profiling enabled, prefix={profilePrefix}");
 
-            Logger.Info($"[OrtModelBase] QNN HTP backend_path={backendPath}");
+            // Fail-fast instead of silent CPU fallback -- surfaces exact rejection reasons in logs
+            options.AddSessionConfigEntry("session.disable_cpu_ep_fallback", "1");
+
+            Logger.Info($"[OrtModelBase] QNN HTP backend_path={backendPath} (CPU fallback disabled)");
             options.AppendExecutionProvider("QNN", qnnOptions);
         }
 
