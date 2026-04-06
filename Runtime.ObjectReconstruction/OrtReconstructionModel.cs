@@ -131,6 +131,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 part1.Dispose();
             }
+            // Let the system reclaim Part 1's ~250MB native memory before loading Part 2
+            GC.Collect();
             await AsyncHelper.YieldFrame();
 
             float[] sceneCodes;
@@ -154,6 +156,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 sceneCodes = results2.First().AsTensor<float>().ToArray();
                 part2.Dispose();
             }
+            GC.Collect();
             await AsyncHelper.YieldFrame();
 
             LastTiming = timing;

@@ -206,6 +206,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// <summary>Timing from the most recent forward pass (populated after RunForwardAsync).</summary>
         internal ForwardTiming LastForwardTiming { get; private set; }
 
+        /// <summary>
+        /// Release large cached data from the previous run to reduce memory pressure
+        /// before starting a new reconstruction. Keeps the pipeline alive for reuse.
+        /// </summary>
+        internal void ReleaseTransientData()
+        {
+            _sceneCodes = null;
+            _readbackBuffer = null;
+            System.GC.Collect();
+        }
+
         internal async Task RunForwardAsync(float[] preprocessed, CancellationToken ct)
         {
             float[] sceneCodes;

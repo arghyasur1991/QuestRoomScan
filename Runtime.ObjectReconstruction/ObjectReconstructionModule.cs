@@ -89,6 +89,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             try
             {
                 EnsurePipeline();
+                _pipeline.ReleaseTransientData();
 
                 Logger.Info($"[ObjectReconstruction] Starting: EP={executionProvider} " +
                     $"Mobile={mobileOptimized} Grid={gridResolution} Backend={meshExtractionBackend}");
