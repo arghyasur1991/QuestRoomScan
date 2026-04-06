@@ -506,8 +506,18 @@ namespace Genesis.RoomScan.Editor
             so.FindProperty("executionProvider").intValue = (int)_executionProvider;
             so.FindProperty("densitySmoothPasses").intValue = _densitySmoothPasses;
             so.FindProperty("meshExtractionBackend").intValue = (int)_meshExtractionBackend;
+
+            var mobileProp = so.FindProperty("mobileOptimized");
+            bool savedMobile = mobileProp.boolValue;
+            mobileProp.boolValue = false;
+
             so.ApplyModifiedPropertiesWithoutUndo();
             module.ResetPipeline();
+
+            // Restore serialized value so we don't dirty the scene
+            so.Update();
+            so.FindProperty("mobileOptimized").boolValue = savedMobile;
+            so.ApplyModifiedPropertiesWithoutUndo();
         }
 
         private ReconstructionPipeline CreatePipeline()
