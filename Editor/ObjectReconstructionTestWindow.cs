@@ -286,7 +286,7 @@ namespace Genesis.RoomScan.Editor
                 _cts?.Dispose();
                 _cts = null;
                 Repaint();
-            }
+            } 
         }
 
         private async void RunRembgOnly()
@@ -392,7 +392,7 @@ namespace Genesis.RoomScan.Editor
         private async void RunFromPreprocessedPng()
         {
             string pngPath = EditorUtility.OpenFilePanel(
-                "Select 512x512 preprocessed composite PNG", "", "png");
+                "Select preprocessed composite PNG", "", "png");
             if (string.IsNullOrEmpty(pngPath)) return;
 
             if (_triplaneShader == null || _surfaceNetsShader == null
@@ -411,39 +411,33 @@ namespace Genesis.RoomScan.Editor
 
             try
             {
-                var pngBytes = File.ReadAllBytes(pngPath);
-                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, true);
-                tex.LoadImage(pngBytes);
-                AppendTiming($"Loaded PNG: {tex.width}x{tex.height} from {Path.GetFileName(pngPath)}");
-
-                if (tex.width != 512 || tex.height != 512)
-                {
-                    DestroyImmediate(tex);
-                    SetStatus($"Error: image must be 512x512 (got {tex.width}x{tex.height})", 0f);
-                    return;
-                }
-
-                // Convert to NCHW float[] [1,3,512,512]
-                var resized = new Texture2D(512, 512, TextureFormat.RGB24, false);
-                var rt = RenderTexture.GetTemporary(512, 512, 0, RenderTextureFormat.ARGB32);
-                Graphics.Blit(tex, rt);
-                RenderTexture.active = rt;
-                resized.ReadPixels(new Rect(0, 0, 512, 512), 0, 0);
-                resized.Apply();
-                RenderTexture.active = null;
-                RenderTexture.ReleaseTemporary(rt);
-                DestroyImmediate(tex);
-
-                float[] preprocessed = ImagePreprocessor.TextureToNCHW(resized, 512);
-                DestroyImmediate(resized);
-                AppendTiming("Converted to NCHW float[] [1,3,512,512]");
-
                 pipeline = CreatePipeline();
 
                 SetStatus("Loading models (triposr + decoder)...", 0.1f);
                 var sw = Stopwatch.StartNew();
                 await pipeline.LoadModelsAsync(_cts.Token);
                 AppendTiming($"Load models: {sw.ElapsedMilliseconds:F0}ms");
+
+                int imgSize = pipeline.ModelImageSize;
+
+                var pngBytes = File.ReadAllBytes(pngPath);
+                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false, true);
+                tex.LoadImage(pngBytes);
+                AppendTiming($"Loaded PNG: {tex.width}x{tex.height} from {Path.GetFileName(pngPath)}");
+
+                var resized = new Texture2D(imgSize, imgSize, TextureFormat.RGB24, false);
+                var rt = RenderTexture.GetTemporary(imgSize, imgSize, 0, RenderTextureFormat.ARGB32);
+                Graphics.Blit(tex, rt);
+                RenderTexture.active = rt;
+                resized.ReadPixels(new Rect(0, 0, imgSize, imgSize), 0, 0);
+                resized.Apply();
+                RenderTexture.active = null;
+                RenderTexture.ReleaseTemporary(rt);
+                DestroyImmediate(tex);
+
+                float[] preprocessed = ImagePreprocessor.TextureToNCHW(resized, imgSize);
+                DestroyImmediate(resized);
+                AppendTiming($"Converted to NCHW float[] [1,3,{imgSize},{imgSize}]");
 
                 SetStatus("Running TripoSR forward pass...", 0.35f);
                 sw.Restart();

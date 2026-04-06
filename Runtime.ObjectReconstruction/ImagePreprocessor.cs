@@ -89,11 +89,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// Matches Python's rembg flow: uint8 quantization → GPU bilinear upscale → composite.
         /// </summary>
         internal static async Task<float[]> ApplyMaskAndCompositeAsync(
-            Texture2D image, float[] alphaMask, int maskW, int maskH, float foregroundRatio)
+            Texture2D image, float[] alphaMask, int maskW, int maskH,
+            float foregroundRatio, int outputSize = 512)
         {
             var srcFrame = Texture2DToFrame(EnsureRGB24(image));
             var alpha = UpscaleMaskGPU(alphaMask, maskW, maskH, srcFrame.width, srcFrame.height);
-            return await CompositeAndResizeAsync(srcFrame, alpha, foregroundRatio);
+            return await CompositeAndResizeAsync(srcFrame, alpha, foregroundRatio, outputSize);
         }
 
         /// <summary>
@@ -154,10 +155,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// Preprocessing for RGBA images: uses the texture's built-in alpha channel.
         /// </summary>
         internal static async Task<float[]> CompositeFromRGBAAsync(
-            Texture2D image, float foregroundRatio)
+            Texture2D image, float foregroundRatio, int outputSize = 512)
         {
             var (srcFrame, alpha) = ExtractRGBAFrame(EnsureReadable(image));
-            return await CompositeAndResizeAsync(srcFrame, alpha, foregroundRatio);
+            return await CompositeAndResizeAsync(srcFrame, alpha, foregroundRatio, outputSize);
         }
 
         /// <summary>
@@ -221,10 +222,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// uint8 quantization artifacts that degrade INT8 model quality.
         /// </summary>
         private static async Task<float[]> CompositeAndResizeAsync(
-            Frame srcFrame, float[] alpha, float ratio)
+            Frame srcFrame, float[] alpha, float ratio, int outputSize = 512)
         {
-            const int outputSize = 512;
-
             var result = await Task.Run(() =>
             {
                 var (compositeHWC, compositeSize) = BuildFloatComposite(srcFrame, alpha, ratio);

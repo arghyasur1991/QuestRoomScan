@@ -90,7 +90,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// </summary>
         internal async Task LoadModelsAsync(CancellationToken ct)
         {
-            if (!_preloadModels) return;
+            if (!_preloadModels)
+            {
+                // Discover image size from Part1 metadata without keeping sessions alive.
+                // This briefly loads Part1, reads input shape, then frees memory.
+                if (_reconstruction == null)
+                {
+                    _reconstruction = new OrtReconstructionModel(_executionProvider, _mobileOptimized);
+                    await _reconstruction.DiscoverImageSizeAsync(ct);
+                }
+                return;
+            }
             if (_rembg != null && _reconstruction != null && _decoder != null) return;
 
             _rembg ??= new OrtRembgModel();
@@ -141,8 +151,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
         }
 
+        internal int ModelImageSize => _reconstruction?.ImageSize ?? 512;
+
         internal async Task<float[]> PreprocessAsync(Texture2D image, CancellationToken ct)
         {
+            int outputSize = ModelImageSize;
             var readable = MakeReadable(image);
             try
             {
@@ -154,13 +167,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
                                 readable.format == TextureFormat.BGRA32;
 
                 if (hasAlpha && HasMeaningfulAlpha(readable))
-                    return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f);
+                    return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f, outputSize);
 
                 if (_rembg != null)
                 {
                     var mask = await _rembg.InferAsync(readable, ct);
                     return await ImagePreprocessor.ApplyMaskAndCompositeAsync(
-                        readable, mask, 320, 320, 0.85f);
+                        readable, mask, 320, 320, 0.85f, outputSize);
                 }
 
                 using var rembg = new OrtRembgModel();
@@ -168,7 +181,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 var maskLocal = await rembg.InferAsync(readable, ct);
                 await AsyncHelper.YieldFrame();
                 return await ImagePreprocessor.ApplyMaskAndCompositeAsync(
-                    readable, maskLocal, 320, 320, 0.85f);
+                    readable, maskLocal, 320, 320, 0.85f, outputSize);
             }
             finally
             {
