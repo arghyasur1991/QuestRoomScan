@@ -33,12 +33,16 @@ namespace Genesis.RoomScan.Editor
 
         enum ModelPrecision { FP32, FP16, INT8, INT8_QDQ }
         enum ModelQuality { Full, Pruned13L, Pruned12L }
+        enum ModelResolution { Res512, Res384 }
 
         static readonly string[] PrecisionSuffixes = { "fp32", "fp16", "int8", "int8_qdq" };
         static readonly string[] PrecisionLabels = { "FP32", "FP16", "INT8", "QDQ" };
 
         static readonly string[] QualityPrefixes = { "triposr", "triposr_pruned13L", "triposr_pruned12L" };
         static readonly string[] QualityLabels = { "Full (16L)", "Pruned 13L", "Pruned 12L" };
+
+        static readonly string[] ResolutionSuffixes = { "", "_res384" };
+        static readonly string[] ResolutionLabels = { "512×512", "384×384" };
 
         ObjectReconstructionModule _objectReconstruction;
         bool _reconTriplaneShaderAssigned;
@@ -50,7 +54,8 @@ namespace Genesis.RoomScan.Editor
         bool _reconOnnxModelsDeployed;
         string _reconDeployedInfo;
         int _reconSelectedQuality;
-        bool[,] _reconAvailableVariants = new bool[3, 4];
+        int _reconSelectedResolution;
+        bool[,,] _reconAvailableVariants = new bool[3, 2, 4];
 
         partial void RefreshObjectReconstruction()
         {
@@ -86,8 +91,10 @@ namespace Genesis.RoomScan.Editor
             _reconDeployedInfo = DetectDeployedInfo(streamingDir);
 
             for (int q = 0; q < 3; q++)
-                for (int p = 0; p < 4; p++)
-                    _reconAvailableVariants[q, p] = IsVariantAvailable((ModelQuality)q, (ModelPrecision)p);
+                for (int r = 0; r < 2; r++)
+                    for (int p = 0; p < 4; p++)
+                        _reconAvailableVariants[q, r, p] = IsVariantAvailable(
+                            (ModelQuality)q, (ModelResolution)r, (ModelPrecision)p);
         }
 
         partial void DrawObjectReconstructionOptionalStatus()
@@ -115,8 +122,9 @@ namespace Genesis.RoomScan.Editor
 
             bool anyAvailable = false;
             for (int q = 0; q < 3 && !anyAvailable; q++)
-                for (int p = 0; p < 4 && !anyAvailable; p++)
-                    anyAvailable = _reconAvailableVariants[q, p];
+                for (int r = 0; r < 2 && !anyAvailable; r++)
+                    for (int p = 0; p < 4 && !anyAvailable; p++)
+                        anyAvailable = _reconAvailableVariants[q, r, p];
 
             if (anyAvailable)
             {
@@ -129,24 +137,32 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.LabelField("Quality:", GUILayout.Width(50));
                 _reconSelectedQuality = EditorGUILayout.Popup(
                     _reconSelectedQuality, QualityLabels, GUILayout.Width(120));
+                EditorGUILayout.LabelField("Resolution:", GUILayout.Width(65));
+                _reconSelectedResolution = EditorGUILayout.Popup(
+                    _reconSelectedResolution, ResolutionLabels, GUILayout.Width(80));
                 EditorGUILayout.EndHorizontal();
 
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.Space(20);
                 for (int i = 0; i < 4; i++)
                 {
-                    bool available = _reconAvailableVariants[_reconSelectedQuality, i];
+                    bool available = _reconAvailableVariants[
+                        _reconSelectedQuality, _reconSelectedResolution, i];
                     using (new EditorGUI.DisabledScope(!available))
                     {
                         string label = PrecisionLabels[i];
                         if (available)
                         {
-                            long sz = GetVariantSizeMB((ModelQuality)_reconSelectedQuality,
+                            long sz = GetVariantSizeMB(
+                                (ModelQuality)_reconSelectedQuality,
+                                (ModelResolution)_reconSelectedResolution,
                                 (ModelPrecision)i);
                             if (sz > 0) label += $" ({sz}MB)";
                         }
                         if (GUILayout.Button(label, GUILayout.Height(22)))
-                            DeployOnnxModels((ModelQuality)_reconSelectedQuality,
+                            DeployOnnxModels(
+                                (ModelQuality)_reconSelectedQuality,
+                                (ModelResolution)_reconSelectedResolution,
                                 (ModelPrecision)i);
                     }
                 }
@@ -159,7 +175,7 @@ namespace Genesis.RoomScan.Editor
                 GUILayout.Label("Missing", EditorStyles.boldLabel);
                 EditorGUILayout.EndHorizontal();
                 EditorGUILayout.HelpBox(
-                    $"Run: python TripoSR/export_onnx.py --prune 0 1 2 --qdq --deploy all\n" +
+                    $"Run: python TripoSR/export_onnx.py --prune 0 1 2 --resolutions 512 384 --qdq --deploy all\n" +
                     $"This generates and copies all model variants to {RECON_ONNX_DIR}/",
                     MessageType.Warning);
             }
@@ -289,9 +305,15 @@ namespace Genesis.RoomScan.Editor
             return true;
         }
 
-        private static bool IsVariantAvailable(ModelQuality quality, ModelPrecision precision)
+        private static string GetFullPrefix(ModelQuality quality, ModelResolution resolution)
         {
-            string prefix = QualityPrefixes[(int)quality];
+            return QualityPrefixes[(int)quality] + ResolutionSuffixes[(int)resolution];
+        }
+
+        private static bool IsVariantAvailable(ModelQuality quality, ModelResolution resolution,
+            ModelPrecision precision)
+        {
+            string prefix = GetFullPrefix(quality, resolution);
             string suffix = PrecisionSuffixes[(int)precision];
             string[] required =
             {
@@ -306,9 +328,10 @@ namespace Genesis.RoomScan.Editor
             return true;
         }
 
-        private static long GetVariantSizeMB(ModelQuality quality, ModelPrecision precision)
+        private static long GetVariantSizeMB(ModelQuality quality, ModelResolution resolution,
+            ModelPrecision precision)
         {
-            string prefix = QualityPrefixes[(int)quality];
+            string prefix = GetFullPrefix(quality, resolution);
             string suffix = PrecisionSuffixes[(int)precision];
             long total = 0;
             string[] parts = { $"{prefix}_part1_{suffix}.onnx", $"{prefix}_part2_{suffix}.onnx" };
@@ -335,21 +358,29 @@ namespace Genesis.RoomScan.Editor
             long deployedSize = new FileInfo(deployedPart1).Length;
             for (int q = QualityPrefixes.Length - 1; q >= 0; q--)
             {
-                for (int p = PrecisionSuffixes.Length - 1; p >= 0; p--)
+                for (int r = ResolutionSuffixes.Length - 1; r >= 0; r--)
                 {
-                    string srcPath = Path.Combine(RECON_ONNX_DIR,
-                        $"{QualityPrefixes[q]}_part1_{PrecisionSuffixes[p]}.onnx");
-                    if (File.Exists(srcPath) && new FileInfo(srcPath).Length == deployedSize)
-                        return $"{QualityLabels[q]} / {PrecisionSuffixes[p].ToUpper()}";
+                    for (int p = PrecisionSuffixes.Length - 1; p >= 0; p--)
+                    {
+                        string prefix = QualityPrefixes[q] + ResolutionSuffixes[r];
+                        string srcPath = Path.Combine(RECON_ONNX_DIR,
+                            $"{prefix}_part1_{PrecisionSuffixes[p]}.onnx");
+                        if (File.Exists(srcPath) && new FileInfo(srcPath).Length == deployedSize)
+                        {
+                            string resLabel = r > 0 ? $" {ResolutionLabels[r]}" : "";
+                            return $"{QualityLabels[q]}{resLabel} / {PrecisionSuffixes[p].ToUpper()}";
+                        }
+                    }
                 }
             }
 
             return null;
         }
 
-        private static void DeployOnnxModels(ModelQuality quality, ModelPrecision precision)
+        private static void DeployOnnxModels(ModelQuality quality, ModelResolution resolution,
+            ModelPrecision precision)
         {
-            string prefix = QualityPrefixes[(int)quality];
+            string prefix = GetFullPrefix(quality, resolution);
             string suffix = PrecisionSuffixes[(int)precision];
             string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
             Directory.CreateDirectory(streamingDir);
@@ -363,6 +394,8 @@ namespace Genesis.RoomScan.Editor
             };
 
             string qualityLabel = QualityLabels[(int)quality];
+            string resLabel = (int)resolution > 0 ? $" {ResolutionLabels[(int)resolution]}" : "";
+            string displayLabel = $"{qualityLabel}{resLabel}";
             for (int i = 0; i < models.Length; i++)
             {
                 var (srcName, dstName) = models[i];
@@ -376,7 +409,7 @@ namespace Genesis.RoomScan.Editor
                 }
 
                 EditorUtility.DisplayProgressBar(
-                    $"Deploying {qualityLabel} {suffix.ToUpper()} Models",
+                    $"Deploying {displayLabel} {suffix.ToUpper()} Models",
                     $"Copying {srcName} → {dstName}... ({i + 1}/{models.Length})",
                     (float)i / models.Length);
 
@@ -387,11 +420,11 @@ namespace Genesis.RoomScan.Editor
             }
 
             string markerPath = Path.Combine(streamingDir, ".precision");
-            File.WriteAllText(markerPath, $"{qualityLabel} / {suffix}");
+            File.WriteAllText(markerPath, $"{displayLabel} / {suffix}");
 
             EditorUtility.ClearProgressBar();
             AssetDatabase.Refresh();
-            Debug.Log($"[ObjectReconstruction] {qualityLabel} {suffix.ToUpper()} deployment complete");
+            Debug.Log($"[ObjectReconstruction] {displayLabel} {suffix.ToUpper()} deployment complete");
         }
     }
 }
