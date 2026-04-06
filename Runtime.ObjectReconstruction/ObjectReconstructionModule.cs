@@ -84,6 +84,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             _running = true;
             _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            ReconstructionEvents.FireStarted();
 
             float[] preprocessed = null;
             try
@@ -140,6 +141,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
             finally
             {
+                ReconstructionEvents.FireFinished();
                 _running = false;
                 _cts?.Dispose();
                 _cts = null;
