@@ -33,6 +33,7 @@ namespace Genesis.RoomScan.Editor
 
         enum ModelPrecision { FP32, FP16, INT8, INT8_QDQ }
         enum ModelQuality { Full, Pruned13L, Pruned12L }
+        enum DinoQuality { Full, Pruned8L }
         enum ModelResolution { Res512, Res384 }
 
         static readonly string[] PrecisionSuffixes = { "fp32", "fp16", "int8", "int8_qdq" };
@@ -40,6 +41,9 @@ namespace Genesis.RoomScan.Editor
 
         static readonly string[] QualityPrefixes = { "triposr", "triposr_pruned13L", "triposr_pruned12L" };
         static readonly string[] QualityLabels = { "Full (16L)", "Pruned 13L", "Pruned 12L" };
+
+        static readonly string[] DinoPrefixParts = { "", "_dino8L" };
+        static readonly string[] DinoLabels = { "DINOv2 Full", "DINOv2 8L" };
 
         static readonly string[] ResolutionSuffixes = { "", "_res384" };
         static readonly string[] ResolutionLabels = { "512×512", "384×384" };
@@ -55,8 +59,9 @@ namespace Genesis.RoomScan.Editor
         bool _reconOnnxModelsDeployed;
         string _reconDeployedInfo;
         int _reconSelectedQuality;
+        int _reconSelectedDino;
         int _reconSelectedResolution;
-        bool[,,] _reconAvailableVariants = new bool[3, 2, 4];
+        bool[,,,] _reconAvailableVariants = new bool[3, 2, 2, 4];
 
         partial void RefreshObjectReconstruction()
         {
@@ -92,10 +97,11 @@ namespace Genesis.RoomScan.Editor
             _reconDeployedInfo = DetectDeployedInfo(streamingDir);
 
             for (int q = 0; q < 3; q++)
-                for (int r = 0; r < 2; r++)
-                    for (int p = 0; p < 4; p++)
-                        _reconAvailableVariants[q, r, p] = IsVariantAvailable(
-                            (ModelQuality)q, (ModelResolution)r, (ModelPrecision)p);
+                for (int d = 0; d < 2; d++)
+                    for (int r = 0; r < 2; r++)
+                        for (int p = 0; p < 4; p++)
+                            _reconAvailableVariants[q, d, r, p] = IsVariantAvailable(
+                                (ModelQuality)q, (DinoQuality)d, (ModelResolution)r, (ModelPrecision)p);
         }
 
         partial void DrawObjectReconstructionOptionalStatus()
@@ -123,9 +129,10 @@ namespace Genesis.RoomScan.Editor
 
             bool anyAvailable = false;
             for (int q = 0; q < 3 && !anyAvailable; q++)
-                for (int r = 0; r < 2 && !anyAvailable; r++)
-                    for (int p = 0; p < 4 && !anyAvailable; p++)
-                        anyAvailable = _reconAvailableVariants[q, r, p];
+                for (int d = 0; d < 2 && !anyAvailable; d++)
+                    for (int r = 0; r < 2 && !anyAvailable; r++)
+                        for (int p = 0; p < 4 && !anyAvailable; p++)
+                            anyAvailable = _reconAvailableVariants[q, d, r, p];
 
             if (anyAvailable)
             {
@@ -137,10 +144,13 @@ namespace Genesis.RoomScan.Editor
                 GUILayout.Space(20);
                 EditorGUILayout.LabelField("Quality:", GUILayout.Width(50));
                 _reconSelectedQuality = EditorGUILayout.Popup(
-                    _reconSelectedQuality, QualityLabels, GUILayout.Width(120));
-                EditorGUILayout.LabelField("Resolution:", GUILayout.Width(65));
+                    _reconSelectedQuality, QualityLabels, GUILayout.Width(100));
+                EditorGUILayout.LabelField("DINOv2:", GUILayout.Width(48));
+                _reconSelectedDino = EditorGUILayout.Popup(
+                    _reconSelectedDino, DinoLabels, GUILayout.Width(90));
+                EditorGUILayout.LabelField("Res:", GUILayout.Width(28));
                 _reconSelectedResolution = EditorGUILayout.Popup(
-                    _reconSelectedResolution, ResolutionLabels, GUILayout.Width(80));
+                    _reconSelectedResolution, ResolutionLabels, GUILayout.Width(70));
                 EditorGUILayout.EndHorizontal();
 
                 EditorGUILayout.BeginHorizontal();
@@ -148,7 +158,7 @@ namespace Genesis.RoomScan.Editor
                 for (int i = 0; i < 4; i++)
                 {
                     bool available = _reconAvailableVariants[
-                        _reconSelectedQuality, _reconSelectedResolution, i];
+                        _reconSelectedQuality, _reconSelectedDino, _reconSelectedResolution, i];
                     using (new EditorGUI.DisabledScope(!available))
                     {
                         string label = PrecisionLabels[i];
@@ -156,6 +166,7 @@ namespace Genesis.RoomScan.Editor
                         {
                             long sz = GetVariantSizeMB(
                                 (ModelQuality)_reconSelectedQuality,
+                                (DinoQuality)_reconSelectedDino,
                                 (ModelResolution)_reconSelectedResolution,
                                 (ModelPrecision)i);
                             if (sz > 0) label += $" ({sz}MB)";
@@ -163,6 +174,7 @@ namespace Genesis.RoomScan.Editor
                         if (GUILayout.Button(label, GUILayout.Height(22)))
                             DeployOnnxModels(
                                 (ModelQuality)_reconSelectedQuality,
+                                (DinoQuality)_reconSelectedDino,
                                 (ModelResolution)_reconSelectedResolution,
                                 (ModelPrecision)i);
                     }
@@ -306,15 +318,17 @@ namespace Genesis.RoomScan.Editor
             return true;
         }
 
-        private static string GetFullPrefix(ModelQuality quality, ModelResolution resolution)
+        private static string GetFullPrefix(ModelQuality quality, DinoQuality dino,
+            ModelResolution resolution)
         {
-            return QualityPrefixes[(int)quality] + ResolutionSuffixes[(int)resolution];
+            return QualityPrefixes[(int)quality] + DinoPrefixParts[(int)dino]
+                + ResolutionSuffixes[(int)resolution];
         }
 
-        private static bool IsVariantAvailable(ModelQuality quality, ModelResolution resolution,
-            ModelPrecision precision)
+        private static bool IsVariantAvailable(ModelQuality quality, DinoQuality dino,
+            ModelResolution resolution, ModelPrecision precision)
         {
-            string prefix = GetFullPrefix(quality, resolution);
+            string prefix = GetFullPrefix(quality, dino, resolution);
             string suffix = PrecisionSuffixes[(int)precision];
             string[] required =
             {
@@ -329,10 +343,10 @@ namespace Genesis.RoomScan.Editor
             return true;
         }
 
-        private static long GetVariantSizeMB(ModelQuality quality, ModelResolution resolution,
-            ModelPrecision precision)
+        private static long GetVariantSizeMB(ModelQuality quality, DinoQuality dino,
+            ModelResolution resolution, ModelPrecision precision)
         {
-            string prefix = GetFullPrefix(quality, resolution);
+            string prefix = GetFullPrefix(quality, dino, resolution);
             string suffix = PrecisionSuffixes[(int)precision];
             long total = 0;
             string[] parts = { $"{prefix}_part1_{suffix}.onnx", $"{prefix}_part2_{suffix}.onnx" };
@@ -359,17 +373,22 @@ namespace Genesis.RoomScan.Editor
             long deployedSize = new FileInfo(deployedPart1).Length;
             for (int q = QualityPrefixes.Length - 1; q >= 0; q--)
             {
-                for (int r = ResolutionSuffixes.Length - 1; r >= 0; r--)
+                for (int d = DinoPrefixParts.Length - 1; d >= 0; d--)
                 {
-                    for (int p = PrecisionSuffixes.Length - 1; p >= 0; p--)
+                    for (int r = ResolutionSuffixes.Length - 1; r >= 0; r--)
                     {
-                        string prefix = QualityPrefixes[q] + ResolutionSuffixes[r];
-                        string srcPath = Path.Combine(RECON_ONNX_DIR,
-                            $"{prefix}_part1_{PrecisionSuffixes[p]}.onnx");
-                        if (File.Exists(srcPath) && new FileInfo(srcPath).Length == deployedSize)
+                        for (int p = PrecisionSuffixes.Length - 1; p >= 0; p--)
                         {
-                            string resLabel = r > 0 ? $" {ResolutionLabels[r]}" : "";
-                            return $"{QualityLabels[q]}{resLabel} / {PrecisionSuffixes[p].ToUpper()}";
+                            string prefix = QualityPrefixes[q] + DinoPrefixParts[d]
+                                + ResolutionSuffixes[r];
+                            string srcPath = Path.Combine(RECON_ONNX_DIR,
+                                $"{prefix}_part1_{PrecisionSuffixes[p]}.onnx");
+                            if (File.Exists(srcPath) && new FileInfo(srcPath).Length == deployedSize)
+                            {
+                                string dinoLabel = d > 0 ? $" {DinoLabels[d]}" : "";
+                                string resLabel = r > 0 ? $" {ResolutionLabels[r]}" : "";
+                                return $"{QualityLabels[q]}{dinoLabel}{resLabel} / {PrecisionSuffixes[p].ToUpper()}";
+                            }
                         }
                     }
                 }
@@ -378,10 +397,10 @@ namespace Genesis.RoomScan.Editor
             return null;
         }
 
-        private static void DeployOnnxModels(ModelQuality quality, ModelResolution resolution,
-            ModelPrecision precision)
+        private static void DeployOnnxModels(ModelQuality quality, DinoQuality dino,
+            ModelResolution resolution, ModelPrecision precision)
         {
-            string prefix = GetFullPrefix(quality, resolution);
+            string prefix = GetFullPrefix(quality, dino, resolution);
             string suffix = PrecisionSuffixes[(int)precision];
             string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
             Directory.CreateDirectory(streamingDir);
@@ -395,8 +414,9 @@ namespace Genesis.RoomScan.Editor
             };
 
             string qualityLabel = QualityLabels[(int)quality];
+            string dinoLabel = (int)dino > 0 ? $" {DinoLabels[(int)dino]}" : "";
             string resLabel = (int)resolution > 0 ? $" {ResolutionLabels[(int)resolution]}" : "";
-            string displayLabel = $"{qualityLabel}{resLabel}";
+            string displayLabel = $"{qualityLabel}{dinoLabel}{resLabel}";
             for (int i = 0; i < models.Length; i++)
             {
                 var (srcName, dstName) = models[i];
