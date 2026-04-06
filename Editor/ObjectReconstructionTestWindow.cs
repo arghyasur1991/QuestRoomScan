@@ -506,7 +506,6 @@ namespace Genesis.RoomScan.Editor
             so.FindProperty("executionProvider").intValue = (int)_executionProvider;
             so.FindProperty("densitySmoothPasses").intValue = _densitySmoothPasses;
             so.FindProperty("meshExtractionBackend").intValue = (int)_meshExtractionBackend;
-            so.FindProperty("mobileOptimized").boolValue = false;
             so.ApplyModifiedPropertiesWithoutUndo();
             module.ResetPipeline();
         }
