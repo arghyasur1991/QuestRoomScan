@@ -43,6 +43,7 @@ namespace Genesis.RoomScan.Editor
 
         static readonly string[] ResolutionSuffixes = { "", "_res384" };
         static readonly string[] ResolutionLabels = { "512×512", "384×384" };
+        static readonly int[] ResolutionValues = { 512, 384 };
 
         ObjectReconstructionModule _objectReconstruction;
         bool _reconTriplaneShaderAssigned;
@@ -421,6 +422,9 @@ namespace Genesis.RoomScan.Editor
 
             string markerPath = Path.Combine(streamingDir, ".precision");
             File.WriteAllText(markerPath, $"{displayLabel} / {suffix}");
+
+            string imageSizePath = Path.Combine(streamingDir, ".imagesize");
+            File.WriteAllText(imageSizePath, ResolutionValues[(int)resolution].ToString());
 
             EditorUtility.ClearProgressBar();
             AssetDatabase.Refresh();

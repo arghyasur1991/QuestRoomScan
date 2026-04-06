@@ -44,11 +44,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private OrtModelBase _part2;
         private bool _preloaded;
         private string _hiddenOutputName;
-        private int _imageSize = 512;
         internal bool IsLoaded => _preloaded;
-
-        /// <summary>Expected input image resolution (read from ONNX model metadata).</summary>
-        internal int ImageSize => _imageSize;
 
         /// <summary>Timing from the most recent RunAsync call (populated after completion).</summary>
         internal ForwardTiming LastTiming { get; private set; }
@@ -59,19 +55,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _mobileOptimized = mobileOptimized;
         }
 
-        /// <summary>
-        /// Briefly load Part1 to discover the expected image input size, then dispose.
-        /// Used in sequential mode where we can't keep sessions alive but still need
-        /// the image size for preprocessing.
-        /// </summary>
-        internal async Task DiscoverImageSizeAsync(CancellationToken ct)
-        {
-            var temp = new PartModel();
-            await temp.LoadAsync(Part1FileName, _ep, _mobileOptimized, ct);
-            _imageSize = temp.DiscoverImageSize();
-            temp.Dispose();
-        }
-
         /// <summary>Load both sessions and keep alive for reuse (editor path).</summary>
         internal async Task PreloadAsync(CancellationToken ct)
         {
@@ -80,7 +63,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _part1 = new PartModel();
             await ((PartModel)_part1).LoadAsync(Part1FileName, _ep, _mobileOptimized, ct);
             _hiddenOutputName = ((PartModel)_part1).DiscoverHiddenOutputName();
-            _imageSize = ((PartModel)_part1).DiscoverImageSize();
 
             _part2 = new PartModel();
             await ((PartModel)_part2).LoadAsync(Part2FileName, _ep, _mobileOptimized, ct);
@@ -88,17 +70,18 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _preloaded = true;
         }
 
+        /// <param name="imageSize">Expected spatial dimension (e.g. 512 or 384).</param>
         /// <returns>Scene codes as float[].</returns>
-        internal async Task<float[]> RunAsync(float[] preprocessed, CancellationToken ct)
+        internal async Task<float[]> RunAsync(float[] preprocessed, int imageSize, CancellationToken ct)
         {
             return _preloaded
-                ? await RunPreloadedAsync(preprocessed, ct)
-                : await RunSequentialAsync(preprocessed, ct);
+                ? await RunPreloadedAsync(preprocessed, imageSize, ct)
+                : await RunSequentialAsync(preprocessed, imageSize, ct);
         }
 
-        private async Task<float[]> RunPreloadedAsync(float[] preprocessed, CancellationToken ct)
+        private async Task<float[]> RunPreloadedAsync(float[] preprocessed, int imageSize, CancellationToken ct)
         {
-            var inputTensor = new DenseTensor<float>(preprocessed, new[] { 1, 3, _imageSize, _imageSize });
+            var inputTensor = new DenseTensor<float>(preprocessed, new[] { 1, 3, imageSize, imageSize });
 
             var part1 = (PartModel)_part1;
             part1.SetInput(inputTensor);
@@ -117,7 +100,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return part2.GetOutputTensor().ToArray();
         }
 
-        private async Task<float[]> RunSequentialAsync(float[] preprocessed, CancellationToken ct)
+        private async Task<float[]> RunSequentialAsync(float[] preprocessed, int imageSize, CancellationToken ct)
         {
             var timing = new ForwardTiming();
             var sw = Stopwatch.StartNew();
@@ -130,7 +113,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 var part1 = new PartModel();
                 await part1.LoadAsync(Part1FileName, _ep, _mobileOptimized, ct);
                 hiddenName = part1.DiscoverHiddenOutputName();
-                int imageSize = part1.DiscoverImageSize();
                 timing.Part1LoadMs = sw.ElapsedMilliseconds;
                 Logger.Info($"[TripoSR] Part1 loaded: {timing.Part1LoadMs:F0}ms (imageSize={imageSize})");
                 sw.Restart();
@@ -201,19 +183,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct)
             {
                 await LoadSessionAsync(relativePath, ep, mobileOptimized, ct);
-            }
-
-            /// <summary>
-            /// Read the expected image input size (H dimension) from the ONNX model metadata.
-            /// Returns 512 as fallback for models without explicit static shapes.
-            /// </summary>
-            internal int DiscoverImageSize()
-            {
-                if (_session.InputMetadata.TryGetValue("image", out var meta)
-                    && meta.Dimensions.Length == 4
-                    && meta.Dimensions[2] > 0)
-                    return meta.Dimensions[2];
-                return 512;
             }
 
             /// <summary>

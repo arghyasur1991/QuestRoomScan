@@ -1,5 +1,6 @@
 #if HAS_ONNXRUNTIME
 using System;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -28,6 +29,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private TriplaneGridSampler _sampler;
         private IMeshExtractor _extractor;
+
+        private int _modelImageSize;
 
         private OrtRembgModel _rembg;
         private OrtReconstructionModel _reconstruction;
@@ -90,17 +93,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
         /// </summary>
         internal async Task LoadModelsAsync(CancellationToken ct)
         {
-            if (!_preloadModels)
-            {
-                // Discover image size from Part1 metadata without keeping sessions alive.
-                // This briefly loads Part1, reads input shape, then frees memory.
-                if (_reconstruction == null)
-                {
-                    _reconstruction = new OrtReconstructionModel(_executionProvider, _mobileOptimized);
-                    await _reconstruction.DiscoverImageSizeAsync(ct);
-                }
-                return;
-            }
+            if (_modelImageSize == 0)
+                _modelImageSize = await ReadImageSizeMarkerAsync(ct);
+
+            if (!_preloadModels) return;
             if (_rembg != null && _reconstruction != null && _decoder != null) return;
 
             _rembg ??= new OrtRembgModel();
@@ -114,6 +110,30 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _decoder ??= new OrtDecoderModel();
             if (!_decoder.IsLoaded)
                 await _decoder.LoadAsync(_executionProvider, _mobileOptimized, ct);
+        }
+
+        /// <summary>
+        /// Reads the .imagesize marker from StreamingAssets to determine the deployed
+        /// model's expected input resolution. Falls back to 512 if the marker is missing.
+        /// </summary>
+        private static async Task<int> ReadImageSizeMarkerAsync(CancellationToken ct)
+        {
+            const string markerPath = "ObjectReconstruction/.imagesize";
+            try
+            {
+                string path = await ModelPathResolver.ResolveAsync(markerPath, ct);
+                string text = await Task.Run(() => File.ReadAllText(path).Trim(), ct);
+                if (int.TryParse(text, out int size) && size > 0)
+                {
+                    Logger.Info($"[TripoSR] Image size from marker: {size}");
+                    return size;
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.Info($"[TripoSR] No .imagesize marker found, defaulting to 512 ({e.Message})");
+            }
+            return 512;
         }
 
         /// <summary>
@@ -151,7 +171,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
         }
 
-        internal int ModelImageSize => _reconstruction?.ImageSize ?? 512;
+        internal int ModelImageSize => _modelImageSize > 0 ? _modelImageSize : 512;
 
         internal async Task<float[]> PreprocessAsync(Texture2D image, CancellationToken ct)
         {
@@ -236,13 +256,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             if (_reconstruction != null)
             {
-                sceneCodes = await _reconstruction.RunAsync(preprocessed, ct);
+                sceneCodes = await _reconstruction.RunAsync(preprocessed, ModelImageSize, ct);
                 LastForwardTiming = _reconstruction.LastTiming;
             }
             else
             {
                 using var reconstruction = new OrtReconstructionModel(_executionProvider, _mobileOptimized);
-                sceneCodes = await reconstruction.RunAsync(preprocessed, ct);
+                sceneCodes = await reconstruction.RunAsync(preprocessed, ModelImageSize, ct);
                 LastForwardTiming = reconstruction.LastTiming;
                 await AsyncHelper.YieldFrame();
             }
