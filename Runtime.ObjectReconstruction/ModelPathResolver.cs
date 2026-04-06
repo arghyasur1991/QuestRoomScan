@@ -65,7 +65,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         throw new FileNotFoundException(
                             $"Failed to load model from StreamingAssets: {request.error}", relativePath);
 
-                    File.WriteAllBytes(persistentPath, request.downloadHandler.data);
+                    var bytes = request.downloadHandler.data;
+                    await Task.Run(() => File.WriteAllBytes(persistentPath, bytes));
                 }
                 finally
                 {

@@ -139,6 +139,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
             var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir, modelName);
 
             bool qnnAccepted = false;
+            List<string> inputNames = null;
+            List<NamedOnnxValue> preallocatedOutputs = null;
+
             var task = new Task(() =>
             {
                 if (ep == ExecutionProvider.CoreML)
@@ -186,29 +189,33 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 {
                     _session = new InferenceSession(modelPath, options);
                 }
+
+                // Build metadata + preallocated outputs on the background thread
+                // to avoid LOH allocations (12MB+ DenseTensors) on the main thread
+                inputNames = _session.InputMetadata.Keys.ToList();
+                preallocatedOutputs = new List<NamedOnnxValue>();
+                foreach (var kvp in _session.OutputMetadata)
+                {
+                    if (kvp.Value.IsTensor && kvp.Value.ElementType == typeof(float))
+                    {
+                        var dims = kvp.Value.Dimensions.Select(d => d <= 0 ? 1 : d).ToArray();
+                        var tensor = new DenseTensor<float>(dims);
+                        preallocatedOutputs.Add(NamedOnnxValue.CreateFromTensor(kvp.Key, tensor));
+                    }
+                    else if (kvp.Value.IsTensor && kvp.Value.ElementType == typeof(long))
+                    {
+                        var dims = kvp.Value.Dimensions.Select(d => d <= 0 ? 1 : d).ToArray();
+                        var tensor = new DenseTensor<long>(dims);
+                        preallocatedOutputs.Add(NamedOnnxValue.CreateFromTensor(kvp.Key, tensor));
+                    }
+                }
             });
             OrtLoadQueue.Enqueue(task, modelName);
             await task;
 
             _profilingEnabled = (ep == ExecutionProvider.QNN_HTP && qnnAccepted);
-            _inputNames = _session.InputMetadata.Keys.ToList();
-
-            _preallocatedOutputs = new List<NamedOnnxValue>();
-            foreach (var kvp in _session.OutputMetadata)
-            {
-                if (kvp.Value.IsTensor && kvp.Value.ElementType == typeof(float))
-                {
-                    var dims = kvp.Value.Dimensions.Select(d => d <= 0 ? 1 : d).ToArray();
-                    var tensor = new DenseTensor<float>(dims);
-                    _preallocatedOutputs.Add(NamedOnnxValue.CreateFromTensor(kvp.Key, tensor));
-                }
-                else if (kvp.Value.IsTensor && kvp.Value.ElementType == typeof(long))
-                {
-                    var dims = kvp.Value.Dimensions.Select(d => d <= 0 ? 1 : d).ToArray();
-                    var tensor = new DenseTensor<long>(dims);
-                    _preallocatedOutputs.Add(NamedOnnxValue.CreateFromTensor(kvp.Key, tensor));
-                }
-            }
+            _inputNames = inputNames;
+            _preallocatedOutputs = preallocatedOutputs;
         }
 
         private static SessionOptions CreateSessionOptions(
