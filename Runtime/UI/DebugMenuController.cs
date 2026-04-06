@@ -334,10 +334,18 @@ namespace Genesis.RoomScan.UI
 
                 SetButtonBusy(_btnReconPredict, "Running...");
                 _btnReconPredict.SetEnabled(false);
-                var mesh = await module.ReconstructAsync(images[_reconSelectedIdx]);
-                Debug.Log($"[DebugMenu] ReconstructAsync returned mesh={mesh != null}, verts={mesh?.vertexCount ?? 0}");
-                if (mesh != null)
-                    SpawnReconstructedMesh(mesh);
+                QuestCpuBoost.Begin();
+                try
+                {
+                    var mesh = await module.ReconstructAsync(images[_reconSelectedIdx]);
+                    Debug.Log($"[DebugMenu] ReconstructAsync returned mesh={mesh != null}, verts={mesh?.vertexCount ?? 0}");
+                    if (mesh != null)
+                        SpawnReconstructedMesh(mesh);
+                }
+                finally
+                {
+                    QuestCpuBoost.End();
+                }
                 SetButtonReady(_btnReconPredict, "Predict");
                 _btnReconPredict.SetEnabled(true);
             });
