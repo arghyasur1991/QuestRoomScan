@@ -84,19 +84,19 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             var part1 = (PartModel)_part1;
             part1.SetInput(inputTensor);
-            using var results1 = await part1.RunDisposablePublic();
+            await part1.RunPreallocatedPublic();
             ct.ThrowIfCancellationRequested();
 
-            var encoderStates = ExtractTensor(results1, EncoderOutputName);
-            var hiddenStates = ExtractTensor(results1, _hiddenOutputName);
+            var encoderStates = part1.GetOutputTensor(EncoderOutputName);
+            var hiddenStates = part1.GetOutputTensor(_hiddenOutputName);
 
             var part2 = (PartModel)_part2;
             part2.SetInput(EncoderOutputName, encoderStates);
             part2.SetInput(_hiddenOutputName, hiddenStates);
-            using var results2 = await part2.RunDisposablePublic();
+            await part2.RunPreallocatedPublic();
             ct.ThrowIfCancellationRequested();
 
-            return results2.First().AsTensor<float>().ToArray();
+            return part2.GetOutputTensor().ToArray();
         }
 
         private async Task<float[]> RunSequentialAsync(float[] preprocessed, CancellationToken ct)
@@ -119,19 +119,20 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 var inputTensor = new DenseTensor<float>(preprocessed, new[] { 1, 3, 512, 512 });
                 part1.SetInput(inputTensor);
-                using var results1 = await part1.RunDisposablePublic();
+                await part1.RunPreallocatedPublic();
                 ct.ThrowIfCancellationRequested();
 
                 timing.Part1RunMs = sw.ElapsedMilliseconds;
                 Logger.Info($"[TripoSR] Part1 infer: {timing.Part1RunMs:F0}ms");
                 sw.Restart();
 
-                encoderStates = CloneTensor(ExtractTensor(results1, EncoderOutputName));
-                hiddenStates = CloneTensor(ExtractTensor(results1, hiddenName));
+                // Grab references before dispose — managed DenseTensor backing arrays
+                // survive _preallocatedOutputs.Clear() since our locals keep them alive
+                encoderStates = part1.GetOutputTensor(EncoderOutputName);
+                hiddenStates = part1.GetOutputTensor(hiddenName);
 
                 part1.Dispose();
             }
-            // Let the system reclaim Part 1's ~250MB native memory before loading Part 2
             GC.Collect();
             await AsyncHelper.YieldFrame();
 
@@ -146,14 +147,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
                 part2.SetInput(EncoderOutputName, encoderStates);
                 part2.SetInput(hiddenName, hiddenStates);
-                using var results2 = await part2.RunDisposablePublic();
+                await part2.RunPreallocatedPublic();
                 ct.ThrowIfCancellationRequested();
 
                 timing.Part2RunMs = sw.ElapsedMilliseconds;
                 Logger.Info($"[TripoSR] Part2 infer: {timing.Part2RunMs:F0}ms");
                 sw.Stop();
 
-                sceneCodes = results2.First().AsTensor<float>().ToArray();
+                sceneCodes = part2.GetOutputTensor().ToArray();
                 part2.Dispose();
             }
             GC.Collect();
@@ -163,21 +164,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
             Logger.Info($"[TripoSR] Forward breakdown: {timing}");
 
             return sceneCodes;
-        }
-
-        private static DenseTensor<float> ExtractTensor(
-            IDisposableReadOnlyCollection<DisposableNamedOnnxValue> results, string name)
-        {
-            foreach (var r in results)
-                if (r.Name == name)
-                    return r.AsTensor<float>() as DenseTensor<float>;
-            throw new InvalidOperationException($"Output '{name}' not found in results");
-        }
-
-        private static DenseTensor<float> CloneTensor(DenseTensor<float> src)
-        {
-            var data = src.ToArray();
-            return new DenseTensor<float>(data, src.Dimensions.ToArray());
         }
 
         public void Dispose()
@@ -221,9 +207,19 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 _inputs.Add(NamedOnnxValue.CreateFromTensor(name, tensor));
             }
 
-            internal async Task<IDisposableReadOnlyCollection<DisposableNamedOnnxValue>> RunDisposablePublic()
+            internal async Task RunPreallocatedPublic()
             {
-                return await RunDisposable();
+                await RunPreallocated();
+            }
+
+            internal DenseTensor<float> GetOutputTensor(string name)
+            {
+                return GetPreallocatedOutput<float>(name);
+            }
+
+            internal DenseTensor<float> GetOutputTensor()
+            {
+                return GetPreallocatedOutput<float>();
             }
         }
     }
