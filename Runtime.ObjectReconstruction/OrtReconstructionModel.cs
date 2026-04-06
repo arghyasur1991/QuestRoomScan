@@ -108,8 +108,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             {
                 var part1 = new PartModel();
-                await part1.LoadAsync(Part1FileName, _ep, _mobileOptimized, ct,
-                    batchInference: true);
+                await part1.LoadAsync(Part1FileName, _ep, _mobileOptimized, ct);
                 timing.Part1LoadMs = sw.ElapsedMilliseconds;
                 Logger.Info($"[TripoSR] Part1 loaded: {timing.Part1LoadMs:F0}ms");
                 sw.Restart();
@@ -134,8 +133,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             float[] sceneCodes;
             {
                 var part2 = new PartModel();
-                await part2.LoadAsync(Part2FileName, _ep, _mobileOptimized, ct,
-                    batchInference: true);
+                await part2.LoadAsync(Part2FileName, _ep, _mobileOptimized, ct);
                 timing.Part2LoadMs = sw.ElapsedMilliseconds;
                 Logger.Info($"[TripoSR] Part2 loaded: {timing.Part2LoadMs:F0}ms");
                 sw.Restart();
@@ -189,11 +187,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private sealed class PartModel : OrtModelBase
         {
             internal async Task LoadAsync(
-                string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct,
-                bool batchInference = false)
+                string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct)
             {
-                await LoadSessionAsync(relativePath, ep, mobileOptimized, ct,
-                    batchInference: batchInference);
+                await LoadSessionAsync(relativePath, ep, mobileOptimized, ct);
             }
 
             internal void SetInput(DenseTensor<float> tensor)
