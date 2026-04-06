@@ -252,8 +252,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                         NnapiFlags.NNAPI_FLAG_USE_FP16);
                     break;
                 case ExecutionProvider.XNNPACK:
-                    options.AppendExecutionProvider("XNNPACK",
-                        new Dictionary<string, string>());
+                    ConfigureXnnpack(options, mobileOptimized);
                     break;
                 case ExecutionProvider.CoreML:
                     ConfigureCoreML(options, modelCacheDir);
@@ -308,6 +307,23 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
 
             return modelCacheDir;
+        }
+
+        /// <summary>
+        /// Configures XNNPACK with proper thread management per ORT docs.
+        /// XNNPACK has its own internal threadpool; ORT's intra-op pool must be
+        /// reduced to 1 and spinning disabled to prevent contention.
+        /// </summary>
+        private static void ConfigureXnnpack(SessionOptions options, bool mobileOptimized)
+        {
+            int threads = mobileOptimized ? 4 : Math.Max(1, SystemInfo.processorCount / 2);
+            options.AddSessionConfigEntry("session.intra_op.allow_spinning", "0");
+            options.AppendExecutionProvider("XNNPACK", new Dictionary<string, string>
+            {
+                { "intra_op_num_threads", threads.ToString() }
+            });
+            options.IntraOpNumThreads = 1;
+            Logger.Info($"[OrtModelBase] XNNPACK: {threads} threads, ORT intra=1, spinning=off");
         }
 
         /// <summary>
