@@ -36,7 +36,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private const string Part2FileName = "ObjectReconstruction/triposr_part2.onnx";
 
         private const string EncoderOutputName = "/Reshape_output_0";
-        private const string HiddenOutputName = "/backbone/transformer_blocks.7/Add_2_output_0";
 
         private readonly ExecutionProvider _ep;
         private readonly bool _mobileOptimized;
@@ -44,6 +43,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private OrtModelBase _part1;
         private OrtModelBase _part2;
         private bool _preloaded;
+        private string _hiddenOutputName;
         internal bool IsLoaded => _preloaded;
 
         /// <summary>Timing from the most recent RunAsync call (populated after completion).</summary>
@@ -62,6 +62,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             _part1 = new PartModel();
             await ((PartModel)_part1).LoadAsync(Part1FileName, _ep, _mobileOptimized, ct);
+            _hiddenOutputName = ((PartModel)_part1).DiscoverHiddenOutputName();
 
             _part2 = new PartModel();
             await ((PartModel)_part2).LoadAsync(Part2FileName, _ep, _mobileOptimized, ct);
@@ -87,11 +88,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             ct.ThrowIfCancellationRequested();
 
             var encoderStates = ExtractTensor(results1, EncoderOutputName);
-            var hiddenStates = ExtractTensor(results1, HiddenOutputName);
+            var hiddenStates = ExtractTensor(results1, _hiddenOutputName);
 
             var part2 = (PartModel)_part2;
             part2.SetInput(EncoderOutputName, encoderStates);
-            part2.SetInput(HiddenOutputName, hiddenStates);
+            part2.SetInput(_hiddenOutputName, hiddenStates);
             using var results2 = await part2.RunDisposablePublic();
             ct.ThrowIfCancellationRequested();
 
@@ -105,10 +106,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             DenseTensor<float> encoderStates;
             DenseTensor<float> hiddenStates;
+            string hiddenName;
 
             {
                 var part1 = new PartModel();
                 await part1.LoadAsync(Part1FileName, _ep, _mobileOptimized, ct);
+                hiddenName = part1.DiscoverHiddenOutputName();
                 timing.Part1LoadMs = sw.ElapsedMilliseconds;
                 Logger.Info($"[TripoSR] Part1 loaded: {timing.Part1LoadMs:F0}ms");
                 sw.Restart();
@@ -124,7 +127,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 sw.Restart();
 
                 encoderStates = CloneTensor(ExtractTensor(results1, EncoderOutputName));
-                hiddenStates = CloneTensor(ExtractTensor(results1, HiddenOutputName));
+                hiddenStates = CloneTensor(ExtractTensor(results1, hiddenName));
 
                 part1.Dispose();
             }
@@ -140,7 +143,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 await AsyncHelper.YieldFrame();
 
                 part2.SetInput(EncoderOutputName, encoderStates);
-                part2.SetInput(HiddenOutputName, hiddenStates);
+                part2.SetInput(hiddenName, hiddenStates);
                 using var results2 = await part2.RunDisposablePublic();
                 ct.ThrowIfCancellationRequested();
 
@@ -190,6 +193,19 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 string relativePath, ExecutionProvider ep, bool mobileOptimized, CancellationToken ct)
             {
                 await LoadSessionAsync(relativePath, ep, mobileOptimized, ct);
+            }
+
+            /// <summary>
+            /// Find the Add_2_output_0 tensor name from Part 1's outputs. This varies
+            /// by model quality: full 16L splits at blocks.7, pruned 13L/12L at blocks.5.
+            /// </summary>
+            internal string DiscoverHiddenOutputName()
+            {
+                foreach (string name in _session.OutputNames)
+                    if (name.Contains("Add_2_output_0"))
+                        return name;
+                throw new InvalidOperationException(
+                    "Part1 model has no Add_2_output_0 output — wrong model file?");
             }
 
             internal void SetInput(DenseTensor<float> tensor)
