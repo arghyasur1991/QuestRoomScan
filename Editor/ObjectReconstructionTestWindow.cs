@@ -788,7 +788,7 @@ namespace Genesis.RoomScan.Editor
 
                 SetStatus("Running reconstruction pipeline...", 0.3f);
 
-                var module = GetOrCreateModule();
+                var module = FindOrCreateModule();
                 SyncModuleConfig(module);
 
                 var mesh = await module.ReconstructAsync(cropped, _cts.Token);
