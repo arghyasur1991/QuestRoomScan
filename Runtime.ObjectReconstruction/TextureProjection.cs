@@ -63,8 +63,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     var n = normals[i];
 
                     // Canonical camera is along +X, looking toward -X.
-                    // Marching cubes uses swapped winding (e0,e2,e1) so RecalculateNormals
-                    // produces inward-pointing normals. Front-facing = normal.x < 0.
+                    // Front-facing vertices have normals pointing toward camera (n.x < 0
+                    // in mesh-local space after RecalculateNormals).
                     float facing = -n.x;
                     float blend = Mathf.Clamp01(facing * 3f);
 
@@ -72,11 +72,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     float py = (v.y - centerY) * invRange;
                     float pz = (v.z - centerZ) * invRange;
 
-                    // Map to image UV space: centered in the foreground region
-                    // Image V axis: in the preprocessed image, top=0, bottom=1 (UV convention)
-                    // But Unity UV v=0 is bottom, v=1 is top. The preprocessed image
-                    // has the object centered and right-side-up.
-                    float u = py * ForegroundRatio + 0.5f;
+                    // Map to image UV space: centered in the foreground region.
+                    // Negate Y→U because front-face view mirrors horizontally
+                    // relative to the back-face projection direction.
+                    float u = -py * ForegroundRatio + 0.5f;
                     float vCoord = pz * ForegroundRatio + 0.5f;
 
                     // Clamp UVs and zero-out blend for out-of-range
