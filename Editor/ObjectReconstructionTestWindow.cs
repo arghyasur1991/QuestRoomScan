@@ -47,6 +47,7 @@ namespace Genesis.RoomScan.Editor
 
         private Mesh _resultMesh;
         private GameObject _previewObj;
+        private GameObject _moduleObj;
 
         private string _timingLog = "";
         private Stopwatch _stepSw;
@@ -83,6 +84,7 @@ namespace Genesis.RoomScan.Editor
         {
             Cancel();
             CleanupPreview();
+            CleanupModule();
             AsyncHelper.EditModeYield = null;
         }
 
@@ -566,11 +568,20 @@ namespace Genesis.RoomScan.Editor
 
         private ObjectReconstructionModule FindOrCreateModule()
         {
-            var module = FindAnyObjectByType<ObjectReconstructionModule>();
-            if (module != null) return module;
+            if (_moduleObj != null)
+            {
+                var cached = _moduleObj.GetComponent<ObjectReconstructionModule>();
+                if (cached != null) return cached;
+            }
 
-            var go = new GameObject("[ReconstructionTest] Module") { hideFlags = HideFlags.DontSave };
-            module = go.AddComponent<ObjectReconstructionModule>();
+            var existing = FindAnyObjectByType<ObjectReconstructionModule>();
+            if (existing != null) return existing;
+
+            _moduleObj = new GameObject("[ReconstructionTest] Module")
+            {
+                hideFlags = HideFlags.HideAndDontSave
+            };
+            var module = _moduleObj.AddComponent<ObjectReconstructionModule>();
 
             module.triplaneGridSampleShader = _triplaneShader;
             module.densitySurfaceNetsShader = _surfaceNetsShader;
@@ -580,6 +591,13 @@ namespace Genesis.RoomScan.Editor
             module.projectedTextureShader = _projectedTextureShader;
 
             return module;
+        }
+
+        private void CleanupModule()
+        {
+            if (_moduleObj != null)
+                DestroyImmediate(_moduleObj);
+            _moduleObj = null;
         }
 
         private void SyncModuleConfig(ObjectReconstructionModule module)
