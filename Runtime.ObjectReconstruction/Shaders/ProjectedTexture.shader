@@ -63,11 +63,9 @@ Shader "Hidden/ObjectReconstruction/ProjectedTexture"
                 float lighting = lerp(0.3, 1.0, ndl);
 
                 // Canonical camera at +X, looking along -X.
-                // MC winding (e0,e2,e1) produces inward normals, so camera-facing
-                // surface normals point away from camera: normalOS.x < 0.
-                // Y axis is negated in mesh extraction, which flips the normal Y
-                // but does NOT affect the X-based facing check.
-                float canonicalFacing = saturate(-normalize(i.normalOS).x * 3.0);
+                // MC winding (e0,e2,e1) + Y negation: the camera-facing surface
+                // normals now have normalOS.x > 0 (Y negate flips n.x sign).
+                float canonicalFacing = saturate(normalize(i.normalOS).x * 3.0);
                 float effectiveBlend = i.blend * canonicalFacing;
 
                 float3 texColor = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, i.projUV).rgb;
@@ -150,7 +148,7 @@ Shader "Hidden/ObjectReconstruction/ProjectedTexture"
                 float ndl = saturate(dot(normalize(i.normalWS), normalize(float3(0.5, 1, 0.3))));
                 float lighting = lerp(0.3, 1.0, ndl);
 
-                float canonicalFacing = saturate(-normalize(i.normalOS).x * 3.0);
+                float canonicalFacing = saturate(normalize(i.normalOS).x * 3.0);
                 float effectiveBlend = i.blend * canonicalFacing;
 
                 float3 texColor = tex2D(_MainTex, i.projUV).rgb;
