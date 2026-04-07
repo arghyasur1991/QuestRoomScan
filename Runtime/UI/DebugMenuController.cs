@@ -415,13 +415,23 @@ namespace Genesis.RoomScan.UI
             return null;
         }
 
-        private void SpawnReconstructedMesh(Mesh mesh)
+        // TripoSR canonical → Unity axis swap: TripoSR(x,y,z) → Unity(y, z, -x)
+        // This rotation converts the right-handed (X-back, Y-right, Z-up) canonical
+        // space to Unity's left-handed (X-right, Y-up, Z-forward) convention.
+        private static readonly Quaternion CanonicalToUnity =
+            Quaternion.Euler(0, 0, 90) * Quaternion.Euler(90, 0, 0);
+
+        private void SpawnReconstructedMesh(Mesh mesh, SceneObject sceneObject = null)
         {
             ClearReconstructedMesh();
 
             var module = FindReconstructionModule();
-            var mat = module?.CreateMaterial();
-            Debug.Log($"[DebugMenu] SpawnReconstructedMesh: verts={mesh.vertexCount}, mat={mat != null}");
+            var preprocessed = module?.LastPreprocessedImage;
+            var mat = preprocessed != null
+                ? module.CreateMaterial(preprocessed)
+                : module?.CreateMaterial();
+            Debug.Log($"[DebugMenu] SpawnReconstructedMesh: verts={mesh.vertexCount}, mat={mat != null}, " +
+                $"hasProjectedTex={preprocessed != null}");
 
             _spawnedReconMesh = new GameObject("ReconstructedObject");
             var mf = _spawnedReconMesh.AddComponent<MeshFilter>();
@@ -429,26 +439,48 @@ namespace Genesis.RoomScan.UI
             mf.sharedMesh = mesh;
             mr.sharedMaterial = mat;
 
-            var anchorMgr = RoomAnchorManager.Instance;
-            if (anchorMgr != null && anchorMgr.IsRoomLoaded)
+            if (sceneObject != null)
             {
-                var roomMatrix = anchorMgr.GetRoomLocalToWorldForPersistence();
-                var floorCenter = (Vector3)roomMatrix.GetColumn(3);
-                floorCenter.y += 1.0f;
-                _spawnedReconMesh.transform.position = floorCenter;
-                Debug.Log($"[DebugMenu] Spawned at room floor center: {floorCenter}");
+                _spawnedReconMesh.transform.position = sceneObject.position;
+
+                // Combine canonical-to-Unity axis swap with the world-facing rotation.
+                // sceneObject.rotation orients the Unity +Z forward toward camera.
+                // CanonicalToUnity converts TripoSR axes to Unity axes.
+                _spawnedReconMesh.transform.rotation = sceneObject.rotation * CanonicalToUnity;
+
+                // Scale: sceneObject.size is the real-world bbox extent in meters.
+                // Canonical mesh spans [-0.5, 0.5] = 1.0 units, but foreground_ratio=0.85
+                // means the object occupies ~85% of the canonical cube.
+                float maxExtent = Mathf.Max(sceneObject.size.x, sceneObject.size.y);
+                float scaleFactor = maxExtent / 0.85f;
+                _spawnedReconMesh.transform.localScale = Vector3.one * scaleFactor;
+
+                Debug.Log($"[DebugMenu] Spawned at SceneObject pos={sceneObject.position}, " +
+                    $"scale={scaleFactor:F3}, label={sceneObject.label}");
             }
             else
             {
-                var cam = Camera.main;
-                var spawnPos = cam != null
-                    ? cam.transform.position + cam.transform.forward * 1.5f
-                    : Vector3.forward * 1.5f;
-                _spawnedReconMesh.transform.position = spawnPos;
-                Debug.Log($"[DebugMenu] Spawned at camera fallback: {spawnPos}");
-            }
+                var anchorMgr = RoomAnchorManager.Instance;
+                if (anchorMgr != null && anchorMgr.IsRoomLoaded)
+                {
+                    var roomMatrix = anchorMgr.GetRoomLocalToWorldForPersistence();
+                    var floorCenter = (Vector3)roomMatrix.GetColumn(3);
+                    floorCenter.y += 1.0f;
+                    _spawnedReconMesh.transform.position = floorCenter;
+                    Debug.Log($"[DebugMenu] Spawned at room floor center: {floorCenter}");
+                }
+                else
+                {
+                    var cam = Camera.main;
+                    var spawnPos = cam != null
+                        ? cam.transform.position + cam.transform.forward * 1.5f
+                        : Vector3.forward * 1.5f;
+                    _spawnedReconMesh.transform.position = spawnPos;
+                    Debug.Log($"[DebugMenu] Spawned at camera fallback: {spawnPos}");
+                }
 
-            _spawnedReconMesh.transform.localScale = Vector3.one * 0.5f;
+                _spawnedReconMesh.transform.localScale = Vector3.one * 0.5f;
+            }
         }
 
         private void ClearReconstructedMesh()

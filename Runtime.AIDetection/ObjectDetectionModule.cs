@@ -58,6 +58,12 @@ namespace Genesis.RoomScan.AIDetection
         [SerializeField] private float mergeDistanceM = 0.8f;
         [Tooltip("How fast existing positions converge to new observations (0=ignore new, 1=snap)")]
         [SerializeField, Range(0f, 1f)] private float positionSmoothingAlpha = 0.3f;
+        [Tooltip("Max re-observations per object before stopping updates. 0 = unlimited. " +
+            "Once reached, further sightings of this object are ignored entirely.")]
+        [SerializeField] private int maxObservationsPerObject = 0;
+        [Tooltip("Single-capture mode: each object gets exactly one keyframe and no further " +
+            "position updates. Optimal for single-view reconstruction workflows.")]
+        [SerializeField] private bool singleCaptureMode = false;
 
         private IDetectionModel _model;
         private RoomScanner _scanner;
@@ -373,7 +379,8 @@ namespace Genesis.RoomScan.AIDetection
                     var existing = FindExisting(registry, d.label, worldPos);
                     if (existing != null)
                     {
-                        UpdateExisting(registry, existing, worldPos, d);
+                        if (!ShouldSkipUpdate(existing))
+                            UpdateExisting(registry, existing, worldPos, d);
                         continue;
                     }
 
@@ -388,7 +395,7 @@ namespace Genesis.RoomScan.AIDetection
                         surfaceType = SurfaceType.Unknown,
                         confidence = d.confidence,
                         position = worldPos,
-                        rotation = Quaternion.identity,
+                        rotation = ComputeObjectOrientation(worldPos, cam.pose.position),
                         size = worldScale,
                         classId = d.classId,
                         imageBoundingBox = d.boundingBox
@@ -542,6 +549,14 @@ namespace Genesis.RoomScan.AIDetection
             return null;
         }
 
+        private bool ShouldSkipUpdate(SceneObject existing)
+        {
+            if (singleCaptureMode) return true;
+            if (maxObservationsPerObject <= 0) return false;
+            _observationCounts.TryGetValue(existing.id, out int count);
+            return count >= maxObservationsPerObject;
+        }
+
         private void UpdateExisting(SceneObjectRegistry registry, SceneObject existing,
             Vector3 newPos, Detection d)
         {
@@ -572,6 +587,23 @@ namespace Genesis.RoomScan.AIDetection
                 Mathf.Max(widthM, 0.05f),
                 Mathf.Max(heightM, 0.05f),
                 Mathf.Max(depthM, 0.05f));
+        }
+
+        /// <summary>
+        /// Computes the object orientation so its "front" faces the detecting camera.
+        /// TripoSR reconstructs objects with the front facing +X (camera direction).
+        /// After canonical-to-Unity axis swap, the front becomes +Z (Unity forward).
+        /// This rotation aligns that forward with the camera-to-object viewing direction.
+        /// </summary>
+        private static Quaternion ComputeObjectOrientation(Vector3 objectPos, Vector3 cameraPos)
+        {
+            Vector3 viewDir = (objectPos - cameraPos).normalized;
+            if (viewDir.sqrMagnitude < 0.001f)
+                return Quaternion.identity;
+
+            // Object forward should face back toward the camera (the "front" the camera saw)
+            Vector3 objectForward = -viewDir;
+            return Quaternion.LookRotation(objectForward, Vector3.up);
         }
 
         // ── Detection keyframe capture ──────────────────────────────

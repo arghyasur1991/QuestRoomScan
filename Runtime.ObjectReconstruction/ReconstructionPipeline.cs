@@ -26,6 +26,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private readonly bool _mobileOptimized;
         private readonly int _densitySmoothPasses;
         private readonly MeshExtractionBackend _meshBackend;
+        private readonly int _laplacianSmoothIterations;
+        private readonly float _laplacianSmoothLambda;
 
         private TriplaneGridSampler _sampler;
         private IMeshExtractor _extractor;
@@ -64,7 +66,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
             ExecutionProvider executionProvider = ExecutionProvider.CPU,
             bool mobileOptimized = false,
             int densitySmoothPasses = 1,
-            MeshExtractionBackend meshBackend = MeshExtractionBackend.GPU)
+            MeshExtractionBackend meshBackend = MeshExtractionBackend.GPU,
+            int laplacianSmoothIterations = 0,
+            float laplacianSmoothLambda = 0.5f)
         {
             _gridResolution = gridResolution;
             _densityThreshold = densityThreshold;
@@ -78,6 +82,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _mobileOptimized = mobileOptimized;
             _densitySmoothPasses = densitySmoothPasses;
             _meshBackend = meshBackend;
+            _laplacianSmoothIterations = laplacianSmoothIterations;
+            _laplacianSmoothLambda = laplacianSmoothLambda;
 
             _postKernelExtractRaw = _postprocessShader.FindKernel("ExtractRawDensity");
             _postKernelSmoothRaw = _postprocessShader.FindKernel("SmoothRaw");
@@ -186,28 +192,55 @@ namespace Genesis.RoomScan.ObjectReconstruction
                                 readable.format == TextureFormat.RGBAHalf ||
                                 readable.format == TextureFormat.BGRA32;
 
+                float[] result;
                 if (hasAlpha && HasMeaningfulAlpha(readable))
-                    return await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f, outputSize);
-
-                if (_rembg != null)
+                    result = await ImagePreprocessor.CompositeFromRGBAAsync(readable, 0.85f, outputSize);
+                else if (_rembg != null)
                 {
                     var mask = await _rembg.InferAsync(readable, ct);
-                    return await ImagePreprocessor.ApplyMaskAndCompositeAsync(
+                    result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(
                         readable, mask, 320, 320, 0.85f, outputSize);
                 }
+                else
+                {
+                    using var rembg = new OrtRembgModel();
+                    await rembg.LoadAsync(_executionProvider, _mobileOptimized, ct);
+                    var maskLocal = await rembg.InferAsync(readable, ct);
+                    await AsyncHelper.YieldFrame();
+                    result = await ImagePreprocessor.ApplyMaskAndCompositeAsync(
+                        readable, maskLocal, 320, 320, 0.85f, outputSize);
+                }
 
-                using var rembg = new OrtRembgModel();
-                await rembg.LoadAsync(_executionProvider, _mobileOptimized, ct);
-                var maskLocal = await rembg.InferAsync(readable, ct);
-                await AsyncHelper.YieldFrame();
-                return await ImagePreprocessor.ApplyMaskAndCompositeAsync(
-                    readable, maskLocal, 320, 320, 0.85f, outputSize);
+                CachePreprocessedAsTexture(result, outputSize);
+                return result;
             }
             finally
             {
                 if (readable != image)
                     SafeDestroy(readable);
             }
+        }
+
+        private void CachePreprocessedAsTexture(float[] nchw, int size)
+        {
+            SafeDestroy(LastPreprocessedImage);
+            var tex = new Texture2D(size, size, TextureFormat.RGB24, false);
+            var pixels = new Color32[size * size];
+            for (int py = 0; py < size; py++)
+            for (int px = 0; px < size; px++)
+            {
+                // NCHW: C=3, flip Y for Unity texture (bottom-up)
+                int ty = size - 1 - py;
+                float r = Mathf.Clamp01(nchw[0 * size * size + py * size + px]);
+                float g = Mathf.Clamp01(nchw[1 * size * size + py * size + px]);
+                float b = Mathf.Clamp01(nchw[2 * size * size + py * size + px]);
+                pixels[ty * size + px] = new Color32(
+                    (byte)(r * 255), (byte)(g * 255), (byte)(b * 255), 255);
+            }
+            tex.SetPixels32(pixels);
+            tex.Apply();
+            tex.wrapMode = TextureWrapMode.Clamp;
+            LastPreprocessedImage = tex;
         }
 
         private static bool HasMeaningfulAlpha(Texture2D tex)
@@ -240,6 +273,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
         internal ForwardTiming LastForwardTiming { get; private set; }
 
         /// <summary>
+        /// The preprocessed source image from the last run, as a Texture2D.
+        /// Available after PreprocessAsync and before ReleaseTransientData.
+        /// Used for texture projection onto the mesh.
+        /// </summary>
+        internal Texture2D LastPreprocessedImage { get; private set; }
+
+        /// <summary>
         /// Release large cached data from the previous run to reduce memory pressure
         /// before starting a new reconstruction. Keeps the pipeline alive for reuse.
         /// </summary>
@@ -247,6 +287,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         {
             _sceneCodes = null;
             _readbackBuffer = null;
+            SafeDestroy(LastPreprocessedImage);
+            LastPreprocessedImage = null;
             System.GC.Collect();
         }
 
@@ -303,7 +345,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             try
             {
-                var cpuExtractor = new CpuMeshExtractor(_gridResolution, _densityThreshold);
+                var cpuExtractor = new CpuMeshExtractor(
+                    _gridResolution, _densityThreshold,
+                    _laplacianSmoothIterations, _laplacianSmoothLambda);
                 return await cpuExtractor.ExtractAsync(
                     _sceneCodes, _sceneNumPlanes, _sceneChannels, _scenePlaneH, _scenePlaneW,
                     decoder, ct);
@@ -370,6 +414,17 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 var mesh = await _extractor.ExtractAsync(densityBuf);
                 await AsyncHelper.YieldFrame();
                 ct.ThrowIfCancellationRequested();
+
+                if (_laplacianSmoothIterations > 0)
+                {
+                    var sv = mesh.vertices;
+                    var st = mesh.triangles;
+                    await Task.Run(() =>
+                        MeshPostProcess.LaplacianSmooth(sv, st, _laplacianSmoothIterations, _laplacianSmoothLambda));
+                    mesh.SetVertices(sv);
+                    mesh.RecalculateNormals();
+                    await AsyncHelper.YieldFrame();
+                }
 
                 var meshVerts = mesh.vertices;
                 int numVerts = meshVerts.Length;
@@ -567,6 +622,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _extractor?.Dispose();
             _featureBuffer?.Release();
             _uploadBuffer?.Release();
+            SafeDestroy(LastPreprocessedImage);
             _rembg = null;
             _reconstruction = null;
             _decoder = null;
@@ -574,6 +630,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             _extractor = null;
             _featureBuffer = null;
             _uploadBuffer = null;
+            LastPreprocessedImage = null;
         }
     }
 }

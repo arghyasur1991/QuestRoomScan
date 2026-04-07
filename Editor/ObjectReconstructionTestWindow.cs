@@ -30,6 +30,8 @@ namespace Genesis.RoomScan.Editor
         [SerializeField] private ExecutionProvider _executionProvider = ExecutionProvider.CPU;
         [SerializeField] private int _densitySmoothPasses = 0;
         [SerializeField] private MeshExtractionBackend _meshExtractionBackend = MeshExtractionBackend.CPU;
+        [SerializeField] private int _laplacianSmoothIterations = 0;
+        [SerializeField] private float _laplacianSmoothLambda = 0.5f;
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
@@ -47,6 +49,14 @@ namespace Genesis.RoomScan.Editor
 
         private string _timingLog = "";
         private Stopwatch _stepSw;
+
+        // Keyframe-based reconstruction
+        private string _keyframeDir = "";
+        private System.Collections.Generic.List<DetectionEntry> _detections;
+        private System.Collections.Generic.Dictionary<int, KeyframeEntry> _frames;
+        private int _selectedDetectionIdx = -1;
+        private Texture2D _croppedPreview;
+        private Vector2 _keyframeScroll;
 
         private const string SHADER_DIR = "Packages/com.genesis.roomscan/Runtime.ObjectReconstruction/Shaders/";
 
@@ -109,6 +119,12 @@ namespace Genesis.RoomScan.Editor
             _densitySmoothPasses = EditorGUILayout.IntSlider(
                 "Density Smooth Passes", _densitySmoothPasses, 0, 3);
 
+            _laplacianSmoothIterations = EditorGUILayout.IntSlider(
+                "Laplacian Smooth Iters", _laplacianSmoothIterations, 0, 5);
+            if (_laplacianSmoothIterations > 0)
+                _laplacianSmoothLambda = EditorGUILayout.Slider(
+                    "Laplacian Lambda", _laplacianSmoothLambda, 0.1f, 0.9f);
+
             _meshExtractionBackend = (MeshExtractionBackend)EditorGUILayout.EnumPopup(
                 "Mesh Extraction", _meshExtractionBackend);
 
@@ -166,6 +182,66 @@ namespace Genesis.RoomScan.Editor
 
                 if (GUILayout.Button("Clear Preview"))
                     CleanupPreview();
+            }
+
+            // ── Keyframe-based reconstruction ──
+            EditorGUILayout.Space(12);
+            EditorGUILayout.LabelField("Reconstruct from Detection Keyframe", EditorStyles.boldLabel);
+            EditorGUILayout.Space(4);
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                _keyframeDir = EditorGUILayout.TextField("Keyframe Directory", _keyframeDir);
+                if (GUILayout.Button("Browse", GUILayout.Width(60)))
+                {
+                    string dir = EditorUtility.OpenFolderPanel("Select Keyframe Directory", _keyframeDir, "");
+                    if (!string.IsNullOrEmpty(dir)) _keyframeDir = dir;
+                }
+            }
+
+            using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(_keyframeDir) || _running))
+            {
+                if (GUILayout.Button("Load Detections"))
+                    LoadDetections();
+            }
+
+            if (_detections != null && _detections.Count > 0)
+            {
+                EditorGUILayout.Space(4);
+                EditorGUILayout.LabelField($"{_detections.Count} detection(s) found:", EditorStyles.miniLabel);
+
+                _keyframeScroll = EditorGUILayout.BeginScrollView(_keyframeScroll, GUILayout.MaxHeight(150));
+                for (int i = 0; i < _detections.Count; i++)
+                {
+                    var d = _detections[i];
+                    bool selected = i == _selectedDetectionIdx;
+                    string label = $"[{i}] {d.label} (conf={d.confidence:F2}, bbox={d.bbox.width:F0}x{d.bbox.height:F0})";
+                    if (GUILayout.Toggle(selected, label, EditorStyles.radioButton) && !selected)
+                    {
+                        _selectedDetectionIdx = i;
+                        LoadCroppedPreview(i);
+                    }
+                }
+                EditorGUILayout.EndScrollView();
+
+                if (_croppedPreview != null)
+                {
+                    EditorGUILayout.Space(4);
+                    EditorGUILayout.LabelField("Cropped Preview:", EditorStyles.miniLabel);
+                    var previewRect = GUILayoutUtility.GetRect(128, 128, GUILayout.ExpandWidth(false));
+                    EditorGUI.DrawPreviewTexture(previewRect, _croppedPreview, null, ScaleMode.ScaleToFit);
+                }
+
+                EditorGUILayout.Space(4);
+                using (new EditorGUI.DisabledScope(_selectedDetectionIdx < 0 || _running))
+                {
+                    if (GUILayout.Button("Reconstruct Selected Detection", GUILayout.Height(28)))
+                        RunFromKeyframe();
+                }
+            }
+            else if (_detections != null)
+            {
+                EditorGUILayout.HelpBox("No detections found in the specified directory.", MessageType.Warning);
             }
         }
 
@@ -499,6 +575,8 @@ namespace Genesis.RoomScan.Editor
             so.FindProperty("meshAlgorithm").intValue = (int)_meshAlgorithm;
             so.FindProperty("executionProvider").intValue = (int)_executionProvider;
             so.FindProperty("densitySmoothPasses").intValue = _densitySmoothPasses;
+            so.FindProperty("laplacianSmoothIterations").intValue = _laplacianSmoothIterations;
+            so.FindProperty("laplacianSmoothLambda").floatValue = _laplacianSmoothLambda;
             so.FindProperty("meshExtractionBackend").intValue = (int)_meshExtractionBackend;
 
             var mobileProp = so.FindProperty("mobileOptimized");
@@ -527,7 +605,9 @@ namespace Genesis.RoomScan.Editor
                 preloadModels: true,
                 executionProvider: _executionProvider,
                 densitySmoothPasses: _densitySmoothPasses,
-                meshBackend: _meshExtractionBackend);
+                meshBackend: _meshExtractionBackend,
+                laplacianSmoothIterations: _laplacianSmoothIterations,
+                laplacianSmoothLambda: _laplacianSmoothLambda);
         }
 
         private bool Validate()
@@ -654,6 +734,94 @@ namespace Genesis.RoomScan.Editor
             DestroyImmediate(tex);
             Debug.Log($"[ReconstructionTest] Saved mask PNG: {path} ({w}x{h})");
         }
+
+        // ── Keyframe-based reconstruction ──
+
+        private void LoadDetections()
+        {
+            _detections = KeyframeLoader.LoadDetections(_keyframeDir);
+            _frames = KeyframeLoader.LoadFrames(_keyframeDir);
+            _selectedDetectionIdx = -1;
+            if (_croppedPreview != null) DestroyImmediate(_croppedPreview);
+            _croppedPreview = null;
+
+            if (_detections.Count > 0)
+                SetStatus($"Loaded {_detections.Count} detections, {_frames.Count} frames", 0);
+            else
+                SetStatus("No detections found in directory", 0);
+        }
+
+        private async void LoadCroppedPreview(int idx)
+        {
+            if (_detections == null || idx < 0 || idx >= _detections.Count) return;
+            if (_croppedPreview != null) DestroyImmediate(_croppedPreview);
+
+            _croppedPreview = await KeyframeLoader.LoadAndCropAsync(
+                _keyframeDir, _detections[idx], denoise: false);
+            Repaint();
+        }
+
+        private async void RunFromKeyframe()
+        {
+            if (_detections == null || _selectedDetectionIdx < 0 || _running) return;
+            var detection = _detections[_selectedDetectionIdx];
+
+            _running = true;
+            _cts = new CancellationTokenSource();
+            _timingLog = "";
+            var totalSw = Stopwatch.StartNew();
+
+            try
+            {
+                SetStatus("Loading and cropping keyframe...", 0.1f);
+                var cropped = await KeyframeLoader.LoadAndCropAsync(
+                    _keyframeDir, detection, denoise: true);
+
+                if (cropped == null)
+                {
+                    SetStatus("Failed to load/crop keyframe image", 0);
+                    return;
+                }
+
+                AppendTiming($"Crop+denoise: {totalSw.ElapsedMilliseconds}ms " +
+                    $"({cropped.width}x{cropped.height})");
+
+                SetStatus("Running reconstruction pipeline...", 0.3f);
+
+                var module = GetOrCreateModule();
+                SyncModuleConfig(module);
+
+                var mesh = await module.ReconstructAsync(cropped, _cts.Token);
+                DestroyImmediate(cropped);
+
+                totalSw.Stop();
+                AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds}ms ---");
+
+                if (mesh != null)
+                {
+                    ShowMeshPreview(mesh);
+                    SetStatus($"Done! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris " +
+                        $"(label={detection.label})", 1f);
+                }
+                else
+                {
+                    SetStatus("Reconstruction returned null", 0);
+                }
+            }
+            catch (OperationCanceledException) { SetStatus("Cancelled", 0); }
+            catch (Exception e)
+            {
+                SetStatus($"Error: {e.Message}", 0);
+                Debug.LogException(e);
+            }
+            finally
+            {
+                _running = false;
+                _cts?.Dispose();
+                _cts = null;
+            }
+        }
     }
 }
+#endif
 #endif

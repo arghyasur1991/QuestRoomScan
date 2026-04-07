@@ -19,11 +19,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
     {
         private readonly int _resolution;
         private readonly float _threshold;
+        private readonly int _laplacianIterations;
+        private readonly float _laplacianLambda;
 
-        internal CpuMeshExtractor(int resolution, float threshold)
+        internal CpuMeshExtractor(int resolution, float threshold,
+            int laplacianIterations = 0, float laplacianLambda = 0.5f)
         {
             _resolution = resolution;
             _threshold = threshold;
+            _laplacianIterations = laplacianIterations;
+            _laplacianLambda = laplacianLambda;
         }
 
         internal async Task<Mesh> ExtractAsync(
@@ -108,6 +113,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             if (verts.Length == 0)
                 return new Mesh();
+
+            if (_laplacianIterations > 0)
+            {
+                await Task.Run(() =>
+                    MeshPostProcess.LaplacianSmooth(verts, tris, _laplacianIterations, _laplacianLambda));
+                Logger.Info($"[CpuMeshExtractor] Laplacian smooth: {_laplacianIterations} iterations, " +
+                    $"lambda={_laplacianLambda:F2}, {verts.Length} verts");
+                await AsyncHelper.YieldFrame();
+            }
 
             // Vertex colors
             var colors = new Color[verts.Length];

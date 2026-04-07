@@ -15,6 +15,13 @@ namespace Genesis.RoomScan
         bool IsRunning { get; }
         Texture2D[] TestImages { get; }
 
+        /// <summary>
+        /// The preprocessed source image from the most recent reconstruction run.
+        /// Available after ReconstructAsync, before the next call. Used for texture projection.
+        /// May be null if the pipeline hasn't run or the data was released.
+        /// </summary>
+        Texture2D LastPreprocessedImage { get; }
+
         Task LoadModelsAsync(CancellationToken ct = default);
 
         /// <summary>
@@ -24,9 +31,15 @@ namespace Genesis.RoomScan
         Task<Mesh> ReconstructAsync(Texture2D image, CancellationToken ct = default);
 
         /// <summary>
-        /// Creates a material suitable for rendering the reconstructed mesh (vertex colors).
+        /// Creates a material suitable for rendering the reconstructed mesh (vertex colors only).
         /// </summary>
         Material CreateMaterial();
+
+        /// <summary>
+        /// Creates a material for the reconstructed mesh. If a projected texture is provided,
+        /// uses a shader that blends the projected texture with vertex colors.
+        /// </summary>
+        Material CreateMaterial(Texture2D projectedTexture);
 
         /// <summary>
         /// Runs rembg only on a test image and returns the mask as a Texture2D for preview.

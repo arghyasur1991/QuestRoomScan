@@ -20,6 +20,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         [SerializeField] internal ComputeShader densityMarchingCubesShader;
         [SerializeField] internal ComputeShader decoderPostprocessShader;
         [SerializeField] internal Shader vertexColorShader;
+        [SerializeField] internal Shader projectedTextureShader;
 
         [Header("Test Images")]
         [SerializeField] private Texture2D[] testImages = Array.Empty<Texture2D>();
@@ -42,6 +43,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
             "Workaround for ORT < 1.24 INT8 quantization noise. " +
             "0 = disabled (default), 1+ = smoothing passes. Not needed with ORT >= 1.24.")]
         private int densitySmoothPasses = 0;
+
+        [SerializeField, Tooltip("Laplacian smoothing iterations on the mesh after extraction. " +
+            "Reduces high-frequency noise from marching cubes. 0 = disabled, 1-3 recommended.")]
+        private int laplacianSmoothIterations = 0;
+
+        [SerializeField, Range(0.1f, 0.9f), Tooltip("Laplacian smoothing strength per iteration. " +
+            "Higher values smooth more aggressively. 0.5 is standard.")]
+        private float laplacianSmoothLambda = 0.5f;
 
         [SerializeField, Tooltip("GPU: uses compute shaders for triplane sampling, postprocessing, " +
             "and marching cubes (fast, but uses GPU and causes FPS drops). " +
@@ -114,9 +123,18 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 ReportStatus("Extracting mesh...");
                 var mesh = await _pipeline.ExtractMeshAsync(_cts.Token);
                 float meshMs = sw.ElapsedMilliseconds;
+                sw.Restart();
+
+                // UV projection: compute per-vertex UVs from canonical camera view
+                if (mesh != null && mesh.vertexCount > 0)
+                {
+                    ReportStatus("Projecting texture UVs...");
+                    await TextureProjection.ApplyProjectionAsync(mesh);
+                }
+                float uvMs = sw.ElapsedMilliseconds;
                 sw.Stop();
 
-                float totalMs = loadMs + rembgMs + forwardMs + meshMs;
+                float totalMs = loadMs + rembgMs + forwardMs + meshMs + uvMs;
                 string timing = $"load={loadMs / 1000f:F1}s rembg={rembgMs / 1000f:F1}s " +
                     $"fwd={forwardMs / 1000f:F1}s mesh={meshMs / 1000f:F1}s | total={totalMs / 1000f:F1}s";
                 var fwd = _pipeline.LastForwardTiming;
@@ -225,11 +243,35 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 executionProvider: executionProvider,
                 mobileOptimized: mobileOptimized,
                 densitySmoothPasses: densitySmoothPasses,
-                meshBackend: meshExtractionBackend);
+                meshBackend: meshExtractionBackend,
+                laplacianSmoothIterations: laplacianSmoothIterations,
+                laplacianSmoothLambda: laplacianSmoothLambda);
         }
+
+        /// <summary>
+        /// The preprocessed source image from the last reconstruction, for texture projection.
+        /// </summary>
+        public Texture2D LastPreprocessedImage => _pipeline?.LastPreprocessedImage;
 
         public Material CreateMaterial()
         {
+            return CreateMaterial(null);
+        }
+
+        /// <summary>
+        /// Creates a material for the reconstructed mesh. If a projected texture is provided,
+        /// uses the ProjectedTexture shader that blends texture with vertex colors.
+        /// Otherwise uses the vertex color shader.
+        /// </summary>
+        public Material CreateMaterial(Texture2D projectedTexture)
+        {
+            if (projectedTexture != null && projectedTextureShader != null)
+            {
+                var mat = new Material(projectedTextureShader);
+                mat.SetTexture("_MainTex", projectedTexture);
+                return mat;
+            }
+
             if (vertexColorShader != null)
                 return new Material(vertexColorShader);
 
