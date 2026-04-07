@@ -64,8 +64,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     float py = (v.y - centerY) * invRange;
                     float pz = (v.z - centerZ) * invRange;
 
-                    // Map to image UV space: centered in the foreground region
-                    float u = py * ForegroundRatio + 0.5f;
+                    // Map to image UV space: negate U to compensate for mesh Y negation
+                    float u = -py * ForegroundRatio + 0.5f;
                     float vCoord = pz * ForegroundRatio + 0.5f;
 
                     // Blend = 1 if UV is in valid range, 0 otherwise.
