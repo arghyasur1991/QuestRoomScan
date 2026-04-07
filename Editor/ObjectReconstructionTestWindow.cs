@@ -339,9 +339,11 @@ namespace Genesis.RoomScan.Editor
 
                 if (mesh != null)
                 {
-                    ShowMeshPreview(mesh, module.CreateMaterial());
+                    var projTex = module.LastPreprocessedImage;
+                    ShowMeshPreview(mesh, module.CreateMaterial(projTex));
                     SetStatus($"Done! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris", 1f);
-                    Debug.Log($"[ReconstructionTest] Pipeline complete in {totalSw.ElapsedMilliseconds}ms");
+                    Debug.Log($"[ReconstructionTest] Pipeline complete in {totalSw.ElapsedMilliseconds}ms, " +
+                        $"projectedTex={projTex != null}");
                 }
                 else
                 {
@@ -803,7 +805,8 @@ namespace Genesis.RoomScan.Editor
 
                 if (mesh != null)
                 {
-                    ShowMeshPreview(mesh);
+                    var projTex = module.LastPreprocessedImage;
+                    ShowMeshPreview(mesh, module.CreateMaterial(projTex));
                     SetStatus($"Done! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris " +
                         $"(label={detection.label})", 1f);
                 }
