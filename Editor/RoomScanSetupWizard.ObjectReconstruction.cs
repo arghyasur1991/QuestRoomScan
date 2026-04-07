@@ -208,36 +208,20 @@ namespace Genesis.RoomScan.Editor
         {
             if (_objectReconstruction == null) return;
 
-            if (!_reconTriplaneShaderAssigned)
-            {
-                StatusRow("Reconstruction triplane grid sample shader", false);
-                needsFix = true;
-            }
-            if (!_reconSurfaceNetsShaderAssigned)
-            {
-                StatusRow("Reconstruction density surface nets shader", false);
-                needsFix = true;
-            }
-            if (!_reconMarchingCubesShaderAssigned)
-            {
-                StatusRow("Reconstruction marching cubes shader", false);
-                needsFix = true;
-            }
-            if (!_reconPostprocessShaderAssigned)
-            {
-                StatusRow("Reconstruction decoder postprocess shader", false);
-                needsFix = true;
-            }
-            if (!_reconVertexColorShaderAssigned)
-            {
-                StatusRow("Reconstruction vertex color shader", false);
-                needsFix = true;
-            }
-            if (!_reconTestImagesAssigned)
-            {
-                StatusRow("Reconstruction test images", false);
-                needsFix = true;
-            }
+            StatusRow("Recon: triplane grid sample shader", _reconTriplaneShaderAssigned);
+            needsFix |= !_reconTriplaneShaderAssigned;
+            StatusRow("Recon: surface nets shader", _reconSurfaceNetsShaderAssigned);
+            needsFix |= !_reconSurfaceNetsShaderAssigned;
+            StatusRow("Recon: marching cubes shader", _reconMarchingCubesShaderAssigned);
+            needsFix |= !_reconMarchingCubesShaderAssigned;
+            StatusRow("Recon: decoder postprocess shader", _reconPostprocessShaderAssigned);
+            needsFix |= !_reconPostprocessShaderAssigned;
+            StatusRow("Recon: vertex color shader", _reconVertexColorShaderAssigned);
+            needsFix |= !_reconVertexColorShaderAssigned;
+            StatusRow("Recon: projected texture shader", _reconProjectedTextureShaderAssigned);
+            needsFix |= !_reconProjectedTextureShaderAssigned;
+            StatusRow("Recon: test images", _reconTestImagesAssigned);
+            needsFix |= !_reconTestImagesAssigned;
         }
 
         partial void WireObjectReconstructionComponents()
