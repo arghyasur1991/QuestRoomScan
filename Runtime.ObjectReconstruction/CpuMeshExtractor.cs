@@ -114,6 +114,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (verts.Length == 0)
                 return new Mesh();
 
+            // Mirror Y axis: empirically required to match Python TripoSR mesh orientation.
+            // Without this, the mesh appears horizontally flipped (visible on asymmetric objects like clocks).
+            for (int i = 0; i < verts.Length; i++)
+                verts[i] = new Vector3(verts[i].x, -verts[i].y, verts[i].z);
+
             if (_laplacianIterations > 0)
             {
                 await Task.Run(() =>
