@@ -27,9 +27,9 @@ namespace Genesis.RoomScan.Editor
         [SerializeField] private Texture2D _testImage;
         [SerializeField] private int _gridResolution = 128;
         [SerializeField] private MeshAlgorithm _meshAlgorithm = MeshAlgorithm.MarchingCubes;
-        [SerializeField] private ExecutionProvider _executionProvider = ExecutionProvider.CoreML;
+        [SerializeField] private ExecutionProvider _executionProvider = ExecutionProvider.CPU;
         [SerializeField] private int _densitySmoothPasses = 0;
-        [SerializeField] private MeshExtractionBackend _meshExtractionBackend = MeshExtractionBackend.GPU;
+        [SerializeField] private MeshExtractionBackend _meshExtractionBackend = MeshExtractionBackend.CPU;
 
         private ComputeShader _triplaneShader;
         private ComputeShader _surfaceNetsShader;
