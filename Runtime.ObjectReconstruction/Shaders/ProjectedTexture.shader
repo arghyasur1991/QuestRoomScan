@@ -38,8 +38,9 @@ Shader "Hidden/ObjectReconstruction/ProjectedTexture"
                 float4 positionCS : SV_POSITION;
                 float3 vertColor  : TEXCOORD0;
                 float3 normalWS   : TEXCOORD1;
-                float2 projUV     : TEXCOORD2;
-                float  blend      : TEXCOORD3;
+                float3 normalOS   : TEXCOORD2;
+                float2 projUV     : TEXCOORD3;
+                float  blend      : TEXCOORD4;
             };
 
             Varyings vert(Attributes i)
@@ -48,24 +49,23 @@ Shader "Hidden/ObjectReconstruction/ProjectedTexture"
                 o.positionCS = TransformObjectToHClip(i.positionOS.xyz);
                 o.vertColor = i.color.rgb;
                 o.normalWS = TransformObjectToWorldNormal(i.normalOS);
+                o.normalOS = i.normalOS;
                 o.projUV = i.uv0;
                 o.blend = i.uv1.x;
                 return o;
             }
 
-            half4 frag(Varyings i, bool frontFace : SV_IsFrontFace) : SV_Target
+            half4 frag(Varyings i) : SV_Target
             {
-                float3 n = normalize(i.normalWS);
-                // Flip normal for back faces so lighting is correct on both sides
-                if (!frontFace) n = -n;
-
+                float3 nWS = normalize(i.normalWS);
                 float3 lightDir = normalize(float3(0.5, 1.0, 0.3));
-                float ndl = saturate(dot(n, lightDir));
+                float ndl = saturate(dot(nWS, lightDir));
                 float lighting = lerp(0.3, 1.0, ndl);
 
-                // MC winding is reversed (e0,e2,e1), so Unity "back face" = object front.
-                // Show projected texture on the object-front side only.
-                float effectiveBlend = frontFace ? 0.0 : i.blend;
+                // Canonical camera is at +X looking along -X.
+                // MC inverted normals: camera-facing surface has normalOS.x < 0.
+                float canonicalFacing = saturate(-normalize(i.normalOS).x * 3.0);
+                float effectiveBlend = i.blend * canonicalFacing;
 
                 float3 texColor = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, i.projUV).rgb;
                 float3 baseColor = lerp(i.vertColor, texColor, effectiveBlend);
@@ -124,9 +124,10 @@ Shader "Hidden/ObjectReconstruction/ProjectedTexture"
             {
                 float4 pos : SV_POSITION;
                 float3 vertColor : TEXCOORD0;
-                float3 normal : TEXCOORD1;
-                float2 projUV : TEXCOORD2;
-                float blend : TEXCOORD3;
+                float3 normalWS : TEXCOORD1;
+                float3 normalOS : TEXCOORD2;
+                float2 projUV : TEXCOORD3;
+                float blend : TEXCOORD4;
             };
 
             v2f vert(appdata v)
@@ -134,22 +135,20 @@ Shader "Hidden/ObjectReconstruction/ProjectedTexture"
                 v2f o;
                 o.pos = UnityObjectToClipPos(v.vertex);
                 o.vertColor = v.color.rgb;
-                o.normal = UnityObjectToWorldNormal(v.normal);
+                o.normalWS = UnityObjectToWorldNormal(v.normal);
+                o.normalOS = v.normal;
                 o.projUV = v.uv0;
                 o.blend = v.uv1.x;
                 return o;
             }
 
-            fixed4 frag(v2f i, fixed facing : VFACE) : SV_Target
+            fixed4 frag(v2f i) : SV_Target
             {
-                float3 n = normalize(i.normal);
-                if (facing < 0) n = -n;
-
-                float ndl = saturate(dot(n, normalize(float3(0.5, 1, 0.3))));
+                float ndl = saturate(dot(normalize(i.normalWS), normalize(float3(0.5, 1, 0.3))));
                 float lighting = lerp(0.3, 1.0, ndl);
 
-                // MC reversed winding: VFACE < 0 = Unity back face = object front
-                float effectiveBlend = (facing > 0) ? 0.0 : i.blend;
+                float canonicalFacing = saturate(-normalize(i.normalOS).x * 3.0);
+                float effectiveBlend = i.blend * canonicalFacing;
 
                 float3 texColor = tex2D(_MainTex, i.projUV).rgb;
                 float3 baseColor = lerp(i.vertColor, texColor, effectiveBlend);
