@@ -72,10 +72,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     float py = (v.y - centerY) * invRange;
                     float pz = (v.z - centerZ) * invRange;
 
-                    // Map to image UV space: centered in the foreground region.
-                    // Negate Y→U because front-face view mirrors horizontally
-                    // relative to the back-face projection direction.
-                    float u = -py * ForegroundRatio + 0.5f;
+                    // Map to image UV space: centered in the foreground region
+                    float u = py * ForegroundRatio + 0.5f;
                     float vCoord = pz * ForegroundRatio + 0.5f;
 
                     // Clamp UVs and zero-out blend for out-of-range
