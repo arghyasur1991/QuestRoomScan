@@ -23,10 +23,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
         internal static async Task ApplyProjectionAsync(Mesh mesh)
         {
             var vertices = mesh.vertices;
-            var normals = mesh.normals;
             int count = vertices.Length;
 
-            if (count == 0 || normals == null || normals.Length != count) return;
+            if (count == 0) return;
 
             // Compute mesh bounds in canonical Y/Z plane (the view plane)
             float minY = float.MaxValue, maxY = float.MinValue;
@@ -60,13 +59,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 for (int i = 0; i < count; i++)
                 {
                     var v = vertices[i];
-                    var n = normals[i];
-
-                    // Canonical camera is along +X, looking toward -X.
-                    // Front-facing vertices have normals pointing toward camera (n.x < 0
-                    // in mesh-local space after RecalculateNormals).
-                    float facing = -n.x;
-                    float blend = Mathf.Clamp01(facing * 3f);
 
                     // Project onto Y/Z plane, normalized to [-0.5, 0.5] relative to mesh center
                     float py = (v.y - centerY) * invRange;
@@ -76,9 +68,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     float u = py * ForegroundRatio + 0.5f;
                     float vCoord = pz * ForegroundRatio + 0.5f;
 
-                    // Clamp UVs and zero-out blend for out-of-range
-                    if (u < 0f || u > 1f || vCoord < 0f || vCoord > 1f)
-                        blend = 0f;
+                    // Blend = 1 if UV is in valid range, 0 otherwise.
+                    // The shader handles front/back face selection via SV_IsFrontFace.
+                    float blend = (u >= 0f && u <= 1f && vCoord >= 0f && vCoord <= 1f) ? 1f : 0f;
 
                     uvs[i] = new Vector2(u, vCoord);
                     blendUvs[i] = new Vector2(blend, 0f);

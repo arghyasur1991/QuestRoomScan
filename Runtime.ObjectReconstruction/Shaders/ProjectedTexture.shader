@@ -53,15 +53,22 @@ Shader "Hidden/ObjectReconstruction/ProjectedTexture"
                 return o;
             }
 
-            half4 frag(Varyings i) : SV_Target
+            half4 frag(Varyings i, bool frontFace : SV_IsFrontFace) : SV_Target
             {
                 float3 n = normalize(i.normalWS);
+                // Flip normal for back faces so lighting is correct on both sides
+                if (!frontFace) n = -n;
+
                 float3 lightDir = normalize(float3(0.5, 1.0, 0.3));
                 float ndl = saturate(dot(n, lightDir));
                 float lighting = lerp(0.3, 1.0, ndl);
 
+                // MC winding is reversed (e0,e2,e1), so Unity "back face" = object front.
+                // Show projected texture on the object-front side only.
+                float effectiveBlend = frontFace ? 0.0 : i.blend;
+
                 float3 texColor = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, i.projUV).rgb;
-                float3 baseColor = lerp(i.vertColor, texColor, i.blend);
+                float3 baseColor = lerp(i.vertColor, texColor, effectiveBlend);
 
                 return half4(baseColor * lighting, 1.0);
             }
@@ -133,12 +140,19 @@ Shader "Hidden/ObjectReconstruction/ProjectedTexture"
                 return o;
             }
 
-            fixed4 frag(v2f i) : SV_Target
+            fixed4 frag(v2f i, fixed facing : VFACE) : SV_Target
             {
-                float ndl = saturate(dot(normalize(i.normal), normalize(float3(0.5, 1, 0.3))));
+                float3 n = normalize(i.normal);
+                if (facing < 0) n = -n;
+
+                float ndl = saturate(dot(n, normalize(float3(0.5, 1, 0.3))));
                 float lighting = lerp(0.3, 1.0, ndl);
+
+                // MC reversed winding: VFACE < 0 = Unity back face = object front
+                float effectiveBlend = (facing > 0) ? 0.0 : i.blend;
+
                 float3 texColor = tex2D(_MainTex, i.projUV).rgb;
-                float3 baseColor = lerp(i.vertColor, texColor, i.blend);
+                float3 baseColor = lerp(i.vertColor, texColor, effectiveBlend);
                 return fixed4(baseColor * lighting, 1);
             }
             ENDCG
