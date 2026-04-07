@@ -268,11 +268,19 @@ namespace Genesis.RoomScan.Editor
 
         private void DrawShaderStatus()
         {
-            bool ok = _triplaneShader != null && _surfaceNetsShader != null
+            EditorGUILayout.LabelField("Shaders", EditorStyles.boldLabel);
+            StatusLabel("  TriplaneGridSample", _triplaneShader != null);
+            StatusLabel("  DensitySurfaceNets", _surfaceNetsShader != null);
+            StatusLabel("  DensityMarchingCubes", _marchingCubesShader != null);
+            StatusLabel("  DecoderPostprocess", _postprocessShader != null);
+            StatusLabel("  VertexColor", _vertexColorShader != null);
+            StatusLabel("  ProjectedTexture", _projectedTextureShader != null);
+
+            bool allOk = _triplaneShader != null && _surfaceNetsShader != null
                 && _marchingCubesShader != null && _postprocessShader != null
                 && _vertexColorShader != null && _projectedTextureShader != null;
-            if (!ok)
-                EditorGUILayout.HelpBox("Shaders not found at expected package path.", MessageType.Error);
+            if (!allOk)
+                EditorGUILayout.HelpBox("Some shaders not found at: " + SHADER_DIR, MessageType.Error);
         }
 
         private static void StatusLabel(string label, bool ok)
