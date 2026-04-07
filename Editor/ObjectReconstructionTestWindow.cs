@@ -37,6 +37,7 @@ namespace Genesis.RoomScan.Editor
         private ComputeShader _surfaceNetsShader;
         private ComputeShader _marchingCubesShader;
         private Shader _vertexColorShader;
+        private Shader _projectedTextureShader;
         private ComputeShader _postprocessShader;
 
         private string _status = "Ready";
@@ -72,6 +73,8 @@ namespace Genesis.RoomScan.Editor
                 SHADER_DIR + "DecoderPostprocess.compute");
             _vertexColorShader = AssetDatabase.LoadAssetAtPath<Shader>(
                 SHADER_DIR + "VertexColor.shader");
+            _projectedTextureShader = AssetDatabase.LoadAssetAtPath<Shader>(
+                SHADER_DIR + "ProjectedTexture.shader");
 
             InstallEditModeYield();
         }
@@ -267,7 +270,7 @@ namespace Genesis.RoomScan.Editor
         {
             bool ok = _triplaneShader != null && _surfaceNetsShader != null
                 && _marchingCubesShader != null && _postprocessShader != null
-                && _vertexColorShader != null;
+                && _vertexColorShader != null && _projectedTextureShader != null;
             if (!ok)
                 EditorGUILayout.HelpBox("Shaders not found at expected package path.", MessageType.Error);
         }
@@ -564,6 +567,7 @@ namespace Genesis.RoomScan.Editor
             module.densityMarchingCubesShader = _marchingCubesShader;
             module.decoderPostprocessShader = _postprocessShader;
             module.vertexColorShader = _vertexColorShader;
+            module.projectedTextureShader = _projectedTextureShader;
 
             return module;
         }

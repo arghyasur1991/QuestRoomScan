@@ -55,6 +55,7 @@ namespace Genesis.RoomScan.Editor
         bool _reconMarchingCubesShaderAssigned;
         bool _reconPostprocessShaderAssigned;
         bool _reconVertexColorShaderAssigned;
+        bool _reconProjectedTextureShaderAssigned;
         bool _reconTestImagesAssigned;
         bool _reconOnnxModelsDeployed;
         string _reconDeployedInfo;
@@ -78,6 +79,8 @@ namespace Genesis.RoomScan.Editor
                     "decoderPostprocessShader");
                 _reconVertexColorShaderAssigned = AreFieldsAssigned(_objectReconstruction,
                     "vertexColorShader");
+                _reconProjectedTextureShaderAssigned = AreFieldsAssigned(_objectReconstruction,
+                    "projectedTextureShader");
                 var so = new SerializedObject(_objectReconstruction);
                 var imgProp = so.FindProperty("testImages");
                 _reconTestImagesAssigned = imgProp != null && imgProp.arraySize > 0;
@@ -89,6 +92,7 @@ namespace Genesis.RoomScan.Editor
                 _reconMarchingCubesShaderAssigned = false;
                 _reconPostprocessShaderAssigned = false;
                 _reconVertexColorShaderAssigned = false;
+                _reconProjectedTextureShaderAssigned = false;
                 _reconTestImagesAssigned = false;
             }
 
@@ -114,6 +118,7 @@ namespace Genesis.RoomScan.Editor
             StatusRow("  Marching cubes shader", _reconMarchingCubesShaderAssigned);
             StatusRow("  Decoder postprocess shader", _reconPostprocessShaderAssigned);
             StatusRow("  Vertex color shader", _reconVertexColorShaderAssigned);
+            StatusRow("  Projected texture shader", _reconProjectedTextureShaderAssigned);
             StatusRow("  Test images", _reconTestImagesAssigned);
 
             if (_reconOnnxModelsDeployed)
@@ -276,6 +281,8 @@ namespace Genesis.RoomScan.Editor
                 RECON_PKG_SHADERS + "DecoderPostprocess.compute");
             AssignAsset<Shader>(so, "vertexColorShader",
                 RECON_PKG_SHADERS + "VertexColor.shader");
+            AssignAsset<Shader>(so, "projectedTextureShader",
+                RECON_PKG_SHADERS + "ProjectedTexture.shader");
 
             var imagesProp = so.FindProperty("testImages");
             if (imagesProp != null && imagesProp.arraySize == 0)
