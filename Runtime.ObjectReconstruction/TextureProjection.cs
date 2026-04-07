@@ -62,10 +62,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     var v = vertices[i];
                     var n = normals[i];
 
-                    // Canonical camera looks along -X. Vertex is front-facing if normal.x > 0.
-                    // Use a soft falloff at grazing angles for smoother blending.
-                    float facing = n.x;
-                    float blend = Mathf.Clamp01(facing * 3f); // 0 at perpendicular, 1 at fully facing
+                    // Canonical camera is along +X, looking toward -X.
+                    // Marching cubes uses swapped winding (e0,e2,e1) so RecalculateNormals
+                    // produces inward-pointing normals. Front-facing = normal.x < 0.
+                    float facing = -n.x;
+                    float blend = Mathf.Clamp01(facing * 3f);
 
                     // Project onto Y/Z plane, normalized to [-0.5, 0.5] relative to mesh center
                     float py = (v.y - centerY) * invRange;
