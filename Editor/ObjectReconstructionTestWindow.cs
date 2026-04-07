@@ -824,4 +824,3 @@ namespace Genesis.RoomScan.Editor
     }
 }
 #endif
-#endif
