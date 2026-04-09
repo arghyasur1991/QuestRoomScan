@@ -320,32 +320,53 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private static MVCamEntry[] ParseMVCameras(string json)
         {
-            var entries = new System.Collections.Generic.List<MVCamEntry>();
-            // Simple JSON array parsing — each entry has "filename" and "pose" (4x4 nested array)
-            var parsed = JsonUtility.FromJson<MVCamArrayWrapper>("{\"items\":" + json + "}");
-            foreach (var item in parsed.items)
+            var results = new System.Collections.Generic.List<MVCamEntry>();
+            int idx = 0;
+            while (true)
             {
-                var entry = new MVCamEntry { filename = item.filename, poseFlat = new float[16] };
-                for (int r = 0; r < 4 && r < item.pose.Length; r++)
-                for (int c = 0; c < 4 && c < item.pose[r].Length; c++)
-                    entry.poseFlat[r * 4 + c] = item.pose[r][c];
-                entries.Add(entry);
+                int fnKey = json.IndexOf("\"filename\"", idx, System.StringComparison.Ordinal);
+                if (fnKey < 0) break;
+
+                int colon = json.IndexOf(':', fnKey + 10);
+                int q1 = json.IndexOf('"', colon + 1);
+                int q2 = json.IndexOf('"', q1 + 1);
+                string filename = json.Substring(q1 + 1, q2 - q1 - 1);
+
+                int poseKey = json.IndexOf("\"pose\"", q2, System.StringComparison.Ordinal);
+                if (poseKey < 0) break;
+
+                int outerBracket = json.IndexOf('[', poseKey + 6);
+                int depth = 0, end = outerBracket;
+                for (int i = outerBracket; i < json.Length; i++)
+                {
+                    if (json[i] == '[') depth++;
+                    else if (json[i] == ']') { depth--; if (depth == 0) { end = i; break; } }
+                }
+
+                string poseBlock = json.Substring(outerBracket, end - outerBracket + 1);
+                var pose = new float[16];
+                int pi = 0, si = 0;
+                while (pi < 16 && si < poseBlock.Length)
+                {
+                    while (si < poseBlock.Length && !IsNumStart(poseBlock[si])) si++;
+                    if (si >= poseBlock.Length) break;
+                    int numEnd = si + 1;
+                    while (numEnd < poseBlock.Length && IsNumChar(poseBlock[numEnd])) numEnd++;
+                    if (float.TryParse(poseBlock.Substring(si, numEnd - si),
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out float val))
+                        pose[pi++] = val;
+                    si = numEnd;
+                }
+
+                results.Add(new MVCamEntry { filename = filename, poseFlat = pose });
+                idx = end + 1;
             }
-            return entries.ToArray();
+            return results.ToArray();
         }
 
-        [System.Serializable]
-        private struct MVCamItem
-        {
-            public string filename;
-            public float[][] pose;
-        }
-
-        [System.Serializable]
-        private struct MVCamArrayWrapper
-        {
-            public MVCamItem[] items;
-        }
+        private static bool IsNumStart(char c) => c == '-' || c == '+' || (c >= '0' && c <= '9');
+        private static bool IsNumChar(char c) => (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '-' || c == '+';
 
         public void Cancel()
         {

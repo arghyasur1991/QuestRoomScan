@@ -858,10 +858,9 @@ namespace Genesis.RoomScan.Editor
                 // Load camera poses
                 SetStatus("Loading camera data...", 0.05f);
                 string camJson = File.ReadAllText(Path.Combine(testDir, "cameras.json"));
-                var cameras = JsonUtility.FromJson<MVCameraArray>(
-                    "{\"items\":" + camJson + "}");
+                var camEntries = ParseMVCameras(camJson);
 
-                int nViews = cameras.items.Length;
+                int nViews = camEntries.Length;
                 AppendTiming($"Views: {nViews}, UID: {uid}");
 
                 // Load view images
@@ -869,7 +868,7 @@ namespace Genesis.RoomScan.Editor
                 var views = new Texture2D[nViews];
                 for (int i = 0; i < nViews; i++)
                 {
-                    string imgPath = Path.Combine(testDir, cameras.items[i].filename);
+                    string imgPath = Path.Combine(testDir, camEntries[i].filename);
                     var bytes = File.ReadAllBytes(imgPath);
                     views[i] = new Texture2D(2, 2, TextureFormat.RGB24, false);
                     views[i].LoadImage(bytes);
@@ -886,13 +885,7 @@ namespace Genesis.RoomScan.Editor
                 sw.Restart();
                 var c2wList = new float[nViews][];
                 for (int i = 0; i < nViews; i++)
-                {
-                    var pose = cameras.items[i].pose;
-                    c2wList[i] = new float[16];
-                    for (int r = 0; r < 4; r++)
-                    for (int c = 0; c < 4; c++)
-                        c2wList[i][r * 4 + c] = pose[r][c];
-                }
+                    c2wList[i] = camEntries[i].poseFlat;
                 float[] w2cFlat = OrtMVReconModel.BlenderC2WToW2C(c2wList);
                 AppendTiming($"Camera math: {sw.ElapsedMilliseconds}ms");
 
@@ -957,21 +950,73 @@ namespace Genesis.RoomScan.Editor
             }
         }
 
-        [Serializable]
-        private struct MVCameraEntry
+        private struct MVCamParsed
         {
-            public int view_index;
-            public float azimuth;
-            public float elevation;
             public string filename;
-            public float[][] pose;
+            public float[] poseFlat; // 16 floats, row-major 4x4
         }
 
-        [Serializable]
-        private struct MVCameraArray
+        /// <summary>
+        /// Manually parse cameras.json — JsonUtility cannot deserialize jagged arrays (float[][]).
+        /// Extracts "filename" and flattens "pose" (4x4 nested array) to 16-element float[].
+        /// </summary>
+        private static MVCamParsed[] ParseMVCameras(string json)
         {
-            public MVCameraEntry[] items;
+            var results = new System.Collections.Generic.List<MVCamParsed>();
+            int idx = 0;
+            while (true)
+            {
+                int fnKey = json.IndexOf("\"filename\"", idx, StringComparison.Ordinal);
+                if (fnKey < 0) break;
+
+                // Extract filename value
+                int colon = json.IndexOf(':', fnKey + 10);
+                int q1 = json.IndexOf('"', colon + 1);
+                int q2 = json.IndexOf('"', q1 + 1);
+                string filename = json.Substring(q1 + 1, q2 - q1 - 1);
+
+                // Find "pose" key after this filename
+                int poseKey = json.IndexOf("\"pose\"", q2, StringComparison.Ordinal);
+                if (poseKey < 0) break;
+
+                // Find the outer '[' after "pose":
+                int outerBracket = json.IndexOf('[', poseKey + 6);
+                // Find the matching ']' — count bracket depth
+                int depth = 0;
+                int end = outerBracket;
+                for (int i = outerBracket; i < json.Length; i++)
+                {
+                    if (json[i] == '[') depth++;
+                    else if (json[i] == ']') { depth--; if (depth == 0) { end = i; break; } }
+                }
+
+                // Extract all numbers from the pose block
+                string poseBlock = json.Substring(outerBracket, end - outerBracket + 1);
+                var pose = new float[16];
+                int pi = 0;
+                int si = 0;
+                while (pi < 16 && si < poseBlock.Length)
+                {
+                    // Skip non-numeric chars
+                    while (si < poseBlock.Length && !IsNumStart(poseBlock[si])) si++;
+                    if (si >= poseBlock.Length) break;
+                    int numEnd = si + 1;
+                    while (numEnd < poseBlock.Length && IsNumChar(poseBlock[numEnd])) numEnd++;
+                    if (float.TryParse(poseBlock.Substring(si, numEnd - si),
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out float val))
+                        pose[pi++] = val;
+                    si = numEnd;
+                }
+
+                results.Add(new MVCamParsed { filename = filename, poseFlat = pose });
+                idx = end + 1;
+            }
+            return results.ToArray();
         }
+
+        private static bool IsNumStart(char c) => c == '-' || c == '+' || (c >= '0' && c <= '9');
+        private static bool IsNumChar(char c) => (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '-' || c == '+';
 
         // ── Keyframe-based reconstruction ──
 
