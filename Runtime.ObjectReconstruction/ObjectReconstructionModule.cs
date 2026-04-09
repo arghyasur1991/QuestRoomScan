@@ -218,6 +218,135 @@ namespace Genesis.RoomScan.ObjectReconstruction
             return tex;
         }
 
+        /// <summary>
+        /// Multi-view reconstruction benchmark using test data from StreamingAssets.
+        /// Loads images + camera poses, runs ORT inference, extracts mesh, logs timing.
+        /// Intended for Quest performance benchmarking.
+        /// </summary>
+        public async Task<Mesh> TestMVReconAsync(string testUid, float threshold = 0.5f,
+            CancellationToken ct = default)
+        {
+            if (_running)
+            {
+                Logger.Warning("[ObjectReconstruction] Pipeline already in progress");
+                return null;
+            }
+
+            _running = true;
+            try
+            {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var totalSw = System.Diagnostics.Stopwatch.StartNew();
+
+                string testDir = System.IO.Path.Combine(
+                    Application.streamingAssetsPath, "ObjectReconstruction", "MVReconTest", testUid);
+                ReportStatus($"[MVRecon] Loading test data: {testUid}");
+
+                string camPath = await ModelPathResolver.ResolveAsync(
+                    $"ObjectReconstruction/MVReconTest/{testUid}/cameras.json", ct);
+                string camJson = await Task.Run(() => System.IO.File.ReadAllText(camPath), ct);
+                // Parse camera JSON manually — lightweight
+                var camEntries = ParseMVCameras(camJson);
+
+                int nViews = camEntries.Length;
+                var views = new Texture2D[nViews];
+                for (int i = 0; i < nViews; i++)
+                {
+                    string imgRelPath = $"ObjectReconstruction/MVReconTest/{testUid}/{camEntries[i].filename}";
+                    string imgPath = await ModelPathResolver.ResolveAsync(imgRelPath, ct);
+                    var bytes = await Task.Run(() => System.IO.File.ReadAllBytes(imgPath), ct);
+                    views[i] = new Texture2D(2, 2, TextureFormat.RGB24, false);
+                    views[i].LoadImage(bytes);
+                }
+                float dataLoadMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[MVRecon] Data loaded: {nViews} views in {dataLoadMs:F0}ms");
+                sw.Restart();
+
+                ReportStatus("[MVRecon] Preprocessing views...");
+                float[] imagesNCHW = await Task.Run(() => OrtMVReconModel.PreprocessViews(views), ct);
+                var c2wList = new float[nViews][];
+                for (int i = 0; i < nViews; i++)
+                    c2wList[i] = camEntries[i].poseFlat;
+                float[] w2cFlat = OrtMVReconModel.BlenderC2WToW2C(c2wList);
+                float preprocessMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[MVRecon] Preprocess: {preprocessMs:F0}ms");
+                sw.Restart();
+
+                ReportStatus("[MVRecon] Loading model...");
+                using var model = new OrtMVReconModel();
+                await model.LoadAsync(executionProvider, mobileOptimized, ct);
+                float modelLoadMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[MVRecon] Model load: {modelLoadMs:F0}ms (EP={executionProvider})");
+                sw.Restart();
+
+                ReportStatus("[MVRecon] Running inference...");
+                var (density, color) = await model.RunAsync(imagesNCHW, w2cFlat, ct);
+                float inferMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[MVRecon] Inference: {inferMs:F0}ms");
+                sw.Restart();
+
+                ReportStatus("[MVRecon] Extracting mesh...");
+                var mesh = await OrtMVReconModel.ExtractMeshFromVolume(density, color, threshold, ct);
+                float meshMs = sw.ElapsedMilliseconds;
+                Logger.Info($"[MVRecon] Mesh extraction: {meshMs:F0}ms");
+
+                totalSw.Stop();
+                string timing = $"data={dataLoadMs:F0}ms pre={preprocessMs:F0}ms " +
+                    $"load={modelLoadMs:F0}ms infer={inferMs:F0}ms mesh={meshMs:F0}ms " +
+                    $"TOTAL={totalSw.ElapsedMilliseconds:F0}ms";
+                Logger.Info($"[MVRecon] Done: EP={executionProvider} mobile={mobileOptimized} {timing}");
+                ReportStatus($"[MVRecon] {timing}");
+
+                foreach (var v in views) Destroy(v);
+                return mesh;
+            }
+            catch (Exception e)
+            {
+                Logger.Error($"[MVRecon] {e.Message}");
+                ReportStatus($"[MVRecon] Error: {e.Message}");
+                return null;
+            }
+            finally
+            {
+                _running = false;
+            }
+        }
+
+        private struct MVCamEntry
+        {
+            public string filename;
+            public float[] poseFlat;
+        }
+
+        private static MVCamEntry[] ParseMVCameras(string json)
+        {
+            var entries = new System.Collections.Generic.List<MVCamEntry>();
+            // Simple JSON array parsing — each entry has "filename" and "pose" (4x4 nested array)
+            var parsed = JsonUtility.FromJson<MVCamArrayWrapper>("{\"items\":" + json + "}");
+            foreach (var item in parsed.items)
+            {
+                var entry = new MVCamEntry { filename = item.filename, poseFlat = new float[16] };
+                for (int r = 0; r < 4 && r < item.pose.Length; r++)
+                for (int c = 0; c < 4 && c < item.pose[r].Length; c++)
+                    entry.poseFlat[r * 4 + c] = item.pose[r][c];
+                entries.Add(entry);
+            }
+            return entries.ToArray();
+        }
+
+        [System.Serializable]
+        private struct MVCamItem
+        {
+            public string filename;
+            public float[][] pose;
+        }
+
+        [System.Serializable]
+        private struct MVCamArrayWrapper
+        {
+            public MVCamItem[] items;
+        }
+
         public void Cancel()
         {
             _cts?.Cancel();

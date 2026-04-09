@@ -582,6 +582,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         #region MC Tables
 
+        internal static int[] EdgeTablePublic => EdgeTable;
+        internal static int[] TriTablePublic => TriTable;
+
         private static readonly int[] MCCornerX = { 0, 1, 1, 0, 0, 1, 1, 0 };
         private static readonly int[] MCCornerY = { 0, 0, 1, 1, 0, 0, 1, 1 };
         private static readonly int[] MCCornerZ = { 0, 0, 0, 0, 1, 1, 1, 1 };

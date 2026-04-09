@@ -60,6 +60,11 @@ namespace Genesis.RoomScan.Editor
         private Texture2D _croppedPreview;
         private Vector2 _keyframeScroll;
 
+        // Multi-view reconstruction
+        private string[] _mvTestUIDs;
+        private int _mvSelectedIdx = -1;
+        private float _mvThreshold = 0.5f;
+
         private const string SHADER_DIR = "Packages/com.genesis.roomscan/Runtime.ObjectReconstruction/Shaders/";
 
         private void OnEnable()
@@ -77,6 +82,7 @@ namespace Genesis.RoomScan.Editor
             _projectedTextureShader = AssetDatabase.LoadAssetAtPath<Shader>(
                 SHADER_DIR + "ProjectedTexture.shader");
 
+            ScanMVReconTestData();
             InstallEditModeYield();
         }
 
@@ -247,6 +253,39 @@ namespace Genesis.RoomScan.Editor
             else if (_detections != null)
             {
                 EditorGUILayout.HelpBox("No detections found in the specified directory.", MessageType.Warning);
+            }
+
+            // ── Multi-view reconstruction ──
+            EditorGUILayout.Space(12);
+            EditorGUILayout.LabelField("Multi-View Reconstruction (MVRecon)", EditorStyles.boldLabel);
+            EditorGUILayout.Space(4);
+
+            DrawMVReconStatus();
+
+            if (_mvTestUIDs != null && _mvTestUIDs.Length > 0)
+            {
+                string[] labels = new string[_mvTestUIDs.Length];
+                for (int i = 0; i < _mvTestUIDs.Length; i++)
+                    labels[i] = _mvTestUIDs[i].Substring(0, 8) + "...";
+
+                _mvSelectedIdx = EditorGUILayout.Popup("Test Object", _mvSelectedIdx, labels);
+                _mvThreshold = EditorGUILayout.Slider("Density Threshold", _mvThreshold, 0.1f, 0.95f);
+
+                _executionProvider = (ExecutionProvider)EditorGUILayout.EnumPopup(
+                    "EP (MVRecon)", _executionProvider);
+
+                EditorGUILayout.Space(4);
+                using (new EditorGUI.DisabledScope(_mvSelectedIdx < 0 || _running))
+                {
+                    if (GUILayout.Button("Run MVRecon", GUILayout.Height(30)))
+                        RunMVRecon();
+                }
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "No test data found in StreamingAssets/ObjectReconstruction/MVReconTest/.\n" +
+                    "Run the Python test data preparation script first.", MessageType.Info);
             }
         }
 
@@ -765,6 +804,172 @@ namespace Genesis.RoomScan.Editor
             File.WriteAllBytes(path, tex.EncodeToPNG());
             DestroyImmediate(tex);
             Debug.Log($"[ReconstructionTest] Saved mask PNG: {path} ({w}x{h})");
+        }
+
+        // ── Multi-view reconstruction ──
+
+        private void ScanMVReconTestData()
+        {
+            string testDir = Path.Combine(Application.streamingAssetsPath,
+                "ObjectReconstruction", "MVReconTest");
+            if (!Directory.Exists(testDir))
+            {
+                _mvTestUIDs = Array.Empty<string>();
+                return;
+            }
+
+            var dirs = Directory.GetDirectories(testDir);
+            _mvTestUIDs = new string[dirs.Length];
+            for (int i = 0; i < dirs.Length; i++)
+                _mvTestUIDs[i] = Path.GetFileName(dirs[i]);
+            Array.Sort(_mvTestUIDs);
+
+            if (_mvTestUIDs.Length > 0 && _mvSelectedIdx < 0)
+                _mvSelectedIdx = 0;
+        }
+
+        private void DrawMVReconStatus()
+        {
+            string onnxDir = Path.Combine(Application.streamingAssetsPath, "ObjectReconstruction");
+            bool hasMVRecon = File.Exists(Path.Combine(onnxDir, "mv_recon.onnx"));
+            StatusLabel("  mv_recon.onnx", hasMVRecon);
+            if (!hasMVRecon)
+                EditorGUILayout.HelpBox("mv_recon.onnx not found in StreamingAssets.", MessageType.Warning);
+        }
+
+        private async void RunMVRecon()
+        {
+            if (_mvSelectedIdx < 0 || _mvSelectedIdx >= _mvTestUIDs.Length) return;
+
+            string uid = _mvTestUIDs[_mvSelectedIdx];
+            string testDir = Path.Combine(Application.streamingAssetsPath,
+                "ObjectReconstruction", "MVReconTest", uid);
+
+            _running = true;
+            _cts = new CancellationTokenSource();
+            AsyncHelper.SuppressYields = true;
+            _timingLog = "";
+            var totalSw = Stopwatch.StartNew();
+            OrtMVReconModel model = null;
+
+            try
+            {
+                // Load camera poses
+                SetStatus("Loading camera data...", 0.05f);
+                string camJson = File.ReadAllText(Path.Combine(testDir, "cameras.json"));
+                var cameras = JsonUtility.FromJson<MVCameraArray>(
+                    "{\"items\":" + camJson + "}");
+
+                int nViews = cameras.items.Length;
+                AppendTiming($"Views: {nViews}, UID: {uid}");
+
+                // Load view images
+                SetStatus("Loading views...", 0.1f);
+                var views = new Texture2D[nViews];
+                for (int i = 0; i < nViews; i++)
+                {
+                    string imgPath = Path.Combine(testDir, cameras.items[i].filename);
+                    var bytes = File.ReadAllBytes(imgPath);
+                    views[i] = new Texture2D(2, 2, TextureFormat.RGB24, false);
+                    views[i].LoadImage(bytes);
+                }
+                AppendTiming($"Images loaded: {views[0].width}x{views[0].height}");
+
+                // Preprocess images
+                SetStatus("Preprocessing views...", 0.2f);
+                var sw = Stopwatch.StartNew();
+                float[] imagesNCHW = OrtMVReconModel.PreprocessViews(views);
+                AppendTiming($"Preprocess: {sw.ElapsedMilliseconds}ms");
+
+                // Compute w2c matrices
+                sw.Restart();
+                var c2wList = new float[nViews][];
+                for (int i = 0; i < nViews; i++)
+                {
+                    var pose = cameras.items[i].pose;
+                    c2wList[i] = new float[16];
+                    for (int r = 0; r < 4; r++)
+                    for (int c = 0; c < 4; c++)
+                        c2wList[i][r * 4 + c] = pose[r][c];
+                }
+                float[] w2cFlat = OrtMVReconModel.BlenderC2WToW2C(c2wList);
+                AppendTiming($"Camera math: {sw.ElapsedMilliseconds}ms");
+
+                // Load ONNX model
+                SetStatus("Loading mv_recon.onnx...", 0.3f);
+                model = new OrtMVReconModel();
+                sw.Restart();
+                await model.LoadAsync(_executionProvider, false, _cts.Token);
+                float loadMs = sw.ElapsedMilliseconds;
+                AppendTiming($"Model load: {loadMs:F0}ms (EP={_executionProvider})");
+
+                // Run inference
+                SetStatus("Running MVRecon inference...", 0.5f);
+                sw.Restart();
+                var (density, color) = await model.RunAsync(imagesNCHW, w2cFlat, _cts.Token);
+                float inferMs = sw.ElapsedMilliseconds;
+                AppendTiming($"Inference: {inferMs:F0}ms");
+
+                // Extract mesh
+                SetStatus("Extracting mesh (marching cubes 64^3)...", 0.75f);
+                sw.Restart();
+                var mesh = await OrtMVReconModel.ExtractMeshFromVolume(
+                    density, color, _mvThreshold, _cts.Token);
+                float meshMs = sw.ElapsedMilliseconds;
+                AppendTiming($"Mesh extraction: {meshMs:F0}ms");
+
+                totalSw.Stop();
+                AppendTiming($"--- TOTAL: {totalSw.ElapsedMilliseconds}ms ---");
+
+                if (mesh != null && mesh.vertexCount > 0)
+                {
+                    var shader = _vertexColorShader
+                                 ?? Shader.Find("Universal Render Pipeline/Lit")
+                                 ?? Shader.Find("Standard");
+                    ShowMeshPreview(mesh, new Material(shader));
+                    SetStatus($"Done! {mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris", 1f);
+                }
+                else
+                {
+                    SetStatus("Empty mesh — try lowering threshold", 0f);
+                }
+
+                foreach (var v in views) DestroyImmediate(v);
+            }
+            catch (OperationCanceledException)
+            {
+                SetStatus("Cancelled", 0f);
+            }
+            catch (Exception e)
+            {
+                SetStatus($"Error: {e.Message}", 0f);
+                Debug.LogException(e);
+            }
+            finally
+            {
+                AsyncHelper.SuppressYields = false;
+                model?.Dispose();
+                _running = false;
+                _cts?.Dispose();
+                _cts = null;
+                Repaint();
+            }
+        }
+
+        [Serializable]
+        private struct MVCameraEntry
+        {
+            public int view_index;
+            public float azimuth;
+            public float elevation;
+            public string filename;
+            public float[][] pose;
+        }
+
+        [Serializable]
+        private struct MVCameraArray
+        {
+            public MVCameraEntry[] items;
         }
 
         // ── Keyframe-based reconstruction ──
