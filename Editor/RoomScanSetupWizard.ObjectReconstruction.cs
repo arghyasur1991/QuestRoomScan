@@ -137,7 +137,17 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
             }
 
+            bool mvReconAvailable = File.Exists(Path.Combine(RECON_ONNX_DIR, "mv_recon.onnx"));
             StatusRowOptional("  mv_recon.onnx (multi-view)", _reconMVReconDeployed);
+            if (mvReconAvailable)
+            {
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.Space(32);
+                string mvLabel = _reconMVReconDeployed ? "Redeploy MVRecon (0.4MB)" : "Deploy MVRecon (0.4MB)";
+                if (GUILayout.Button(mvLabel, GUILayout.Height(22)))
+                    DeployMVRecon();
+                EditorGUILayout.EndHorizontal();
+            }
 
             bool anyAvailable = false;
             for (int q = 0; q < 3 && !anyAvailable; q++)
@@ -451,6 +461,26 @@ namespace Genesis.RoomScan.Editor
             EditorUtility.ClearProgressBar();
             AssetDatabase.Refresh();
             Debug.Log($"[ObjectReconstruction] {displayLabel} {suffix.ToUpper()} deployment complete");
+        }
+
+        private static void DeployMVRecon()
+        {
+            string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
+            Directory.CreateDirectory(streamingDir);
+
+            string[] files = { "mv_recon.onnx", "mv_recon_camera_config.json" };
+            foreach (var name in files)
+            {
+                string srcPath = Path.Combine(RECON_ONNX_DIR, name);
+                if (!File.Exists(srcPath)) continue;
+                string dstPath = Path.Combine(streamingDir, name);
+                File.Copy(srcPath, dstPath, overwrite: true);
+                var fi = new FileInfo(dstPath);
+                Debug.Log($"[ObjectReconstruction] Deployed {name} ({fi.Length / 1024} KB)");
+            }
+
+            AssetDatabase.Refresh();
+            Debug.Log("[ObjectReconstruction] mv_recon deployment complete");
         }
     }
 }
