@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Networking;
 using UnityEngine.UIElements;
 
 namespace Genesis.RoomScan.UI
@@ -549,14 +550,17 @@ namespace Genesis.RoomScan.UI
 
         private void ScanMVReconTestUIDs()
         {
+            _mvTestUIDs = System.Array.Empty<string>();
+            _mvSelectedIdx = -1;
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            // Android: StreamingAssets are inside the APK — use manifest.json
+            LoadMVReconManifestAsync();
+#else
             string testRoot = System.IO.Path.Combine(
                 Application.streamingAssetsPath, "ObjectReconstruction", "MVReconTest");
 
-            if (!System.IO.Directory.Exists(testRoot))
-            {
-                _mvTestUIDs = System.Array.Empty<string>();
-                return;
-            }
+            if (!System.IO.Directory.Exists(testRoot)) return;
 
             var dirs = System.IO.Directory.GetDirectories(testRoot);
             var uids = new System.Collections.Generic.List<string>();
@@ -565,7 +569,45 @@ namespace Genesis.RoomScan.UI
             uids.Sort();
             _mvTestUIDs = uids.ToArray();
             _mvSelectedIdx = _mvTestUIDs.Length > 0 ? 0 : -1;
+#endif
         }
+
+        private async void LoadMVReconManifestAsync()
+        {
+            string url = System.IO.Path.Combine(
+                Application.streamingAssetsPath, "ObjectReconstruction", "MVReconTest", "manifest.json");
+
+            var request = UnityWebRequest.Get(url);
+            try
+            {
+                var op = request.SendWebRequest();
+                while (!op.isDone)
+                    await System.Threading.Tasks.Task.Yield();
+
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    Debug.LogWarning($"[DebugMenu] MVRecon manifest not found: {request.error}");
+                    return;
+                }
+
+                string json = request.downloadHandler.text;
+                // Parse simple JSON array: ["uid1","uid2",...]
+                var uids = JsonUtility.FromJson<MVReconManifest>("{\"uids\":" + json + "}");
+                if (uids.uids != null && uids.uids.Length > 0)
+                {
+                    _mvTestUIDs = uids.uids;
+                    _mvSelectedIdx = 0;
+                    UpdateMVReconUidLabel();
+                }
+            }
+            finally
+            {
+                request.Dispose();
+            }
+        }
+
+        [System.Serializable]
+        private struct MVReconManifest { public string[] uids; }
 
         private void UpdateMVReconUidLabel()
         {
@@ -580,10 +622,35 @@ namespace Genesis.RoomScan.UI
 
         private void UpdateMVReconModelStatus()
         {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            CheckMVReconModelAsync();
+#else
             string onnxPath = System.IO.Path.Combine(
                 Application.streamingAssetsPath, "ObjectReconstruction", "mv_recon.onnx");
             bool found = System.IO.File.Exists(onnxPath);
             SetLabel(_valMVReconModel, found ? "mv_recon.onnx ✓" : "mv_recon.onnx ✗ (missing)");
+#endif
+        }
+
+        private async void CheckMVReconModelAsync()
+        {
+            string url = System.IO.Path.Combine(
+                Application.streamingAssetsPath, "ObjectReconstruction", "mv_recon.onnx");
+
+            var request = UnityWebRequest.Head(url);
+            try
+            {
+                var op = request.SendWebRequest();
+                while (!op.isDone)
+                    await System.Threading.Tasks.Task.Yield();
+
+                bool found = request.result == UnityWebRequest.Result.Success;
+                SetLabel(_valMVReconModel, found ? "mv_recon.onnx ✓" : "mv_recon.onnx ✗ (missing)");
+            }
+            finally
+            {
+                request.Dispose();
+            }
         }
 
         private async void RunMVRecon()
