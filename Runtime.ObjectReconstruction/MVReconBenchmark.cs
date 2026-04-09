@@ -10,7 +10,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
     /// Attach to any GameObject, set runOnStart=true for automated benchmarking.
     /// All timing is logged via Logger.Info, visible in logcat.
     /// </summary>
-    public class MVReconBenchmark : MonoBehaviour
+    internal class MVReconBenchmark : MonoBehaviour
     {
         [Tooltip("Run benchmark automatically on Start")]
         public bool runOnStart = true;
