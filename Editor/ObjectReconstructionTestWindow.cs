@@ -65,6 +65,10 @@ namespace Genesis.RoomScan.Editor
         private int _mvSelectedIdx = -1;
         private float _mvThreshold = 0.5f;
 
+        // Tab navigation
+        private int _tabIndex = 0;
+        private static readonly string[] TabNames = { "MVRecon", "TripoSR", "Keyframe" };
+
         private const string SHADER_DIR = "Packages/com.genesis.roomscan/Runtime.ObjectReconstruction/Shaders/";
 
         private void OnEnable()
@@ -108,34 +112,99 @@ namespace Genesis.RoomScan.Editor
 
         private void OnGUI()
         {
-            EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Object Reconstruction Pipeline Test", EditorStyles.boldLabel);
+            EditorGUILayout.Space(4);
+            _tabIndex = GUILayout.Toolbar(_tabIndex, TabNames, GUILayout.Height(24));
             EditorGUILayout.Space(4);
 
+            // Shared status/progress bar
+            if (_running)
+            {
+                var rect = EditorGUILayout.GetControlRect(false, 18);
+                EditorGUI.ProgressBar(rect, _progress, "");
+                if (GUILayout.Button("Cancel"))
+                    Cancel();
+                EditorGUILayout.Space(2);
+            }
+
+            switch (_tabIndex)
+            {
+                case 0: DrawMVReconTab(); break;
+                case 1: DrawTripoSRTab(); break;
+                case 2: DrawKeyframeTab(); break;
+            }
+
+            // Shared status footer
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Status", EditorStyles.boldLabel);
+            EditorGUILayout.SelectableLabel(_status, EditorStyles.wordWrappedLabel,
+                GUILayout.MinHeight(30));
+
+            if (!string.IsNullOrEmpty(_timingLog))
+            {
+                EditorGUILayout.LabelField("Timing", EditorStyles.boldLabel);
+                EditorGUILayout.HelpBox(_timingLog, MessageType.Info);
+            }
+
+            if (_resultMesh != null)
+            {
+                EditorGUILayout.Space(2);
+                EditorGUILayout.LabelField("Result",
+                    $"{_resultMesh.vertexCount} verts, {_resultMesh.triangles.Length / 3} tris");
+                if (GUILayout.Button("Clear Preview"))
+                    CleanupPreview();
+            }
+        }
+
+        private void DrawMVReconTab()
+        {
+            DrawMVReconStatus();
+
+            if (_mvTestUIDs != null && _mvTestUIDs.Length > 0)
+            {
+                string[] labels = new string[_mvTestUIDs.Length];
+                for (int i = 0; i < _mvTestUIDs.Length; i++)
+                    labels[i] = _mvTestUIDs[i].Substring(0, 8) + "...";
+
+                _mvSelectedIdx = EditorGUILayout.Popup("Test Object", _mvSelectedIdx, labels);
+                _mvThreshold = EditorGUILayout.Slider("Density Threshold", _mvThreshold, 0.1f, 0.95f);
+                _executionProvider = (ExecutionProvider)EditorGUILayout.EnumPopup(
+                    "Execution Provider", _executionProvider);
+
+                EditorGUILayout.Space(4);
+                using (new EditorGUI.DisabledScope(_mvSelectedIdx < 0 || _running))
+                {
+                    if (GUILayout.Button("Run MVRecon", GUILayout.Height(30)))
+                        RunMVRecon();
+                }
+            }
+            else
+            {
+                EditorGUILayout.HelpBox(
+                    "No test data found in StreamingAssets/ObjectReconstruction/MVReconTest/.\n" +
+                    "Run the Python test data preparation script first.", MessageType.Info);
+            }
+        }
+
+        private void DrawTripoSRTab()
+        {
             DrawModelStatus();
             EditorGUILayout.Space(4);
 
             _testImage = (Texture2D)EditorGUILayout.ObjectField(
                 "Test Image", _testImage, typeof(Texture2D), false);
-
             _gridResolution = EditorGUILayout.IntPopup("Grid Resolution",
                 _gridResolution, new[] { "64 (fast)", "128 (balanced)", "256 (quality)" },
                 new[] { 64, 128, 256 });
-
             _meshAlgorithm = (MeshAlgorithm)EditorGUILayout.EnumPopup("Mesh Algorithm", _meshAlgorithm);
-
             _executionProvider = (ExecutionProvider)EditorGUILayout.EnumPopup(
                 "Execution Provider", _executionProvider);
-
             _densitySmoothPasses = EditorGUILayout.IntSlider(
                 "Density Smooth Passes", _densitySmoothPasses, 0, 3);
-
             _laplacianSmoothIterations = EditorGUILayout.IntSlider(
                 "Laplacian Smooth Iters", _laplacianSmoothIterations, 0, 5);
             if (_laplacianSmoothIterations > 0)
                 _laplacianSmoothLambda = EditorGUILayout.Slider(
                     "Laplacian Lambda", _laplacianSmoothLambda, 0.1f, 0.9f);
-
             _meshExtractionBackend = (MeshExtractionBackend)EditorGUILayout.EnumPopup(
                 "Mesh Extraction", _meshExtractionBackend);
 
@@ -149,7 +218,6 @@ namespace Genesis.RoomScan.Editor
                     RunPipeline();
 
                 EditorGUILayout.Space(2);
-
                 using (new EditorGUILayout.HorizontalScope())
                 {
                     if (GUILayout.Button("Test Rembg Only"))
@@ -162,44 +230,10 @@ namespace Genesis.RoomScan.Editor
                 if (GUILayout.Button("Run from Preprocessed PNG (bypass rembg+composite)"))
                     RunFromPreprocessedPng();
             }
+        }
 
-            if (_running)
-            {
-                EditorGUILayout.Space(4);
-                var rect = EditorGUILayout.GetControlRect(false, 20);
-                EditorGUI.ProgressBar(rect, _progress, "");
-
-                if (GUILayout.Button("Cancel"))
-                    Cancel();
-            }
-
-            EditorGUILayout.Space(4);
-            EditorGUILayout.LabelField("Status", EditorStyles.boldLabel);
-            EditorGUILayout.SelectableLabel(_status, EditorStyles.wordWrappedLabel,
-                GUILayout.MinHeight(40), GUILayout.ExpandHeight(true));
-
-            if (!string.IsNullOrEmpty(_timingLog))
-            {
-                EditorGUILayout.Space(8);
-                EditorGUILayout.LabelField("Timing", EditorStyles.boldLabel);
-                EditorGUILayout.HelpBox(_timingLog, MessageType.Info);
-            }
-
-            if (_resultMesh != null)
-            {
-                EditorGUILayout.Space(4);
-                EditorGUILayout.LabelField("Result",
-                    $"{_resultMesh.vertexCount} verts, {_resultMesh.triangles.Length / 3} tris");
-
-                if (GUILayout.Button("Clear Preview"))
-                    CleanupPreview();
-            }
-
-            // ── Keyframe-based reconstruction ──
-            EditorGUILayout.Space(12);
-            EditorGUILayout.LabelField("Reconstruct from Detection Keyframe", EditorStyles.boldLabel);
-            EditorGUILayout.Space(4);
-
+        private void DrawKeyframeTab()
+        {
             using (new EditorGUILayout.HorizontalScope())
             {
                 _keyframeDir = EditorGUILayout.TextField("Keyframe Directory", _keyframeDir);
@@ -253,39 +287,6 @@ namespace Genesis.RoomScan.Editor
             else if (_detections != null)
             {
                 EditorGUILayout.HelpBox("No detections found in the specified directory.", MessageType.Warning);
-            }
-
-            // ── Multi-view reconstruction ──
-            EditorGUILayout.Space(12);
-            EditorGUILayout.LabelField("Multi-View Reconstruction (MVRecon)", EditorStyles.boldLabel);
-            EditorGUILayout.Space(4);
-
-            DrawMVReconStatus();
-
-            if (_mvTestUIDs != null && _mvTestUIDs.Length > 0)
-            {
-                string[] labels = new string[_mvTestUIDs.Length];
-                for (int i = 0; i < _mvTestUIDs.Length; i++)
-                    labels[i] = _mvTestUIDs[i].Substring(0, 8) + "...";
-
-                _mvSelectedIdx = EditorGUILayout.Popup("Test Object", _mvSelectedIdx, labels);
-                _mvThreshold = EditorGUILayout.Slider("Density Threshold", _mvThreshold, 0.1f, 0.95f);
-
-                _executionProvider = (ExecutionProvider)EditorGUILayout.EnumPopup(
-                    "EP (MVRecon)", _executionProvider);
-
-                EditorGUILayout.Space(4);
-                using (new EditorGUI.DisabledScope(_mvSelectedIdx < 0 || _running))
-                {
-                    if (GUILayout.Button("Run MVRecon", GUILayout.Height(30)))
-                        RunMVRecon();
-                }
-            }
-            else
-            {
-                EditorGUILayout.HelpBox(
-                    "No test data found in StreamingAssets/ObjectReconstruction/MVReconTest/.\n" +
-                    "Run the Python test data preparation script first.", MessageType.Info);
             }
         }
 
