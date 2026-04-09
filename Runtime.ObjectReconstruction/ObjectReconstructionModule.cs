@@ -263,7 +263,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 sw.Restart();
 
                 ReportStatus("[MVRecon] Preprocessing views...");
-                float[] imagesNCHW = await Task.Run(() => OrtMVReconModel.PreprocessViews(views), ct);
+                float[] imagesNCHW = OrtMVReconModel.PreprocessViews(views);
                 var c2wList = new float[nViews][];
                 for (int i = 0; i < nViews; i++)
                     c2wList[i] = camEntries[i].poseFlat;
