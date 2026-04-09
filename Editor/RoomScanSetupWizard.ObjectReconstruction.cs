@@ -28,8 +28,11 @@ namespace Genesis.RoomScan.Editor
             "triposr_part1.onnx",
             "triposr_part2.onnx",
             "nerf_decoder.onnx",
-            "u2netp.onnx"
+            "u2netp.onnx",
         };
+
+        // Always deployed alongside TripoSR when present in OnnxSource (no variants)
+        static readonly string[] AlwaysDeployModelNames = { "mv_recon.onnx" };
 
         enum ModelPrecision { FP32, FP16, INT8, INT8_QDQ }
         enum ModelQuality { Full, Pruned13L, Pruned12L }
@@ -58,6 +61,7 @@ namespace Genesis.RoomScan.Editor
         bool _reconProjectedTextureShaderAssigned;
         bool _reconTestImagesAssigned;
         bool _reconOnnxModelsDeployed;
+        bool _reconMVReconDeployed;
         string _reconDeployedInfo;
         int _reconSelectedQuality;
         int _reconSelectedDino;
@@ -98,6 +102,7 @@ namespace Genesis.RoomScan.Editor
 
             string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
             _reconOnnxModelsDeployed = AllDeployedModelsExist(streamingDir);
+            _reconMVReconDeployed = File.Exists(Path.Combine(streamingDir, "mv_recon.onnx"));
             _reconDeployedInfo = DetectDeployedInfo(streamingDir);
 
             for (int q = 0; q < 3; q++)
@@ -131,6 +136,8 @@ namespace Genesis.RoomScan.Editor
                 GUILayout.Label(deployLabel, EditorStyles.boldLabel);
                 EditorGUILayout.EndHorizontal();
             }
+
+            StatusRowOptional("  mv_recon.onnx (multi-view)", _reconMVReconDeployed);
 
             bool anyAvailable = false;
             for (int q = 0; q < 3 && !anyAvailable; q++)
@@ -396,13 +403,17 @@ namespace Genesis.RoomScan.Editor
             string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
             Directory.CreateDirectory(streamingDir);
 
-            (string src, string dst)[] models =
+            var modelList = new System.Collections.Generic.List<(string src, string dst)>
             {
                 ($"{prefix}_part1_{suffix}.onnx", "triposr_part1.onnx"),
                 ($"{prefix}_part2_{suffix}.onnx", "triposr_part2.onnx"),
                 ($"nerf_decoder_{suffix}.onnx", "nerf_decoder.onnx"),
                 ("u2netp.onnx", "u2netp.onnx"),
             };
+            foreach (var name in AlwaysDeployModelNames)
+                if (File.Exists(Path.Combine(RECON_ONNX_DIR, name)))
+                    modelList.Add((name, name));
+            var models = modelList.ToArray();
 
             string qualityLabel = QualityLabels[(int)quality];
             string dinoLabel = (int)dino > 0 ? $" {DinoLabels[(int)dino]}" : "";

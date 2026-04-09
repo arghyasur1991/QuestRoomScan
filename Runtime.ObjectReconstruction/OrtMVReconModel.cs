@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
+using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 
 namespace Genesis.RoomScan.ObjectReconstruction
@@ -40,7 +41,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private const string ModelFileName = "ObjectReconstruction/mv_recon.onnx";
         private const int InputSize = 160;
         private const int NumViews = 3;
-        private const int VolumeRes = 64;
+        internal const int VolumeRes = 64;
 
         internal MVReconTiming LastTiming { get; private set; }
 
@@ -81,7 +82,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
             var densityTensor = GetPreallocatedOutput<float>("density");
             var colorTensor = GetPreallocatedOutput<float>("color");
 
-            return (densityTensor.ToArray(), colorTensor.ToArray());
+            var densityBuf = densityTensor.Buffer;
+            var colorBuf = colorTensor.Buffer;
+            var density = new float[densityBuf.Length];
+            var color = new float[colorBuf.Length];
+            densityBuf.Span.CopyTo(density);
+            colorBuf.Span.CopyTo(color);
+
+            return (density, color);
         }
 
         #region Camera Math
@@ -109,10 +117,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     c2wCv[r * 4 + 3] =  c2w[r * 4 + 3];
                 }
 
-                // w2c = inverse(c2w_cv) — 4x4 matrix inverse
                 var w2c = Invert4x4(c2wCv);
 
-                // Copy first 3 rows (drop homogeneous row)
                 int off = v * 12;
                 for (int r = 0; r < 3; r++)
                 for (int c = 0; c < 4; c++)
@@ -194,7 +200,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 var tex = EnsureReadableSquare(views[v], InputSize);
                 var pixels = tex.GetPixelData<byte>(0);
                 int bpp = tex.format == TextureFormat.RGBA32 ? 4 : 3;
-                byte* srcPtr = (byte*)pixels.GetUnsafeReadOnlyPtr();
+                byte* srcPtr = (byte*)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(pixels);
 
                 int baseOff = v * viewSize;
                 fixed (float* dstFixed = result)
@@ -202,6 +208,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     byte* srcLocal = srcPtr;
                     float* dst = dstFixed + baseOff;
                     int sz = InputSize;
+                    int cs = channelSize;
 
                     Parallel.For(0, sz, y =>
                     {
@@ -211,11 +218,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
                             int srcIdx = (unityY * sz + x) * bpp;
                             int dstIdx = y * sz + x;
 
-                            dst[0 * channelSize + dstIdx] =
+                            dst[0 * cs + dstIdx] =
                                 (srcLocal[srcIdx + 0] / 255f - ImageNetMean[0]) / ImageNetStd[0];
-                            dst[1 * channelSize + dstIdx] =
+                            dst[1 * cs + dstIdx] =
                                 (srcLocal[srcIdx + 1] / 255f - ImageNetMean[1]) / ImageNetStd[1];
-                            dst[2 * channelSize + dstIdx] =
+                            dst[2 * cs + dstIdx] =
                                 (srcLocal[srcIdx + 2] / 255f - ImageNetMean[2]) / ImageNetStd[2];
                         }
                     });
@@ -307,14 +314,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (verts == null || verts.Length == 0)
                 return new Mesh();
 
-            // Interpolate vertex colors from volume
             Color[] vertColors = null;
             if (colors != null)
             {
                 vertColors = new Color[verts.Length];
                 await Task.Run(() =>
                 {
-                    float halfVox = 0.5f / (res - 1);
                     Parallel.For(0, verts.Length, i =>
                     {
                         var p = verts[i];
@@ -344,9 +349,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private static float Sigmoid(float x) => 1f / (1f + MathF.Exp(-x));
 
         /// <summary>
-        /// Simple marching cubes on a flat density[res^3] array.
+        /// Marching cubes on a flat density[res^3] array.
         /// Vertices output in [-0.5, 0.5]^3 normalized coordinates.
-        /// Reuses the MC tables from CpuMeshExtractor.
         /// </summary>
         private static unsafe void CpuMarchingCubes64(
             float[] density, int res, float threshold,
@@ -359,8 +363,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
             var sliceVerts = new System.Collections.Generic.List<Vector3>[sliceCount];
             var sliceTris = new System.Collections.Generic.List<int>[sliceCount];
 
-            fixed (float* denPtr = density)
+            fixed (float* denPtrFixed = density)
             {
+                float* denPtr = denPtrFixed;
+
                 Parallel.For(0, sliceCount, iz =>
                 {
                     var vList = new System.Collections.Generic.List<Vector3>(256);
@@ -460,15 +466,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
         }
 
-        // MC lookup tables (same as CpuMeshExtractor — duplicated to avoid coupling)
         private static readonly int[] MCCornerX = { 0, 1, 1, 0, 0, 1, 1, 0 };
         private static readonly int[] MCCornerY = { 0, 0, 1, 1, 0, 0, 1, 1 };
         private static readonly int[] MCCornerZ = { 0, 0, 0, 0, 1, 1, 1, 1 };
         private static readonly int[] MCEdgeA = { 0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3 };
         private static readonly int[] MCEdgeB = { 1, 2, 3, 0, 5, 6, 7, 4, 4, 5, 6, 7 };
 
-        // EdgeTable and TriTable omitted for brevity — use static reference from CpuMeshExtractor
-        // In production, these would be shared via a static helper class
         private static readonly int[] MCEdgeTable = CpuMeshExtractor.EdgeTablePublic;
         private static readonly int[] MCTriTable = CpuMeshExtractor.TriTablePublic;
 
