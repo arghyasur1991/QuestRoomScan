@@ -46,5 +46,12 @@ namespace Genesis.RoomScan
         /// Useful for quick EP validation (e.g. QNN HTP) without running the full pipeline.
         /// </summary>
         Task<Texture2D> TestRembgAsync(Texture2D image, CancellationToken ct = default);
+
+        /// <summary>
+        /// Runs MVRecon test benchmark with pre-staged multi-view test data from StreamingAssets.
+        /// Returns the reconstructed mesh, or null on failure.
+        /// </summary>
+        Task<Mesh> TestMVReconAsync(string testUid, float threshold = 0.5f,
+            CancellationToken ct = default);
     }
 }

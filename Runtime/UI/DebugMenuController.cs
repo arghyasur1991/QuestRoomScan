@@ -16,11 +16,11 @@ namespace Genesis.RoomScan.UI
         private bool _visible;
 
         // Nav buttons
-        private Button _navScan, _navSaved, _navRefine, _navTraining, _navTools, _navReconstruct;
+        private Button _navScan, _navSaved, _navRefine, _navTraining, _navTools, _navReconstruct, _navMVRecon;
         private Button[] _navButtons;
 
         // Views
-        private VisualElement _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools, _viewReconstruct;
+        private VisualElement _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools, _viewReconstruct, _viewMVRecon;
         private VisualElement[] _views;
 
         // Scan view elements
@@ -58,6 +58,14 @@ namespace Genesis.RoomScan.UI
         private bool _reconAvailable;
         private IObjectReconstructionProvider _cachedReconModule;
         private GameObject _spawnedReconMesh;
+
+        // MVRecon view
+        private Label _valMVReconModel, _valMVReconUid, _valMVReconStatus, _valMVReconTiming, _valMVReconMesh;
+        private Button _btnMVReconPrev, _btnMVReconNext, _btnMVReconRun, _btnMVReconClear;
+        private string[] _mvTestUIDs;
+        private int _mvSelectedIdx;
+        private bool _mvRunning;
+        private GameObject _spawnedMVReconMesh;
 
         // Footer
         private Label _valFps;
@@ -147,7 +155,8 @@ namespace Genesis.RoomScan.UI
             _navTraining = _root.Q<Button>("nav-training");
             _navTools = _root.Q<Button>("nav-tools");
             _navReconstruct = _root.Q<Button>("nav-reconstruct");
-            _navButtons = new[] { _navScan, _navSaved, _navRefine, _navTraining, _navTools, _navReconstruct };
+            _navMVRecon = _root.Q<Button>("nav-mvrecon");
+            _navButtons = new[] { _navScan, _navSaved, _navRefine, _navTraining, _navTools, _navReconstruct, _navMVRecon };
 
             // Views
             _viewScan = _root.Q<VisualElement>("view-scan");
@@ -156,7 +165,8 @@ namespace Genesis.RoomScan.UI
             _viewTraining = _root.Q<VisualElement>("view-training");
             _viewTools = _root.Q<VisualElement>("view-tools");
             _viewReconstruct = _root.Q<VisualElement>("view-reconstruct");
-            _views = new[] { _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools, _viewReconstruct };
+            _viewMVRecon = _root.Q<VisualElement>("view-mvrecon");
+            _views = new[] { _viewScan, _viewSaved, _viewRefine, _viewTraining, _viewTools, _viewReconstruct, _viewMVRecon };
 
             // Scan view
             _valScanning = _root.Q<Label>("val-scanning");
@@ -219,6 +229,17 @@ namespace Genesis.RoomScan.UI
             for (int i = 0; i < 6; i++)
                 _reconThumbs[i] = _root.Q<VisualElement>($"recon-thumb-{i}");
 
+            // MVRecon
+            _valMVReconModel = _root.Q<Label>("val-mvrecon-model");
+            _valMVReconUid = _root.Q<Label>("val-mvrecon-uid");
+            _valMVReconStatus = _root.Q<Label>("val-mvrecon-status");
+            _valMVReconTiming = _root.Q<Label>("val-mvrecon-timing");
+            _valMVReconMesh = _root.Q<Label>("val-mvrecon-mesh");
+            _btnMVReconPrev = _root.Q<Button>("btn-mvrecon-prev");
+            _btnMVReconNext = _root.Q<Button>("btn-mvrecon-next");
+            _btnMVReconRun = _root.Q<Button>("btn-mvrecon-run");
+            _btnMVReconClear = _root.Q<Button>("btn-mvrecon-clear");
+
             // Footer
             _valFps = _root.Q<Label>("val-fps");
         }
@@ -232,6 +253,7 @@ namespace Genesis.RoomScan.UI
             _navTraining?.RegisterCallback<ClickEvent>(_ => SelectNav(_navTraining));
             _navTools?.RegisterCallback<ClickEvent>(_ => SelectNav(_navTools));
             _navReconstruct?.RegisterCallback<ClickEvent>(_ => SelectNav(_navReconstruct));
+            _navMVRecon?.RegisterCallback<ClickEvent>(_ => SelectNav(_navMVRecon));
 
             // Scan view buttons
             _btnToggleScan?.RegisterCallback<ClickEvent>(_ =>
@@ -311,6 +333,9 @@ namespace Genesis.RoomScan.UI
 
             // Reconstruct
             BindReconstructButtons();
+
+            // MVRecon
+            BindMVReconButtons();
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -493,6 +518,153 @@ namespace Genesis.RoomScan.UI
         }
 
         // ─────────────────────────────────────────────────────────────
+        //  MVRecon Bindings
+        // ─────────────────────────────────────────────────────────────
+
+        private void BindMVReconButtons()
+        {
+            ScanMVReconTestUIDs();
+
+            _btnMVReconPrev?.RegisterCallback<ClickEvent>(_ =>
+            {
+                if (_mvTestUIDs == null || _mvTestUIDs.Length == 0) return;
+                _mvSelectedIdx = (_mvSelectedIdx - 1 + _mvTestUIDs.Length) % _mvTestUIDs.Length;
+                UpdateMVReconUidLabel();
+            });
+
+            _btnMVReconNext?.RegisterCallback<ClickEvent>(_ =>
+            {
+                if (_mvTestUIDs == null || _mvTestUIDs.Length == 0) return;
+                _mvSelectedIdx = (_mvSelectedIdx + 1) % _mvTestUIDs.Length;
+                UpdateMVReconUidLabel();
+            });
+
+            _btnMVReconRun?.RegisterCallback<ClickEvent>(_ => RunMVRecon());
+
+            _btnMVReconClear?.RegisterCallback<ClickEvent>(_ => ClearMVReconMesh());
+
+            UpdateMVReconUidLabel();
+            UpdateMVReconModelStatus();
+        }
+
+        private void ScanMVReconTestUIDs()
+        {
+            string testRoot = System.IO.Path.Combine(
+                Application.streamingAssetsPath, "ObjectReconstruction", "MVReconTest");
+
+            if (!System.IO.Directory.Exists(testRoot))
+            {
+                _mvTestUIDs = System.Array.Empty<string>();
+                return;
+            }
+
+            var dirs = System.IO.Directory.GetDirectories(testRoot);
+            var uids = new System.Collections.Generic.List<string>();
+            foreach (var d in dirs)
+                uids.Add(System.IO.Path.GetFileName(d));
+            uids.Sort();
+            _mvTestUIDs = uids.ToArray();
+            _mvSelectedIdx = _mvTestUIDs.Length > 0 ? 0 : -1;
+        }
+
+        private void UpdateMVReconUidLabel()
+        {
+            if (_mvTestUIDs == null || _mvTestUIDs.Length == 0)
+            {
+                SetLabel(_valMVReconUid, "No test data");
+                return;
+            }
+            string uid = _mvTestUIDs[_mvSelectedIdx];
+            SetLabel(_valMVReconUid, $"[{_mvSelectedIdx + 1}/{_mvTestUIDs.Length}] {uid.Substring(0, 8)}...");
+        }
+
+        private void UpdateMVReconModelStatus()
+        {
+            string onnxPath = System.IO.Path.Combine(
+                Application.streamingAssetsPath, "ObjectReconstruction", "mv_recon.onnx");
+            bool found = System.IO.File.Exists(onnxPath);
+            SetLabel(_valMVReconModel, found ? "mv_recon.onnx ✓" : "mv_recon.onnx ✗ (missing)");
+        }
+
+        private async void RunMVRecon()
+        {
+            if (_mvRunning || _mvTestUIDs == null || _mvSelectedIdx < 0) return;
+
+            var module = FindReconstructionModule();
+            if (module == null)
+            {
+                SetLabel(_valMVReconStatus, "ObjectReconstructionModule not found");
+                return;
+            }
+
+            _mvRunning = true;
+            SetButtonBusy(_btnMVReconRun, "Running...");
+            SetLabel(_valMVReconStatus, "Starting...");
+            SetLabel(_valMVReconTiming, "--");
+            SetLabel(_valMVReconMesh, "--");
+            QuestCpuBoost.Begin();
+
+            try
+            {
+                string uid = _mvTestUIDs[_mvSelectedIdx];
+                var mesh = await module.TestMVReconAsync(uid);
+
+                if (mesh != null && mesh.vertexCount > 0)
+                {
+                    SetLabel(_valMVReconMesh, $"{mesh.vertexCount} verts, {mesh.triangles.Length / 3} tris");
+                    SpawnMVReconMesh(mesh);
+                }
+                else
+                {
+                    SetLabel(_valMVReconMesh, "Empty mesh");
+                }
+            }
+            catch (System.Exception e)
+            {
+                SetLabel(_valMVReconStatus, $"Error: {e.Message}");
+                Debug.LogException(e);
+            }
+            finally
+            {
+                QuestCpuBoost.End();
+                _mvRunning = false;
+                SetButtonReady(_btnMVReconRun, "Run MVRecon");
+            }
+        }
+
+        private void SpawnMVReconMesh(Mesh mesh)
+        {
+            ClearMVReconMesh();
+
+            var module = FindReconstructionModule();
+            var mat = module?.CreateMaterial();
+
+            _spawnedMVReconMesh = new GameObject("MVReconObject");
+            var mf = _spawnedMVReconMesh.AddComponent<MeshFilter>();
+            var mr = _spawnedMVReconMesh.AddComponent<MeshRenderer>();
+            mf.sharedMesh = mesh;
+            mr.sharedMaterial = mat;
+
+            var cam = Camera.main;
+            var spawnPos = cam != null
+                ? cam.transform.position + cam.transform.forward * 1.5f
+                : Vector3.forward * 1.5f;
+            _spawnedMVReconMesh.transform.position = spawnPos;
+            _spawnedMVReconMesh.transform.localScale = Vector3.one * 0.5f;
+
+            Debug.Log($"[DebugMenu] MVRecon mesh spawned at {spawnPos}: {mesh.vertexCount} verts");
+        }
+
+        private void ClearMVReconMesh()
+        {
+            if (_spawnedMVReconMesh != null)
+            {
+                Destroy(_spawnedMVReconMesh);
+                _spawnedMVReconMesh = null;
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────
         //  Module Availability
         // ─────────────────────────────────────────────────────────────
 
@@ -506,6 +678,7 @@ namespace Genesis.RoomScan.UI
             SetNavAvailable(_navRefine, _refineAvailable);
             SetNavAvailable(_navTraining, _gsplatAvailable);
             SetNavAvailable(_navReconstruct, _reconAvailable);
+            SetNavAvailable(_navMVRecon, _reconAvailable);
 
             if (_reconAvailable)
                 SetupReconThumbnails();
@@ -685,6 +858,7 @@ namespace Genesis.RoomScan.UI
             RefreshRefineView(scanner);
             RefreshTrainingStatus();
             RefreshReconstructStatus();
+            RefreshMVReconStatus();
             RefreshDisabledStates(scanner);
 
             SetLabel(_valFps, $"{_currentFps:F0} FPS");
@@ -884,6 +1058,17 @@ namespace Genesis.RoomScan.UI
 
             if (_btnReconPredict != null && !module.IsRunning && _btnReconPredict.text.Contains("Running"))
                 SetButtonReady(_btnReconPredict, "Predict");
+        }
+
+        private void RefreshMVReconStatus()
+        {
+            var module = FindReconstructionModule();
+            if (module == null) return;
+
+            if (_mvRunning)
+                SetLabel(_valMVReconStatus, module.Status ?? "Running...");
+            else if (_btnMVReconRun != null && !_btnMVReconRun.text.Contains("Running"))
+                SetLabel(_valMVReconStatus, module.Status ?? "Idle");
         }
 
         private void RefreshDisabledStates(RoomScanner scanner)

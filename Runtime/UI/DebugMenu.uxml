@@ -21,6 +21,7 @@
             <ui:Button name="nav-training"    text="Gaussian Splat"    class="nav-btn" />
             <ui:Button name="nav-tools"       text="Tools"       class="nav-btn" />
             <ui:Button name="nav-reconstruct" text="Reconstruct" class="nav-btn" />
+            <ui:Button name="nav-mvrecon"     text="MVRecon"      class="nav-btn" />
 
             <ui:VisualElement class="nav-spacer" />
             <ui:Label name="val-fps" text="-- FPS" class="nav-fps" />
@@ -216,6 +217,41 @@
                     <ui:Label name="val-recon-experiment" text="--" class="status-val" style="white-space: normal;" />
                 </ui:VisualElement>
                 <ui:VisualElement name="recon-mask-preview" style="width: 160px; height: 160px; background-color: rgb(34, 34, 34);" />
+            </ui:VisualElement>
+
+            <!-- ── MVRECON VIEW ── -->
+            <ui:VisualElement name="view-mvrecon" class="detail-view" style="display:none;">
+                <ui:Label text="MULTI-VIEW RECONSTRUCTION" class="view-title" />
+
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Model" class="status-key" />
+                    <ui:Label name="val-mvrecon-model" text="--" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Test Object" class="status-key" />
+                    <ui:Label name="val-mvrecon-uid" text="--" class="status-val" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Status" class="status-key" />
+                    <ui:Label name="val-mvrecon-status" text="Idle" class="status-val" style="white-space: normal;" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Timing" class="status-key" />
+                    <ui:Label name="val-mvrecon-timing" text="--" class="status-val" style="white-space: normal;" />
+                </ui:VisualElement>
+                <ui:VisualElement class="status-row">
+                    <ui:Label text="Mesh" class="status-key" />
+                    <ui:Label name="val-mvrecon-mesh" text="--" class="status-val" />
+                </ui:VisualElement>
+
+                <ui:VisualElement class="btn-group">
+                    <ui:Button name="btn-mvrecon-prev" text="◀ Prev" class="action-btn" />
+                    <ui:Button name="btn-mvrecon-next" text="Next ▶" class="action-btn" />
+                </ui:VisualElement>
+                <ui:VisualElement class="btn-group">
+                    <ui:Button name="btn-mvrecon-run" text="Run MVRecon" class="action-btn action-btn--primary" />
+                    <ui:Button name="btn-mvrecon-clear" text="Clear Mesh" class="action-btn action-btn--danger" />
+                </ui:VisualElement>
             </ui:VisualElement>
 
         </ui:VisualElement>
