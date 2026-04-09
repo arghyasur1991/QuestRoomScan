@@ -43,11 +43,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
             _module = GetComponent<ObjectReconstructionModule>();
             if (_module == null)
-            {
                 _module = gameObject.AddComponent<ObjectReconstructionModule>();
-                _module.executionProvider = executionProvider;
-                _module.mobileOptimized = mobileOptimized;
-            }
 
             string uid = testUid;
             if (string.IsNullOrEmpty(uid))
