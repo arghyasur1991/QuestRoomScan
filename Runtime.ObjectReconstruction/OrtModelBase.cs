@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.ML.OnnxRuntime;
@@ -243,16 +244,13 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     string optDir = Path.Combine(Application.persistentDataPath, "ort_opt_cache");
                     Directory.CreateDirectory(optDir);
 
-                    // Key cache by model file size so different model versions never collide
-                    long modelSize = 0;
-                    if (!string.IsNullOrEmpty(modelPath) && File.Exists(modelPath))
-                        modelSize = new FileInfo(modelPath).Length;
-                    string optName = modelSize > 0
-                        ? $"{modelName}_{modelSize}_opt.onnx"
+                    string hash = ComputeModelHash(modelPath);
+                    string optName = hash != null
+                        ? $"{modelName}_{hash}_opt.onnx"
                         : $"{modelName}_opt.onnx";
                     options.OptimizedModelFilePath = Path.Combine(optDir, optName);
 
-                    // Clean up stale opt files for this model with different sizes
+                    // Clean up stale opt files for this model with a different hash
                     try
                     {
                         foreach (var oldFile in Directory.GetFiles(optDir, $"{modelName}_*_opt.onnx"))
@@ -296,16 +294,16 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Returns a per-model cache subdirectory keyed by file size. Different model
-        /// precisions (FP32/INT8) get isolated cache dirs automatically, preventing
+        /// Returns a per-model cache subdirectory keyed by content hash. Different model
+        /// weights or precisions get isolated cache dirs automatically, preventing
         /// stale compiled-model collisions when models share the same filename.
-        /// Also cleans up old cache dirs for the same model name with different sizes.
+        /// Also cleans up old cache dirs for the same model name with different hashes.
         /// </summary>
         private static string GetPerModelCacheDir(string modelPath, string modelName)
         {
-            long fileSize = new FileInfo(modelPath).Length;
+            string hash = ComputeModelHash(modelPath) ?? new FileInfo(modelPath).Length.ToString();
             string baseDir = GetCoreMLCacheDirectory();
-            string modelCacheDir = Path.Combine(baseDir, $"{modelName}_{fileSize}");
+            string modelCacheDir = Path.Combine(baseDir, $"{modelName}_{hash}");
 
             if (!Directory.Exists(modelCacheDir))
             {
@@ -325,6 +323,35 @@ namespace Genesis.RoomScan.ObjectReconstruction
             }
 
             return modelCacheDir;
+        }
+
+        /// <summary>
+        /// Computes a short hash of the model file for cache-keying. Uses MD5 on
+        /// the first 64KB — enough to detect any weight change without reading
+        /// the full file (which can be 20MB+).
+        /// </summary>
+        private static string ComputeModelHash(string modelPath)
+        {
+            if (string.IsNullOrEmpty(modelPath) || !File.Exists(modelPath))
+                return null;
+            try
+            {
+                const int sampleBytes = 64 * 1024;
+                using var stream = File.OpenRead(modelPath);
+                long fileLen = stream.Length;
+                int toRead = (int)Math.Min(fileLen, sampleBytes);
+                byte[] buf = new byte[toRead + 8];
+                stream.Read(buf, 0, toRead);
+                // Append file length so same-prefix-different-length files don't collide
+                BitConverter.GetBytes(fileLen).CopyTo(buf, toRead);
+                using var md5 = MD5.Create();
+                byte[] hash = md5.ComputeHash(buf, 0, toRead + 8);
+                return BitConverter.ToString(hash).Replace("-", "").Substring(0, 12).ToLowerInvariant();
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>
