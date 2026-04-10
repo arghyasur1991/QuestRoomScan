@@ -21,29 +21,45 @@ namespace Genesis.RoomScan.ObjectReconstruction
         private static void InvalidateCacheOnUpgrade()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            string currentVersion = Application.version + "|" + Application.buildGUID;
-            string cachedVersion = PlayerPrefs.GetString(VersionPrefKey, "");
+            bool shouldClear = false;
 
-            if (cachedVersion != currentVersion)
+            if (Debug.isDebugBuild)
             {
-                string cacheDir = Path.Combine(Application.persistentDataPath, "ObjectReconstruction");
-                if (Directory.Exists(cacheDir))
-                {
-                    Directory.Delete(cacheDir, true);
-                    Logger.Info("[ModelPathResolver] Cleared model cache (app updated)");
-                }
+                // Dev builds: always clear to guarantee fresh models after every deploy
+                shouldClear = true;
+            }
+            else
+            {
+                string currentVersion = Application.version + "|" + Application.buildGUID;
+                string cachedVersion = PlayerPrefs.GetString(VersionPrefKey, "");
+                shouldClear = (cachedVersion != currentVersion);
+            }
 
-                string ortOptDir = Path.Combine(Application.persistentDataPath, "ort_opt_cache");
-                if (Directory.Exists(ortOptDir))
-                {
-                    Directory.Delete(ortOptDir, true);
-                    Logger.Info("[ModelPathResolver] Cleared ORT optimization cache (app updated)");
-                }
-
+            if (shouldClear)
+            {
+                ClearAllCaches();
+                string currentVersion = Application.version + "|" + Application.buildGUID;
                 PlayerPrefs.SetString(VersionPrefKey, currentVersion);
                 PlayerPrefs.Save();
             }
 #endif
+        }
+
+        private static void ClearAllCaches()
+        {
+            string cacheDir = Path.Combine(Application.persistentDataPath, "ObjectReconstruction");
+            if (Directory.Exists(cacheDir))
+            {
+                Directory.Delete(cacheDir, true);
+                Logger.Info("[ModelPathResolver] Cleared model cache");
+            }
+
+            string ortOptDir = Path.Combine(Application.persistentDataPath, "ort_opt_cache");
+            if (Directory.Exists(ortOptDir))
+            {
+                Directory.Delete(ortOptDir, true);
+                Logger.Info("[ModelPathResolver] Cleared ORT optimization cache");
+            }
         }
 
         internal static async Task<string> ResolveAsync(string relativePath, CancellationToken ct)

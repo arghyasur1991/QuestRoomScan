@@ -136,7 +136,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             if (ep == ExecutionProvider.CoreML)
                 modelCacheDir = GetPerModelCacheDir(modelPath, modelName);
 
-            var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir, modelName);
+            var options = CreateSessionOptions(ep, mobileOptimized, modelCacheDir, modelName, modelPath);
 
             bool qnnAccepted = false;
             List<string> inputNames = null;
@@ -220,7 +220,8 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private static SessionOptions CreateSessionOptions(
             ExecutionProvider ep, bool mobileOptimized,
-            string modelCacheDir = null, string modelName = null)
+            string modelCacheDir = null, string modelName = null,
+            string modelPath = null)
         {
             var options = new SessionOptions
             {
@@ -241,7 +242,24 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 {
                     string optDir = Path.Combine(Application.persistentDataPath, "ort_opt_cache");
                     Directory.CreateDirectory(optDir);
-                    options.OptimizedModelFilePath = Path.Combine(optDir, $"{modelName}_opt.onnx");
+
+                    // Key cache by model file size so different model versions never collide
+                    long modelSize = 0;
+                    if (!string.IsNullOrEmpty(modelPath) && File.Exists(modelPath))
+                        modelSize = new FileInfo(modelPath).Length;
+                    string optName = modelSize > 0
+                        ? $"{modelName}_{modelSize}_opt.onnx"
+                        : $"{modelName}_opt.onnx";
+                    options.OptimizedModelFilePath = Path.Combine(optDir, optName);
+
+                    // Clean up stale opt files for this model with different sizes
+                    try
+                    {
+                        foreach (var oldFile in Directory.GetFiles(optDir, $"{modelName}_*_opt.onnx"))
+                            if (oldFile != options.OptimizedModelFilePath)
+                                File.Delete(oldFile);
+                    }
+                    catch { /* best effort cleanup */ }
                 }
             }
 
