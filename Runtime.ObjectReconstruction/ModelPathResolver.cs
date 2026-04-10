@@ -32,6 +32,14 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     Directory.Delete(cacheDir, true);
                     Logger.Info("[ModelPathResolver] Cleared model cache (app updated)");
                 }
+
+                string ortOptDir = Path.Combine(Application.persistentDataPath, "ort_opt_cache");
+                if (Directory.Exists(ortOptDir))
+                {
+                    Directory.Delete(ortOptDir, true);
+                    Logger.Info("[ModelPathResolver] Cleared ORT optimization cache (app updated)");
+                }
+
                 PlayerPrefs.SetString(VersionPrefKey, currentVersion);
                 PlayerPrefs.Save();
             }
