@@ -32,7 +32,10 @@ namespace Genesis.RoomScan.Editor
         };
 
         // Always deployed alongside TripoSR when present in OnnxSource (no variants)
-        static readonly string[] AlwaysDeployModelNames = { "mv_recon.onnx" };
+        static readonly string[] AlwaysDeployModelNames = { };
+
+        static readonly string[] MVReconPrecisionSuffixes = { "fp32", "fp16", "int8" };
+        static readonly string[] MVReconPrecisionLabels = { "FP32", "FP16", "INT8" };
 
         enum ModelPrecision { FP32, FP16, INT8, INT8_QDQ }
         enum ModelQuality { Full, Pruned13L, Pruned12L }
@@ -63,6 +66,8 @@ namespace Genesis.RoomScan.Editor
         bool _reconOnnxModelsDeployed;
         bool _reconMVReconDeployed;
         string _reconDeployedInfo;
+        string _reconMVReconDeployedVariant;
+        bool[] _reconMVReconVariantsAvailable = new bool[3];
         int _reconSelectedQuality;
         int _reconSelectedDino;
         int _reconSelectedResolution;
@@ -104,6 +109,11 @@ namespace Genesis.RoomScan.Editor
             _reconOnnxModelsDeployed = AllDeployedModelsExist(streamingDir);
             _reconMVReconDeployed = File.Exists(Path.Combine(streamingDir, "mv_recon.onnx"));
             _reconDeployedInfo = DetectDeployedInfo(streamingDir);
+            _reconMVReconDeployedVariant = DetectMVReconVariant(streamingDir);
+
+            for (int i = 0; i < MVReconPrecisionSuffixes.Length; i++)
+                _reconMVReconVariantsAvailable[i] = File.Exists(
+                    Path.Combine(RECON_ONNX_DIR, $"mv_recon_{MVReconPrecisionSuffixes[i]}.onnx"));
 
             for (int q = 0; q < 3; q++)
                 for (int d = 0; d < 2; d++)
@@ -137,15 +147,43 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
             }
 
-            bool mvReconAvailable = File.Exists(Path.Combine(RECON_ONNX_DIR, "mv_recon.onnx"));
+            bool anyMVReconAvailable = false;
+            for (int i = 0; i < _reconMVReconVariantsAvailable.Length; i++)
+                anyMVReconAvailable |= _reconMVReconVariantsAvailable[i];
+
+            string mvStatus = _reconMVReconDeployed
+                ? (_reconMVReconDeployedVariant != null
+                    ? $"OK ({_reconMVReconDeployedVariant})"
+                    : "OK")
+                : "Not deployed";
             StatusRowOptional("  mv_recon.onnx (multi-view)", _reconMVReconDeployed);
-            if (mvReconAvailable)
+
+            if (anyMVReconAvailable)
             {
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.Space(32);
-                string mvLabel = _reconMVReconDeployed ? "Redeploy MVRecon (0.4MB)" : "Deploy MVRecon (0.4MB)";
-                if (GUILayout.Button(mvLabel, GUILayout.Height(22)))
-                    DeployMVRecon();
+                for (int i = 0; i < MVReconPrecisionSuffixes.Length; i++)
+                {
+                    bool available = _reconMVReconVariantsAvailable[i];
+                    using (new EditorGUI.DisabledScope(!available))
+                    {
+                        string label = MVReconPrecisionLabels[i];
+                        if (available)
+                        {
+                            string srcPath = Path.Combine(RECON_ONNX_DIR,
+                                $"mv_recon_{MVReconPrecisionSuffixes[i]}.onnx");
+                            long sizeMB = new FileInfo(srcPath).Length / (1024 * 1024);
+                            label += $" ({sizeMB}MB)";
+                        }
+                        bool isActive = _reconMVReconDeployedVariant == MVReconPrecisionSuffixes[i];
+                        var style = isActive
+                            ? new GUIStyle(GUI.skin.button)
+                              { fontStyle = FontStyle.Bold }
+                            : GUI.skin.button;
+                        if (GUILayout.Button(label, style, GUILayout.Height(22)))
+                            DeployMVRecon(MVReconPrecisionSuffixes[i]);
+                    }
+                }
                 EditorGUILayout.EndHorizontal();
             }
 
@@ -463,24 +501,46 @@ namespace Genesis.RoomScan.Editor
             Debug.Log($"[ObjectReconstruction] {displayLabel} {suffix.ToUpper()} deployment complete");
         }
 
-        private static void DeployMVRecon()
+        private static void DeployMVRecon(string precisionSuffix = "fp32")
         {
             string streamingDir = Path.Combine(Application.streamingAssetsPath, RECON_STREAMING_DIR);
             Directory.CreateDirectory(streamingDir);
 
-            string[] files = { "mv_recon.onnx", "mv_recon_camera_config.json" };
-            foreach (var name in files)
+            string srcModel = Path.Combine(RECON_ONNX_DIR, $"mv_recon_{precisionSuffix}.onnx");
+            if (!File.Exists(srcModel))
             {
-                string srcPath = Path.Combine(RECON_ONNX_DIR, name);
-                if (!File.Exists(srcPath)) continue;
-                string dstPath = Path.Combine(streamingDir, name);
-                File.Copy(srcPath, dstPath, overwrite: true);
-                var fi = new FileInfo(dstPath);
-                Debug.Log($"[ObjectReconstruction] Deployed {name} ({fi.Length / 1024} KB)");
+                Debug.LogError($"[ObjectReconstruction] Missing: {srcModel}");
+                return;
             }
 
+            string dstModel = Path.Combine(streamingDir, "mv_recon.onnx");
+            File.Copy(srcModel, dstModel, overwrite: true);
+            var fi = new FileInfo(dstModel);
+            Debug.Log($"[ObjectReconstruction] Deployed mv_recon.onnx ← mv_recon_{precisionSuffix}.onnx ({fi.Length / 1024} KB)");
+
+            string srcConfig = Path.Combine(RECON_ONNX_DIR, "mv_recon_camera_config.json");
+            if (File.Exists(srcConfig))
+            {
+                string dstConfig = Path.Combine(streamingDir, "mv_recon_camera_config.json");
+                File.Copy(srcConfig, dstConfig, overwrite: true);
+            }
+
+            string markerPath = Path.Combine(streamingDir, ".mv_recon_precision");
+            File.WriteAllText(markerPath, precisionSuffix);
+
             AssetDatabase.Refresh();
-            Debug.Log("[ObjectReconstruction] mv_recon deployment complete");
+            Debug.Log($"[ObjectReconstruction] mv_recon ({precisionSuffix.ToUpper()}) deployment complete");
+        }
+
+        private static string DetectMVReconVariant(string streamingDir)
+        {
+            string markerPath = Path.Combine(streamingDir, ".mv_recon_precision");
+            if (File.Exists(markerPath))
+            {
+                string marker = File.ReadAllText(markerPath).Trim();
+                if (!string.IsNullOrEmpty(marker)) return marker;
+            }
+            return null;
         }
     }
 }
