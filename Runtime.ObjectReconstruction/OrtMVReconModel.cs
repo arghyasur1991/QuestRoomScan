@@ -182,10 +182,12 @@ namespace Genesis.RoomScan.ObjectReconstruction
 
         private static readonly float[] ImageNetMean = { 0.485f, 0.456f, 0.406f };
         private static readonly float[] ImageNetStd = { 0.229f, 0.224f, 0.225f };
+        private const float GrayBg = 127f / 255f;
 
         /// <summary>
         /// Convert N Texture2D views into a single NCHW float[] with ImageNet normalization.
         /// Output layout: [N, 3, InputSize, InputSize] flattened.
+        /// RGBA images are composited on gray (0.5) background to match training pipeline.
         /// Images are center-cropped to square then resized to InputSize.
         /// </summary>
         internal static unsafe float[] PreprocessViews(Texture2D[] views)
@@ -200,6 +202,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 var tex = EnsureReadableSquare(views[v], InputSize);
                 var pixels = tex.GetPixelData<byte>(0);
                 int bpp = tex.format == TextureFormat.RGBA32 ? 4 : 3;
+                bool hasAlpha = bpp == 4;
                 byte* srcPtr = (byte*)NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(pixels);
 
                 int baseOff = v * viewSize;
@@ -218,12 +221,22 @@ namespace Genesis.RoomScan.ObjectReconstruction
                             int srcIdx = (unityY * sz + x) * bpp;
                             int dstIdx = y * sz + x;
 
-                            dst[0 * cs + dstIdx] =
-                                (srcLocal[srcIdx + 0] / 255f - ImageNetMean[0]) / ImageNetStd[0];
-                            dst[1 * cs + dstIdx] =
-                                (srcLocal[srcIdx + 1] / 255f - ImageNetMean[1]) / ImageNetStd[1];
-                            dst[2 * cs + dstIdx] =
-                                (srcLocal[srcIdx + 2] / 255f - ImageNetMean[2]) / ImageNetStd[2];
+                            float r = srcLocal[srcIdx + 0] / 255f;
+                            float g = srcLocal[srcIdx + 1] / 255f;
+                            float b = srcLocal[srcIdx + 2] / 255f;
+
+                            if (hasAlpha)
+                            {
+                                float a = srcLocal[srcIdx + 3] / 255f;
+                                float invA = 1f - a;
+                                r = r * a + GrayBg * invA;
+                                g = g * a + GrayBg * invA;
+                                b = b * a + GrayBg * invA;
+                            }
+
+                            dst[0 * cs + dstIdx] = (r - ImageNetMean[0]) / ImageNetStd[0];
+                            dst[1 * cs + dstIdx] = (g - ImageNetMean[1]) / ImageNetStd[1];
+                            dst[2 * cs + dstIdx] = (b - ImageNetMean[2]) / ImageNetStd[2];
                         }
                     });
                 }
@@ -242,6 +255,11 @@ namespace Genesis.RoomScan.ObjectReconstruction
             int cropX = (w - sq) / 2;
             int cropY = (h - sq) / 2;
 
+            bool srcHasAlpha = src.format == TextureFormat.RGBA32 ||
+                               src.format == TextureFormat.BGRA32 ||
+                               src.format == TextureFormat.ARGB32;
+            var dstFormat = srcHasAlpha ? TextureFormat.RGBA32 : TextureFormat.RGB24;
+
             var rt = RenderTexture.GetTemporary(targetSize, targetSize, 0, RenderTextureFormat.ARGB32);
             float scaleX = (float)sq / w;
             float scaleY = (float)sq / h;
@@ -250,7 +268,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
             Graphics.Blit(src, rt, new Vector2(scaleX, scaleY), new Vector2(offsetX, offsetY));
 
             RenderTexture.active = rt;
-            var result = new Texture2D(targetSize, targetSize, TextureFormat.RGB24, false);
+            var result = new Texture2D(targetSize, targetSize, dstFormat, false);
             result.ReadPixels(new Rect(0, 0, targetSize, targetSize), 0, 0);
             result.Apply();
             RenderTexture.active = null;
