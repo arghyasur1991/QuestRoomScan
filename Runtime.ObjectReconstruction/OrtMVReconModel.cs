@@ -25,10 +25,10 @@ namespace Genesis.RoomScan.ObjectReconstruction
     }
 
     /// <summary>
-    /// Multi-view reconstruction via ONNX Runtime. Takes N input views with known
-    /// camera poses and produces a 64^3 occupancy volume + color volume.
+    /// Multi-view reconstruction via ONNX Runtime. Takes N input views (variable)
+    /// with known camera poses and produces a 64^3 occupancy volume + color volume.
     ///
-    /// ONNX inputs:
+    /// ONNX inputs (N is dynamic):
     ///   images  [1, N, 3, 160, 160] — ImageNet-normalized RGB
     ///   w2c_cv  [1, N, 3, 4]        — world-to-camera (OpenCV convention)
     ///
@@ -40,7 +40,6 @@ namespace Genesis.RoomScan.ObjectReconstruction
     {
         private const string ModelFileName = "ObjectReconstruction/mv_recon.onnx";
         private const int InputSize = 160;
-        private const int NumViews = 3;
         internal const int VolumeRes = 64;
 
         internal MVReconTiming LastTiming { get; private set; }
@@ -51,15 +50,15 @@ namespace Genesis.RoomScan.ObjectReconstruction
         }
 
         /// <summary>
-        /// Run full multi-view reconstruction.
+        /// Run full multi-view reconstruction with N input views (variable).
         /// Returns (density, color) as flat float arrays of length 64^3 and 3*64^3.
         /// Density values are raw logits (apply sigmoid for probability).
         /// </summary>
         internal async Task<(float[] density, float[] color)> RunAsync(
-            float[] imagesNCHW, float[] w2cFlat, CancellationToken ct)
+            float[] imagesNCHW, float[] w2cFlat, int numViews, CancellationToken ct)
         {
-            int imgLen = NumViews * 3 * InputSize * InputSize;
-            int w2cLen = NumViews * 3 * 4;
+            int imgLen = numViews * 3 * InputSize * InputSize;
+            int w2cLen = numViews * 3 * 4;
 
             if (imagesNCHW.Length != imgLen)
                 throw new ArgumentException(
@@ -69,9 +68,9 @@ namespace Genesis.RoomScan.ObjectReconstruction
                     $"Expected w2c length {w2cLen}, got {w2cFlat.Length}");
 
             var imagesTensor = new DenseTensor<float>(
-                imagesNCHW, new[] { 1, NumViews, 3, InputSize, InputSize });
+                imagesNCHW, new[] { 1, numViews, 3, InputSize, InputSize });
             var w2cTensor = new DenseTensor<float>(
-                w2cFlat, new[] { 1, NumViews, 3, 4 });
+                w2cFlat, new[] { 1, numViews, 3, 4 });
 
             _inputs.Add(NamedOnnxValue.CreateFromTensor(_inputNames[0], imagesTensor));
             _inputs.Add(NamedOnnxValue.CreateFromTensor(_inputNames[1], w2cTensor));

@@ -280,7 +280,7 @@ namespace Genesis.RoomScan.ObjectReconstruction
                 sw.Restart();
 
                 ReportStatus("[MVRecon] Running inference...");
-                var (density, color) = await model.RunAsync(imagesNCHW, w2cFlat, ct);
+                var (density, color) = await model.RunAsync(imagesNCHW, w2cFlat, nViews, ct);
                 float inferMs = sw.ElapsedMilliseconds;
                 Logger.Info($"[MVRecon] Inference: {inferMs:F0}ms");
                 sw.Restart();
