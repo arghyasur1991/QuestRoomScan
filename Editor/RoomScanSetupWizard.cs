@@ -715,14 +715,19 @@ namespace Genesis.RoomScan.Editor
         {
             BeginSection("GAME-READY PRESET");
             EditorGUILayout.HelpBox(
-                "Lightweight module set for game integration: scan \u2192 refine \u2192 release GPU \u2192 play. " +
-                "Skips TriplanarCache, Gaussian Splat, and debug tools to save GPU and keep the build lean.",
+                "One-click \"make this project actually buildable for Quest VR\":\n" +
+                "  \u2022 VR project prerequisites (XR Plug-in, OpenXR features, OVRProjectConfig \u2014 Outstanding tier)\n" +
+                "  \u2022 AndroidManifest (boundaryless feature, cleartext HTTP) + insecureHttpOption\n" +
+                "  \u2022 AR Session + AROcclusionManager on the camera rig\n" +
+                "  \u2022 Game-ready scene modules (scan \u2192 refine \u2192 release GPU \u2192 play)\n" +
+                "  \u2022 Shader wiring + xatlas native plugin build (background)\n" +
+                "Skips TriplanarCache, Gaussian Splat, and debug tools to keep the build lean.",
                 MessageType.Info);
 
+            // ── Scene-level state ──
             bool hasPCA = _pcaComponent != null;
             bool hasPCAProvider = _cameraProvider != null;
             bool hasRefinement = _textureRefinement != null;
-
             bool hasRoomUnderstanding = _roomScanner != null && _roomScanner.GetComponent<RoomUnderstanding>() != null;
 
             StatusRowOptional("PassthroughCameraAccess (camera RGB)", hasPCA);
@@ -742,6 +747,15 @@ namespace Genesis.RoomScan.Editor
                 }
             }
 
+            // ── Project-level state (also fixed by this preset) ──
+            GUILayout.Space(2);
+            EditorGUILayout.LabelField("Project prerequisites", EditorStyles.miniLabel);
+            StatusRowOptional("AR Session + AROcclusionManager", _arSession != null && _arOcclusion != null);
+            StatusRowOptional("AndroidManifest (boundaryless + cleartext)", _boundarylessManifest && _cleartextAllowed);
+            StatusRowOptional("Player Settings: Allow HTTP", _insecureHttpAllowed);
+            StatusRowOptional($"VR Project Bootstrap ({_vrOutstanding.Count} outstanding)", _vrOutstanding.Count == 0);
+            StatusRowOptional("xatlas native plugins (Android + Editor)", _xatlasAndroid && _xatlasEditor);
+
             bool triplanarAttached = _triplanarCache != null;
             if (triplanarAttached)
             {
@@ -759,15 +773,26 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
             }
 
-            bool gameReadyMissing = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding;
-            if (gameReadyMissing)
+            bool sceneMissing   = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding;
+            bool projectMissing = _arSession == null || _arOcclusion == null
+                                  || !_boundarylessManifest || !_cleartextAllowed || !_insecureHttpAllowed
+                                  || _vrOutstanding.Count > 0
+                                  || !_xatlasAndroid || !_xatlasEditor;
+
+            if (sceneMissing || projectMissing)
             {
                 GUILayout.Space(2);
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.FlexibleSpace();
-                if (GUILayout.Button("Add Game-Ready Modules", GUILayout.Width(200)))
-                    FixGameReadyModules();
+                using (new EditorGUI.DisabledScope(_gameReadyFixInProgress))
+                {
+                    if (GUILayout.Button("Apply Game-Ready Setup", GUILayout.Width(220)))
+                        FixGameReadyModules();
+                }
                 EditorGUILayout.EndHorizontal();
+
+                if (_gameReadyFixInProgress)
+                    EditorGUILayout.HelpBox("Game-Ready setup in progress (VR bootstrap + Meta XR sweep)\u2026", MessageType.Info);
             }
 
             EndSection();
@@ -816,7 +841,79 @@ namespace Genesis.RoomScan.Editor
             EndSection();
         }
 
-        void FixGameReadyModules()
+        // Tracks whether either the Game-Ready preset or Setup Everything is
+        // currently running, so the matching buttons can disable themselves and
+        // we never re-enter the async orchestrator while VRProjectBootstrap.FixAllAsync
+        // is still awaiting Meta's project setup tool.
+        bool _gameReadyFixInProgress;
+
+        async void FixGameReadyModules()
+        {
+            if (_gameReadyFixInProgress) return;
+            _gameReadyFixInProgress = true;
+
+            try
+            {
+                EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                    "Auditing VR project settings\u2026", 0.05f);
+                VRProjectBootstrap.Audit();
+
+                EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                    "Fixing VR prerequisites (XR Plug-in, OpenXR, OVRProjectConfig\u2026)", 0.15f);
+                await VRProjectBootstrap.FixAllAsync(CheckSeverity.Outstanding);
+
+                EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                    "Updating AndroidManifest + Player Settings\u2026", 0.50f);
+                if (!ManifestHasBoundaryless())     FixBoundarylessManifest();
+                if (!ManifestHasCleartextTraffic()) FixCleartextTraffic();
+                if (PlayerSettings.insecureHttpOption == InsecureHttpOption.NotAllowed)
+                {
+                    PlayerSettings.insecureHttpOption = InsecureHttpOption.AlwaysAllowed;
+                    Debug.Log("[RoomScan Setup] Set Player Settings > insecureHttpOption to AlwaysAllowed");
+                }
+
+                EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                    "Setting up AR session + occlusion\u2026", 0.65f);
+                if (_arSession == null) FixARSession();
+                if (_cameraRig != null && _arOcclusion == null) FixAROcclusion();
+
+                EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                    "Adding game-ready scene components\u2026", 0.80f);
+                AddGameReadyComponentsToRoot();
+
+                EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                    "Wiring shaders\u2026", 0.90f);
+                FixShaderWiring();
+
+                RefreshNativePlugins();
+                bool xatlasMissing = !_xatlasAndroid || !_xatlasEditor;
+                if (xatlasMissing)
+                {
+                    EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                        "Starting xatlas plugin build (background)\u2026", 0.97f);
+                    BuildXAtlasPlugin();
+                }
+
+                Debug.Log("[RoomScan Setup] Game-Ready setup complete." +
+                    (xatlasMissing ? " (xatlas build running in background)" : ""));
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[RoomScan Setup] Game-Ready setup failed: {ex}");
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+                _gameReadyFixInProgress = false;
+                MarkDirty();
+                Refresh();
+                Repaint();
+            }
+        }
+
+        // Pure scene-component piece of the game-ready preset, callable
+        // synchronously from the orchestrator above without owning Refresh().
+        void AddGameReadyComponentsToRoot()
         {
             var root = FindOrCreateRoot();
 
@@ -849,9 +946,6 @@ namespace Genesis.RoomScan.Editor
 
             foreach (var c in root.GetComponents<Component>())
                 WireComponent(c);
-
-            MarkDirty();
-            Refresh();
         }
 
         void FixDebugModules()
@@ -1581,12 +1675,17 @@ namespace Genesis.RoomScan.Editor
                 fixedHeight = 36
             };
 
-            if (GUILayout.Button("\u2261  Setup Everything", style))
-                SetupEverything();
+            using (new EditorGUI.DisabledScope(_gameReadyFixInProgress))
+            {
+                if (GUILayout.Button("\u2261  Setup Everything", style))
+                    SetupEverything();
+            }
         }
 
-        void SetupEverything()
+        async void SetupEverything()
         {
+            if (_gameReadyFixInProgress) return;
+
             if (_cameraRig == null)
             {
                 EditorUtility.DisplayDialog("Room Scan Setup",
@@ -1597,27 +1696,58 @@ namespace Genesis.RoomScan.Editor
                 return;
             }
 
-            if (_arSession == null) FixARSession();
-            if (_arOcclusion == null) FixAROcclusion();
-            if (!_boundarylessManifest) FixBoundarylessManifest();
-            if (!_cleartextAllowed) FixCleartextTraffic();
-            if (!_insecureHttpAllowed)
+            _gameReadyFixInProgress = true;
+            try
             {
-                PlayerSettings.insecureHttpOption = InsecureHttpOption.AlwaysAllowed;
-                Debug.Log("[RoomScan Setup] Set Player Settings > insecureHttpOption to AlwaysAllowed");
+                EditorUtility.DisplayProgressBar("Setup Everything",
+                    "Fixing VR prerequisites (Outstanding + Recommended)\u2026", 0.05f);
+                VRProjectBootstrap.Audit();
+                await VRProjectBootstrap.FixAllAsync(CheckSeverity.Recommended);
+
+                EditorUtility.DisplayProgressBar("Setup Everything",
+                    "Setting up AR session + occlusion\u2026", 0.35f);
+                if (_arSession == null) FixARSession();
+                if (_arOcclusion == null) FixAROcclusion();
+
+                EditorUtility.DisplayProgressBar("Setup Everything",
+                    "Updating AndroidManifest + Player Settings\u2026", 0.50f);
+                if (!_boundarylessManifest) FixBoundarylessManifest();
+                if (!_cleartextAllowed) FixCleartextTraffic();
+                if (!_insecureHttpAllowed)
+                {
+                    PlayerSettings.insecureHttpOption = InsecureHttpOption.AlwaysAllowed;
+                    Debug.Log("[RoomScan Setup] Set Player Settings > insecureHttpOption to AlwaysAllowed");
+                }
+
+                EditorUtility.DisplayProgressBar("Setup Everything",
+                    "Adding all components + wiring shaders\u2026", 0.75f);
+                FixComponents();
+                FixShaderWiring();
+
+                RefreshNativePlugins();
+                bool xatlasMissing = !_xatlasAndroid || !_xatlasEditor;
+                if (xatlasMissing)
+                {
+                    EditorUtility.DisplayProgressBar("Setup Everything",
+                        "Starting xatlas plugin build (background)\u2026", 0.95f);
+                    BuildXAtlasPlugin();
+                }
+
+                Debug.Log("[RoomScan Setup] Scene setup complete." +
+                    (xatlasMissing ? " (xatlas build running in background)" : ""));
             }
-            FixComponents();
-            FixShaderWiring();
-
-            RefreshNativePlugins();
-            if (!_xatlasAndroid || !_xatlasEditor)
-                BuildXAtlasPlugin();
-
-            MarkDirty();
-            Refresh();
-
-            Debug.Log("[RoomScan Setup] Scene setup complete." +
-                (!_xatlasAndroid || !_xatlasEditor ? " (xatlas build running in background)" : ""));
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"[RoomScan Setup] Setup Everything failed: {ex}");
+            }
+            finally
+            {
+                EditorUtility.ClearProgressBar();
+                _gameReadyFixInProgress = false;
+                MarkDirty();
+                Refresh();
+                Repaint();
+            }
         }
 
         // =================================================================
