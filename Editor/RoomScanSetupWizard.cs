@@ -280,22 +280,15 @@ namespace Genesis.RoomScan.Editor
 
             GameObject target = cam.gameObject;
 
-            // Add AR camera/occlusion managers in a DISABLED state. They throw
-            // NREs when OnEnable runs in the Editor without an XR provider
-            // (no subsystem to back them). DepthCapture re-enables the
-            // occlusion manager at scan start; ARCameraManager is enabled by
-            // ARFoundation when the session starts on device.
+            // Need ARCameraManager as well for AROcclusionManager to work.
+            // Both stay enabled in the scene asset — EditorPlayModeXRGuard
+            // disables them only inside the play-mode scene clone when no
+            // XR loader is active, so Quest builds are unaffected.
             if (target.GetComponent<ARCameraManager>() == null)
-            {
-                var arCam = Undo.AddComponent<ARCameraManager>(target);
-                arCam.enabled = false;
-            }
+                Undo.AddComponent<ARCameraManager>(target);
 
             if (target.GetComponent<AROcclusionManager>() == null)
-            {
-                var arOcc = Undo.AddComponent<AROcclusionManager>(target);
-                arOcc.enabled = false;
-            }
+                Undo.AddComponent<AROcclusionManager>(target);
 
             MarkDirty();
             Refresh();
@@ -658,15 +651,11 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<RoomScanner>(root);
 
             // PassthroughCameraAccess isn't pulled in by RequireComponent.
-            // Add it DISABLED — Meta's component crashes in OnEnable/Update
-            // when running in the Editor without an Android passthrough
-            // backend. PassthroughCameraProvider.StartCapture() enables it
-            // when scanning starts.
+            // Stays enabled in the scene asset — EditorPlayModeXRGuard
+            // disables it only inside the play-mode scene clone when no XR
+            // loader is active, so Quest builds are unaffected.
             if (root.GetComponent<PassthroughCameraAccess>() == null)
-            {
-                var pca = Undo.AddComponent<PassthroughCameraAccess>(root);
-                pca.enabled = false;
-            }
+                Undo.AddComponent<PassthroughCameraAccess>(root);
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
 
@@ -736,7 +725,7 @@ namespace Genesis.RoomScan.Editor
                 "  \u2022 Switch active build target to Android if needed (re-click after the reload)\n" +
                 "  \u2022 VR project prerequisites (XR Plug-in, OpenXR features, OVRProjectConfig \u2014 Outstanding tier)\n" +
                 "  \u2022 AndroidManifest (boundaryless feature, cleartext HTTP) + insecureHttpOption\n" +
-                "  \u2022 AR Session + AROcclusionManager on the camera rig (added DISABLED \u2014 driver enables on demand)\n" +
+                "  \u2022 AR Session + AROcclusionManager on the camera rig\n" +
                 "  \u2022 Game-ready scene modules (scan \u2192 refine \u2192 release GPU \u2192 play)\n" +
                 "  \u2022 Shader wiring + xatlas native plugin build (background)\n" +
                 "Skips TriplanarCache, Gaussian Splat, and debug tools to keep the build lean.",
@@ -903,7 +892,6 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.DisplayProgressBar("Game-Ready Setup",
                     "Adding game-ready scene components\u2026", 0.80f);
                 AddGameReadyComponentsToRoot();
-                DisableQuestRuntimeComponentsInEditor();
 
                 EditorUtility.DisplayProgressBar("Game-Ready Setup",
                     "Wiring shaders\u2026", 0.90f);
@@ -944,14 +932,11 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<RoomScanner>() == null)
                 Undo.AddComponent<RoomScanner>(root);
 
-            // Add PassthroughCameraAccess DISABLED — see FixAllOptionalModules
-            // for rationale (Meta's component crashes in Editor without an
-            // Android passthrough backend; provider re-enables on demand).
+            // PassthroughCameraAccess stays enabled in the scene asset —
+            // EditorPlayModeXRGuard disables it inside the play-mode scene
+            // clone when no XR loader is active.
             if (root.GetComponent<PassthroughCameraAccess>() == null)
-            {
-                var pca = Undo.AddComponent<PassthroughCameraAccess>(root);
-                pca.enabled = false;
-            }
+                Undo.AddComponent<PassthroughCameraAccess>(root);
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
 
@@ -976,53 +961,6 @@ namespace Genesis.RoomScan.Editor
 
             foreach (var c in root.GetComponents<Component>())
                 WireComponent(c);
-        }
-
-        /// <summary>
-        /// Walks the active scene and disables any Meta/AR component that
-        /// crashes when its OnEnable runs in the Editor without an XR provider
-        /// (PassthroughCameraAccess, AROcclusionManager, ARCameraManager).
-        /// Each one is re-enabled at the right moment by its driver
-        /// (PassthroughCameraProvider / DepthCapture / ARSession).
-        /// Idempotent — only logs if it actually had to flip something.
-        /// </summary>
-        void DisableQuestRuntimeComponentsInEditor()
-        {
-            int flipped = 0;
-
-            foreach (var pca in Object.FindObjectsByType<PassthroughCameraAccess>(
-                         FindObjectsInactive.Include, FindObjectsSortMode.None))
-            {
-                if (!pca.enabled) continue;
-                Undo.RecordObject(pca, "Disable PassthroughCameraAccess in Editor");
-                pca.enabled = false;
-                EditorUtility.SetDirty(pca);
-                flipped++;
-            }
-
-            foreach (var arOcc in Object.FindObjectsByType<AROcclusionManager>(
-                         FindObjectsInactive.Include, FindObjectsSortMode.None))
-            {
-                if (!arOcc.enabled) continue;
-                Undo.RecordObject(arOcc, "Disable AROcclusionManager in Editor");
-                arOcc.enabled = false;
-                EditorUtility.SetDirty(arOcc);
-                flipped++;
-            }
-
-            foreach (var arCam in Object.FindObjectsByType<ARCameraManager>(
-                         FindObjectsInactive.Include, FindObjectsSortMode.None))
-            {
-                if (!arCam.enabled) continue;
-                Undo.RecordObject(arCam, "Disable ARCameraManager in Editor");
-                arCam.enabled = false;
-                EditorUtility.SetDirty(arCam);
-                flipped++;
-            }
-
-            if (flipped > 0)
-                Debug.Log($"[RoomScan Setup] Disabled {flipped} Quest-runtime component(s) " +
-                          "so Editor play mode doesn't crash; their drivers re-enable them at runtime.");
         }
 
         /// <summary>
@@ -1831,7 +1769,6 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.DisplayProgressBar("Setup Everything",
                     "Adding all components + wiring shaders\u2026", 0.75f);
                 FixComponents();
-                DisableQuestRuntimeComponentsInEditor();
                 FixShaderWiring();
 
                 RefreshNativePlugins();
