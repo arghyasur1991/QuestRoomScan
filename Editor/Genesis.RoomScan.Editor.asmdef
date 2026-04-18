@@ -15,6 +15,7 @@
     "Unity.XR.Management",
     "Unity.XR.Management.Editor",
     "meta.xr.mrutilitykit",
+    "Meta.XR.BuildingBlocks",
     "Oculus.VR",
     "Oculus.VR.Editor",
     "GaussianSplatting",

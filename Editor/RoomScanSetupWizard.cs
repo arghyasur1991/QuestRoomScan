@@ -150,6 +150,8 @@ namespace Genesis.RoomScan.Editor
             RefreshVRProject();
 
             RefreshURPState();
+
+            RefreshBuildingBlocksState();
             _boundarylessManifest = ManifestHasAllQuestVREntries();
             _cleartextAllowed = ManifestHasCleartextTraffic();
             _insecureHttpAllowed = PlayerSettings.insecureHttpOption != InsecureHttpOption.NotAllowed;
@@ -875,6 +877,7 @@ namespace Genesis.RoomScan.Editor
                 "  \u2022 URP pipeline + renderer at Assets/Settings/ with Quest-friendly defaults (4x MSAA, no HDR, single shadow cascade)\n" +
                 "  \u2022 VR project prerequisites (XR Plug-in, OpenXR features, OVRProjectConfig \u2014 Outstanding tier)\n" +
                 "  \u2022 AndroidManifest: full Quest VR feature/permission set (HEADSET_CAMERA, USE_SCENE, USE_ANCHOR_API, BOUNDARYLESS, etc.) + cleartext HTTP + insecureHttpOption\n" +
+                "  \u2022 Meta XR Building Blocks: OVRCameraRig, Passthrough Underlay, PassthroughCameraAccess\n" +
                 "  \u2022 AR Session + AROcclusionManager on the camera rig\n" +
                 "  \u2022 Game-ready scene modules (scan \u2192 refine \u2192 release GPU \u2192 play)\n" +
                 "  \u2022 Shader wiring + xatlas native plugin build (background)\n" +
@@ -910,6 +913,7 @@ namespace Genesis.RoomScan.Editor
             bool buildTargetIsAndroid = EditorUserBuildSettings.activeBuildTarget == BuildTarget.Android;
             StatusRowOptional($"Active build target = Android (current: {EditorUserBuildSettings.activeBuildTarget})", buildTargetIsAndroid);
             StatusRowOptional("URP pipeline asset (Quest defaults)", _urpConfigured);
+            StatusRowOptional("Meta XR Building Blocks (Camera Rig + Passthrough + PCA)", _bbAllPresent);
             StatusRowOptional("AR Session + AROcclusionManager", _arSession != null && _arOcclusion != null);
             StatusRowOptional("AndroidManifest (Quest VR features + permissions + cleartext)",
                               _boundarylessManifest && _cleartextAllowed);
@@ -937,6 +941,7 @@ namespace Genesis.RoomScan.Editor
             bool sceneMissing   = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding;
             bool projectMissing = !buildTargetIsAndroid
                                   || !_urpConfigured
+                                  || !_bbAllPresent
                                   || _arSession == null || _arOcclusion == null
                                   || !_boundarylessManifest || !_cleartextAllowed || !_insecureHttpAllowed
                                   || _vrOutstanding.Count > 0
@@ -1051,6 +1056,16 @@ namespace Genesis.RoomScan.Editor
                     Debug.Log("[RoomScan Setup] Set Player Settings > insecureHttpOption to AlwaysAllowed");
                 }
 
+                // Meta XR Building Blocks: drops in OVRCameraRig +
+                // Passthrough Underlay + PassthroughCameraAccess with
+                // Meta's recommended wiring (TrackingOrigin = FloorLevel,
+                // Underlay layer set up, etc.). Done before AR session
+                // so AROcclusionManager can latch onto the new rig camera.
+                EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                    "Installing Meta XR Building Blocks (Camera Rig + Passthrough)\u2026", 0.60f);
+                await EnsureRequiredBuildingBlocksAsync();
+                Refresh();
+
                 EditorUtility.DisplayProgressBar("Game-Ready Setup",
                     "Setting up AR session + occlusion\u2026", 0.65f);
                 if (_arSession == null) FixARSession();
@@ -1099,10 +1114,13 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<RoomScanner>() == null)
                 Undo.AddComponent<RoomScanner>(root);
 
-            // PassthroughCameraAccess stays enabled in the scene asset —
+            // PassthroughCameraAccess is normally added by the Meta XR
+            // Building Block (see EnsureRequiredBuildingBlocksAsync), but
+            // fall back to a root-level component if the block didn't land
+            // anywhere in the scene — RoomScanner needs a PCA somewhere.
             // EditorPlayModeXRGuard disables it inside the play-mode scene
             // clone when no XR loader is active.
-            if (root.GetComponent<PassthroughCameraAccess>() == null)
+            if (UnityEngine.Object.FindAnyObjectByType<PassthroughCameraAccess>() == null)
                 Undo.AddComponent<PassthroughCameraAccess>(root);
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
@@ -1898,16 +1916,6 @@ namespace Genesis.RoomScan.Editor
         {
             if (_gameReadyFixInProgress) return;
 
-            if (_cameraRig == null)
-            {
-                EditorUtility.DisplayDialog("Room Scan Setup",
-                    "No Camera Rig found in the scene.\n\n" +
-                    "Add a Camera Rig via Meta > Tools > Building Blocks first, " +
-                    "then run this wizard again.",
-                    "OK");
-                return;
-            }
-
             _gameReadyFixInProgress = true;
             try
             {
@@ -1923,6 +1931,15 @@ namespace Genesis.RoomScan.Editor
                 EnsureURPSetup();
 
                 await VRProjectBootstrap.FixAllAsync(CheckSeverity.Recommended);
+
+                // Camera Rig + Passthrough via Meta XR Building Blocks
+                // — does the right thing whether or not a rig is already
+                // present. Done before AR session so AROcclusionManager
+                // can attach to the rig camera.
+                EditorUtility.DisplayProgressBar("Setup Everything",
+                    "Installing Meta XR Building Blocks (Camera Rig + Passthrough)\u2026", 0.30f);
+                await EnsureRequiredBuildingBlocksAsync();
+                Refresh();
 
                 EditorUtility.DisplayProgressBar("Setup Everything",
                     "Setting up AR session + occlusion\u2026", 0.35f);
