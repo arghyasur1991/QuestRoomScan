@@ -186,6 +186,12 @@ namespace Genesis.RoomScan.Editor
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
             GUILayout.Space(4);
 
+            // Game-Ready Preset is the promoted, common workflow for game
+            // developers — keep it at the top so it's the first thing seen.
+            // Everything below is for inspection / piecemeal fixes / opt-in
+            // modules / final "do absolutely everything" sweep.
+            DrawGameReadyPreset();
+
             DrawPrerequisites();
             DrawProjectSettings();
             DrawComponents();
@@ -721,8 +727,8 @@ namespace Genesis.RoomScan.Editor
 
             EndSection();
 
-            // ── Game-Ready Preset ──
-            DrawGameReadyPreset();
+            // Game-Ready Preset is rendered at the very top of the wizard
+            // (see OnGUI) — it is the promoted workflow.
 
             // ── Debug Preset ──
             DrawDebugPreset();
