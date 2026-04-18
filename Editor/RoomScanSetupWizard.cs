@@ -873,7 +873,7 @@ namespace Genesis.RoomScan.Editor
             BeginSection("GAME-READY PRESET");
             EditorGUILayout.HelpBox(
                 "One-click \"make this project actually buildable for Quest VR\":\n" +
-                "  \u2022 Switch active build target to Android if needed (re-click after the reload)\n" +
+                "  \u2022 Switch active build profile to Meta Quest if needed (re-click after the reload)\n" +
                 "  \u2022 URP pipeline + renderer at Assets/Settings/ with Quest-friendly defaults (4x MSAA, no HDR, single shadow cascade)\n" +
                 "  \u2022 VR project prerequisites (XR Plug-in, OpenXR features, OVRProjectConfig \u2014 Outstanding tier)\n" +
                 "  \u2022 AndroidManifest: full Quest VR feature/permission set (HEADSET_CAMERA, USE_SCENE, USE_ANCHOR_API, BOUNDARYLESS, etc.) + cleartext HTTP + insecureHttpOption\n" +
@@ -911,7 +911,11 @@ namespace Genesis.RoomScan.Editor
             GUILayout.Space(2);
             EditorGUILayout.LabelField("Project prerequisites", EditorStyles.miniLabel);
             bool buildTargetIsAndroid = EditorUserBuildSettings.activeBuildTarget == BuildTarget.Android;
-            StatusRowOptional($"Active build target = Android (current: {EditorUserBuildSettings.activeBuildTarget})", buildTargetIsAndroid);
+            bool activeProfileIsMetaQuest = IsActiveProfileMetaQuest();
+            string profileLabel = activeProfileIsMetaQuest
+                ? "Meta Quest"
+                : (buildTargetIsAndroid ? "Android (plain)" : EditorUserBuildSettings.activeBuildTarget.ToString());
+            StatusRowOptional($"Active build profile = Meta Quest (current: {profileLabel})", activeProfileIsMetaQuest);
             StatusRowOptional("URP pipeline asset (Quest defaults)", _urpConfigured);
             StatusRowOptional("Meta XR Building Blocks (Camera Rig + Passthrough + PCA)", _bbAllPresent);
             StatusRowOptional("AR Session + AROcclusionManager", _arSession != null && _arOcclusion != null);
@@ -940,6 +944,7 @@ namespace Genesis.RoomScan.Editor
 
             bool sceneMissing   = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding;
             bool projectMissing = !buildTargetIsAndroid
+                                  || !activeProfileIsMetaQuest
                                   || !_urpConfigured
                                   || !_bbAllPresent
                                   || _arSession == null || _arOcclusion == null
@@ -1156,20 +1161,38 @@ namespace Genesis.RoomScan.Editor
         /// </summary>
         bool TrySwitchToAndroidBuildTarget(string flowName)
         {
-            if (EditorUserBuildSettings.activeBuildTarget == BuildTarget.Android)
+            // Already on the Meta Quest profile? Nothing to do.
+            if (EditorUserBuildSettings.activeBuildTarget == BuildTarget.Android
+                && IsActiveProfileMetaQuest())
                 return false;
 
             EditorUtility.ClearProgressBar();
+
+            // Try the Meta Quest *build profile* first (Unity 6.1+). It's a
+            // derived Android profile that ships Quest-tuned Player + Quality
+            // overrides (Vulkan, IL2CPP, ARM64, Multiview, Quest quality
+            // level), and it's what the user picks by hand in File > Build
+            // Profiles. Falls back to plain Android if Meta Quest isn't
+            // registered (older Unity, missing Android module, etc.).
+            string what = "Meta Quest build profile";
             EditorUtility.DisplayDialog(flowName,
-                "Active build target is " + EditorUserBuildSettings.activeBuildTarget + ".\n\n" +
-                "Switching to Android (Quest) now \u2014 this triggers a domain reload " +
+                "Active build target is " + EditorUserBuildSettings.activeBuildTarget +
+                (IsActiveProfileMetaQuest() ? " (Meta Quest profile)" : "") + ".\n\n" +
+                "Switching to the " + what + " now \u2014 this triggers a domain reload " +
                 "and aborts the rest of this run.\n\n" +
                 "Click \"" + flowName + "\" again after Unity finishes reloading to " +
                 "apply the remaining fixes.",
                 "Switch and reload");
 
-            EditorUserBuildSettings.SwitchActiveBuildTarget(
-                BuildTargetGroup.Android, BuildTarget.Android);
+            if (!TryActivateMetaQuestProfile())
+            {
+                Debug.LogWarning("[RoomScan Setup] Meta Quest classic build profile not " +
+                                 "found \u2014 falling back to plain Android target. " +
+                                 "Run File > Build Profiles once to let Unity register the " +
+                                 "Meta Quest platform, then re-run this wizard.");
+                EditorUserBuildSettings.SwitchActiveBuildTarget(
+                    BuildTargetGroup.Android, BuildTarget.Android);
+            }
 
             // Drop the in-progress flag — the domain reload will wipe state
             // anyway, but if for some reason it doesn't fire we don't want
