@@ -314,6 +314,17 @@ namespace Genesis.RoomScan
 
         private void Start()
         {
+            // Match DepthCapture's Editor early-out: when no XR loader is
+            // active, AR/MRUK subsystems are dead and any module that touches
+            // them on init will NRE. The user can still load saved scans
+            // through other code paths but cannot start a live scan.
+            if (!XRRuntimeGuard.IsXRActive)
+            {
+                Logger.Warning("RoomScanner: " + XRRuntimeGuard.EditorDisabledMessage);
+                enabled = false;
+                return;
+            }
+
             _modules = GetComponents<IRoomScanModule>();
             foreach (var m in _modules) m.OnModuleInitialize(this);
 

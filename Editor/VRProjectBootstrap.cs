@@ -101,6 +101,19 @@ namespace Genesis.RoomScan.Editor
 
             Audit();
 
+            // Build-target switch must happen first AND alone — it triggers a
+            // domain reload that wipes the rest of this loop's continuation.
+            // Bail out after switching so the user re-clicks Fix All and the
+            // remaining checks evaluate against the new target.
+            if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.Android)
+            {
+                Debug.Log("[VR Bootstrap] Switching active build target \u2192 Android. " +
+                          "Click Fix All again after the reload completes to apply the rest.");
+                EditorUserBuildSettings.SwitchActiveBuildTarget(
+                    BuildTargetGroup.Android, BuildTarget.Android);
+                return;
+            }
+
             int fixed_ = 0, skipped = 0;
             foreach (var check in AllChecks)
             {
@@ -150,6 +163,25 @@ namespace Genesis.RoomScan.Editor
             var list = new List<VRCheck>
             {
                 // === Outstanding ===
+                // Active build target must be Android — the entire OpenXR
+                // feature configuration is meaningless until you switch.
+                // Switching triggers a domain reload that aborts FixAllAsync
+                // mid-loop, so the orchestrator special-cases this one and
+                // returns early after the switch (user re-clicks Fix All).
+                new VRCheck {
+                    Id = "android.buildtarget.active",
+                    Label = "Active build target = Android (Quest)",
+                    Severity = CheckSeverity.Outstanding,
+                    Group = BuildTargetGroup.Android,
+                    CurrentValue = () => EditorUserBuildSettings.activeBuildTarget.ToString(),
+                    TargetValue = "Android",
+                    IsOk = () => EditorUserBuildSettings.activeBuildTarget == BuildTarget.Android,
+                    Fix = () => {
+                        EditorUserBuildSettings.SwitchActiveBuildTarget(
+                            BuildTargetGroup.Android, BuildTarget.Android);
+                    },
+                },
+
                 MakeXRLoaderCheck(BuildTargetGroup.Android, CheckSeverity.Outstanding,
                     id: "android.xr.loader.openxr",
                     label: "Android: OpenXR loader assigned"),

@@ -5,6 +5,7 @@
     "Unity.XR.ARFoundation",
     "Unity.XR.ARSubsystems",
     "Unity.XR.CoreUtils",
+    "Unity.XR.Management",
     "Unity.Burst",
     "Unity.Collections",
     "Unity.Mathematics",

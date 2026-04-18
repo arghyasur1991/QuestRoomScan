@@ -167,6 +167,16 @@ namespace Genesis.RoomScan
 
         private void Start()
         {
+            // Editor + no XR loader = AR subsystems will all be null and any
+            // toggle of AROcclusionManager.enabled blows up DestroyTextures.
+            // Build/run on Quest (or via Link) to actually scan.
+            if (!XRRuntimeGuard.IsXRActive)
+            {
+                Logger.Warning("DepthCapture: " + XRRuntimeGuard.EditorDisabledMessage);
+                enabled = false;
+                return;
+            }
+
             EnsureARSession();
 
             _arOcclusionManager = FindFirstObjectByType<AROcclusionManager>();
