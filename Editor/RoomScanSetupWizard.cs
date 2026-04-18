@@ -149,6 +149,7 @@ namespace Genesis.RoomScan.Editor
             RefreshAIDetection();
             RefreshVRProject();
 
+            RefreshURPState();
             _boundarylessManifest = ManifestHasAllQuestVREntries();
             _cleartextAllowed = ManifestHasCleartextTraffic();
             _insecureHttpAllowed = PlayerSettings.insecureHttpOption != InsecureHttpOption.NotAllowed;
@@ -223,9 +224,26 @@ namespace Genesis.RoomScan.Editor
         {
             BeginSection("PREREQUISITES");
 
+            string urpLabel = _urpAssetCached != null
+                ? $"URP pipeline asset wired ({_urpAssetCached.name})"
+                : "URP pipeline asset wired";
+            StatusRow(urpLabel, _urpConfigured);
             StatusRow("ARSession", _arSession != null);
             StatusRow("Camera Rig (OVRCameraRig / XROrigin)", _cameraRig != null);
             StatusRow("AROcclusionManager", _arOcclusion != null);
+
+            if (!_urpConfigured)
+            {
+                GUILayout.Space(2);
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button("Setup URP (Quest defaults)", GUILayout.Width(220)))
+                {
+                    EnsureURPSetup();
+                    Refresh();
+                }
+                EditorGUILayout.EndHorizontal();
+            }
 
             if (_arSession == null)
             {
@@ -854,6 +872,7 @@ namespace Genesis.RoomScan.Editor
             EditorGUILayout.HelpBox(
                 "One-click \"make this project actually buildable for Quest VR\":\n" +
                 "  \u2022 Switch active build target to Android if needed (re-click after the reload)\n" +
+                "  \u2022 URP pipeline + renderer at Assets/Settings/ with Quest-friendly defaults (4x MSAA, no HDR, single shadow cascade)\n" +
                 "  \u2022 VR project prerequisites (XR Plug-in, OpenXR features, OVRProjectConfig \u2014 Outstanding tier)\n" +
                 "  \u2022 AndroidManifest: full Quest VR feature/permission set (HEADSET_CAMERA, USE_SCENE, USE_ANCHOR_API, BOUNDARYLESS, etc.) + cleartext HTTP + insecureHttpOption\n" +
                 "  \u2022 AR Session + AROcclusionManager on the camera rig\n" +
@@ -890,6 +909,7 @@ namespace Genesis.RoomScan.Editor
             EditorGUILayout.LabelField("Project prerequisites", EditorStyles.miniLabel);
             bool buildTargetIsAndroid = EditorUserBuildSettings.activeBuildTarget == BuildTarget.Android;
             StatusRowOptional($"Active build target = Android (current: {EditorUserBuildSettings.activeBuildTarget})", buildTargetIsAndroid);
+            StatusRowOptional("URP pipeline asset (Quest defaults)", _urpConfigured);
             StatusRowOptional("AR Session + AROcclusionManager", _arSession != null && _arOcclusion != null);
             StatusRowOptional("AndroidManifest (Quest VR features + permissions + cleartext)",
                               _boundarylessManifest && _cleartextAllowed);
@@ -916,6 +936,7 @@ namespace Genesis.RoomScan.Editor
 
             bool sceneMissing   = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding;
             bool projectMissing = !buildTargetIsAndroid
+                                  || !_urpConfigured
                                   || _arSession == null || _arOcclusion == null
                                   || !_boundarylessManifest || !_cleartextAllowed || !_insecureHttpAllowed
                                   || _vrOutstanding.Count > 0
@@ -1001,6 +1022,14 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.DisplayProgressBar("Game-Ready Setup",
                     "Auditing VR project settings\u2026", 0.05f);
                 VRProjectBootstrap.Audit();
+
+                // URP first — shaders fall back to magenta until the
+                // pipeline asset exists and is wired into GraphicsSettings,
+                // so any later step that touches a Material/Shader needs
+                // this in place.
+                EditorUtility.DisplayProgressBar("Game-Ready Setup",
+                    "Ensuring URP pipeline + Quest-friendly defaults\u2026", 0.10f);
+                EnsureURPSetup();
 
                 EditorUtility.DisplayProgressBar("Game-Ready Setup",
                     "Fixing VR prerequisites (XR Plug-in, OpenXR, OVRProjectConfig\u2026)", 0.15f);
@@ -1887,6 +1916,12 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.DisplayProgressBar("Setup Everything",
                     "Fixing VR prerequisites (Outstanding + Recommended)\u2026", 0.05f);
                 VRProjectBootstrap.Audit();
+
+                // URP must exist before anything else so shaders resolve.
+                EditorUtility.DisplayProgressBar("Setup Everything",
+                    "Ensuring URP pipeline + Quest-friendly defaults\u2026", 0.10f);
+                EnsureURPSetup();
+
                 await VRProjectBootstrap.FixAllAsync(CheckSeverity.Recommended);
 
                 EditorUtility.DisplayProgressBar("Setup Everything",
