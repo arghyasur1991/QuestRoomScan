@@ -146,6 +146,7 @@ namespace Genesis.RoomScan.Editor
                 "debugOverlayShader");
             RefreshGSplat();
             RefreshAIDetection();
+            RefreshVRProject();
 
             _boundarylessManifest = ManifestHasBoundaryless();
             _cleartextAllowed = ManifestHasCleartextTraffic();
@@ -170,6 +171,11 @@ namespace Genesis.RoomScan.Editor
         partial void WireAIDetectionComponents();
         partial void SetupAIDetectionIfAvailable(GameObject root);
 
+        // Partial methods implemented in RoomScanSetupWizard.VRProject.cs.
+        // Always present (no #if guard) because OpenXR + Meta XR are core deps.
+        partial void RefreshVRProject();
+        partial void DrawVRProjectSection();
+
         // =================================================================
         //  GUI
         // =================================================================
@@ -183,6 +189,7 @@ namespace Genesis.RoomScan.Editor
             DrawPrerequisites();
             DrawProjectSettings();
             DrawComponents();
+            DrawVRProjectSection();
             DrawShaderWiring();
             DrawNativePlugins();
 
