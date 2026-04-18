@@ -16,7 +16,9 @@ using System.Reflection;
 using System.Threading.Tasks;
 using Meta.XR.BuildingBlocks;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 namespace Genesis.RoomScan.Editor
 {
@@ -44,17 +46,53 @@ namespace Genesis.RoomScan.Editor
         readonly Dictionary<string, bool> _bbPresent = new Dictionary<string, bool>();
         bool _bbAllPresent;
 
+        // Passthrough scene-config state (separate from block presence so the
+        // wizard reports both pieces independently).
+        bool _ovrPassthroughEnabled;     // OVRManager.isInsightPassthroughEnabled
+        bool _ovrCameraBackgroundClear;  // CenterEyeAnchor camera clears to transparent
+        bool _ovrPassthroughReady;       // both above (only when passthrough block present)
+
         void RefreshBuildingBlocksState()
         {
             _bbPresent.Clear();
-            var inScene = UnityEngine.Object
-                .FindObjectsByType<BuildingBlock>(FindObjectsSortMode.None);
+            var inScene = Object.FindObjectsByType<BuildingBlock>(FindObjectsSortMode.None);
 
             foreach (var spec in REQUIRED_BLOCKS)
             {
                 _bbPresent[spec.Id] = inScene.Any(b => b != null && b.BlockId == spec.Id);
             }
             _bbAllPresent = _bbPresent.Values.All(v => v);
+
+            RefreshPassthroughSceneState();
+        }
+
+        void RefreshPassthroughSceneState()
+        {
+            // OVRManager.isInsightPassthroughEnabled must be true whenever any
+            // OVRPassthroughLayer (including the Building-Block one) lives in
+            // the scene. We mirror Meta's check here so the row stays green
+            // exactly when their setup tool would.
+            var ovrManager = FindAny<OVRManager>();
+            _ovrPassthroughEnabled = ovrManager != null && ovrManager.isInsightPassthroughEnabled;
+
+            _ovrCameraBackgroundClear = false;
+            var rig = FindAny<OVRCameraRig>();
+            if (rig != null && rig.centerEyeAnchor != null)
+            {
+                var cam = rig.centerEyeAnchor.GetComponent<Camera>();
+                if (cam != null)
+                {
+                    _ovrCameraBackgroundClear =
+                        cam.clearFlags == CameraClearFlags.SolidColor &&
+                        cam.backgroundColor.a < 1f;
+                }
+            }
+
+            // Only flag as "not ready" when the Passthrough block is present —
+            // the warning is gated on that.
+            bool passthroughBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH, out var p) && p;
+            _ovrPassthroughReady = !passthroughBlockPresent
+                                   || (_ovrPassthroughEnabled && _ovrCameraBackgroundClear);
         }
 
         // ────────────────────────────────────────────────────────────────
@@ -177,6 +215,75 @@ namespace Genesis.RoomScan.Editor
             {
                 AssetDatabase.SaveAssets();
                 RefreshBuildingBlocksState();
+            }
+
+            // Building Blocks install puts the parts in the scene but doesn't
+            // wire OVRManager.isInsightPassthroughEnabled or clear the
+            // CenterEyeAnchor's background. Without these two follow-ups, Meta's
+            // own "Outstanding Issues" panel shows two red rows and Passthrough
+            // simply doesn't render.
+            EnsurePassthroughSceneConfig();
+        }
+
+        /// <summary>
+        /// Mirrors Meta's own `OVRProjectSetupPassthrough` and
+        /// `PassthroughBuildingBlockRules` fixes:
+        ///   * `OVRManager.isInsightPassthroughEnabled = true`
+        ///   * Center eye camera `clearFlags = SolidColor`, `backgroundColor = (0,0,0,0)`
+        /// Both are required for the Passthrough Building Block to actually
+        /// render an underlay; Meta installs the BB but doesn't apply these
+        /// fixes itself, so we bake them into the wizard.
+        /// </summary>
+        void EnsurePassthroughSceneConfig()
+        {
+            // No Passthrough block in the scene → nothing to do (and nothing
+            // is "wrong"; Meta only gates these warnings on the block being
+            // present).
+            bool passthroughBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH, out var p) && p;
+            if (!passthroughBlockPresent) return;
+
+            int changed = 0;
+
+            var ovrManager = FindAny<OVRManager>();
+            if (ovrManager != null && !ovrManager.isInsightPassthroughEnabled)
+            {
+                Undo.RecordObject(ovrManager, "Enable Insight Passthrough");
+                ovrManager.isInsightPassthroughEnabled = true;
+                EditorUtility.SetDirty(ovrManager);
+                changed++;
+                Debug.Log("[RoomScan Setup] Enabled OVRManager.isInsightPassthroughEnabled.");
+            }
+
+            var rig = FindAny<OVRCameraRig>();
+            if (rig != null && rig.centerEyeAnchor != null)
+            {
+                var cam = rig.centerEyeAnchor.GetComponent<Camera>();
+                if (cam != null)
+                {
+                    bool needsClear =
+                        cam.clearFlags != CameraClearFlags.SolidColor ||
+                        cam.backgroundColor.a >= 1f;
+
+                    if (needsClear)
+                    {
+                        Undo.RecordObject(cam, "Clear Camera Background for Passthrough");
+                        cam.clearFlags = CameraClearFlags.SolidColor;
+                        cam.backgroundColor = Color.clear;
+                        EditorUtility.SetDirty(cam);
+                        changed++;
+                        Debug.Log("[RoomScan Setup] Set CenterEyeAnchor camera background to transparent.");
+                    }
+                }
+                else
+                {
+                    Debug.LogWarning("[RoomScan Setup] OVRCameraRig has no Camera under CenterEyeAnchor — skipping background clear.");
+                }
+            }
+
+            if (changed > 0)
+            {
+                EditorSceneManager.MarkSceneDirty(EditorSceneManager.GetActiveScene());
+                RefreshPassthroughSceneState();
             }
         }
     }

@@ -918,6 +918,8 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional($"Active build profile = Meta Quest (current: {profileLabel})", activeProfileIsMetaQuest);
             StatusRowOptional("URP pipeline asset (Quest defaults)", _urpConfigured);
             StatusRowOptional("Meta XR Building Blocks (Camera Rig + Passthrough + PCA)", _bbAllPresent);
+            StatusRowOptional("Passthrough scene config (OVRManager + transparent center camera)",
+                              _ovrPassthroughReady);
             StatusRowOptional("AR Session + AROcclusionManager", _arSession != null && _arOcclusion != null);
             StatusRowOptional("AndroidManifest (Quest VR features + permissions + cleartext)",
                               _boundarylessManifest && _cleartextAllowed);
@@ -947,6 +949,7 @@ namespace Genesis.RoomScan.Editor
                                   || !activeProfileIsMetaQuest
                                   || !_urpConfigured
                                   || !_bbAllPresent
+                                  || !_ovrPassthroughReady
                                   || _arSession == null || _arOcclusion == null
                                   || !_boundarylessManifest || !_cleartextAllowed || !_insecureHttpAllowed
                                   || _vrOutstanding.Count > 0
