@@ -217,6 +217,7 @@ namespace Genesis.RoomScan.Editor
                 MakeTargetSdkCheck(),
                 MakeVulkanOnlyCheck(),
                 MakeStereoRenderingCheck(),
+                MakeTextureCompressionAstcCheck(),
 
                 new VRCheck {
                     Id = "android.player.appid.set",
@@ -447,6 +448,34 @@ namespace Genesis.RoomScan.Editor
             TargetValue = "Instancing (Single Pass Instanced)",
             IsOk = () => PlayerSettings.stereoRenderingPath == StereoRenderingPath.Instancing,
             Fix = () => PlayerSettings.stereoRenderingPath = StereoRenderingPath.Instancing,
+        };
+
+        // Quest GPUs (Adreno) only have hardware decoders for ASTC; ETC2 falls
+        // back to software decode which inflates VRAM and hurts perf. Meta's
+        // own docs and the Build Profiles "Meta Quest" preset both ship with
+        // ASTC as the only Android texture compression format.
+        static VRCheck MakeTextureCompressionAstcCheck() => new()
+        {
+            Id = "android.player.texcompression.astc",
+            Label = "Android: texture compression = ASTC only",
+            Severity = CheckSeverity.Outstanding,
+            Group = BuildTargetGroup.Android,
+            CurrentValue = () =>
+            {
+                var fmts = PlayerSettings.Android.textureCompressionFormats;
+                return fmts == null || fmts.Length == 0
+                    ? "(none)"
+                    : string.Join(",", fmts);
+            },
+            TargetValue = "[ASTC] only",
+            IsOk = () =>
+            {
+                var fmts = PlayerSettings.Android.textureCompressionFormats;
+                return fmts != null && fmts.Length == 1
+                       && fmts[0] == TextureCompressionFormat.ASTC;
+            },
+            Fix = () => PlayerSettings.Android.textureCompressionFormats =
+                        new[] { TextureCompressionFormat.ASTC },
         };
 
         #endregion
