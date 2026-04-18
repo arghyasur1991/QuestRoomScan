@@ -63,10 +63,14 @@ namespace Genesis.RoomScan.Editor
 
         const string OPENXR_LOADER_TYPE = "UnityEngine.XR.OpenXR.OpenXRLoader";
 
-        // App-id pattern: at least 3 dot-separated lowercase segments, first
-        // starts with a letter (Android requirement).
+        // Android applicationIdentifier rules (per Android Studio docs):
+        //   * at least two dot-separated segments
+        //   * each segment starts with a letter
+        //   * all characters are [a-zA-Z0-9_]
+        // We deliberately accept uppercase letters — `com.GenesisInteractive.PocketHamlet`
+        // is a perfectly legal app-id even though lowercase is idiomatic.
         static readonly Regex APPID_RE =
-            new(@"^[a-z][a-z0-9_]*\.([a-z0-9_]+\.)+[a-z0-9_]+$", RegexOptions.Compiled);
+            new(@"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$", RegexOptions.Compiled);
 
         public static IReadOnlyList<VRCheck> AllChecks { get; } = BuildChecks();
 
@@ -216,11 +220,11 @@ namespace Genesis.RoomScan.Editor
 
                 new VRCheck {
                     Id = "android.player.appid.set",
-                    Label = "Android: applicationIdentifier set (per-game; bootstrap will not auto-set)",
+                    Label = "Android: applicationIdentifier is a valid per-game id (manual)",
                     Severity = CheckSeverity.Outstanding,
                     Group = BuildTargetGroup.Android,
                     CurrentValue = () => PlayerSettings.applicationIdentifier ?? "(null)",
-                    TargetValue = "match ^[a-z][a-z0-9_]*(\\.[a-z0-9_]+){2,}$ and != com.DefaultCompany.unityProject",
+                    TargetValue = "valid Android app-id (com.<Company>.<Product>) and != com.DefaultCompany.unityProject",
                     IsOk = () => {
                         var id = PlayerSettings.applicationIdentifier ?? "";
                         return APPID_RE.IsMatch(id) && id != "com.DefaultCompany.unityProject";
