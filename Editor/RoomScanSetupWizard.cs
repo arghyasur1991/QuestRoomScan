@@ -32,6 +32,7 @@ namespace Genesis.RoomScan.Editor
         RoomScanner _roomScanner;
         PassthroughCameraProvider _cameraProvider;
         PassthroughCameraAccess _pcaComponent;
+        EditorPlayModeXRGuard _xrGuard;
         CameraDebugOverlay _cameraDebug;
         DepthDebugOverlay _depthDebug;
         TriplanarCache _triplanarCache;
@@ -111,6 +112,7 @@ namespace Genesis.RoomScan.Editor
             _roomScanner = FindAny<RoomScanner>();
             _cameraProvider = FindAny<PassthroughCameraProvider>();
             _pcaComponent = FindAny<PassthroughCameraAccess>();
+            _xrGuard = FindAny<EditorPlayModeXRGuard>();
             _cameraDebug = FindAny<CameraDebugOverlay>();
             _depthDebug = FindAny<DepthDebugOverlay>();
             _triplanarCache = FindAny<TriplanarCache>();
@@ -810,6 +812,12 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
 
+            // Editor play-mode guard runs before any AR component's Awake
+            // and disables them when no XR loader is active. Harmless on
+            // device.
+            if (UnityEngine.Object.FindAnyObjectByType<EditorPlayModeXRGuard>() == null)
+                Undo.AddComponent<EditorPlayModeXRGuard>(root);
+
             if (root.GetComponent<TriplanarCache>() == null)
                 Undo.AddComponent<TriplanarCache>(root);
             if (root.GetComponent<TextureRefinement>() == null)
@@ -894,6 +902,8 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("PassthroughCameraProvider", hasPCAProvider);
             StatusRowOptional("TextureRefinement (atlas baking)", hasRefinement);
             StatusRowOptional("RoomUnderstanding (MRUK bridge)", hasRoomUnderstanding);
+            StatusRowOptional("EditorPlayModeXRGuard (silences AR errors in Editor play mode)",
+                              _xrGuard != null);
 
             if (hasRefinement)
             {
@@ -944,7 +954,8 @@ namespace Genesis.RoomScan.Editor
                 EditorGUILayout.EndHorizontal();
             }
 
-            bool sceneMissing   = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding;
+            bool sceneMissing   = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding
+                                  || _xrGuard == null;
             bool projectMissing = !buildTargetIsAndroid
                                   || !activeProfileIsMetaQuest
                                   || !_urpConfigured
@@ -1137,6 +1148,14 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<TextureRefinement>(root);
             if (root.GetComponent<RoomUnderstanding>() == null)
                 Undo.AddComponent<RoomUnderstanding>(root);
+
+            // Editor play-mode guard. [DefaultExecutionOrder(int.MinValue)]
+            // makes its Awake run before any AR component, so it can
+            // disable them BEFORE their OnEnable fires (which is the only
+            // way to suppress the ARSession / AROcclusionManager / PCA
+            // null-subsystem error wall when there's no Quest Link).
+            if (UnityEngine.Object.FindAnyObjectByType<EditorPlayModeXRGuard>() == null)
+                Undo.AddComponent<EditorPlayModeXRGuard>(root);
 
             var tr = root.GetComponent<TextureRefinement>();
             if (tr != null)

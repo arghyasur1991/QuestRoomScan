@@ -2,59 +2,77 @@
 //
 // When you hit Play in the Unity Editor without an active XR loader (no
 // Quest, no Quest Link), Meta's PassthroughCameraAccess and Unity's
-// AROcclusionManager / ARCameraManager throw NREs in Update because no AR
-// subsystem ever materialised. The error wall makes the Editor unusable
-// for non-XR work (UI, AI, gameplay scaffolding, anything else).
+// AROcclusionManager / ARCameraManager / ARSession throw NREs in
+// OnEnable / Update because no AR subsystem ever materialised. The error
+// wall makes the Editor unusable for non-XR work (UI, AI, gameplay
+// scaffolding, anything else).
 //
-// This guard hooks RuntimeInitializeOnLoadMethod (which fires only when
-// the player runtime spins up — i.e. on play-mode entry in Editor or on
-// device start in a build) and disables those components inside the
-// play-mode scene clone the moment each scene finishes loading.
+// We can't catch this from a [RuntimeInitializeOnLoadMethod] hook —
+// SceneManager.sceneLoaded fires AFTER every Awake/OnEnable in that
+// scene, so by the time we'd disable the components their OnEnable has
+// already crashed (and the subsequent disable triggers a secondary NRE
+// in AROcclusionManager.OnDisable → DestroyTextures).
 //
-// Critically: edits to the play-mode scene clone do NOT propagate back to
-// the saved scene asset, so the next time you stop and re-enter play mode
-// the components come back enabled. On device, XRRuntimeGuard.IsXRActive
-// is true and this guard is a complete no-op. The whole class is also
-// wrapped in UNITY_EDITOR so it never reaches built players.
+// Instead, this is a MonoBehaviour wedged into the scene by the
+// RoomScanSetupWizard. With [DefaultExecutionOrder(int.MinValue)] its
+// Awake runs before any AR component's Awake. Unity then runs OnEnable
+// on every still-enabled component — so disabling the AR pieces during
+// our Awake skips their OnEnable entirely, and no NRE chain ever fires.
+//
+// On Quest device the XR loader is active, so the whole guard early-outs
+// in Awake. The component is harmless in builds and stays in the saved
+// scene asset.
+
+using UnityEngine;
 
 #if UNITY_EDITOR
-
 using Meta.XR;
-using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.XR.ARFoundation;
+#endif
 
 namespace Genesis.RoomScan
 {
-    internal static class EditorPlayModeXRGuard
+    /// <summary>
+    /// Disables Quest-only components inside the Editor play-mode scene
+    /// when no XR loader is active. No-op on device. Wizard adds this to
+    /// the RoomScan root automatically.
+    /// </summary>
+    [DefaultExecutionOrder(int.MinValue)]
+    [DisallowMultipleComponent]
+    [AddComponentMenu("Genesis/Room Scan/Editor Play Mode XR Guard")]
+    public sealed class EditorPlayModeXRGuard : MonoBehaviour
     {
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
-        static void Hook()
+#if UNITY_EDITOR
+        void Awake()
         {
             // Quest device, Quest Link, anything with a real OpenXR loader →
             // these components work normally; nothing to guard against.
             if (XRRuntimeGuard.IsXRActive) return;
 
+            DisableInScene(gameObject.scene);
+
+            // Cover scenes loaded additively after this one.
             SceneManager.sceneLoaded -= OnSceneLoaded;
             SceneManager.sceneLoaded += OnSceneLoaded;
+        }
 
-            // Cover the active scene that may have been loaded before
-            // BeforeSceneLoad fired (single-scene play sessions).
-            for (int i = 0; i < SceneManager.sceneCount; i++)
-            {
-                var s = SceneManager.GetSceneAt(i);
-                if (s.isLoaded) DisableInScene(s);
-            }
+        void OnDestroy()
+        {
+            SceneManager.sceneLoaded -= OnSceneLoaded;
         }
 
         static void OnSceneLoaded(Scene scene, LoadSceneMode mode) => DisableInScene(scene);
 
         static void DisableInScene(Scene scene)
         {
+            if (!scene.isLoaded) return;
+
             int flipped = 0;
             foreach (var go in scene.GetRootGameObjects())
             {
                 flipped += DisableInHierarchy<PassthroughCameraAccess>(go);
+                flipped += DisableInHierarchy<ARSession>(go);
                 flipped += DisableInHierarchy<AROcclusionManager>(go);
                 flipped += DisableInHierarchy<ARCameraManager>(go);
             }
@@ -62,8 +80,9 @@ namespace Genesis.RoomScan
             if (flipped > 0)
             {
                 Debug.Log($"[RoomScan] EditorPlayModeXRGuard: disabled {flipped} Quest-runtime " +
-                          "component(s) for this play session (no XR loader active). " +
-                          "Scene asset is NOT modified — this only applies to the play-mode clone.");
+                          $"component(s) in scene '{scene.name}' for this play session " +
+                          "(no XR loader active). Scene asset is NOT modified — this only " +
+                          "applies to the play-mode clone.");
             }
         }
 
@@ -78,7 +97,6 @@ namespace Genesis.RoomScan
             }
             return n;
         }
+#endif
     }
 }
-
-#endif
