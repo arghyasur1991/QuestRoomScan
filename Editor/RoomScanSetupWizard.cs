@@ -148,7 +148,7 @@ namespace Genesis.RoomScan.Editor
             RefreshAIDetection();
             RefreshVRProject();
 
-            _boundarylessManifest = ManifestHasBoundaryless();
+            _boundarylessManifest = ManifestHasAllQuestVREntries();
             _cleartextAllowed = ManifestHasCleartextTraffic();
             _insecureHttpAllowed = PlayerSettings.insecureHttpOption != InsecureHttpOption.NotAllowed;
         }
@@ -297,13 +297,45 @@ namespace Genesis.RoomScan.Editor
         // -- Project Settings ---------------------------------------------
 
         const string MANIFEST_PATH = "Assets/Plugins/Android/AndroidManifest.xml";
-        const string BOUNDARYLESS_FEATURE = "com.oculus.feature.BOUNDARYLESS_APP";
+
+        // Every <uses-feature> + <uses-permission> entry that QRS or its
+        // satellite modules expect at runtime. Some of these (HEADSET_CAMERA,
+        // USE_SCENE, USE_ANCHOR_API, etc.) are NOT in Meta's templated
+        // manifest set and get stripped any time OVRProjectSetup.FixAllAsync
+        // or the Project Setup Tool regenerates the manifest from
+        // OVRProjectConfig — hence this comprehensive ensure-pass that runs
+        // AFTER Meta's tooling in the wizard orchestrators.
+        //
+        // Each entry is idempotent (skip if already present, never remove).
+        struct ManifestFeature { public string Name; public bool Required; }
+        static readonly ManifestFeature[] REQUIRED_FEATURES = new[]
+        {
+            new ManifestFeature { Name = "android.hardware.vr.headtracking", Required = true  },
+            new ManifestFeature { Name = "oculus.software.handtracking",     Required = false },
+            new ManifestFeature { Name = "com.oculus.feature.PASSTHROUGH",   Required = false },
+            new ManifestFeature { Name = "com.oculus.feature.BOUNDARYLESS_APP", Required = true },
+        };
+
+        static readonly string[] REQUIRED_PERMISSIONS = new[]
+        {
+            "com.oculus.permission.HAND_TRACKING",
+            "com.oculus.permission.USE_ANCHOR_API",
+            "com.oculus.permission.USE_SCENE",
+            "horizonos.permission.HEADSET_CAMERA",
+        };
+
+        // horizonos SDK declaration — anchored to a current floor so MR
+        // features (camera, anchors) are exposed.
+        const string HORIZONOS_NS = "http://schemas.horizonos/sdk";
+        const string HORIZONOS_MIN_SDK_VERSION = "60";
+        const string HORIZONOS_TARGET_SDK_VERSION = "85";
 
         void DrawProjectSettings()
         {
             BeginSection("PROJECT SETTINGS");
 
-            StatusRow("AndroidManifest boundaryless entry", _boundarylessManifest);
+            StatusRow("AndroidManifest Quest VR entries (features + permissions)",
+                      _boundarylessManifest);
             StatusRow("AndroidManifest cleartext HTTP (LAN)", _cleartextAllowed);
             StatusRow("Player Settings: Allow HTTP", _insecureHttpAllowed);
 
@@ -312,9 +344,9 @@ namespace Genesis.RoomScan.Editor
                 GUILayout.Space(2);
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.FlexibleSpace();
-                if (GUILayout.Button("Add Boundaryless Manifest", GUILayout.Width(200)))
+                if (GUILayout.Button("Add Quest VR Manifest Entries", GUILayout.Width(220)))
                 {
-                    FixBoundarylessManifest();
+                    EnsureQuestVRManifest();
                     Refresh();
                 }
                 EditorGUILayout.EndHorizontal();
@@ -350,7 +382,13 @@ namespace Genesis.RoomScan.Editor
             EndSection();
         }
 
-        static bool ManifestHasBoundaryless()
+        /// <summary>
+        /// Returns true iff every entry in REQUIRED_FEATURES /
+        /// REQUIRED_PERMISSIONS plus the horizonos SDK declaration is
+        /// already present in the manifest. Used by the status row + by the
+        /// orchestrators to decide whether to re-run the ensure-pass.
+        /// </summary>
+        static bool ManifestHasAllQuestVREntries()
         {
             string fullPath = Path.Combine(Application.dataPath, "..", MANIFEST_PATH);
             if (!File.Exists(fullPath)) return false;
@@ -358,9 +396,28 @@ namespace Genesis.RoomScan.Editor
             try
             {
                 var doc = XDocument.Load(fullPath);
+                if (doc.Root == null) return false;
                 XNamespace android = "http://schemas.android.com/apk/res/android";
-                return doc.Root?.Elements("uses-feature")
-                    .Any(e => e.Attribute(android + "name")?.Value == BOUNDARYLESS_FEATURE) ?? false;
+                XNamespace horizonos = HORIZONOS_NS;
+
+                foreach (var f in REQUIRED_FEATURES)
+                {
+                    bool found = doc.Root.Elements("uses-feature")
+                        .Any(e => e.Attribute(android + "name")?.Value == f.Name);
+                    if (!found) return false;
+                }
+
+                foreach (var p in REQUIRED_PERMISSIONS)
+                {
+                    bool found = doc.Root.Elements("uses-permission")
+                        .Any(e => e.Attribute(android + "name")?.Value == p);
+                    if (!found) return false;
+                }
+
+                bool hasHorizonOsSdk = doc.Root.Elements(horizonos + "uses-horizonos-sdk").Any();
+                if (!hasHorizonOsSdk) return false;
+
+                return true;
             }
             catch
             {
@@ -368,7 +425,15 @@ namespace Genesis.RoomScan.Editor
             }
         }
 
-        static void FixBoundarylessManifest()
+        /// <summary>
+        /// Idempotent: adds every required uses-feature, uses-permission, and
+        /// the horizonos:uses-horizonos-sdk declaration if any are missing.
+        /// Never removes existing entries — safe to run after Meta's
+        /// OVRProjectSetup.FixAllAsync has rewritten the manifest from
+        /// OVRProjectConfig defaults (which strips MR-only permissions like
+        /// HEADSET_CAMERA / USE_SCENE that aren't in OVR's template).
+        /// </summary>
+        static void EnsureQuestVRManifest()
         {
             string fullPath = Path.Combine(Application.dataPath, "..", MANIFEST_PATH);
 
@@ -384,25 +449,84 @@ namespace Genesis.RoomScan.Editor
             try
             {
                 var doc = XDocument.Load(fullPath);
+                if (doc.Root == null)
+                {
+                    Debug.LogError("[RoomScan Setup] AndroidManifest.xml has no <manifest> root.");
+                    return;
+                }
+
                 XNamespace android = "http://schemas.android.com/apk/res/android";
+                XNamespace horizonos = HORIZONOS_NS;
+                bool dirty = false;
+                var added = new List<string>();
 
-                bool exists = doc.Root?.Elements("uses-feature")
-                    .Any(e => e.Attribute(android + "name")?.Value == BOUNDARYLESS_FEATURE) ?? false;
-                if (exists) return;
+                // Make sure xmlns:horizonos is declared on root so the SDK
+                // element below can use the prefix without serializing as
+                // xmlns="...". Unity templates usually include it but
+                // OVR-regenerated manifests may not.
+                if (doc.Root.Attribute(XNamespace.Xmlns + "horizonos") == null)
+                {
+                    doc.Root.Add(new XAttribute(XNamespace.Xmlns + "horizonos", HORIZONOS_NS));
+                    dirty = true;
+                }
 
-                var element = new XElement("uses-feature",
-                    new XAttribute(android + "name", BOUNDARYLESS_FEATURE),
-                    new XAttribute(android + "required", "true"));
+                // <uses-feature>
+                foreach (var f in REQUIRED_FEATURES)
+                {
+                    bool exists = doc.Root.Elements("uses-feature")
+                        .Any(e => e.Attribute(android + "name")?.Value == f.Name);
+                    if (exists) continue;
 
-                doc.Root?.Add(element);
+                    var el = new XElement("uses-feature",
+                        new XAttribute(android + "name", f.Name),
+                        new XAttribute(android + "required", f.Required ? "true" : "false"));
+
+                    // headtracking gets a version attr by Android convention.
+                    if (f.Name == "android.hardware.vr.headtracking")
+                        el.Add(new XAttribute(android + "version", "1"));
+
+                    doc.Root.Add(el);
+                    added.Add($"feature:{f.Name}");
+                    dirty = true;
+                }
+
+                // <uses-permission>
+                foreach (var p in REQUIRED_PERMISSIONS)
+                {
+                    bool exists = doc.Root.Elements("uses-permission")
+                        .Any(e => e.Attribute(android + "name")?.Value == p);
+                    if (exists) continue;
+
+                    doc.Root.Add(new XElement("uses-permission",
+                        new XAttribute(android + "name", p)));
+                    added.Add($"perm:{p}");
+                    dirty = true;
+                }
+
+                // <horizonos:uses-horizonos-sdk>
+                bool hasHorizonOsSdk = doc.Root.Elements(horizonos + "uses-horizonos-sdk").Any();
+                if (!hasHorizonOsSdk)
+                {
+                    doc.Root.Add(new XElement(horizonos + "uses-horizonos-sdk",
+                        new XAttribute(horizonos + "minSdkVersion",    HORIZONOS_MIN_SDK_VERSION),
+                        new XAttribute(horizonos + "targetSdkVersion", HORIZONOS_TARGET_SDK_VERSION)));
+                    added.Add("horizonos:uses-horizonos-sdk");
+                    dirty = true;
+                }
+
+                if (!dirty)
+                {
+                    return;
+                }
+
                 doc.Save(fullPath);
-
                 AssetDatabase.Refresh();
-                Debug.Log($"[RoomScan Setup] Added {BOUNDARYLESS_FEATURE} to AndroidManifest.xml");
+                Debug.Log($"[RoomScan Setup] AndroidManifest: added {added.Count} entr{(added.Count == 1 ? "y" : "ies")} \u2192 " +
+                          string.Join(", ", added));
             }
             catch (System.Exception ex)
             {
-                Debug.LogError($"[RoomScan Setup] Failed to update manifest: {ex.Message}");
+                Debug.LogError($"[RoomScan Setup] Failed to update manifest: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -724,7 +848,7 @@ namespace Genesis.RoomScan.Editor
                 "One-click \"make this project actually buildable for Quest VR\":\n" +
                 "  \u2022 Switch active build target to Android if needed (re-click after the reload)\n" +
                 "  \u2022 VR project prerequisites (XR Plug-in, OpenXR features, OVRProjectConfig \u2014 Outstanding tier)\n" +
-                "  \u2022 AndroidManifest (boundaryless feature, cleartext HTTP) + insecureHttpOption\n" +
+                "  \u2022 AndroidManifest: full Quest VR feature/permission set (HEADSET_CAMERA, USE_SCENE, USE_ANCHOR_API, BOUNDARYLESS, etc.) + cleartext HTTP + insecureHttpOption\n" +
                 "  \u2022 AR Session + AROcclusionManager on the camera rig\n" +
                 "  \u2022 Game-ready scene modules (scan \u2192 refine \u2192 release GPU \u2192 play)\n" +
                 "  \u2022 Shader wiring + xatlas native plugin build (background)\n" +
@@ -760,7 +884,8 @@ namespace Genesis.RoomScan.Editor
             bool buildTargetIsAndroid = EditorUserBuildSettings.activeBuildTarget == BuildTarget.Android;
             StatusRowOptional($"Active build target = Android (current: {EditorUserBuildSettings.activeBuildTarget})", buildTargetIsAndroid);
             StatusRowOptional("AR Session + AROcclusionManager", _arSession != null && _arOcclusion != null);
-            StatusRowOptional("AndroidManifest (boundaryless + cleartext)", _boundarylessManifest && _cleartextAllowed);
+            StatusRowOptional("AndroidManifest (Quest VR features + permissions + cleartext)",
+                              _boundarylessManifest && _cleartextAllowed);
             StatusRowOptional("Player Settings: Allow HTTP", _insecureHttpAllowed);
             StatusRowOptional($"VR Project Bootstrap ({_vrOutstanding.Count} outstanding)", _vrOutstanding.Count == 0);
             StatusRowOptional("xatlas native plugins (Android + Editor)", _xatlasAndroid && _xatlasEditor);
@@ -874,9 +999,15 @@ namespace Genesis.RoomScan.Editor
                     "Fixing VR prerequisites (XR Plug-in, OpenXR, OVRProjectConfig\u2026)", 0.15f);
                 await VRProjectBootstrap.FixAllAsync(CheckSeverity.Outstanding);
 
+                // EnsureQuestVRManifest is unconditional (and idempotent) on
+                // purpose — it has to undo any permission stripping that
+                // OVRProjectSetup.FixAllAsync may have done a moment ago when
+                // it regenerated the manifest from OVRProjectConfig defaults.
+                // HEADSET_CAMERA / USE_SCENE / USE_ANCHOR_API are not in
+                // Meta's templated set and would otherwise vanish here.
                 EditorUtility.DisplayProgressBar("Game-Ready Setup",
                     "Updating AndroidManifest + Player Settings\u2026", 0.50f);
-                if (!ManifestHasBoundaryless())     FixBoundarylessManifest();
+                EnsureQuestVRManifest();
                 if (!ManifestHasCleartextTraffic()) FixCleartextTraffic();
                 if (PlayerSettings.insecureHttpOption == InsecureHttpOption.NotAllowed)
                 {
@@ -1756,9 +1887,12 @@ namespace Genesis.RoomScan.Editor
                 if (_arSession == null) FixARSession();
                 if (_arOcclusion == null) FixAROcclusion();
 
+                // See the matching comment in FixGameReadyModules — run
+                // unconditionally so this restores anything OVRProjectSetup
+                // stripped during the Recommended VR fix pass above.
                 EditorUtility.DisplayProgressBar("Setup Everything",
                     "Updating AndroidManifest + Player Settings\u2026", 0.50f);
-                if (!_boundarylessManifest) FixBoundarylessManifest();
+                EnsureQuestVRManifest();
                 if (!_cleartextAllowed) FixCleartextTraffic();
                 if (!_insecureHttpAllowed)
                 {
