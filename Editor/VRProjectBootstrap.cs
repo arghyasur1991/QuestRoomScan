@@ -67,8 +67,9 @@ namespace Genesis.RoomScan.Editor
         //   * at least two dot-separated segments
         //   * each segment starts with a letter
         //   * all characters are [a-zA-Z0-9_]
-        // We deliberately accept uppercase letters — `com.GenesisInteractive.PocketHamlet`
-        // is a perfectly legal app-id even though lowercase is idiomatic.
+        // We deliberately accept uppercase letters — Pascal-cased segments
+        // such as `com.MyCompany.MyGame` are perfectly legal app-ids even
+        // though all-lowercase is more idiomatic on Android.
         static readonly Regex APPID_RE =
             new(@"^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$", RegexOptions.Compiled);
 

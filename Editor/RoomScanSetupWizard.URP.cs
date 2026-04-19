@@ -1,12 +1,12 @@
 // URP setup helpers for the Room Scan setup wizard.
 //
-// PocketHamlet (and any new Unity 6 project) ships with GraphicsSettings +
-// QualitySettings already wired to a UniversalRenderPipelineAsset GUID,
-// but the .asset files themselves are not generated until you either
-// install URP via Package Manager into a fresh project or copy them in
-// manually. The result is a project that references a pipeline asset that
-// doesn't exist on disk — every shader falls back to magenta and most of
-// QRS's rendering pipeline silently does nothing.
+// A new Unity 6 project ships with GraphicsSettings + QualitySettings
+// already wired to a UniversalRenderPipelineAsset GUID, but the .asset
+// files themselves are not generated until you either install URP via
+// Package Manager into a fresh project or copy them in manually. The
+// result is a project that references a pipeline asset that doesn't
+// exist on disk — every shader falls back to magenta and most of QRS's
+// rendering pipeline silently does nothing.
 //
 // EnsureURPSetup:
 //   1. Looks for a UniversalRenderPipelineAsset already wired into

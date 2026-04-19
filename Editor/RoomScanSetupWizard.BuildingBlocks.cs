@@ -285,9 +285,12 @@ namespace Genesis.RoomScan.Editor
             // Have OVRManager request HEADSET_CAMERA at app startup. Without
             // this, PCA's permission dialog only appears once the user
             // triggers a scan — by which point the scanner has already kicked
-            // off in degraded depth-only mode (the user-facing race the
-            // PocketHamlet ScanFlow had to defend against by gating Begin()).
-            // Mirrors Meta's PassthroughCameraAccessProjectSetup Optional task.
+            // off in degraded depth-only mode. Game code that wants a
+            // deterministic "asking for permission" UI state should still
+            // call RoomScanSession.RequestCameraPermissionAsync() before
+            // StartScan() as defense-in-depth (covers the user dismissing
+            // the startup dialog). Mirrors Meta's
+            // PassthroughCameraAccessProjectSetup Optional task.
             bool pcaBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH_CAMERA_ACCESS, out var pp) && pp;
             if (ovrManager != null && pcaBlockPresent
                 && WriteOvrManagerStartupPermFlag(ovrManager, true))

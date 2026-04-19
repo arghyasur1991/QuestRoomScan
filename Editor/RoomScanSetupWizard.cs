@@ -1157,8 +1157,8 @@ namespace Genesis.RoomScan.Editor
 
             // RoomScanSession: public game-dev facade (StartScan / FinalizeScanAsync /
             // LoadLatestAsync / HasSavedScan / ProgressUpdated). Without it,
-            // game code that follows the documented public-API path
-            // (e.g. PocketHamlet.ScanFlow) cannot find Instance and bails.
+            // game code that follows the documented public-API path cannot
+            // find RoomScanSession.Instance and bails.
             if (root.GetComponent<RoomScanSession>() == null)
                 Undo.AddComponent<RoomScanSession>(root);
 

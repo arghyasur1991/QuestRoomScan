@@ -649,8 +649,6 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 6. When the user commits: `var result = await RoomScanSession.Instance.FinalizeScanAsync();` → use `result.Mesh` + `result.Atlas` to render with a standard `MeshRenderer`.
 7. On subsequent launches: `if (session.HasSavedScan) await session.LoadLatestAsync();` — skip scanning entirely.
 
-For a complete reference implementation with UI Toolkit HUD, OVRInput wiring, permission gating, and rescan-on-demand, see the open-source [Pocket Hamlet `ScanFlow`](https://github.com/arghyasur1991/PocketHamlet/tree/main/PocketHamletUnity/Assets/Game/Scripts/Scan).
-
 ## Credits & Prior Art
 
 The TSDF volume integration and Surface Nets meshing approach draws inspiration from [anaglyphs/lasertag](https://github.com/anaglyphs/lasertag) by Julian Triveri & Hazel Roeder (MIT), which demonstrated real-time room reconstruction on Quest 3 inside a mixed reality game.
