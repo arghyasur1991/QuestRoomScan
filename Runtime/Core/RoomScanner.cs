@@ -447,6 +447,96 @@ namespace Genesis.RoomScan
         // ═════════════════════════════════════════════════════════════
 
         /// <summary>
+        /// Pre-allocates the heavy scan GPU resources (~150 MB TSDF/color
+        /// volumes + ~480 MB Surface Nets buffers + first-dispatch kernel
+        /// warmup) <b>without</b> starting integration. Idempotent.
+        ///
+        /// <para>
+        /// <b>Why it exists.</b> The lazy-alloc landed in
+        /// <c>perf/lazy-scan-gpu-allocations</c> moved this work from
+        /// <c>Awake</c>/<c>Start</c> (where the boot splash hides any
+        /// stall) into the first <see cref="StartScanning"/> call. On
+        /// device that landed inside the user's A-press frame and burned
+        /// 1–3 s on the main thread because Vulkan has to drain in-flight
+        /// frames before the new descriptor pool can include the freshly
+        /// created 3D RTs and ComputeBuffers. Result: head-locked freeze,
+        /// motion sickness, and ANR risk.
+        /// </para>
+        ///
+        /// <para>
+        /// <b>How to use.</b> Host apps with a "scan-guidance" UX (the
+        /// user reads hints for several seconds before pressing A) should
+        /// call this as soon as that surface becomes visible. The cost
+        /// then amortises across that idle window instead of landing in a
+        /// single frame. <see cref="StartScanning"/> remains correct on
+        /// its own — this is a pure optimisation. Both <c>VolumeIntegrator</c>
+        /// and <c>MeshExtractor</c> ignore re-allocation when they are
+        /// already up, so calling it more than once is free.
+        /// </para>
+        ///
+        /// <para>
+        /// We yield twice between the volume and mesh allocation steps so
+        /// the compositor gets at least one full frame to recover before
+        /// the next 480 MB allocation lands. Awaiting <see cref="Task.Yield"/>
+        /// from a Unity main-thread coroutine context resumes on the main
+        /// thread on the next frame, so the GPU work happens in three
+        /// well-separated frames instead of one mega-frame.
+        /// </para>
+        /// </summary>
+        public async Task WarmupScanResourcesAsync()
+        {
+            if (IsScanning)
+            {
+                // An active scan already owns these resources; nothing to warm.
+                return;
+            }
+            if (_volumeIntegrator == null || _meshExtractor == null)
+            {
+                Logger.Warning("RoomScanner.WarmupScanResourcesAsync: scanner " +
+                               "not fully initialised yet (no integrator/extractor).");
+                return;
+            }
+
+            bool needVolumes = _volumeIntegrator.VolumesReleased;
+            bool needMesh = !_meshExtractor.IsInitialized;
+            if (!needVolumes && !needMesh)
+            {
+                _scanResourcesReleased = false;
+                return;
+            }
+
+            Logger.Info($"RoomScanner.WarmupScanResourcesAsync: warming GPU " +
+                        $"resources during idle window (needVolumes={needVolumes}, " +
+                        $"needMesh={needMesh}).");
+
+            if (needVolumes)
+            {
+                _volumeIntegrator.ReallocateVolumes();
+                // Two yields: first frame absorbs the RT.Create + Clear
+                // dispatch, second frame lets the compositor re-stabilise
+                // before the much larger Surface Nets alloc lands.
+                await Task.Yield();
+                await Task.Yield();
+            }
+
+            if (needMesh)
+            {
+                _meshExtractor.EnsureInitialized();
+                await Task.Yield();
+                await Task.Yield();
+            }
+
+            // Critical: must clear the released flag, otherwise the next
+            // StartScanning() takes the `_scanResourcesReleased` branch and
+            // calls MeshExtractor.Reinitialize() — which destroys + recreates
+            // the very buffers we just warmed up, defeating the optimisation.
+            _scanResourcesReleased = false;
+
+            Logger.Info("RoomScanner.WarmupScanResourcesAsync: scan GPU " +
+                        "resources warmed; first scan press will be hang-free.");
+        }
+
+        /// <summary>
         /// Begins depth integration and mesh extraction. Resets relocation state,
         /// clears in-memory keyframes, and starts the active camera provider.
         /// </summary>
@@ -456,6 +546,22 @@ namespace Genesis.RoomScan
             IsScanning = true;
             KeyframeRelocation = Matrix4x4.identity;
             _cachedUnwrap = null;
+
+            // ── Instrumentation ─────────────────────────────────────────
+            // The lazy-alloc landing in `perf/lazy-scan-gpu-allocations`
+            // moved ~600 MB of GPU work from `Awake`/`Start` (where the
+            // boot splash absorbs any stall) into the user's A-press
+            // frame. Field reports describe a "permanent hang that never
+            // recovers" instead of a 1–3 s freeze, which doesn't match
+            // a pure GPU-cost story (GPU allocs eventually return). The
+            // timing logs below were added so the next hung session's
+            // logcat tells us *which* call wedges the main thread —
+            // ReallocateVolumes (TSDF/color RTs), EnsureInitialized
+            // (Surface Nets buffers + first dispatch), CreateTmpPackage
+            // (file I/O), or one of the camera-provider starts.
+            // Remove once the warmup path lands and is verified.
+            var swTotal = System.Diagnostics.Stopwatch.StartNew();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
 
             // Lazy GPU bring-up. Both calls are idempotent: ReallocateVolumes
             // early-returns if RTs already exist, and EnsureInitialized
@@ -471,14 +577,21 @@ namespace Genesis.RoomScan
             if (_scanResourcesReleased)
             {
                 _volumeIntegrator.ReallocateVolumes();
+                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: ReallocateVolumes (post-release) took {sw.ElapsedMilliseconds} ms");
+                sw.Restart();
                 _meshExtractor.Reinitialize();
+                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: Mesh Reinitialize took {sw.ElapsedMilliseconds} ms");
                 _scanResourcesReleased = false;
             }
             else
             {
                 _volumeIntegrator.ReallocateVolumes();
+                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: ReallocateVolumes took {sw.ElapsedMilliseconds} ms");
+                sw.Restart();
                 _meshExtractor.EnsureInitialized();
+                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: EnsureInitialized took {sw.ElapsedMilliseconds} ms");
             }
+            sw.Restart();
 
             // Resume within the same session: if we already have an active tmp
             // package with scan data, keep it instead of nuking everything.
@@ -533,7 +646,11 @@ namespace Genesis.RoomScan
                     _keyframeCollector.ClearInMemory();
 
                 _persistence.CreateTmpPackage();
+                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: CreateTmpPackage took {sw.ElapsedMilliseconds} ms");
+                sw.Restart();
                 _ = CreateScanAnchorAsync();
+                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: CreateScanAnchorAsync (fire-and-forget) launch took {sw.ElapsedMilliseconds} ms");
+                sw.Restart();
             }
 
             _keyframeCollector?.SetExportDirectory(
@@ -547,7 +664,11 @@ namespace Genesis.RoomScan
 
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StartCapture();
+            Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: camera StartCapture took {sw.ElapsedMilliseconds} ms");
+            sw.Restart();
             _depthCapture.StartDepthCapture();
+            Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: DepthCapture.StartDepthCapture took {sw.ElapsedMilliseconds} ms");
+            sw.Restart();
 
             if (!resuming)
             {
@@ -566,6 +687,12 @@ namespace Genesis.RoomScan
             ScanStarted?.Invoke();
             if (_modules != null)
                 foreach (var m in _modules) m.OnScanStarted();
+
+            Logger.Info($"StartScanning RETURNED — total main-thread time {swTotal.ElapsedMilliseconds} ms. " +
+                        "If field reports describe a >5 s 'permanent hang' this is the upper " +
+                        "bound on the synchronous part; anything beyond that is fire-and-forget " +
+                        "(spatial anchor handshake) or compositor / OVR runtime giving up after " +
+                        "the long stall.");
         }
 
         /// <summary>

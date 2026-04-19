@@ -261,13 +261,33 @@ namespace Genesis.RoomScan
             // backing field as the "never initialized" sentinel.
             bool firstAlloc = (_clearKernel.Shader == null);
 
+            // ── Instrumentation ─────────────────────────────────────────
+            // Field reports of "permanent hang on first scan press" need
+            // a finer breakdown than the wrapping StartScanning logs can
+            // give us. CreateVolume = two RenderTexture.Create on 256³
+            // 3D RTs = the most likely Vulkan stall point (descriptor
+            // pool drain). InitKernels = first-dispatch shader cache
+            // warm. Clear = first compute dispatch on the freshly
+            // allocated UAV-enabled 3D RT. Remove with the rest of the
+            // diagnostic logs once the warmup path is verified.
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
             CreateVolume();
+            Logger.Info($"ReallocateVolumes: CreateVolume took {sw.ElapsedMilliseconds} ms (firstAlloc={firstAlloc})");
+            sw.Restart();
 
             if (firstAlloc) InitKernels();
             else            RebindKernelTextures();
+            Logger.Info($"ReallocateVolumes: {(firstAlloc ? "InitKernels" : "RebindKernelTextures")} took {sw.ElapsedMilliseconds} ms");
+            sw.Restart();
 
             SetShaderConstants();
+            Logger.Info($"ReallocateVolumes: SetShaderConstants took {sw.ElapsedMilliseconds} ms");
+            sw.Restart();
+
             Clear();
+            Logger.Info($"ReallocateVolumes: Clear (first compute dispatch on fresh RT) took {sw.ElapsedMilliseconds} ms");
+            sw.Restart();
 
             if (DepthCapture.Instance != null)
                 DepthCapture.Instance.SetVoxelParams(voxelDistance, voxelSize);
