@@ -893,15 +893,22 @@ namespace Genesis.RoomScan
 
                 ApplyRefinedAtlas(toRender);
                 HasRefinedTexture = true;
-                RefinedMeshReady?.Invoke(_refinedMesh, _refinedAtlasTexture);
                 SetRenderMode(ScanRenderMode.Refined);
 
+                // IMPORTANT: persist refined artifacts BEFORE firing RefinedMeshReady.
+                // RoomScanSession.FinalizeScanAsync wakes on this event and then calls
+                // SaveScanAsync → Directory.Move(_tmp → pkg_xxx). If the event fired first,
+                // SaveArtifactAsync would race against that Move (the captured pkgDir would
+                // point at _tmp while the directory was being renamed), and refined_mesh.bin
+                // would silently fail to land in the final package.
                 if (_persistence != null && _persistence.HasActivePackage)
                 {
                     await _persistence.SaveArtifactAsync(ArtifactType.Refined, null, original);
                     if (LastSimplifiedResult.HasValue)
                         await _persistence.SaveArtifactAsync(ArtifactType.SimplifiedMesh, null, LastSimplifiedResult);
                 }
+
+                RefinedMeshReady?.Invoke(_refinedMesh, _refinedAtlasTexture);
 
                 Logger.Info("On-device texture refinement complete");
             }
