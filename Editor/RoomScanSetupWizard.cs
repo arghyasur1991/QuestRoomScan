@@ -780,7 +780,45 @@ namespace Genesis.RoomScan.Editor
                     Undo.RegisterCreatedObjectUndo(root, "Create RoomScan");
                 }
             }
+
+            EnsureRoomScanIdentityTransform(root);
             return root;
+        }
+
+        // The RoomScan GameObject MUST have an identity local transform.
+        // RoomScanner spawns a child "RefinedMeshRenderer" whose mesh
+        // vertices are pre-baked into world-space coordinates by
+        // RoomScanPersistence.RelocateVertices, and RefinedMesh.shader
+        // bypasses the object-to-world matrix (uses posWS directly). Unity
+        // still uses localToWorldMatrix for frustum-cull bounds, so any
+        // non-identity scale on this GameObject silently shrinks (or moves)
+        // the culling box away from the actual geometry — the rendered mesh
+        // then "disappears" from most viewing angles unless the camera
+        // frustum happens to clip the displaced bounds. Reset defensively.
+        static void EnsureRoomScanIdentityTransform(GameObject root)
+        {
+            if (root == null) return;
+            var t = root.transform;
+
+            bool wrongScale = t.localScale != Vector3.one;
+            bool wrongPos = t.localPosition != Vector3.zero;
+            bool wrongRot = t.localRotation != Quaternion.identity;
+            if (!wrongScale && !wrongPos && !wrongRot) return;
+
+            Undo.RecordObject(t, "Reset RoomScan transform to identity");
+            t.localScale = Vector3.one;
+            t.localPosition = Vector3.zero;
+            t.localRotation = Quaternion.identity;
+            EditorUtility.SetDirty(root);
+
+            Debug.LogWarning(
+                $"[RoomScanSetupWizard] Reset '{root.name}' transform to identity " +
+                $"(wrongScale={wrongScale}, wrongPos={wrongPos}, wrongRot={wrongRot}). " +
+                "RoomScanner's refined-mesh renderer hosts pre-baked world-space " +
+                "vertices and bypasses object-to-world in its shader; any non-identity " +
+                "parent transform breaks frustum-cull bounds and the mesh disappears " +
+                "from most viewing angles. Don't put world-space UI panels (UIDocument) " +
+                "directly on RoomScan — keep them on their own child GameObject.");
         }
 
         void FixCoreComponents()
