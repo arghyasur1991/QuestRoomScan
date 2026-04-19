@@ -257,7 +257,9 @@ namespace Genesis.RoomScan
         {
             if (_volume != null) return;
 
-            bool firstAlloc = (_clearKernel == null);
+            // ComputeKernelHelper is a struct — use its readonly Shader
+            // backing field as the "never initialized" sentinel.
+            bool firstAlloc = (_clearKernel.Shader == null);
 
             CreateVolume();
 
@@ -371,7 +373,7 @@ namespace Genesis.RoomScan
         /// </summary>
         public void Clear()
         {
-            if (_volume == null || _clearKernel == null) return;
+            if (_volume == null || _clearKernel.Shader == null) return;
             _clearKernel.Set(VolumeRWID, _volume);
             _clearKernel.Set(ColorVolumeRWID, _colorVolume);
             _clearKernel.DispatchFit(_volume);
@@ -457,7 +459,7 @@ namespace Genesis.RoomScan
         public void FreezeInView(Vector3 camPos, Quaternion camRot,
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
         {
-            if (_volume == null || _freezeKernel == null)
+            if (_volume == null || _freezeKernel.Shader == null)
             {
                 Logger.Warning("FreezeInView called before GPU resources allocated; ignored.");
                 return;
@@ -475,7 +477,7 @@ namespace Genesis.RoomScan
         public void UnfreezeInView(Vector3 camPos, Quaternion camRot,
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
         {
-            if (_volume == null || _unfreezeKernel == null)
+            if (_volume == null || _unfreezeKernel.Shader == null)
             {
                 Logger.Warning("UnfreezeInView called before GPU resources allocated; ignored.");
                 return;
@@ -608,7 +610,7 @@ namespace Genesis.RoomScan
             // ReallocateVolumes can land here. RoomScanner.StartScanning()
             // always calls ReallocateVolumes first, so this is just a
             // safety net.
-            if (_volume == null || _integrateKernel == null) return;
+            if (_volume == null || _integrateKernel.Shader == null) return;
             if (!_frustumReady) SetupFrustumVolume();
             if (!_frustumReady) return;
 
