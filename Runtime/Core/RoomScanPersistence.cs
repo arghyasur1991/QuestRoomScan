@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Unity.Mathematics;
@@ -1062,6 +1063,36 @@ namespace Genesis.RoomScan
         {
             ActivePackageId = null;
             _activeAnchorData = null;
+        }
+
+        /// <summary>
+        /// Deletes every saved scan package on disk (directories + spatial anchors)
+        /// and the manifest, plus any leftover <c>_tmp</c> working dir. After this
+        /// returns, <see cref="HasAnyPackage"/> is false and <see cref="HasActivePackage"/>
+        /// is false. Intended for game flows where there is exactly one "current"
+        /// scan and a rescan should obsolete everything that came before.
+        /// Each per-package delete goes through <see cref="DeletePackageAsync"/>
+        /// so spatial anchors get erased from Horizon OS too.
+        /// </summary>
+        public async Task ClearAllPackagesAsync()
+        {
+            var ids = ListPackages().Select(p => p.id).ToList();
+            foreach (string id in ids)
+            {
+                try { await DeletePackageAsync(id); }
+                catch (Exception e) { Logger.Warning($"ClearAllPackages: delete '{id}' failed: {e.Message}"); }
+            }
+
+            CleanupTmpPackage();
+
+            try
+            {
+                if (File.Exists(ManifestPath)) File.Delete(ManifestPath);
+            }
+            catch (Exception e) { Logger.Warning($"ClearAllPackages: manifest delete failed: {e.Message}"); }
+
+            ClearActivePackage();
+            Logger.Info($"All scan packages cleared ({ids.Count} removed)");
         }
 
         /// <summary>

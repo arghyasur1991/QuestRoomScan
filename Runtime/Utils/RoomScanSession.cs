@@ -172,6 +172,21 @@ namespace Genesis.RoomScan
         /// <summary>Returns true if at least one saved scan package exists on disk.</summary>
         public bool HasSavedScan => _persistence != null && _persistence.HasAnyPackage();
 
+        /// <summary>
+        /// Deletes every saved scan package on disk (mesh, atlas, keyframes,
+        /// triplanar, manifest) and erases each package's spatial anchor from
+        /// Horizon OS. Intended for game flows where there is exactly one
+        /// "current" scan and a rescan should obsolete everything that came
+        /// before — call this immediately before <see cref="StartScan"/> to
+        /// stop the on-device scan store from growing unbounded.
+        /// Safe to call when nothing is saved (returns immediately).
+        /// </summary>
+        public Task ClearAllScansAsync()
+        {
+            if (_persistence == null) return Task.CompletedTask;
+            return _persistence.ClearAllPackagesAsync();
+        }
+
         /// <summary>Whether a scan is currently in progress.</summary>
         public bool IsScanning => _scanner != null && _scanner.IsScanning;
 
