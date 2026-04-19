@@ -37,6 +37,7 @@ namespace Genesis.RoomScan.Editor
         DepthDebugOverlay _depthDebug;
         TriplanarCache _triplanarCache;
         RoomScanPersistence _persistence;
+        RoomScanSession _session;
         KeyframeCollector _keyframeCollector;
         DebugMenuController _debugMenu;
         RoomScanInputHandler _inputHandler;
@@ -117,6 +118,7 @@ namespace Genesis.RoomScan.Editor
             _depthDebug = FindAny<DepthDebugOverlay>();
             _triplanarCache = FindAny<TriplanarCache>();
             _persistence = FindAny<RoomScanPersistence>();
+            _session = FindAny<RoomScanSession>();
             _keyframeCollector = FindAny<KeyframeCollector>();
             _debugMenu = FindAny<DebugMenuController>();
             _inputHandler = FindAny<RoomScanInputHandler>();
@@ -824,6 +826,11 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<TextureRefinement>(root);
             if (root.GetComponent<RoomUnderstanding>() == null)
                 Undo.AddComponent<RoomUnderstanding>(root);
+
+            // Public game-dev facade — see comment in AddGameReadyComponentsToRoot.
+            if (root.GetComponent<RoomScanSession>() == null)
+                Undo.AddComponent<RoomScanSession>(root);
+
             SetupGSplatIfAvailable(root);
             SetupAIDetectionIfAvailable(root);
 
@@ -902,6 +909,8 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("PassthroughCameraProvider", hasPCAProvider);
             StatusRowOptional("TextureRefinement (atlas baking)", hasRefinement);
             StatusRowOptional("RoomUnderstanding (MRUK bridge)", hasRoomUnderstanding);
+            StatusRowOptional("RoomScanSession (game-dev async API: StartScan / FinalizeScanAsync / LoadLatestAsync)",
+                              _session != null);
             StatusRowOptional("EditorPlayModeXRGuard (silences AR errors in Editor play mode)",
                               _xrGuard != null);
 
@@ -955,6 +964,7 @@ namespace Genesis.RoomScan.Editor
             }
 
             bool sceneMissing   = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding
+                                  || _session == null
                                   || _xrGuard == null;
             bool projectMissing = !buildTargetIsAndroid
                                   || !activeProfileIsMetaQuest
@@ -1148,6 +1158,13 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<TextureRefinement>(root);
             if (root.GetComponent<RoomUnderstanding>() == null)
                 Undo.AddComponent<RoomUnderstanding>(root);
+
+            // RoomScanSession: public game-dev facade (StartScan / FinalizeScanAsync /
+            // LoadLatestAsync / HasSavedScan / ProgressUpdated). Without it,
+            // game code that follows the documented public-API path
+            // (e.g. PocketHamlet.ScanFlow) cannot find Instance and bails.
+            if (root.GetComponent<RoomScanSession>() == null)
+                Undo.AddComponent<RoomScanSession>(root);
 
             // Editor play-mode guard. [DefaultExecutionOrder(int.MinValue)]
             // makes its Awake run before any AR component, so it can

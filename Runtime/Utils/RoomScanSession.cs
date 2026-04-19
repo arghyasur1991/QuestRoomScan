@@ -21,9 +21,11 @@ namespace Genesis.RoomScan
     /// minimal API with awaitable operations and a single result type.
     /// <para>
     /// Attach this component alongside <see cref="RoomScanner"/> or access via
-    /// <see cref="Instance"/> after it initializes.
+    /// <see cref="Instance"/> after it initializes. The Setup Scene wizard's
+    /// "Apply Game-Ready Setup" preset adds it automatically.
     /// </para>
     /// </summary>
+    [RequireComponent(typeof(RoomScanner))]
     public class RoomScanSession : MonoBehaviour
     {
         public static RoomScanSession Instance { get; private set; }
@@ -39,6 +41,11 @@ namespace Genesis.RoomScan
             Instance = this;
             _scanner = GetComponent<RoomScanner>();
             _persistence = GetComponent<RoomScanPersistence>();
+        }
+
+        private void OnDestroy()
+        {
+            if (Instance == this) Instance = null;
         }
 
         private void Update()
