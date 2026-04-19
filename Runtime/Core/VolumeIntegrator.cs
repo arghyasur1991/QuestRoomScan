@@ -249,7 +249,7 @@ namespace Genesis.RoomScan
         ///   <see cref="RebindKernelTextures"/>.</description></item>
         ///   <item><description><b>Already allocated</b>: no-op.</description></item>
         /// </list>
-        /// Called by <see cref="RoomScanner.StartScanning"/> and the heavy
+        /// Called by <see cref="RoomScanner.StartScanningAsync"/> and the heavy
         /// <c>RoomScanPersistence</c> save/full-load paths. The lightweight
         /// <c>LoadRefinedOnlyAsync</c> path intentionally skips this.
         /// </summary>

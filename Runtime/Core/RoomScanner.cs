@@ -34,7 +34,7 @@ namespace Genesis.RoomScan
     /// <summary>High-level phase of the scanning session.</summary>
     public enum ScanPhase
     {
-        /// <summary>Before <see cref="RoomScanner.StartScanning"/> is called.</summary>
+        /// <summary>Before <see cref="RoomScanner.StartScanningAsync"/> is called.</summary>
         NotStarted,
         /// <summary>New geometry appearing rapidly — early scan.</summary>
         Discovering,
@@ -447,252 +447,218 @@ namespace Genesis.RoomScan
         // ═════════════════════════════════════════════════════════════
 
         /// <summary>
-        /// Pre-allocates the heavy scan GPU resources (~150 MB TSDF/color
-        /// volumes + ~480 MB Surface Nets buffers + first-dispatch kernel
-        /// warmup) <b>without</b> starting integration. Idempotent.
-        ///
-        /// <para>
-        /// <b>Why it exists.</b> The lazy-alloc landed in
-        /// <c>perf/lazy-scan-gpu-allocations</c> moved this work from
-        /// <c>Awake</c>/<c>Start</c> (where the boot splash hides any
-        /// stall) into the first <see cref="StartScanning"/> call. On
-        /// device that landed inside the user's A-press frame and burned
-        /// 1–3 s on the main thread because Vulkan has to drain in-flight
-        /// frames before the new descriptor pool can include the freshly
-        /// created 3D RTs and ComputeBuffers. Result: head-locked freeze,
-        /// motion sickness, and ANR risk.
-        /// </para>
-        ///
-        /// <para>
-        /// <b>How to use.</b> Host apps with a "scan-guidance" UX (the
-        /// user reads hints for several seconds before pressing A) should
-        /// call this as soon as that surface becomes visible. The cost
-        /// then amortises across that idle window instead of landing in a
-        /// single frame. <see cref="StartScanning"/> remains correct on
-        /// its own — this is a pure optimisation. Both <c>VolumeIntegrator</c>
-        /// and <c>MeshExtractor</c> ignore re-allocation when they are
-        /// already up, so calling it more than once is free.
-        /// </para>
-        ///
-        /// <para>
-        /// We yield twice between the volume and mesh allocation steps so
-        /// the compositor gets at least one full frame to recover before
-        /// the next 480 MB allocation lands. Awaiting <see cref="Task.Yield"/>
-        /// from a Unity main-thread coroutine context resumes on the main
-        /// thread on the next frame, so the GPU work happens in three
-        /// well-separated frames instead of one mega-frame.
-        /// </para>
-        /// </summary>
-        public async Task WarmupScanResourcesAsync()
-        {
-            if (IsScanning)
-            {
-                // An active scan already owns these resources; nothing to warm.
-                return;
-            }
-            if (_volumeIntegrator == null || _meshExtractor == null)
-            {
-                Logger.Warning("RoomScanner.WarmupScanResourcesAsync: scanner " +
-                               "not fully initialised yet (no integrator/extractor).");
-                return;
-            }
-
-            bool needVolumes = _volumeIntegrator.VolumesReleased;
-            bool needMesh = !_meshExtractor.IsInitialized;
-            if (!needVolumes && !needMesh)
-            {
-                _scanResourcesReleased = false;
-                return;
-            }
-
-            Logger.Info($"RoomScanner.WarmupScanResourcesAsync: warming GPU " +
-                        $"resources during idle window (needVolumes={needVolumes}, " +
-                        $"needMesh={needMesh}).");
-
-            if (needVolumes)
-            {
-                _volumeIntegrator.ReallocateVolumes();
-                // Two yields: first frame absorbs the RT.Create + Clear
-                // dispatch, second frame lets the compositor re-stabilise
-                // before the much larger Surface Nets alloc lands.
-                await Task.Yield();
-                await Task.Yield();
-            }
-
-            if (needMesh)
-            {
-                _meshExtractor.EnsureInitialized();
-                await Task.Yield();
-                await Task.Yield();
-            }
-
-            // Critical: must clear the released flag, otherwise the next
-            // StartScanning() takes the `_scanResourcesReleased` branch and
-            // calls MeshExtractor.Reinitialize() — which destroys + recreates
-            // the very buffers we just warmed up, defeating the optimisation.
-            _scanResourcesReleased = false;
-
-            Logger.Info("RoomScanner.WarmupScanResourcesAsync: scan GPU " +
-                        "resources warmed; first scan press will be hang-free.");
-        }
-
-        /// <summary>
         /// Begins depth integration and mesh extraction. Resets relocation state,
         /// clears in-memory keyframes, and starts the active camera provider.
+        ///
+        /// <para>
+        /// <b>Async by necessity, not by API preference.</b> The lazy GPU
+        /// bring-up (~150 MB TSDF + ~480 MB Surface Nets) and the
+        /// passthrough-camera handshake (PCA → MRUK) are both heavy work
+        /// for the render thread, and if they land in the same Unity frame
+        /// PCA's hardware-buffer-queue handshake loses the race against
+        /// our compute dispatches: MRUK then spams "Hardware buffer queue
+        /// is empty", Vulkan submit corrupts with
+        /// VK_ERROR_INITIALIZATION_FAILED, and the compositor never
+        /// recovers (perceived as a permanent hang on the user's first
+        /// A-press). The fix is to do the GPU allocations + first
+        /// dispatches first, yield twice between each step so the render
+        /// thread commits the new resources across separate frames, and
+        /// only then enable PCA + AROcclusionManager. Total wall-clock
+        /// cost on a Quest 3 is ~56 ms (4 frames at 72 fps) — below the
+        /// "press registered" threshold of human perception.
+        /// </para>
+        ///
+        /// <para>
+        /// Eager allocation in <c>Awake</c>/<c>Start</c> avoided the bug
+        /// because the render thread had committed all VRAM and run the
+        /// first dispatches across multiple uneventful boot-splash frames
+        /// before the user could ever press A. The lazy-alloc landing
+        /// regressed that without realising the timing was load-bearing.
+        /// We keep lazy alloc (so the load-existing-scan path doesn't pay
+        /// the 600 MB cost) and add the inline staging instead.
+        /// </para>
         /// </summary>
-        public void StartScanning()
+        public async Task StartScanningAsync()
         {
             if (IsScanning) return;
             IsScanning = true;
-            KeyframeRelocation = Matrix4x4.identity;
-            _cachedUnwrap = null;
-
-            // ── Instrumentation ─────────────────────────────────────────
-            // The lazy-alloc landing in `perf/lazy-scan-gpu-allocations`
-            // moved ~600 MB of GPU work from `Awake`/`Start` (where the
-            // boot splash absorbs any stall) into the user's A-press
-            // frame. Field reports describe a "permanent hang that never
-            // recovers" instead of a 1–3 s freeze, which doesn't match
-            // a pure GPU-cost story (GPU allocs eventually return). The
-            // timing logs below were added so the next hung session's
-            // logcat tells us *which* call wedges the main thread —
-            // ReallocateVolumes (TSDF/color RTs), EnsureInitialized
-            // (Surface Nets buffers + first dispatch), CreateTmpPackage
-            // (file I/O), or one of the camera-provider starts.
-            // Remove once the warmup path lands and is verified.
-            var swTotal = System.Diagnostics.Stopwatch.StartNew();
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-
-            // Lazy GPU bring-up. Both calls are idempotent: ReallocateVolumes
-            // early-returns if RTs already exist, and EnsureInitialized
-            // early-returns if Surface Nets buffers are already up. This
-            // covers three cases uniformly:
-            //   1. First-ever scan in this session — heavy alloc happens here
-            //      (~150 MB TSDF + ~480 MB Surface Nets), NOT at scene load.
-            //   2. Resume after ReleaseScanResources — same thing.
-            //   3. Already-allocated mid-session — no-op.
-            // Reinitialize on the mesh side disposes/recreates so we use
-            // EnsureInitialized for the no-op-if-up branch and Reinitialize
-            // only after an explicit release.
-            if (_scanResourcesReleased)
+            try
             {
-                _volumeIntegrator.ReallocateVolumes();
-                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: ReallocateVolumes (post-release) took {sw.ElapsedMilliseconds} ms");
-                sw.Restart();
-                _meshExtractor.Reinitialize();
-                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: Mesh Reinitialize took {sw.ElapsedMilliseconds} ms");
-                _scanResourcesReleased = false;
-            }
-            else
-            {
-                _volumeIntegrator.ReallocateVolumes();
-                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: ReallocateVolumes took {sw.ElapsedMilliseconds} ms");
-                sw.Restart();
-                _meshExtractor.EnsureInitialized();
-                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: EnsureInitialized took {sw.ElapsedMilliseconds} ms");
-            }
-            sw.Restart();
-
-            // Resume within the same session: if we already have an active tmp
-            // package with scan data, keep it instead of nuking everything.
-            bool resuming = _persistence != null
-                && _persistence.ActivePackageId == RoomScanPersistence.TmpPkgId
-                && _volumeIntegrator.IntegrationCount > 0;
-
-            if (!resuming)
-            {
-                _prevVertexCount = 0;
-                _stableVertexCycles = 0;
-                _stableColorCycles = 0;
-                _prevColorCoverage = 0f;
-                _stabilizedTime = 0f;
-
-                // Invalidate any previously loaded / refined output. Without
-                // this, a Begin() that follows a LoadRefinedOnlyAsync (or a
-                // prior in-session refinement) leaves HasRefinedTexture=true
-                // and the old _refinedMesh visible, which (a) keeps the stale
-                // mesh on screen instead of switching to live vertex preview
-                // and (b) makes RoomScanSession.FinalizeScanAsync skip the
-                // "if (!HasRefinedTexture) StartTextureRefinement()" gate, so
-                // the new TSDF gets saved but no fresh refined_mesh.bin is
-                // ever written. This is the same per-state-reset that
-                // ClearAllDataAsync does, just narrowed to the things a fresh
-                // scan must invalidate (volumes are already re-alloc'd above).
-                HasRefinedTexture = false;
-                HasHQRefinedTexture = false;
-                HasEnhancedMesh = false;
-                LastRefinedResult = null;
-                LastSimplifiedResult = null;
+                KeyframeRelocation = Matrix4x4.identity;
                 _cachedUnwrap = null;
-                _refinedMesh = null;
-                if (_normalMapTexture != null)
+
+                // ── Instrumentation ─────────────────────────────────────
+                // Per-step Stopwatch logs around every synchronous step so
+                // a future regression of the MRUK/Vulkan hang is easy to
+                // bisect. Will be removed in a follow-up commit once the
+                // staged-allocation fix is verified on device for both the
+                // first-scan and post-release-resume paths.
+                var swTotal = System.Diagnostics.Stopwatch.StartNew();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
+                // ── Stage 1: GPU volume bring-up ────────────────────────
+                // Both calls are idempotent: ReallocateVolumes early-returns
+                // if RTs already exist; EnsureInitialized / Reinitialize
+                // early-return for the same reason on the mesh side. The
+                // _scanResourcesReleased branch uses Reinitialize because
+                // ReleaseScanResources explicitly disposes the mesh
+                // extractor and we need a true rebuild, not a no-op.
+                if (_scanResourcesReleased)
                 {
-                    Destroy(_normalMapTexture);
-                    _normalMapTexture = null;
+                    _volumeIntegrator.ReallocateVolumes();
+                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: ReallocateVolumes (post-release) took {sw.ElapsedMilliseconds} ms");
                 }
-                _gsplatProvider?.ClearSplat();
-                _gsplatProvider?.ResetSplatTransform();
-                _downloadedPlyData = null;
-
-                // Switch render mode off Refined/HQRefined/Splat back to the
-                // live in-progress preview. Done after the HasRefined* flags
-                // are cleared so IsModeAvailable() reports the new state
-                // correctly and the renderer toggles in ApplyRenderMode pick
-                // up Vertex as the right visible mode.
-                SetRenderMode(ScanRenderMode.Vertex);
-
-                if (_persistence != null) _persistence.ClearActivePackage();
-                if (_keyframeCollector != null)
-                    _keyframeCollector.ClearInMemory();
-
-                _persistence.CreateTmpPackage();
-                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: CreateTmpPackage took {sw.ElapsedMilliseconds} ms");
+                else
+                {
+                    _volumeIntegrator.ReallocateVolumes();
+                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: ReallocateVolumes took {sw.ElapsedMilliseconds} ms");
+                }
                 sw.Restart();
-                _ = CreateScanAnchorAsync();
-                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: CreateScanAnchorAsync (fire-and-forget) launch took {sw.ElapsedMilliseconds} ms");
+
+                // Yield twice so the render thread can (a) actually commit
+                // the two 256³ 3D RT allocations to VRAM, and (b) run the
+                // first Clear compute dispatch. One yield is "next frame";
+                // two yields gives the compositor a clean frame in between
+                // before the much bigger Surface Nets alloc lands.
+                await Task.Yield();
+                await Task.Yield();
+
+                // ── Stage 2: Surface Nets mesh extractor ────────────────
+                if (_scanResourcesReleased)
+                {
+                    _meshExtractor.Reinitialize();
+                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: Mesh Reinitialize took {sw.ElapsedMilliseconds} ms");
+                    _scanResourcesReleased = false;
+                }
+                else
+                {
+                    _meshExtractor.EnsureInitialized();
+                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: EnsureInitialized took {sw.ElapsedMilliseconds} ms");
+                }
                 sw.Restart();
+
+                // Yield twice so the render thread can commit the ~480 MB
+                // ComputeBuffers + cell-table upload before PCA enables.
+                // This is the critical pair — without it, PCA's native
+                // OnEnable lands in the same frame as the first Surface
+                // Nets dispatch and the MRUK fence handshake fails.
+                await Task.Yield();
+                await Task.Yield();
+
+                // ── Stage 3: persistence + per-scan invalidation ────────
+                // Resume within the same session: if we already have an
+                // active tmp package with scan data, keep it instead of
+                // nuking everything.
+                bool resuming = _persistence != null
+                    && _persistence.ActivePackageId == RoomScanPersistence.TmpPkgId
+                    && _volumeIntegrator.IntegrationCount > 0;
+
+                if (!resuming)
+                {
+                    _prevVertexCount = 0;
+                    _stableVertexCycles = 0;
+                    _stableColorCycles = 0;
+                    _prevColorCoverage = 0f;
+                    _stabilizedTime = 0f;
+
+                    // Invalidate any previously loaded / refined output. Without
+                    // this, a Begin() that follows a LoadRefinedOnlyAsync (or a
+                    // prior in-session refinement) leaves HasRefinedTexture=true
+                    // and the old _refinedMesh visible, which (a) keeps the stale
+                    // mesh on screen instead of switching to live vertex preview
+                    // and (b) makes RoomScanSession.FinalizeScanAsync skip the
+                    // "if (!HasRefinedTexture) StartTextureRefinement()" gate, so
+                    // the new TSDF gets saved but no fresh refined_mesh.bin is
+                    // ever written. This is the same per-state-reset that
+                    // ClearAllDataAsync does, just narrowed to the things a fresh
+                    // scan must invalidate (volumes are already re-alloc'd above).
+                    HasRefinedTexture = false;
+                    HasHQRefinedTexture = false;
+                    HasEnhancedMesh = false;
+                    LastRefinedResult = null;
+                    LastSimplifiedResult = null;
+                    _cachedUnwrap = null;
+                    _refinedMesh = null;
+                    if (_normalMapTexture != null)
+                    {
+                        Destroy(_normalMapTexture);
+                        _normalMapTexture = null;
+                    }
+                    _gsplatProvider?.ClearSplat();
+                    _gsplatProvider?.ResetSplatTransform();
+                    _downloadedPlyData = null;
+
+                    // Switch render mode off Refined/HQRefined/Splat back to the
+                    // live in-progress preview. Done after the HasRefined* flags
+                    // are cleared so IsModeAvailable() reports the new state
+                    // correctly and the renderer toggles in ApplyRenderMode pick
+                    // up Vertex as the right visible mode.
+                    SetRenderMode(ScanRenderMode.Vertex);
+
+                    if (_persistence != null) _persistence.ClearActivePackage();
+                    if (_keyframeCollector != null)
+                        _keyframeCollector.ClearInMemory();
+
+                    _persistence.CreateTmpPackage();
+                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: CreateTmpPackage took {sw.ElapsedMilliseconds} ms");
+                    sw.Restart();
+                    _ = CreateScanAnchorAsync();
+                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: CreateScanAnchorAsync (fire-and-forget) launch took {sw.ElapsedMilliseconds} ms");
+                    sw.Restart();
+                }
+
+                _keyframeCollector?.SetExportDirectory(
+                    Path.Combine(_persistence.ActivePackageDirectory, "keyframes"));
+
+                float t = Time.time;
+                _lastIntegrationTime = t;
+                _lastMeshTime = t;
+
+                _cameraAvailable = false;
+
+                // ── Stage 4: camera + depth (now safe) ──────────────────
+                // PCA's native OnEnable handshakes with MRUK to grab the
+                // passthrough hardware buffer queue. By this point the
+                // GPU resources are committed and the render-thread queue
+                // is clean, so PCA can win the handshake and MRUK keeps
+                // pulling frames steadily.
+                ICameraProvider provider = GetActiveCameraProvider();
+                provider?.StartCapture();
+                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: camera StartCapture took {sw.ElapsedMilliseconds} ms");
+                sw.Restart();
+                _depthCapture.StartDepthCapture();
+                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: DepthCapture.StartDepthCapture took {sw.ElapsedMilliseconds} ms");
+                sw.Restart();
+
+                if (!resuming)
+                {
+                    // Fresh scan: reset registry — stale AI detections from a previous
+                    // session/load are in a different anchor frame and must be discarded.
+                    _sceneObjectRegistry = new SceneObjectRegistry();
+                }
+                else
+                {
+                    _sceneObjectRegistry ??= new SceneObjectRegistry();
+                }
+                PopulateSceneObjectRegistry();
+                SubscribeToAnchorsChanged();
+
+                Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
+                ScanStarted?.Invoke();
+                if (_modules != null)
+                    foreach (var m in _modules) m.OnScanStarted();
+
+                Logger.Info($"StartScanning RETURNED — total wall-clock {swTotal.ElapsedMilliseconds} ms (includes 4 yielded frames between alloc steps and PCA start). " +
+                            "If you see MRUK/Vulkan errors here, the staging didn't actually yield — check the per-step gaps in this log block.");
             }
-
-            _keyframeCollector?.SetExportDirectory(
-                Path.Combine(_persistence.ActivePackageDirectory, "keyframes"));
-
-            float t = Time.time;
-            _lastIntegrationTime = t;
-            _lastMeshTime = t;
-
-            _cameraAvailable = false;
-
-            ICameraProvider provider = GetActiveCameraProvider();
-            provider?.StartCapture();
-            Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: camera StartCapture took {sw.ElapsedMilliseconds} ms");
-            sw.Restart();
-            _depthCapture.StartDepthCapture();
-            Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: DepthCapture.StartDepthCapture took {sw.ElapsedMilliseconds} ms");
-            sw.Restart();
-
-            if (!resuming)
+            catch
             {
-                // Fresh scan: reset registry — stale AI detections from a previous
-                // session/load are in a different anchor frame and must be discarded.
-                _sceneObjectRegistry = new SceneObjectRegistry();
+                // Reset the re-entry guard so the user can retry. Without
+                // this, a throw mid-warmup would leave IsScanning=true
+                // forever and every subsequent A-press would no-op.
+                IsScanning = false;
+                throw;
             }
-            else
-            {
-                _sceneObjectRegistry ??= new SceneObjectRegistry();
-            }
-            PopulateSceneObjectRegistry();
-            SubscribeToAnchorsChanged();
-
-            Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
-            ScanStarted?.Invoke();
-            if (_modules != null)
-                foreach (var m in _modules) m.OnScanStarted();
-
-            Logger.Info($"StartScanning RETURNED — total main-thread time {swTotal.ElapsedMilliseconds} ms. " +
-                        "If field reports describe a >5 s 'permanent hang' this is the upper " +
-                        "bound on the synchronous part; anything beyond that is fire-and-forget " +
-                        "(spatial anchor handshake) or compositor / OVR runtime giving up after " +
-                        "the long stall.");
         }
 
         /// <summary>
@@ -732,11 +698,18 @@ namespace Genesis.RoomScan
                 foreach (var m in _modules) m.OnScanStopped();
         }
 
-        /// <summary>Toggles between <see cref="StartScanning"/> and <see cref="StopScanning"/>.</summary>
+        /// <summary>
+        /// Toggles between <see cref="StartScanningAsync"/> and <see cref="StopScanning"/>.
+        /// The Start path is fire-and-forget here because this is a debug/dev API
+        /// (typically wired to a debug-menu button) and the small ~56 ms delay
+        /// before integration begins is not worth changing the toggle's signature
+        /// for. Production callers should await <see cref="StartScanningAsync"/>
+        /// directly so they can sequence UI feedback around the start.
+        /// </summary>
         public void ToggleScanning()
         {
             if (IsScanning) StopScanning();
-            else StartScanning();
+            else _ = StartScanningAsync();
         }
 
         /// <summary>True after <see cref="ReleaseScanResources"/> has been called. Cleared when scanning restarts.</summary>
@@ -746,7 +719,7 @@ namespace Genesis.RoomScan
         /// Frees heavy GPU resources (TSDF volumes, Surface Nets buffers, depth textures) to reclaim
         /// ~400-500 MB of GPU memory. Call after scanning + refinement is complete, before entering gameplay.
         /// The refined MeshRenderer stays alive for game-phase rendering.
-        /// Call <see cref="StartScanning"/> to re-allocate everything if a new scan is needed.
+        /// Call <see cref="StartScanningAsync"/> to re-allocate everything if a new scan is needed.
         /// </summary>
         public void ReleaseScanResources()
         {
@@ -786,7 +759,7 @@ namespace Genesis.RoomScan
         /// stalls and potential SynchronizationContext deadlocks on Quest/IL2CPP.
         /// GPU resources are disposed without immediate re-allocation to avoid
         /// Vulkan stalls when the GPU is still referencing the previous frame's buffers.
-        /// Re-initialization happens lazily on the next <see cref="StartScanning"/> or load.
+        /// Re-initialization happens lazily on the next <see cref="StartScanningAsync"/> or load.
         /// </summary>
         public void ClearAllDataAsync(Action onComplete = null)
         {
