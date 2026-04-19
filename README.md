@@ -53,7 +53,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
 - **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, Occlusion, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
 - **Freeze Tint Toggle** — Independent toggle (not tied to render mode) shows/hides a blue tint overlay on frozen voxels in live mesh modes (Vertex, Triplanar, Wireframe). Bindable via `RoomScanInputHandler`.
-- **Game Integration APIs** — `RoomScanSession` provides a high-level facade: `StartScan()` → `await FinalizeScanAsync()` → `ScanResult` with mesh + atlas. `LoadLatestAsync()` for instant game-mode loading. For finer control: `LoadRefinedOnlyAsync()` (loads only refined mesh + atlas, no TSDF, < 1 second), `ReleaseScanResources()`, public `RefinedMesh`/`RefinedAtlas` properties, `RefinedMeshReady` event, and `ScanCoverage`/`ScanProgress` metrics for guided UX. Scene understanding accessible via `SceneObjectRegistry` for MRUK + AI detected objects.
+- **Game Integration APIs** — `RoomScanSession` provides a high-level facade auto-installed by the Game-Ready preset: `RequestCameraPermissionAsync()` → `StartScan()` → `FreezeInView()` / `UnfreezeInView()` → `await FinalizeScanAsync()` → `ScanResult` with mesh + atlas. `LoadLatestAsync()` for instant game-mode loading on subsequent launches. `ClearAllScansAsync()` for single-scan games that want rescan-wipes-prior semantics. For finer control: `LoadRefinedOnlyAsync()` (loads only refined mesh + atlas, no TSDF, < 1 second), `ReleaseScanResources()`, public `RefinedMesh`/`RefinedAtlas` properties, `RefinedMeshReady` event, and `ScanCoverage`/`ScanProgress` metrics for guided UX. Scene understanding accessible via `SceneObjectRegistry` for MRUK + AI detected objects.
 - **Post-Bake Mesh Simplification** — UV-preserving mesh simplification via `meshopt_simplifyWithAttributes` runs after atlas baking (configurable ratio), preserving texture quality. Replaces the old broken pre-bake decimation.
 - **AI Object Detection** — Optional YOLO-based object detection via Unity Inference Engine (Sentis) running during scanning. GPU Non-Maximum Suppression via compute shader (only ~500 bytes readback vs ~200KB for CPU NMS). Detected objects projected to 3D world space via GPU depth projection with temporal snapshot to handle async inference. Head angular velocity gating skips blurry frames. Detection keyframes saved with JSONL metadata for post-processing.
 - **MRUK Scene Understanding** — `RoomUnderstanding` module populates a `SceneObjectRegistry` from Meta's Mixed Reality Utility Kit anchors (walls, floor, ceiling, bed, TV, doors, windows, furniture). Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh for reliable detection. Event-driven anchor updates.
@@ -127,26 +127,38 @@ Both optional dependencies can be combined. The `Genesis.RoomScan.AIDetection` a
 
 ## Quick Start
 
-1. Create a new blank URP scene
-2. **Configure XR Plugin Management**: Go to **Project Settings > XR Plug-in Management > Android** tab and enable **OpenXR**. Then under **OpenXR > Features (Android)**, enable the **Meta XR feature group** — this is required for passthrough, depth, and spatial data
-3. Add a **Camera Rig** and **Passthrough** from Meta's Building Blocks (`Menu > Meta > Building Blocks`). The Camera Rig provides `OVRCameraRig` and the Passthrough block enables the passthrough layer — both are required before running the wizard
-4. Verify your **Main Camera** background is set to **Solid Color** with alpha = 0 (i.e., `(0, 0, 0, 0)`). A skybox or opaque background will block passthrough
-5. Open the setup wizard: **RoomScan > Setup Scene**
-6. The wizard checks prerequisites (AR Session, AROcclusionManager), configures project settings (boundaryless manifest, cleartext HTTP for LAN server), and adds required core components. Use the **Game-Ready Preset** for lean game integration (PCA + TextureRefinement with 0.5 simplification ratio), and the **Debug Preset** for development tools (debug HUD, input handler, overlays, VR input infrastructure). Optional modules (TriplanarCache, GSplat, etc.) are added via the inspector's **Add Module** dropdown on the RoomScanner component
-7. The wizard also compiles native xatlas plugins (required for texture refinement). On **macOS**, this uses the system `clang++`. On **Windows**, you need Visual Studio with the C++ Desktop workload (for the editor plugin) — the Android plugin uses Unity's bundled NDK and needs no extra install. If the build fails, you can retry from the **Build xatlas Plugin** button in the wizard's NATIVE PLUGINS section
-8. Build and deploy to Quest 3
-9. The room mesh appears as you look around — surfaces solidify with repeated observations
+1. Create a new blank URP scene (or use an existing one).
+2. Open the setup wizard: **`RoomScan > Setup Scene`**.
+3. Click **`Apply Game-Ready Setup`** at the top of the wizard. One click does the following — there's nothing else you need to configure first:
+   - Switches the active build profile to **Meta Quest** (re-click after the domain reload to continue with the rest)
+   - Creates and assigns a **URP** pipeline + renderer at `Assets/Settings/` with Quest-friendly defaults (4x MSAA, no HDR, single shadow cascade)
+   - Audits and fixes ~20 **VR project prerequisites**: XR Plug-in Management (OpenXR loader on Android), OpenXR feature groups (Meta XR, Touch interaction profile), `OVRProjectConfig` (Quest 3 target devices, scene support, passthrough, hand tracking, anchors), `OVRRuntimeSettings`, scripting backend (IL2CPP / ARM64), graphics (Vulkan-only, single-pass-instanced stereo), and ASTC texture compression
+   - Writes `Assets/Plugins/Android/AndroidManifest.xml` with the full Quest VR feature/permission set (`HEADSET_CAMERA`, `USE_SCENE`, `USE_ANCHOR_API`, `BOUNDARYLESS`, etc.) plus cleartext HTTP for the LAN GS server, without clobbering anything already there
+   - Installs Meta XR Building Blocks (**OVRCameraRig**, **Passthrough Underlay**, **PassthroughCameraAccess**) and configures `OVRManager` for passthrough + transparent center-eye camera + camera permission on startup
+   - Adds AR Session + AROcclusionManager on the new camera rig
+   - Adds the lean game-ready scene modules to a `RoomScan` root: `RoomScanner`, `RoomScanPersistence`, `RoomAnchorManager`, `PassthroughCameraProvider`, `TextureRefinement` (with 0.5 post-bake simplification), `RoomUnderstanding`, `RoomScanSession`. Skips `TriplanarCache`, Gaussian Splat, and debug HUD to keep the build lean
+   - Wires every shader / compute / material reference and triggers the xatlas native plugin build in the background
+4. The first click typically lands you on Meta Quest profile and reloads the domain. Click **`Apply Game-Ready Setup`** again to finish project + scene setup. Repeat until every status row is green.
+5. (Optional) Apply the **`Add Debug Tools`** block lower in the wizard if you want the world-space VR debug HUD, controller input handler, camera/depth overlays, and VR input infrastructure for development. Keep it skipped for shipping builds.
+6. (Optional) Add modules not in the Game-Ready preset (`TriplanarCache`, `GSplatManager`, `ObjectDetectionModule`) via the inspector's **Add Module** dropdown on the `RoomScanner` component.
+7. The wizard also compiles native xatlas plugins (required for texture refinement). On **macOS**, this uses the system `clang++`. On **Windows**, you need Visual Studio with the C++ Desktop workload (for the editor plugin) — the Android plugin uses Unity's bundled NDK and needs no extra install. If the build fails, retry from the **Build xatlas Plugin** button in the wizard's NATIVE PLUGINS section.
+8. Build and deploy to Quest 3.
+9. The room mesh appears as you look around — surfaces solidify with repeated observations.
+
+> **The wizard is idempotent.** Re-running `Apply Game-Ready Setup` on an already-set-up project only fixes outstanding rows; it never duplicates components or overwrites your edits to assigned fields. If a row is red after running, click again — the most common cause is a domain reload split across two clicks.
 
 ### Troubleshooting
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| Black screen / no passthrough | Meta XR feature group not enabled | Project Settings > XR Plug-in Management > Android > OpenXR > Features > enable Meta XR feature group |
-| Black screen / no passthrough | Camera background not transparent | Set Main Camera > Environment > Background to Solid Color `(0,0,0,0)` |
-| Controller ray visible but no UI | Debug menu not opened | Press **left thumbstick click** to toggle the debug menu |
-| Scanning stays at "Discovering" | Depth frames not arriving | Verify OpenXR + Meta XR feature group are enabled; check that `com.oculus.permission.USE_SCENE` is in the Android manifest |
-| Refine shows "--" / does nothing | xatlas native plugin not built | Open **RoomScan > Setup Scene** wizard and click **Build xatlas Plugin**. On Windows, requires Visual Studio C++ workload or clang++ on PATH |
+| Black screen / no passthrough | Meta XR feature group not enabled | Re-run `Apply Game-Ready Setup` until the `XR Plug-in Management (OpenXR + Meta XR feature group)` row goes green |
+| Black screen / no passthrough | Camera background not transparent | Re-run `Apply Game-Ready Setup` until `Passthrough scene config (OVRManager + transparent center camera + HEADSET_CAMERA on startup)` is green |
+| App launches but no permission dialog appears | `OVRManager.requestPassthroughCameraAccessPermissionOnStartup` is off | Re-run `Apply Game-Ready Setup`; or call `RoomScanSession.RequestCameraPermissionAsync()` from your game code before `StartScan()` |
+| Controller ray visible but no UI | Debug menu not opened | Press **left thumbstick click** to toggle the debug menu (debug-tools build only) |
+| Scanning stays at "Discovering" | Depth frames not arriving | Verify the wizard's `VR PROJECT BOOTSTRAP` panel is fully green; check that `com.oculus.permission.USE_SCENE` is in `AndroidManifest.xml` |
+| Refine shows "--" / does nothing | xatlas native plugin not built | Open the wizard and click **Build xatlas Plugin** in the NATIVE PLUGINS section. On Windows, requires Visual Studio C++ workload or clang++ on PATH |
 | xatlas build fails on Windows | macOS-only build (pre-v1.x) | Pull latest main — Windows/Linux support was added |
+| Wall of AR / Meta XR errors when hitting Play in Editor without Quest Link | `ARSession` / `AROcclusionManager` / `PassthroughCameraAccess` react to the missing XR loader | Expected and not silenceable from outside Meta's package — every workaround introduced its own NRE chain. Build to a Quest 3, or attach via Quest Link, to actually test scanning. Editor play mode is fine for non-XR work; the errors are noise |
 
 ## Usage Flow
 
@@ -452,20 +464,46 @@ This section covers how to embed QuestRoomScan into a game that needs a one-time
 
 ### Quick Start with RoomScanSession
 
-The simplest integration uses `RoomScanSession` — a high-level facade that wraps the full scan → refine → save → release flow into a few awaitable calls. Add it to the same GameObject as `RoomScanner`.
+The simplest integration uses `RoomScanSession` — a high-level facade that wraps the full scan → refine → save → release flow into a few awaitable calls. The `Apply Game-Ready Setup` wizard preset adds it to the `RoomScan` root automatically.
 
 ```csharp
 var session = RoomScanSession.Instance;
 
-// First launch: scan the room
+// 0. (Recommended) Make sure HEADSET_CAMERA permission is granted before
+//    StartScan, so the scan doesn't run in degraded depth-only mode while
+//    the system dialog is up. Returns true immediately if already granted
+//    or off-Android. If you used the Game-Ready preset, OVRManager already
+//    requests this on app startup, so this is just a defense-in-depth gate
+//    for users who dismissed the startup dialog.
+if (!session.HasCameraPermission)
+{
+    bool granted = await session.RequestCameraPermissionAsync();
+    if (!granted) { /* tell the user to grant in System Settings */ return; }
+}
+
+// 1. (Optional) Single-scan games: wipe any previous saved scan so the
+//    on-device scan store doesn't grow ~100 MB per finalize.
+if (session.HasSavedScan)
+    await session.ClearAllScansAsync();
+
+// 2. Begin scanning. The room mesh builds in real-time as the user looks around.
 session.StartScan();
 session.ProgressUpdated += p => progressBar.value = p.OverallProgress;
 
-// When the user is done scanning:
+// 3. As the user sweeps the room, paint visible chunks as "done":
+//    FreezeInView locks all voxels currently in the camera frustum so they
+//    stop receiving updates. The FrozenFraction metric (which drives
+//    ScanPhase.Complete) climbs as more of the room is painted. Use this as
+//    the natural "I'm satisfied with this region" gesture rather than a
+//    global pause.
+session.FreezeInView();    // typically bound to a controller button
+session.UnfreezeInView();  // for "I painted too aggressively, redo"
+
+// 4. When the user is done, commit:
 ScanResult result = await session.FinalizeScanAsync();
-// result.Mesh     — simplified UV-mapped mesh, ready for MeshFilter
-// result.Atlas    — baked texture atlas, ready for material.mainTexture
-// result.PackageId — save this for future loads
+// result.Mesh      — simplified UV-mapped mesh, ready for MeshFilter
+// result.Atlas     — baked texture atlas, ready for material.mainTexture
+// result.PackageId — save this if you want to reload a specific scan later
 // GPU resources already released (~400-500 MB freed)
 
 // Subsequent launches: skip scanning entirely
@@ -473,11 +511,15 @@ if (session.HasSavedScan)
 {
     ScanResult result = await session.LoadLatestAsync();
     // or: await session.LoadAsync(savedPackageId);
-    // Mesh + atlas ready in < 1 second
+    // Mesh + atlas ready in < 1 second, relocated via the saved spatial anchor
 }
 ```
 
-`FinalizeScanAsync()` handles everything: stop scanning → texture refinement → save → release GPU resources.
+`FinalizeScanAsync()` handles everything: stop scanning → texture refinement → save to disk → release GPU resources. The scan is also persisted as a self-contained package under `Application.persistentDataPath/RoomScans/pkg_<timestamp>/` with its own `OVRSpatialAnchor` for cross-session relocation.
+
+> **Why explicit permission gating matters.** PCA's own `OnEnable` waits for the user's permission decision in a coroutine, so the scan eventually transitions to RGB mode after the user accepts. But during the wait, `RoomScanner.StartScanning()` has already kicked off integration in degraded depth-only mode, and there's no place for game UI to show an "asking for permission" state. Calling `await session.RequestCameraPermissionAsync()` *before* `StartScan()` lets you surface a deterministic UI state and only kick off integration once you actually have the camera.
+
+> **Why `ClearAllScansAsync` and not save-then-purge.** `ClearAllScansAsync` deliberately wipes only saved packages (`pkg_*/` and `manifest.json`), never the active `_tmp/` working directory — that one is owned by `StartScan` / `FinalizeScanAsync`'s lifecycle. Safe to call at any point: if nothing is saved it returns immediately. The trade-off is that a finalize crash after a `ClearAllScansAsync` loses the previous scan; if your game wants the old scan to outlive a finalize failure, save first and purge after.
 
 ### Lifecycle: Scan Phase → Game Phase
 
@@ -574,14 +616,40 @@ statusText.text = prog.Phase.ToString();  // Discovering → Refining → Stabil
 
 Set `TextureRefinement.postBakeSimplificationRatio` in the Inspector (e.g. 0.5 for 50% triangle reduction). Simplification runs automatically after atlas baking, preserving UV coordinates via `meshopt_simplifyWithAttributes` with locked border vertices to prevent seam tearing.
 
+### `RoomScanSession` API Surface
+
+Everything a game needs lives on one component. `[RequireComponent(typeof(RoomScanner))]` pulls in the scanner; `RoomScanPersistence` is auto-added by the wizard.
+
+| Member | Type | Purpose |
+|---|---|---|
+| `Instance` | `static RoomScanSession` | Singleton; set in `Awake`, cleared in `OnDestroy` |
+| `IsScanning` | `bool` | Live scan state (mirrors `RoomScanner.IsScanning`) |
+| `HasSavedScan` | `bool` | True if at least one `pkg_*/` exists on disk |
+| `HasCameraPermission` | `bool` | Horizon OS `HEADSET_CAMERA` granted (always true off-Android) |
+| `ProgressUpdated` | `event Action<ScanProgress>` | Per-frame progress while scanning |
+| `RequestCameraPermissionAsync()` | `Task<bool>` | Awaits the system permission dialog; resolves true if already granted |
+| `StartScan()` | `void` | Begin a new scan session (creates `_tmp/` package + spatial anchor) |
+| `FreezeInView()` | `void` | Paint voxels in current camera frustum as done; integration continues globally |
+| `UnfreezeInView()` | `void` | Inverse of `FreezeInView` for re-capture of bad regions |
+| `FinalizeScanAsync()` | `Task<ScanResult>` | Stop scanning → refine → save → release GPU; returns mesh + atlas + package id |
+| `LoadAsync(packageId)` | `Task<ScanResult>` | Load refined mesh + atlas from a specific package (< 1 s) |
+| `LoadLatestAsync()` | `Task<ScanResult>` | Load the newest saved package |
+| `ClearAllScansAsync()` | `Task` | Erase every saved `pkg_*/`, the manifest, and per-package spatial anchors (leaves `_tmp/` alone) |
+| `ReleaseScanResources()` | `void` | Free ~400-500 MB of GPU memory (auto-called by `FinalizeScanAsync`) |
+
+`ScanResult` is `{ Mesh, Texture2D Atlas, string PackageId }`.
+
 ### Minimal Integration Checklist
 
-1. Add QuestRoomScan package to your project
-2. Run **RoomScan > Setup Scene** wizard (Game-Ready Preset)
-3. Add `RoomScanSession` component to the RoomScanner GameObject
-4. Call `RoomScanSession.Instance.StartScan()` to begin
-5. Call `await RoomScanSession.Instance.FinalizeScanAsync()` when done — returns `ScanResult` with mesh + atlas
-6. On subsequent launches: `await RoomScanSession.Instance.LoadLatestAsync()`
+1. Add QuestRoomScan to your `Packages/manifest.json` (see [Installation](#installation)).
+2. Open **`RoomScan > Setup Scene`** and click **`Apply Game-Ready Setup`**. Re-click after the build-target / domain reload to finish.
+3. Build to Quest 3 (or attach Quest Link).
+4. Game code: `await RoomScanSession.Instance.RequestCameraPermissionAsync();` then `RoomScanSession.Instance.StartScan();`.
+5. Bind a controller button to `FreezeInView` and another to `UnfreezeInView` (the QRS DebugMenu uses Y/B + X/A by default).
+6. When the user commits: `var result = await RoomScanSession.Instance.FinalizeScanAsync();` → use `result.Mesh` + `result.Atlas` to render with a standard `MeshRenderer`.
+7. On subsequent launches: `if (session.HasSavedScan) await session.LoadLatestAsync();` — skip scanning entirely.
+
+For a complete reference implementation with UI Toolkit HUD, OVRInput wiring, permission gating, and rescan-on-demand, see the open-source [Pocket Hamlet `ScanFlow`](https://github.com/arghyasur1991/PocketHamlet/tree/main/PocketHamletUnity/Assets/Game/Scripts/Scan).
 
 ## Credits & Prior Art
 

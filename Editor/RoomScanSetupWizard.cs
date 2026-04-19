@@ -32,7 +32,6 @@ namespace Genesis.RoomScan.Editor
         RoomScanner _roomScanner;
         PassthroughCameraProvider _cameraProvider;
         PassthroughCameraAccess _pcaComponent;
-        EditorPlayModeXRGuard _xrGuard;
         CameraDebugOverlay _cameraDebug;
         DepthDebugOverlay _depthDebug;
         TriplanarCache _triplanarCache;
@@ -113,7 +112,6 @@ namespace Genesis.RoomScan.Editor
             _roomScanner = FindAny<RoomScanner>();
             _cameraProvider = FindAny<PassthroughCameraProvider>();
             _pcaComponent = FindAny<PassthroughCameraAccess>();
-            _xrGuard = FindAny<EditorPlayModeXRGuard>();
             _cameraDebug = FindAny<CameraDebugOverlay>();
             _depthDebug = FindAny<DepthDebugOverlay>();
             _triplanarCache = FindAny<TriplanarCache>();
@@ -312,9 +310,15 @@ namespace Genesis.RoomScan.Editor
             GameObject target = cam.gameObject;
 
             // Need ARCameraManager as well for AROcclusionManager to work.
-            // Both stay enabled in the scene asset — EditorPlayModeXRGuard
-            // disables them only inside the play-mode scene clone when no
-            // XR loader is active, so Quest builds are unaffected.
+            // Both throw a wall of "No active XRSubsystem" errors in Editor
+            // play mode without an active XR loader (no Quest, no Quest
+            // Link). On device they're fine. We previously tried to silence
+            // the Editor errors with EditorPlayModeXRGuard but the AR
+            // OnEnable order bug it relied on never reliably fired before
+            // the AR components' own OnEnable, and the workaround
+            // introduced its own NRE chain via AROcclusionManager.OnDisable
+            // → DestroyTextures. Reverted; just live with the Editor errors
+            // and build to device to actually test.
             if (target.GetComponent<ARCameraManager>() == null)
                 Undo.AddComponent<ARCameraManager>(target);
 
@@ -806,19 +810,13 @@ namespace Genesis.RoomScan.Editor
                 Undo.AddComponent<RoomScanner>(root);
 
             // PassthroughCameraAccess isn't pulled in by RequireComponent.
-            // Stays enabled in the scene asset — EditorPlayModeXRGuard
-            // disables it only inside the play-mode scene clone when no XR
-            // loader is active, so Quest builds are unaffected.
+            // It will spam "No active XRSubsystem" / NRE errors in Editor
+            // play mode without an XR loader; that's expected and can't be
+            // fixed from outside Meta's package — build to device to test.
             if (root.GetComponent<PassthroughCameraAccess>() == null)
                 Undo.AddComponent<PassthroughCameraAccess>(root);
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
-
-            // Editor play-mode guard runs before any AR component's Awake
-            // and disables them when no XR loader is active. Harmless on
-            // device.
-            if (UnityEngine.Object.FindAnyObjectByType<EditorPlayModeXRGuard>() == null)
-                Undo.AddComponent<EditorPlayModeXRGuard>(root);
 
             if (root.GetComponent<TriplanarCache>() == null)
                 Undo.AddComponent<TriplanarCache>(root);
@@ -911,8 +909,6 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("RoomUnderstanding (MRUK bridge)", hasRoomUnderstanding);
             StatusRowOptional("RoomScanSession (game-dev async API: StartScan / FinalizeScanAsync / LoadLatestAsync)",
                               _session != null);
-            StatusRowOptional("EditorPlayModeXRGuard (silences AR errors in Editor play mode)",
-                              _xrGuard != null);
 
             if (hasRefinement)
             {
@@ -964,8 +960,7 @@ namespace Genesis.RoomScan.Editor
             }
 
             bool sceneMissing   = !hasPCA || !hasPCAProvider || !hasRefinement || !hasRoomUnderstanding
-                                  || _session == null
-                                  || _xrGuard == null;
+                                  || _session == null;
             bool projectMissing = !buildTargetIsAndroid
                                   || !activeProfileIsMetaQuest
                                   || !_urpConfigured
@@ -1147,8 +1142,9 @@ namespace Genesis.RoomScan.Editor
             // Building Block (see EnsureRequiredBuildingBlocksAsync), but
             // fall back to a root-level component if the block didn't land
             // anywhere in the scene — RoomScanner needs a PCA somewhere.
-            // EditorPlayModeXRGuard disables it inside the play-mode scene
-            // clone when no XR loader is active.
+            // PCA + ARSession + AROcclusionManager will spam errors in
+            // Editor play mode without an XR loader; that's expected,
+            // build to device.
             if (UnityEngine.Object.FindAnyObjectByType<PassthroughCameraAccess>() == null)
                 Undo.AddComponent<PassthroughCameraAccess>(root);
             if (root.GetComponent<PassthroughCameraProvider>() == null)
@@ -1165,14 +1161,6 @@ namespace Genesis.RoomScan.Editor
             // (e.g. PocketHamlet.ScanFlow) cannot find Instance and bails.
             if (root.GetComponent<RoomScanSession>() == null)
                 Undo.AddComponent<RoomScanSession>(root);
-
-            // Editor play-mode guard. [DefaultExecutionOrder(int.MinValue)]
-            // makes its Awake run before any AR component, so it can
-            // disable them BEFORE their OnEnable fires (which is the only
-            // way to suppress the ARSession / AROcclusionManager / PCA
-            // null-subsystem error wall when there's no Quest Link).
-            if (UnityEngine.Object.FindAnyObjectByType<EditorPlayModeXRGuard>() == null)
-                Undo.AddComponent<EditorPlayModeXRGuard>(root);
 
             var tr = root.GetComponent<TextureRefinement>();
             if (tr != null)
