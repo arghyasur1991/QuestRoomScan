@@ -225,10 +225,24 @@ namespace Genesis.RoomScan
         public async Task<bool> SaveToNewPackageAsync()
         {
             var vi = VolumeIntegrator.Instance;
-            if (vi == null || vi.Volume == null)
+            if (vi == null)
             {
-                Logger.Warning("Cannot save, no volume");
+                Logger.Warning("Cannot save, VolumeIntegrator instance missing");
                 return false;
+            }
+            // Defensive: if a caller invokes Save without ever StartScanning
+            // (programmatic snapshot, test runner, etc.) the volume RTs will
+            // be null because of lazy alloc. ReallocateVolumes is idempotent.
+            // We don't fabricate scan data — if the volume is empty the saved
+            // payload will reflect that.
+            if (vi.Volume == null)
+            {
+                vi.ReallocateVolumes();
+                if (vi.Volume == null)
+                {
+                    Logger.Warning("Cannot save, ReallocateVolumes did not produce a Volume RT");
+                    return false;
+                }
             }
             if (IsSaving) { Logger.Warning("Save already in progress"); return false; }
 
@@ -814,9 +828,21 @@ namespace Genesis.RoomScan
 
             var vi = VolumeIntegrator.Instance;
             var cm = MeshExtractor.Instance;
-            if (vi == null || vi.Volume == null)
+            if (vi == null)
             {
-                Logger.Warning("Cannot load, no volume");
+                Logger.Warning("Cannot load, VolumeIntegrator instance missing");
+                return false;
+            }
+            // Full-load path needs the GPU TSDF volume to receive the saved
+            // bytes. With lazy alloc the volume may not exist yet (e.g. user
+            // skipped past startup straight into "load saved scan for
+            // re-editing" via the debug menu). Bring it up on demand —
+            // idempotent if already allocated.
+            if (vi.Volume == null) vi.ReallocateVolumes();
+            if (cm != null) cm.EnsureInitialized();
+            if (vi.Volume == null)
+            {
+                Logger.Warning("Cannot load, ReallocateVolumes did not produce a Volume RT");
                 return false;
             }
             if (IsLoading) { Logger.Warning("Load already in progress"); return false; }

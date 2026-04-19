@@ -457,11 +457,27 @@ namespace Genesis.RoomScan
             KeyframeRelocation = Matrix4x4.identity;
             _cachedUnwrap = null;
 
+            // Lazy GPU bring-up. Both calls are idempotent: ReallocateVolumes
+            // early-returns if RTs already exist, and EnsureInitialized
+            // early-returns if Surface Nets buffers are already up. This
+            // covers three cases uniformly:
+            //   1. First-ever scan in this session — heavy alloc happens here
+            //      (~150 MB TSDF + ~480 MB Surface Nets), NOT at scene load.
+            //   2. Resume after ReleaseScanResources — same thing.
+            //   3. Already-allocated mid-session — no-op.
+            // Reinitialize on the mesh side disposes/recreates so we use
+            // EnsureInitialized for the no-op-if-up branch and Reinitialize
+            // only after an explicit release.
             if (_scanResourcesReleased)
             {
                 _volumeIntegrator.ReallocateVolumes();
                 _meshExtractor.Reinitialize();
                 _scanResourcesReleased = false;
+            }
+            else
+            {
+                _volumeIntegrator.ReallocateVolumes();
+                _meshExtractor.EnsureInitialized();
             }
 
             // Resume within the same session: if we already have an active tmp
