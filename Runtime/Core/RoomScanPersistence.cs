@@ -744,6 +744,10 @@ namespace Genesis.RoomScan
                 mesh.SetUVs(0, displayData.UVs);
                 mesh.SetTriangles(displayData.Indices, 0);
                 mesh.RecalculateTangents();
+                // Frustum culling needs real bounds; without this the mesh
+                // is treated as a zero-size point at the local origin and
+                // pops in/out depending on view direction.
+                mesh.RecalculateBounds();
 
                 scanner.ApplyRefinedTexture(atlasTex, mesh, normalTex);
                 Logger.Info($"Refined atlas loaded ({meshData.AtlasWidth}x{meshData.AtlasHeight})" +

@@ -1224,6 +1224,7 @@ namespace Genesis.RoomScan
             _refinedMesh.SetNormals(enhanced.Normals);
             _refinedMesh.SetUVs(0, enhanced.UVs);
             _refinedMesh.SetTriangles(enhanced.Indices, 0);
+            _refinedMesh.RecalculateBounds();
 
             EnsureRefinedRenderer();
             _refinedMeshFilter.mesh = _refinedMesh;
@@ -1262,6 +1263,7 @@ namespace Genesis.RoomScan
             _refinedMesh.SetUVs(0, result.UVs);
             _refinedMesh.SetTriangles(result.Indices, 0);
             _refinedMesh.RecalculateTangents();
+            _refinedMesh.RecalculateBounds();
 
             Logger.Info($"Refined mesh applied: " +
                 $"{result.Positions.Length} verts, {result.Indices.Length / 3} tris, " +
@@ -1425,6 +1427,11 @@ namespace Genesis.RoomScan
             _refinedMesh.SetNormals(unwrap.Normals);
             _refinedMesh.SetUVs(0, unwrap.UVs);
             _refinedMesh.SetTriangles(unwrap.Indices, 0);
+            // Without explicit bounds, Unity's frustum culling treats the
+            // mesh as a zero-size point at the local origin and the renderer
+            // pops in/out depending on view direction. SetTriangles does not
+            // recompute bounds when only positions/indices change.
+            _refinedMesh.RecalculateBounds();
             EnsureRefinedRenderer();
             _refinedMeshFilter.mesh = _refinedMesh;
         }
@@ -1818,6 +1825,7 @@ namespace Genesis.RoomScan
                     _refinedMesh.SetNormals(r.Normals);
                     _refinedMesh.SetUVs(0, r.UVs);
                     _refinedMesh.SetTriangles(r.Indices, 0);
+                    _refinedMesh.RecalculateBounds();
                     EnsureRefinedRenderer();
                     _refinedMeshFilter.mesh = _refinedMesh;
                 }
