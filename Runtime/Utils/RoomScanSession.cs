@@ -62,6 +62,33 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Paints the voxels currently visible in the camera frustum as
+        /// "frozen" — they stop receiving integration updates until the user
+        /// explicitly <see cref="UnfreezeInView"/>s them again. Use this as
+        /// the user sweeps the room: visible chunks they're satisfied with
+        /// get painted done, and the <see cref="ScanCoverage.FrozenFraction"/>
+        /// metric (which drives <see cref="ScanPhase.Complete"/>) grows.
+        /// Integration keeps running globally on un-painted regions.
+        /// </summary>
+        public void FreezeInView()
+        {
+            if (_scanner == null) { Logger.Error("RoomScanSession: RoomScanner not found"); return; }
+            _scanner.FreezeInView();
+        }
+
+        /// <summary>
+        /// Inverse of <see cref="FreezeInView"/>: unfreezes voxels in the
+        /// current camera frustum so depth integration can refine them again.
+        /// Useful when you painted too aggressively or part of the scan looks
+        /// bad and needs re-capturing.
+        /// </summary>
+        public void UnfreezeInView()
+        {
+            if (_scanner == null) { Logger.Error("RoomScanSession: RoomScanner not found"); return; }
+            _scanner.UnfreezeInView();
+        }
+
+        /// <summary>
         /// Stops scanning, runs on-device texture refinement (UV unwrap + atlas bake + simplification),
         /// saves to a permanent package, and releases heavy GPU resources (~400-500 MB).
         /// Returns a <see cref="ScanResult"/> with the game-ready mesh and atlas.
