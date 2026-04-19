@@ -1067,12 +1067,21 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Deletes every saved scan package on disk (directories + spatial anchors)
-        /// and the manifest, plus any leftover <c>_tmp</c> working dir. After this
-        /// returns, <see cref="HasAnyPackage"/> is false and <see cref="HasActivePackage"/>
-        /// is false. Intended for game flows where there is exactly one "current"
+        /// and the manifest. After this returns, <see cref="HasAnyPackage"/> is
+        /// false. Intended for game flows where there is exactly one "current"
         /// scan and a rescan should obsolete everything that came before.
         /// Each per-package delete goes through <see cref="DeletePackageAsync"/>
         /// so spatial anchors get erased from Horizon OS too.
+        /// <para>
+        /// Deliberately does NOT touch the <c>_tmp/</c> working dir or
+        /// <see cref="ActivePackageId"/> when it points at <c>_tmp</c> — that's
+        /// the live scan-in-progress's territory, owned by
+        /// <see cref="CreateTmpPackage"/> / <see cref="CleanupTmpPackage"/> /
+        /// <see cref="SaveToNewPackageAsync"/>. Calling this mid-scan is safe
+        /// for the current scan (only saved packages and the manifest go);
+        /// callers who want to abandon the in-progress scan too should call
+        /// <c>RoomScanner.ClearAllDataAsync</c> first.
+        /// </para>
         /// </summary>
         public async Task ClearAllPackagesAsync()
         {
@@ -1083,15 +1092,18 @@ namespace Genesis.RoomScan
                 catch (Exception e) { Logger.Warning($"ClearAllPackages: delete '{id}' failed: {e.Message}"); }
             }
 
-            CleanupTmpPackage();
-
             try
             {
                 if (File.Exists(ManifestPath)) File.Delete(ManifestPath);
             }
             catch (Exception e) { Logger.Warning($"ClearAllPackages: manifest delete failed: {e.Message}"); }
 
-            ClearActivePackage();
+            // ActivePackageId may be _tmp here (live scan in progress) — leave it
+            // alone; only clear the in-memory ref if it pointed at one of the
+            // packages we just nuked.
+            if (HasActivePackage && !IsTmpPackage)
+                ClearActivePackage();
+
             Logger.Info($"All scan packages cleared ({ids.Count} removed)");
         }
 
