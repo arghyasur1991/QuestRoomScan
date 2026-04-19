@@ -50,7 +50,8 @@ namespace Genesis.RoomScan.Editor
         // wizard reports both pieces independently).
         bool _ovrPassthroughEnabled;     // OVRManager.isInsightPassthroughEnabled
         bool _ovrCameraBackgroundClear;  // CenterEyeAnchor camera clears to transparent
-        bool _ovrPassthroughReady;       // both above (only when passthrough block present)
+        bool _ovrCameraPermissionOnStartup; // OVRManager.requestPassthroughCameraAccessPermissionOnStartup
+        bool _ovrPassthroughReady;       // all of the above (only when passthrough block present)
 
         void RefreshBuildingBlocksState()
         {
@@ -74,6 +75,8 @@ namespace Genesis.RoomScan.Editor
             // exactly when their setup tool would.
             var ovrManager = FindAny<OVRManager>();
             _ovrPassthroughEnabled = ovrManager != null && ovrManager.isInsightPassthroughEnabled;
+            _ovrCameraPermissionOnStartup = ovrManager != null
+                && ReadOvrManagerStartupPermFlag(ovrManager);
 
             _ovrCameraBackgroundClear = false;
             var rig = FindAny<OVRCameraRig>();
@@ -89,10 +92,35 @@ namespace Genesis.RoomScan.Editor
             }
 
             // Only flag as "not ready" when the Passthrough block is present —
-            // the warning is gated on that.
+            // the warning is gated on that. The startup-permission flag is
+            // separately gated on the PassthroughCameraAccess block (it lives
+            // on OVRManager but is only meaningful when PCA is in use).
             bool passthroughBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH, out var p) && p;
-            _ovrPassthroughReady = !passthroughBlockPresent
-                                   || (_ovrPassthroughEnabled && _ovrCameraBackgroundClear);
+            bool pcaBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH_CAMERA_ACCESS, out var c) && c;
+            _ovrPassthroughReady = (!passthroughBlockPresent || (_ovrPassthroughEnabled && _ovrCameraBackgroundClear))
+                                && (!pcaBlockPresent       || _ovrCameraPermissionOnStartup);
+        }
+
+        // OVRManager.requestPassthroughCameraAccessPermissionOnStartup is
+        // declared `internal` in com.meta.xr.sdk.core, so we can't read or
+        // write it directly from this assembly. SerializedObject lets us
+        // poke it through Unity's serialization layer either way.
+        static bool ReadOvrManagerStartupPermFlag(OVRManager m)
+        {
+            using var so = new UnityEditor.SerializedObject(m);
+            var prop = so.FindProperty("requestPassthroughCameraAccessPermissionOnStartup");
+            return prop != null && prop.boolValue;
+        }
+
+        static bool WriteOvrManagerStartupPermFlag(OVRManager m, bool value)
+        {
+            using var so = new UnityEditor.SerializedObject(m);
+            var prop = so.FindProperty("requestPassthroughCameraAccessPermissionOnStartup");
+            if (prop == null) return false;
+            if (prop.boolValue == value) return false;
+            prop.boolValue = value;
+            so.ApplyModifiedPropertiesWithoutUndo();
+            return true;
         }
 
         // ────────────────────────────────────────────────────────────────
@@ -252,6 +280,20 @@ namespace Genesis.RoomScan.Editor
                 EditorUtility.SetDirty(ovrManager);
                 changed++;
                 Debug.Log("[RoomScan Setup] Enabled OVRManager.isInsightPassthroughEnabled.");
+            }
+
+            // Have OVRManager request HEADSET_CAMERA at app startup. Without
+            // this, PCA's permission dialog only appears once the user
+            // triggers a scan — by which point the scanner has already kicked
+            // off in degraded depth-only mode (the user-facing race the
+            // PocketHamlet ScanFlow had to defend against by gating Begin()).
+            // Mirrors Meta's PassthroughCameraAccessProjectSetup Optional task.
+            bool pcaBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH_CAMERA_ACCESS, out var pp) && pp;
+            if (ovrManager != null && pcaBlockPresent
+                && WriteOvrManagerStartupPermFlag(ovrManager, true))
+            {
+                changed++;
+                Debug.Log("[RoomScan Setup] Enabled OVRManager.requestPassthroughCameraAccessPermissionOnStartup.");
             }
 
             var rig = FindAny<OVRCameraRig>();

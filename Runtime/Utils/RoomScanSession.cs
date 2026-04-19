@@ -150,5 +150,27 @@ namespace Genesis.RoomScan
 
         /// <summary>Releases heavy GPU resources. Called automatically by <see cref="FinalizeScanAsync"/>.</summary>
         public void ReleaseScanResources() => _scanner?.ReleaseScanResources();
+
+        // ─── Camera permission (HEADSET_CAMERA on Quest 3+) ──────────────
+        //
+        // PCA can technically wait for the user's permission decision in its
+        // own coroutine (see Meta.XR.PassthroughCameraAccess.OnEnable), but
+        // game code usually wants to surface a deterministic "asking for
+        // permission" UI state and only call StartScan() after the user has
+        // decided. These helpers expose that without making callers reach
+        // into UnityEngine.Android.Permission directly.
+
+        /// <summary>True when the Horizon OS HEADSET_CAMERA permission has
+        /// been granted. Always true outside Android device builds.</summary>
+        public bool HasCameraPermission => PassthroughCameraProvider.HasCameraPermission;
+
+        /// <summary>Asynchronously requests the HEADSET_CAMERA permission and
+        /// resolves once the user accepts, denies, or dismisses the system
+        /// dialog. Call this <b>before</b> <see cref="StartScan"/> to avoid
+        /// scanning in degraded depth-only mode while the dialog is up.
+        /// Resolves <c>true</c> immediately if permission is already granted,
+        /// or outside Android device builds.</summary>
+        public Task<bool> RequestCameraPermissionAsync()
+            => PassthroughCameraProvider.RequestCameraPermissionAsync();
     }
 }
