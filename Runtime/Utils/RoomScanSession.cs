@@ -54,11 +54,25 @@ namespace Genesis.RoomScan
                 ProgressUpdated?.Invoke(_scanner.CurrentProgress);
         }
 
-        /// <summary>Begins a new scan session. The room mesh builds in real-time as the user looks around.</summary>
-        public void StartScan()
+        /// <summary>
+        /// Begins a new scan session. The room mesh builds in real-time as
+        /// the user looks around. Async because <see cref="RoomScanner.StartScanningAsync"/>
+        /// stages the heavy GPU bring-up across a few frames before
+        /// enabling the passthrough camera (otherwise the PCA / MRUK
+        /// handshake races our compute dispatches and the compositor
+        /// freezes — see that method's docs for the full story). Total
+        /// wall-clock from await to first integrated frame is ~56 ms,
+        /// imperceptible to the user but worth awaiting so callers can
+        /// sequence UI feedback ("Scanning…") right after.
+        /// </summary>
+        public Task StartScanAsync()
         {
-            if (_scanner == null) { Logger.Error("RoomScanSession: RoomScanner not found"); return; }
-            _scanner.StartScanning();
+            if (_scanner == null)
+            {
+                Logger.Error("RoomScanSession: RoomScanner not found");
+                return Task.CompletedTask;
+            }
+            return _scanner.StartScanningAsync();
         }
 
         /// <summary>

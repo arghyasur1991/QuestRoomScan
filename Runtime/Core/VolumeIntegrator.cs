@@ -153,12 +153,31 @@ namespace Genesis.RoomScan
         private void Awake()
         {
             Instance = this;
-            // Create GPU volumes in Awake so RoomScanPersistence.LoadAsync and other
-            // early callers never see Volume == null (Start order is not guaranteed).
-            CreateVolume();
+            // GPU resources allocate lazily on the first scan / save / full-load
+            // path via ReallocateVolumes(). The lightweight LoadRefinedOnlyAsync
+            // path (returning-player and editor-sim) never touches them, so a
+            // pure replay session avoids the ~150 MB TSDF+color RT footprint.
         }
 
         private void Start()
+        {
+            // Intentionally empty — see Awake().
+            //
+            // Historic note: kernel helpers + 3D RTs used to be constructed
+            // here unconditionally. They're now created on demand inside
+            // ReallocateVolumes(), which is called by:
+            //   * RoomScanner.StartScanning() (every scan begin)
+            //   * RoomScanPersistence.SaveToNewPackageAsync (defensive)
+            //   * RoomScanPersistence.LoadPackageAsync (full TSDF reload)
+        }
+
+        /// <summary>
+        /// Build all compute-kernel helpers and bind them to the current
+        /// <see cref="_volume"/> / <see cref="_colorVolume"/>. Idempotent —
+        /// the first <see cref="ReallocateVolumes"/> call constructs them;
+        /// subsequent allocations only need <see cref="RebindKernelTextures"/>.
+        /// </summary>
+        private void InitKernels()
         {
             _clearKernel = new ComputeKernelHelper(compute, "Clear");
             _clearKernel.Set(VolumeRWID, _volume);
@@ -187,12 +206,6 @@ namespace Genesis.RoomScan
             _dummyCamTex = new Texture2D(1, 1, TextureFormat.RGBA32, false);
             _dummyCamTex.SetPixel(0, 0, Color.black);
             _dummyCamTex.Apply(false, true);
-
-            SetShaderConstants();
-            Clear();
-
-            if (DepthCapture.Instance != null)
-                DepthCapture.Instance.SetVoxelParams(voxelDistance, voxelSize);
         }
 
         private void OnDestroy()
@@ -224,16 +237,44 @@ namespace Genesis.RoomScan
         public bool VolumesReleased => _volume == null;
 
         /// <summary>
-        /// Re-creates TSDF + color volumes after a prior <see cref="ReleaseVolumes"/> call.
+        /// Allocate (or re-allocate) TSDF + color volumes and bring kernels +
+        /// shader constants up to date. Idempotent — early-returns if volumes
+        /// already exist. Handles three scenarios:
+        /// <list type="bullet">
+        ///   <item><description><b>First-ever scan</b>: builds compute kernels
+        ///   from scratch (deferred from the old eager <c>Awake</c>/<c>Start</c>
+        ///   path), allocates RTs, sets globals.</description></item>
+        ///   <item><description><b>Resume after <see cref="ReleaseVolumes"/></b>:
+        ///   re-allocates RTs and rebinds existing kernels via
+        ///   <see cref="RebindKernelTextures"/>.</description></item>
+        ///   <item><description><b>Already allocated</b>: no-op.</description></item>
+        /// </list>
+        /// Called by <see cref="RoomScanner.StartScanningAsync"/> and the heavy
+        /// <c>RoomScanPersistence</c> save/full-load paths. The lightweight
+        /// <c>LoadRefinedOnlyAsync</c> path intentionally skips this.
         /// </summary>
         public void ReallocateVolumes()
         {
             if (_volume != null) return;
+
+            // ComputeKernelHelper is a struct — use its readonly Shader
+            // backing field as the "never initialized" sentinel.
+            bool firstAlloc = (_clearKernel.Shader == null);
+
             CreateVolume();
+
+            if (firstAlloc) InitKernels();
+            else            RebindKernelTextures();
+
             SetShaderConstants();
             Clear();
-            RebindKernelTextures();
-            Logger.Info("VolumeIntegrator: GPU volumes re-allocated");
+
+            if (DepthCapture.Instance != null)
+                DepthCapture.Instance.SetVoxelParams(voxelDistance, voxelSize);
+
+            Logger.Info(firstAlloc
+                ? "VolumeIntegrator: GPU resources allocated lazily on first scan/save/full-load."
+                : "VolumeIntegrator: GPU volumes re-allocated after release.");
         }
 
         private void RebindKernelTextures()
@@ -326,10 +367,13 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Zeros the TSDF and color volumes on the GPU.
+        /// Zeros the TSDF and color volumes on the GPU. No-op if volumes
+        /// haven't been allocated yet (lazy alloc — see
+        /// <see cref="ReallocateVolumes"/>).
         /// </summary>
         public void Clear()
         {
+            if (_volume == null || _clearKernel.Shader == null) return;
             _clearKernel.Set(VolumeRWID, _volume);
             _clearKernel.Set(ColorVolumeRWID, _colorVolume);
             _clearKernel.DispatchFit(_volume);
@@ -415,6 +459,11 @@ namespace Genesis.RoomScan
         public void FreezeInView(Vector3 camPos, Quaternion camRot,
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
         {
+            if (_volume == null || _freezeKernel.Shader == null)
+            {
+                Logger.Warning("FreezeInView called before GPU resources allocated; ignored.");
+                return;
+            }
             SetFrustumCameraUniforms(_freezeKernel, camPos, camRot,
                 focalLen, principalPt, sensorRes, currentRes);
             _freezeKernel.Set(VolumeRWID, _volume);
@@ -428,6 +477,11 @@ namespace Genesis.RoomScan
         public void UnfreezeInView(Vector3 camPos, Quaternion camRot,
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
         {
+            if (_volume == null || _unfreezeKernel.Shader == null)
+            {
+                Logger.Warning("UnfreezeInView called before GPU resources allocated; ignored.");
+                return;
+            }
             SetFrustumCameraUniforms(_unfreezeKernel, camPos, camRot,
                 focalLen, principalPt, sensorRes, currentRes);
             _unfreezeKernel.Set(VolumeRWID, _volume);
@@ -552,6 +606,11 @@ namespace Genesis.RoomScan
         {
             var dc = DepthCapture.Instance;
             if (dc == null || !DepthCapture.DepthAvailable || dc.DepthTex == null) return;
+            // Defensive: with lazy GPU alloc a stray Integrate() before
+            // ReallocateVolumes can land here. RoomScanner.StartScanning()
+            // always calls ReallocateVolumes first, so this is just a
+            // safety net.
+            if (_volume == null || _integrateKernel.Shader == null) return;
             if (!_frustumReady) SetupFrustumVolume();
             if (!_frustumReady) return;
 

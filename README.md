@@ -164,7 +164,7 @@ Both optional dependencies can be combined. The `Genesis.RoomScan.AIDetection` a
 
 ### Scanning
 
-Call `RoomScanner.Instance.StartScanning()` to begin (or use the debug menu). As you look around:
+Call `await RoomScanner.Instance.StartScanningAsync()` to begin (or use the debug menu). As you look around:
 
 1. **Depth integration**: Each depth frame is fused into the TSDF volume with color from the passthrough camera
 2. **Mesh extraction**: GPU Surface Nets extracts a mesh from the volume every few frames (after a minimum number of integrations)
@@ -487,7 +487,11 @@ if (session.HasSavedScan)
     await session.ClearAllScansAsync();
 
 // 2. Begin scanning. The room mesh builds in real-time as the user looks around.
-session.StartScan();
+//    Awaitable: StartScanAsync stages the heavy GPU bring-up across ~4 yielded
+//    frames (~56 ms total) before enabling the passthrough camera, so PCA's
+//    hardware-buffer handshake doesn't race our compute dispatches and tank
+//    MRUK/Vulkan. Below human-perception threshold for "press registered".
+await session.StartScanAsync();
 session.ProgressUpdated += p => progressBar.value = p.OverallProgress;
 
 // 3. As the user sweeps the room, paint visible chunks as "done":
@@ -517,7 +521,7 @@ if (session.HasSavedScan)
 
 `FinalizeScanAsync()` handles everything: stop scanning → texture refinement → save to disk → release GPU resources. The scan is also persisted as a self-contained package under `Application.persistentDataPath/RoomScans/pkg_<timestamp>/` with its own `OVRSpatialAnchor` for cross-session relocation.
 
-> **Why explicit permission gating matters.** PCA's own `OnEnable` waits for the user's permission decision in a coroutine, so the scan eventually transitions to RGB mode after the user accepts. But during the wait, `RoomScanner.StartScanning()` has already kicked off integration in degraded depth-only mode, and there's no place for game UI to show an "asking for permission" state. Calling `await session.RequestCameraPermissionAsync()` *before* `StartScan()` lets you surface a deterministic UI state and only kick off integration once you actually have the camera.
+> **Why explicit permission gating matters.** PCA's own `OnEnable` waits for the user's permission decision in a coroutine, so the scan eventually transitions to RGB mode after the user accepts. But during the wait, `RoomScanner.StartScanningAsync()` has already kicked off integration in degraded depth-only mode, and there's no place for game UI to show an "asking for permission" state. Calling `await session.RequestCameraPermissionAsync()` *before* `StartScanAsync()` lets you surface a deterministic UI state and only kick off integration once you actually have the camera.
 
 > **Why `ClearAllScansAsync` and not save-then-purge.** `ClearAllScansAsync` deliberately wipes only saved packages (`pkg_*/` and `manifest.json`), never the active `_tmp/` working directory — that one is owned by `StartScan` / `FinalizeScanAsync`'s lifecycle. Safe to call at any point: if nothing is saved it returns immediately. The trade-off is that a finalize crash after a `ClearAllScansAsync` loses the previous scan; if your game wants the old scan to outlive a finalize failure, save first and purge after.
 
@@ -526,7 +530,7 @@ if (session.HasSavedScan)
 For developers who want finer control, the underlying APIs are:
 
 ```
-1. Scan Phase:    StartScanning() → user looks around → StopScanning()
+1. Scan Phase:    await StartScanningAsync() → user looks around → StopScanning()
 2. Refine:        StartTextureRefinement() → wait for RefinedMeshReady event
 3. Transition:    ReleaseScanResources() → frees ~400-500 MB GPU memory
 4. Game Phase:    Render with standard MeshRenderer (1 draw call, baked texture)
@@ -593,7 +597,7 @@ scanner.ReleaseScanResources();
 // Vertex/Wireframe/Triplanar modes become unavailable (IsModeAvailable returns false)
 
 // To scan again later (re-allocates everything):
-scanner.StartScanning();
+await scanner.StartScanningAsync();
 ```
 
 #### Monitoring Scan Progress
@@ -644,7 +648,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 1. Add QuestRoomScan to your `Packages/manifest.json` (see [Installation](#installation)).
 2. Open **`RoomScan > Setup Scene`** and click **`Apply Game-Ready Setup`**. Re-click after the build-target / domain reload to finish.
 3. Build to Quest 3 (or attach Quest Link).
-4. Game code: `await RoomScanSession.Instance.RequestCameraPermissionAsync();` then `RoomScanSession.Instance.StartScan();`.
+4. Game code: `await RoomScanSession.Instance.RequestCameraPermissionAsync();` then `await RoomScanSession.Instance.StartScanAsync();`.
 5. Bind a controller button to `FreezeInView` and another to `UnfreezeInView` (the QRS DebugMenu uses Y/B + X/A by default).
 6. When the user commits: `var result = await RoomScanSession.Instance.FinalizeScanAsync();` → use `result.Mesh` + `result.Atlas` to render with a standard `MeshRenderer`.
 7. On subsequent launches: `if (session.HasSavedScan) await session.LoadLatestAsync();` — skip scanning entirely.

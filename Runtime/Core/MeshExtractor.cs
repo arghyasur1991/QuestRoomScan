@@ -69,12 +69,31 @@ namespace Genesis.RoomScan
             if (surfaceNetsCompute == null)
                 throw new Exception("[RoomScan] surfaceNetsCompute not assigned on MeshExtractor");
 
+            // GPU Surface Nets buffers (~480 MB at the default 256³ voxel grid)
+            // are allocated lazily — first scan via RoomScanner.StartScanning,
+            // or full-load via RoomScanPersistence.LoadPackageAsync. Pure
+            // refined-mesh-only replay paths never trigger this. Keep the
+            // pipeline log here so device traces still show RP/stereo/material
+            // state at scene load, but defer the heavy Init().
             var rpAsset = GraphicsSettings.currentRenderPipeline;
-            Logger.Info($"MeshExtractor Start: mat={scanMeshMaterial?.name ?? "NULL"}, " +
+            Logger.Info($"MeshExtractor Start (Surface Nets buffers deferred): " +
+                $"mat={scanMeshMaterial?.name ?? "NULL"}, " +
                 $"shader={scanMeshMaterial?.shader?.name ?? "NULL"}, " +
                 $"rp={rpAsset?.name ?? "NULL"}, " +
                 $"stereoMode={UnityEngine.XR.XRSettings.stereoRenderingMode}");
+        }
 
+        /// <summary>
+        /// Lazy initializer. Brings up GPU Surface Nets buffers + the renderer
+        /// component if they aren't already up. Idempotent. Existing callers
+        /// (<see cref="Reinitialize"/>, <see cref="RoomScanner"/>'s update loop
+        /// guard, the Start of every scan) all funnel through here so the
+        /// allocation cost only appears when a scan or full reload actually
+        /// needs it.
+        /// </summary>
+        public void EnsureInitialized()
+        {
+            if (_gpuSurfaceNets != null) return;
             Init();
         }
 
@@ -98,13 +117,14 @@ namespace Genesis.RoomScan
                 ConvergenceThreshold = convergenceThreshold,
                 TemporalDeadzone = temporalDeadzone
             };
+
             _gpuSurfaceNets.EnsureBuffers(_volume.VoxelCount, gpuVertexBudgetPercent);
 
             _gpuRenderer = gameObject.AddComponent<GPUMeshRenderer>();
             _gpuRenderer.GpuMeshMaterial = scanMeshMaterial;
             _gpuRenderer.Initialize(_gpuSurfaceNets, _gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
 
-            Logger.Info($"GPU Surface Nets initialized: voxels={_volume.VoxelCount}, " +
+            Logger.Info($"GPU Surface Nets initialized lazily: voxels={_volume.VoxelCount}, " +
                       $"voxSize={_volume.VoxelSize}");
         }
 

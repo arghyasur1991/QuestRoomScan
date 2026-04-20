@@ -494,7 +494,7 @@ Per mesh extraction cycle, `UpdatePlateauDetection` tracks:
 ## 12b. Depth Subsystem Gating
 
 `DepthCapture` manages the `AROcclusionManager` lifecycle to avoid unnecessary GPU work:
-- **`StartDepthCapture()`**: Enables `AROcclusionManager`, subscribes to `frameReceived`. Called by `RoomScanner.StartScanning()`.
+- **`StartDepthCapture()`**: Enables `AROcclusionManager`, subscribes to `frameReceived`. Called by `RoomScanner.StartScanningAsync()`.
 - **`StopDepthCapture()`**: Unsubscribes, disables `AROcclusionManager` (calls `subsystem.Stop()` — shuts down depth sensor and neural inference on Quest). Called by `RoomScanner.StopScanning()`.
 - **`_permissionReady`**: Set once after USE_SCENE permission is confirmed and subsystem verified.
 - **`_captureActive`**: Persists across app pause/resume. `OnApplicationPause(false)` only re-enables the subsystem if `_captureActive` was true.
