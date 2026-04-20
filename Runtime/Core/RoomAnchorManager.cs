@@ -234,7 +234,21 @@ namespace Genesis.RoomScan
             await StabilizeAnchorTransform(anchor.transform);
 
             if (_activeSpatialAnchor != null && _activeSpatialAnchor.gameObject != go)
+            {
+                // Consumers (game-side WorldRoot, refined-mesh holder, etc.)
+                // commonly parent anchor-tracked content under the active
+                // [SpatialAnchor] GO so it stays glued to the room across
+                // drift correction. Destroying the GO with those children
+                // still attached recursively destroys them too — the
+                // gameplay scene loses its world root and the player's
+                // UI vanishes mid-rescan. Detach first with world pose
+                // preserved so the children survive and a downstream
+                // adopter (e.g. WorldRoot.Update polling
+                // SpatialAnchorTransform) can reparent them under the
+                // new anchor on the next frame.
+                DetachChildrenForReparent(_activeSpatialAnchor.transform);
                 Destroy(_activeSpatialAnchor.gameObject);
+            }
             _activeSpatialAnchor = anchor;
 
             Matrix4x4 matrix = anchor.transform.localToWorldMatrix;
@@ -290,7 +304,15 @@ namespace Genesis.RoomScan
             await StabilizeAnchorTransform(anchor.transform);
 
             if (_activeSpatialAnchor != null && _activeSpatialAnchor.gameObject != go)
+            {
+                // See note in CreateAndSaveSpatialAnchorAsync: detach
+                // children first so anchor-tracked scene content (game-side
+                // WorldRoot, refined-mesh holder, etc.) survives the
+                // destroy and can be re-adopted under the new anchor on
+                // the next frame.
+                DetachChildrenForReparent(_activeSpatialAnchor.transform);
                 Destroy(_activeSpatialAnchor.gameObject);
+            }
             _activeSpatialAnchor = anchor;
 
             return anchor.transform.localToWorldMatrix;
@@ -312,6 +334,34 @@ namespace Genesis.RoomScan
                 Logger.Warning($"Spatial anchor erase failed: {result.Status}");
 
             return result.Success;
+        }
+
+        /// <summary>
+        /// Reparent every direct child of <paramref name="oldAnchor"/> to the
+        /// scene root with world pose preserved. Called immediately before
+        /// destroying a superseded <c>[SpatialAnchor]</c> GameObject so that
+        /// anchor-tracked content parented underneath (e.g. the game-side
+        /// <c>WorldRoot</c>, refined-mesh holder GameObjects) is not
+        /// recursively destroyed by Unity's child-cascade. Once detached,
+        /// any consumer polling <see cref="SpatialAnchorTransform"/> (the
+        /// canonical pattern: <c>WorldRoot.Update</c>) will reparent them
+        /// under the new active anchor on the next frame, also with world
+        /// pose preserved — the player sees no visible jump.
+        ///
+        /// <para>
+        /// Iterates index 0 in a loop because <c>SetParent(null, ...)</c>
+        /// mutates the child collection, so a forward-index <c>for</c> would
+        /// skip every other element.
+        /// </para>
+        /// </summary>
+        private static void DetachChildrenForReparent(Transform oldAnchor)
+        {
+            if (oldAnchor == null) return;
+            while (oldAnchor.childCount > 0)
+            {
+                var child = oldAnchor.GetChild(0);
+                child.SetParent(null, worldPositionStays: true);
+            }
         }
 
         /// <summary>
