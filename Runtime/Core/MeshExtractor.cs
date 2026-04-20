@@ -105,16 +105,6 @@ namespace Genesis.RoomScan
 
         private void Init()
         {
-            // ── Instrumentation ─────────────────────────────────────────
-            // EnsureBuffers allocates ~480 MB of ComputeBuffers and
-            // uploads the Surface Nets cell-table — the largest single
-            // GPU allocation in the entire scan path. Field reports of
-            // a "permanent hang" on first A-press make this the prime
-            // suspect. Per-step timing tells us whether the cost is in
-            // the buffer alloc, the GPUMeshRenderer AddComponent, or
-            // its Initialize. Remove after the warmup path is verified.
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-
             _gpuSurfaceNets = new GPUSurfaceNets(surfaceNetsCompute)
             {
                 MinMeshWeight = _volume.MinMeshWeight,
@@ -127,20 +117,12 @@ namespace Genesis.RoomScan
                 ConvergenceThreshold = convergenceThreshold,
                 TemporalDeadzone = temporalDeadzone
             };
-            Logger.Info($"MeshExtractor.Init: new GPUSurfaceNets ctor took {sw.ElapsedMilliseconds} ms");
-            sw.Restart();
 
             _gpuSurfaceNets.EnsureBuffers(_volume.VoxelCount, gpuVertexBudgetPercent);
-            Logger.Info($"MeshExtractor.Init: GPUSurfaceNets.EnsureBuffers (~480 MB ComputeBuffers) took {sw.ElapsedMilliseconds} ms");
-            sw.Restart();
 
             _gpuRenderer = gameObject.AddComponent<GPUMeshRenderer>();
             _gpuRenderer.GpuMeshMaterial = scanMeshMaterial;
-            Logger.Info($"MeshExtractor.Init: AddComponent<GPUMeshRenderer> + material took {sw.ElapsedMilliseconds} ms");
-            sw.Restart();
-
             _gpuRenderer.Initialize(_gpuSurfaceNets, _gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
-            Logger.Info($"MeshExtractor.Init: GPUMeshRenderer.Initialize took {sw.ElapsedMilliseconds} ms");
 
             Logger.Info($"GPU Surface Nets initialized lazily: voxels={_volume.VoxelCount}, " +
                       $"voxSize={_volume.VoxelSize}");

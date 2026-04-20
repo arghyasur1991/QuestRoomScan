@@ -487,15 +487,6 @@ namespace Genesis.RoomScan
                 KeyframeRelocation = Matrix4x4.identity;
                 _cachedUnwrap = null;
 
-                // ── Instrumentation ─────────────────────────────────────
-                // Per-step Stopwatch logs around every synchronous step so
-                // a future regression of the MRUK/Vulkan hang is easy to
-                // bisect. Will be removed in a follow-up commit once the
-                // staged-allocation fix is verified on device for both the
-                // first-scan and post-release-resume paths.
-                var swTotal = System.Diagnostics.Stopwatch.StartNew();
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-
                 // ── Stage 1: GPU volume bring-up ────────────────────────
                 // Both calls are idempotent: ReallocateVolumes early-returns
                 // if RTs already exist; EnsureInitialized / Reinitialize
@@ -503,17 +494,7 @@ namespace Genesis.RoomScan
                 // _scanResourcesReleased branch uses Reinitialize because
                 // ReleaseScanResources explicitly disposes the mesh
                 // extractor and we need a true rebuild, not a no-op.
-                if (_scanResourcesReleased)
-                {
-                    _volumeIntegrator.ReallocateVolumes();
-                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: ReallocateVolumes (post-release) took {sw.ElapsedMilliseconds} ms");
-                }
-                else
-                {
-                    _volumeIntegrator.ReallocateVolumes();
-                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: ReallocateVolumes took {sw.ElapsedMilliseconds} ms");
-                }
-                sw.Restart();
+                _volumeIntegrator.ReallocateVolumes();
 
                 // Yield twice so the render thread can (a) actually commit
                 // the two 256³ 3D RT allocations to VRAM, and (b) run the
@@ -527,15 +508,12 @@ namespace Genesis.RoomScan
                 if (_scanResourcesReleased)
                 {
                     _meshExtractor.Reinitialize();
-                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: Mesh Reinitialize took {sw.ElapsedMilliseconds} ms");
                     _scanResourcesReleased = false;
                 }
                 else
                 {
                     _meshExtractor.EnsureInitialized();
-                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: EnsureInitialized took {sw.ElapsedMilliseconds} ms");
                 }
-                sw.Restart();
 
                 // Yield twice so the render thread can commit the ~480 MB
                 // ComputeBuffers + cell-table upload before PCA enables.
@@ -600,11 +578,7 @@ namespace Genesis.RoomScan
                         _keyframeCollector.ClearInMemory();
 
                     _persistence.CreateTmpPackage();
-                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: CreateTmpPackage took {sw.ElapsedMilliseconds} ms");
-                    sw.Restart();
                     _ = CreateScanAnchorAsync();
-                    Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: CreateScanAnchorAsync (fire-and-forget) launch took {sw.ElapsedMilliseconds} ms");
-                    sw.Restart();
                 }
 
                 _keyframeCollector?.SetExportDirectory(
@@ -624,11 +598,7 @@ namespace Genesis.RoomScan
                 // pulling frames steadily.
                 ICameraProvider provider = GetActiveCameraProvider();
                 provider?.StartCapture();
-                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: camera StartCapture took {sw.ElapsedMilliseconds} ms");
-                sw.Restart();
                 _depthCapture.StartDepthCapture();
-                Logger.Info($"StartScanning[t+{swTotal.ElapsedMilliseconds}ms]: DepthCapture.StartDepthCapture took {sw.ElapsedMilliseconds} ms");
-                sw.Restart();
 
                 if (!resuming)
                 {
@@ -647,9 +617,6 @@ namespace Genesis.RoomScan
                 ScanStarted?.Invoke();
                 if (_modules != null)
                     foreach (var m in _modules) m.OnScanStarted();
-
-                Logger.Info($"StartScanning RETURNED — total wall-clock {swTotal.ElapsedMilliseconds} ms (includes 4 yielded frames between alloc steps and PCA start). " +
-                            "If you see MRUK/Vulkan errors here, the staging didn't actually yield — check the per-step gaps in this log block.");
             }
             catch
             {
