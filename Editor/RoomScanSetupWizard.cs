@@ -2254,7 +2254,7 @@ namespace Genesis.RoomScan.Editor
             // - Dynamic size mode: panel auto-sizes to the content layout (480×640 from USS)
             // - Pivot = Center: transform position = center of the visible panel
             // - PivotReferenceSize = Layout: pivot calculated from root element layout, not bounding box
-            uiDoc.worldSpaceSizeMode = UIDocument.WorldSpaceSizeMode.Dynamic;
+            uiDoc.worldSpaceSizeMode = WorldSpaceSizeMode.Dynamic;
             uiDoc.pivot = Pivot.Center;
             uiDoc.pivotReferenceSize = PivotReferenceSize.Layout;
 
