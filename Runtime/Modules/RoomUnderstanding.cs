@@ -302,7 +302,7 @@ namespace Genesis.RoomScan
             if (_room != null) return;
 
             if (_mruk == null)
-                _mruk = FindFirstObjectByType<MRUK>();
+                _mruk = FindAnyObjectByType<MRUK>();
             if (_mruk == null) return;
 
             _room = _mruk.GetCurrentRoom();

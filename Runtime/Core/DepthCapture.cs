@@ -179,11 +179,11 @@ namespace Genesis.RoomScan
 
             EnsureARSession();
 
-            _arOcclusionManager = FindFirstObjectByType<AROcclusionManager>();
+            _arOcclusionManager = FindAnyObjectByType<AROcclusionManager>();
             if (!_arOcclusionManager)
                 throw new Exception("[RoomScan] AROcclusionManager not found in scene");
 
-            _xrOrigin = FindFirstObjectByType<Unity.XR.CoreUtils.XROrigin>();
+            _xrOrigin = FindAnyObjectByType<Unity.XR.CoreUtils.XROrigin>();
             CacheTrackingSpaceTransform();
 
             _normKernel = new ComputeKernelHelper(depthNormalCompute, "DepthNorm");
@@ -215,7 +215,7 @@ namespace Genesis.RoomScan
         private void CacheTrackingSpaceTransform()
         {
             // Prefer OVRCameraRig.trackingSpace (most reliable on Meta devices)
-            var ovrRig = FindFirstObjectByType<OVRCameraRig>();
+            var ovrRig = FindAnyObjectByType<OVRCameraRig>();
             if (ovrRig != null && ovrRig.trackingSpace != null)
             {
                 _trackingSpaceTransform = ovrRig.trackingSpace;
@@ -238,7 +238,7 @@ namespace Genesis.RoomScan
 
         private void EnsureARSession()
         {
-            if (FindFirstObjectByType<ARSession>() == null)
+            if (FindAnyObjectByType<ARSession>() == null)
             {
                 var go = new GameObject("[AR Session]");
                 go.AddComponent<ARSession>();

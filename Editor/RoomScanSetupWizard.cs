@@ -2150,8 +2150,7 @@ namespace Genesis.RoomScan.Editor
         // =================================================================
 
         static T FindAny<T>() where T : Object =>
-            Object.FindObjectsByType<T>(FindObjectsInactive.Include,
-                FindObjectsSortMode.None).FirstOrDefault();
+            Object.FindAnyObjectByType<T>(FindObjectsInactive.Include);
 
         static Component FindComponentByTypeName(string typeName)
         {

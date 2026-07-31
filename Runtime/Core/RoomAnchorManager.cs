@@ -46,7 +46,7 @@ namespace Genesis.RoomScan
             if (!enabled)
                 yield break;
 
-            _mruk = FindFirstObjectByType<MRUK>();
+            _mruk = FindAnyObjectByType<MRUK>();
             if (_mruk == null)
             {
                 var go = new GameObject("[MRUK]");
