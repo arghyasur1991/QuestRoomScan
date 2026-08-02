@@ -162,6 +162,15 @@ namespace Genesis.RoomScan
         /// Current spatial anchor localization matrix. Valid after
         /// <see cref="CreateAndSaveSpatialAnchorAsync"/> or <see cref="LoadSpatialAnchorAsync"/>.
         /// Returns identity if no spatial anchor is active.
+        ///
+        /// <para><b>Persisting data baked in world space.</b> Store this
+        /// alongside the data at the moment you bake it, and on load multiply
+        /// by <c>ComputeRelocationMatrix(SpatialAnchorMatrix, stored)</c> to
+        /// bring it into the current session's world frame. This is how the
+        /// refined mesh survives a restart, and it is the right recipe only for
+        /// data a transform cannot move — vertex buffers, precomputed fields.
+        /// Anything you can parent should use <see cref="RoomSpaceRoot"/>
+        /// instead and store plain local coordinates.</para>
         /// </summary>
         public Matrix4x4 SpatialAnchorMatrix =>
             _activeSpatialAnchor != null
@@ -174,8 +183,18 @@ namespace Genesis.RoomScan
         public bool HasSpatialAnchor => _activeSpatialAnchor != null;
 
         /// <summary>
-        /// Live transform of the active spatial anchor. Modules can parent objects
-        /// under this to stay world-locked across tracking corrections.
+        /// Live transform of the active spatial anchor. Parenting under it keeps
+        /// content world-locked across tracking corrections.
+        ///
+        /// <para><b>Parenting under this alone does not make coordinates
+        /// persistent.</b> <c>SetParent(anchor, worldPositionStays: true)</c>
+        /// preserves the child's world pose and stores the difference as a local
+        /// offset, so its local space remains world space plus a constant — and
+        /// Unity's world origin is wherever the headset booted, so it means a
+        /// different physical place next run. Within one session that is
+        /// invisible, which is what makes it a trap. Use
+        /// <see cref="RoomSpaceRoot"/>, which holds its own local transform at
+        /// identity so that local space genuinely is the anchor's space.</para>
         /// </summary>
         public Transform SpatialAnchorTransform =>
             _activeSpatialAnchor != null ? _activeSpatialAnchor.transform : null;
