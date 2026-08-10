@@ -16,6 +16,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 
 ## Table of Contents
 
+- [Used In](#used-in)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -37,6 +38,18 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
   - [Placing Content So It Comes Back in the Right Spot](#placing-content-so-it-comes-back-in-the-right-spot)
 - [Credits & Prior Art](#credits--prior-art)
 - [License](#license)
+
+## Used In
+
+**[CoasterMania](https://altlabvr.com/coastermania)** (AltLab VR) — Meta Quest. The **Room Scan Update**, released 1 August 2026, added *Environmental Scanning*: you shrink to track height and ride your rollercoaster in first person through your actual room.
+
+This is the case the package was built for. Quest's built-in room mesh gives you geometry but no surface colour, so when CoasterMania first added a first-person ride in 2023 it had to drop a default green-brown terrain texture over the room and the ride happened in a stand-in of your space rather than your space. Reconstructing a *textured* mesh is what closes that gap.
+
+- Developer post — [true first-person mode, r/VRGaming](https://www.reddit.com/r/VRGaming/comments/1vgmyhy/i_recently_added_a_true_first_person_mode_to_my/)
+- Developer comment — [r/OculusQuest](https://www.reddit.com/r/OculusQuest/comments/1vcqem3/comment/p2ro430/?context=3)
+- Gameplay — [CoasterMania | I Built A Roller Coaster In My Basement... And Rode It!](https://www.youtube.com/watch?v=31pwtov8hwA), by A Wolf in VR
+
+*Shipped something with this package? Open an issue or a PR and it goes on the list.*
 
 ## Features
 
