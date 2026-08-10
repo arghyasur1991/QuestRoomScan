@@ -1,3 +1,5 @@
+
+
 # QuestRoomScan
 
 Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from depth + RGB camera data using GPU TSDF volume integration and Surface Nets mesh extraction, with server-based Gaussian Splat training and on-device rendering via [Unity Gaussian Splatting](https://github.com/arghyasur1991/UnityGaussianSplatting).
@@ -426,8 +428,8 @@ Buttons are dynamically enabled/disabled based on app context:
 | Left Thumbstick Click | Toggle Debug Menu |
 | One (Y/B) | Freeze In View |
 | Two (X/A) | Unfreeze In View |
-| Three (A/X) | Cycle Render Mode |
-| Four (B/Y) | Start Server Training (disabled by default) |
+| Three (Grip) | Cycle Render Mode |
+| Four (Trigger) | Start Server Training (disabled by default) |
 
 Additional bindable actions (not mapped by default): `ToggleFreezeTint`, `ToggleScanning`, `SaveScan`, `LoadScan`, `ClearAllData`, `ExportPointCloud`.
 
