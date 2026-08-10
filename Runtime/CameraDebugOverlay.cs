@@ -29,7 +29,7 @@ namespace Genesis.RoomScan
                 _provider = scanner.ActiveCameraProvider;
 
             if (_provider == null)
-                _provider = FindFirstObjectByType<PassthroughCameraProvider>();
+                _provider = FindAnyObjectByType<PassthroughCameraProvider>();
 
             CreateCanvas();
             Logger.Info($"CameraDebugOverlay: provider={(_provider != null ? _provider.GetType().Name : "NULL")}");

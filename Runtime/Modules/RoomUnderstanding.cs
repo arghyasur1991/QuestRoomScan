@@ -106,14 +106,28 @@ namespace Genesis.RoomScan
             return planes;
         }
 
-        /// <summary>Floor plane from MRUK, or a default Y=0 plane.</summary>
+        /// <summary>
+        /// Floor plane from MRUK, or a default Y=0 plane.
+        ///
+        /// <para>The normal is the anchor's <c>forward</c>, which is how MRUK
+        /// orients a plane anchor — same convention <see cref="GetWallPlanes"/>
+        /// uses. A floor anchor is therefore pitched ninety degrees so that its
+        /// forward points at the ceiling, and its <c>up</c> lies flat along the
+        /// floor. Reading <c>up</c> instead returns a plane standing on edge:
+        /// it still passes through the right point, so anything asking whether
+        /// a point is on the floor gets a plausible answer, while anything
+        /// asking how high the floor is gets the height of the room's origin.
+        /// </para>
+        /// </summary>
         public Plane GetFloorPlane()
         {
             EnsureRoom();
             if (_room != null && _room.FloorAnchors != null && _room.FloorAnchors.Count > 0)
             {
                 var ft = _room.FloorAnchors[0].transform;
-                return new Plane(ft.up, ft.position);
+                Vector3 normal = ft.forward;
+                if (Vector3.Dot(normal, Vector3.up) < 0f) normal = -normal;
+                return new Plane(normal, ft.position);
             }
             return new Plane(Vector3.up, Vector3.zero);
         }
@@ -302,7 +316,7 @@ namespace Genesis.RoomScan
             if (_room != null) return;
 
             if (_mruk == null)
-                _mruk = FindFirstObjectByType<MRUK>();
+                _mruk = FindAnyObjectByType<MRUK>();
             if (_mruk == null) return;
 
             _room = _mruk.GetCurrentRoom();

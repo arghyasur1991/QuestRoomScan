@@ -56,7 +56,7 @@ namespace Genesis.RoomScan.Editor
         void RefreshBuildingBlocksState()
         {
             _bbPresent.Clear();
-            var inScene = Object.FindObjectsByType<BuildingBlock>(FindObjectsSortMode.None);
+            var inScene = Object.FindObjectsByType<BuildingBlock>();
 
             foreach (var spec in REQUIRED_BLOCKS)
             {

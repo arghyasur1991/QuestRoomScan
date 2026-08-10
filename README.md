@@ -16,6 +16,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 
 ## Table of Contents
 
+- [Used In](#used-in)
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
@@ -34,8 +35,21 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 - [Memory Budget (Quest 3)](#memory-budget-quest-3)
 - [Comparison with Hyperscape](#comparison-with-hyperscape)
 - [**Game Integration Guide**](#game-integration-guide)
+  - [Placing Content So It Comes Back in the Right Spot](#placing-content-so-it-comes-back-in-the-right-spot)
 - [Credits & Prior Art](#credits--prior-art)
 - [License](#license)
+
+## Used In
+
+**[CoasterMania](https://altlabvr.com/coastermania)** (AltLab VR) — Meta Quest. The **Room Scan Update**, released 1 August 2026, added *Environmental Scanning*: you shrink to track height and ride your rollercoaster in first person through your actual room.
+
+This is the case the package was built for. Quest's built-in room mesh gives you geometry but no surface colour, so when CoasterMania first added a first-person ride in 2023 it had to drop a default green-brown terrain texture over the room and the ride happened in a stand-in of your space rather than your space. Reconstructing a *textured* mesh is what closes that gap.
+
+- Developer post — [true first-person mode, r/VRGaming](https://www.reddit.com/r/VRGaming/comments/1vgmyhy/i_recently_added_a_true_first_person_mode_to_my/)
+- Developer comment — [r/OculusQuest](https://www.reddit.com/r/OculusQuest/comments/1vcqem3/comment/p2ro430/?context=3)
+- Gameplay — [CoasterMania | I Built A Roller Coaster In My Basement... And Rode It!](https://www.youtube.com/watch?v=31pwtov8hwA), by A Wolf in VR
+
+*Shipped something with this package? Open an issue or a PR and it goes on the list.*
 
 ## Features
 
@@ -542,6 +556,88 @@ On subsequent launches, skip scanning entirely:
 1. LoadRefinedOnlyAsync(pkgId) → loads refined mesh + atlas in < 1 second
 2. Game Phase immediately
 ```
+
+### Placing Content So It Comes Back in the Right Spot
+
+Unity's world origin is wherever the headset booted, so world coordinates mean a
+different physical place on every run. The spatial anchor is the only transform
+that re-localizes to the same spot, so it is the only frame worth saving against.
+
+**Parenting under the anchor is not by itself enough.** `SetParent(anchor,
+worldPositionStays: true)` keeps the child's world pose and stores the difference
+as a local offset. That correctly tracks drift correction — the usual reason to
+parent — but leaves local space equal to world space plus a constant, so local
+coordinates still mean a different place next run. Within one session this is
+invisible, which is what makes it a trap: content is perfect on the run that
+authored it and wrong on every run after.
+
+There are two correct recipes, and which one you need depends on whether a
+transform can move your data.
+
+#### Recipe 1 — content you can parent (use this by default)
+
+Put a `RoomSpaceRoot` on a scene root GameObject. It binds itself to the spatial
+anchor and holds its own local transform at identity, so **its local space is the
+anchor's space**. Save local coordinates; reload them; done. No matrices.
+
+```csharp
+// Spawn into room space (or RoomSpaceRoot.Adopt for an existing GameObject).
+var tree = RoomSpaceRoot.Spawn(treePrefab, worldPos, worldRot);
+
+// Persist: local coordinates are room coordinates.
+save.position = tree.transform.localPosition;
+save.rotation = tree.transform.localRotation;
+
+// Restore on a later run, after the anchor has bound.
+if (await RoomSpaceRoot.WaitForBindAsync())
+{
+    var restored = Instantiate(treePrefab);
+    RoomSpaceRoot.Adopt(restored);
+    restored.transform.localPosition = save.position;
+    restored.transform.localRotation = save.rotation;
+}
+```
+
+When the anchor binds or changes, direct children keep their world poses, so
+nothing visibly jumps; their local coordinates are re-expressed in the new frame.
+Before any anchor binds, the root sits at the world origin and `IsBound` is
+false — content placed then is correct for the session but its coordinates are
+not yet room coordinates, so await `WaitForBindAsync()` before persisting.
+
+If you generate geometry rather than place prefabs, build vertices through
+`RoomSpaceRoot.WorldToRoom` and attach the result with `AdoptAtRoomOrigin`, which
+avoids applying the room transform twice.
+
+#### Recipe 2 — data with world coordinates baked in
+
+A transform cannot move vertices already written into an array. For those, store
+`RoomAnchorManager.Instance.SpatialAnchorMatrix` at bake time and apply the delta
+on load — which is exactly how the refined scan mesh itself survives a restart:
+
+```csharp
+// At bake time, beside the data:
+save.anchorAtBake = RoomAnchorManager.Instance.SpatialAnchorMatrix;
+
+// On load:
+var reloc = RoomAnchorManager.ComputeRelocationMatrix(
+    RoomAnchorManager.Instance.SpatialAnchorMatrix, save.anchorAtBake);
+for (int i = 0; i < positions.Length; i++)
+    positions[i] = reloc.MultiplyPoint3x4(positions[i]);
+```
+
+Record the anchor matrix in the same operation that bakes the data. Assigning it
+afterwards is the common bug: any code that draws the content in between will use
+whatever the field was initialised to, and identity is a legal frame that gets
+replayed as a full anchor-pose offset. For the same reason, use a sentinel that
+is *not* identity for "never recorded" — the zero matrix works, since it fails
+`Matrix4x4.ValidTRS()` and is also what a missing JSON field deserializes to.
+
+> **Breaking change.** Earlier versions expected consumers to parent their own
+> root under `SpatialAnchorTransform` with `worldPositionStays: true`. That
+> produces content which is correctly placed in the session that authored it and
+> misplaced afterwards. Migrating to `RoomSpaceRoot` changes what previously
+> saved local coordinates mean, so bump your save format and regenerate rather
+> than loading old data into the new frame.
 
 ### Recommended Configuration
 
