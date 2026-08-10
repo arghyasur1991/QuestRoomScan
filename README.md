@@ -41,7 +41,7 @@ Real-time 3D room reconstruction on Meta Quest 3. Produces a textured mesh from 
 
 ## Used In
 
-**[CoasterMania](https://www.meta.com/en-gb/experiences/coastermania/7856648691073700/)** (AltLab VR) — Meta Quest. The **Room Scan Update**, released 1 August 2026, added *Environmental Scanning*: you shrink to track height and ride your rollercoaster in first person through your actual room.
+**[CoasterMania](https://www.meta.com/en-gb/experiences/coastermania/7856648691073700/)** — Meta Quest. The **Room Scan Update**, released 1 August 2026, added *Environmental Scanning*: you shrink to track height and ride your rollercoaster in first person through your actual room.
 
 This is the case the package was built for. Quest's built-in room mesh gives you geometry but no surface colour, so when CoasterMania first added a first-person ride in 2023 it had to drop a default green-brown terrain texture over the room and the ride happened in a stand-in of your space rather than your space. Reconstructing a *textured* mesh is what closes that gap.
 
