@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using UnityEngine;
 
@@ -187,13 +188,61 @@ namespace Genesis.RoomScan
         public bool HasSavedScan => _persistence != null && _persistence.HasAnyPackage();
 
         /// <summary>
+        /// Snapshot of one saved scan package. Games that keep several rooms
+        /// (one package per save) use this with <see cref="LoadAsync"/> and
+        /// <see cref="DeleteScanAsync"/> instead of <see cref="LoadLatestAsync"/>
+        /// / <see cref="ClearAllScansAsync"/>.
+        /// </summary>
+        public readonly struct SavedScanInfo
+        {
+            public SavedScanInfo(string id, string displayName, long timestamp)
+            {
+                Id = id;
+                DisplayName = displayName ?? string.Empty;
+                Timestamp = timestamp;
+            }
+
+            public string Id { get; }
+            public string DisplayName { get; }
+            /// <summary>Unix milliseconds, newest-first in <see cref="ListSavedScans"/>.</summary>
+            public long Timestamp { get; }
+        }
+
+        /// <summary>
+        /// Every saved scan package, newest first. Empty when nothing is on
+        /// disk. Does not load meshes.
+        /// </summary>
+        public IReadOnlyList<SavedScanInfo> ListSavedScans()
+        {
+            if (_persistence == null) return Array.Empty<SavedScanInfo>();
+            var packages = _persistence.ListPackages();
+            var list = new List<SavedScanInfo>(packages.Count);
+            for (int i = 0; i < packages.Count; i++)
+            {
+                var p = packages[i];
+                list.Add(new SavedScanInfo(p.id, p.displayName, p.timestamp));
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// Deletes one saved scan package (mesh, atlas, keyframes, triplanar,
+        /// manifest entry) and erases its spatial anchor from Horizon OS.
+        /// No-op when the id is missing or already gone.
+        /// </summary>
+        public Task DeleteScanAsync(string packageId)
+        {
+            if (_persistence == null || string.IsNullOrEmpty(packageId))
+                return Task.CompletedTask;
+            return _persistence.DeletePackageAsync(packageId);
+        }
+
+        /// <summary>
         /// Deletes every saved scan package on disk (mesh, atlas, keyframes,
         /// triplanar, manifest) and erases each package's spatial anchor from
-        /// Horizon OS. Intended for game flows where there is exactly one
-        /// "current" scan and a rescan should obsolete everything that came
-        /// before — call this immediately before <see cref="StartScan"/> to
-        /// stop the on-device scan store from growing unbounded.
-        /// Safe to call when nothing is saved (returns immediately).
+        /// Horizon OS. Nuclear option — games that keep several packages
+        /// should call <see cref="DeleteScanAsync"/> for the one they are
+        /// replacing. Safe to call when nothing is saved (returns immediately).
         /// </summary>
         public Task ClearAllScansAsync()
         {
