@@ -246,6 +246,12 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>
+        /// Enable occlusion once <c>USE_SCENE</c> is granted. Does <b>not</b>
+        /// call <c>RequestUserPermission</c> — a second request while the host
+        /// (or <c>OVRManager</c>) already has a dialog up is dropped by Android
+        /// with no UI. Hosts ask via <see cref="RoomScanSession.RequestScenePermissionAsync"/>.
+        /// </summary>
         private void CheckPermissionAndEnable()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -255,11 +261,8 @@ namespace Genesis.RoomScan
             }
             else
             {
-                Logger.Info("Requesting USE_SCENE permission...");
-                var callbacks = new PermissionCallbacks();
-                callbacks.PermissionGranted += _ => EnableOcclusion();
-                callbacks.PermissionDenied += _ => Logger.Error("USE_SCENE permission denied — depth will not work");
-                Permission.RequestUserPermission(ScenePermission, callbacks);
+                Logger.Info(
+                    "USE_SCENE not granted yet — waiting (host requests via RoomScanSession)");
             }
 #else
             EnableOcclusion();
@@ -267,43 +270,52 @@ namespace Genesis.RoomScan
         }
 
         private bool _subscribed;
+        bool _enablingOcclusion;
 
         private async void EnableOcclusion()
         {
             if (_arOcclusionManager == null) return;
-
-            Logger.Info("Verifying AROcclusionManager subsystem...");
-
-            _arOcclusionManager.frameReceived -= OnDepthFrame;
-            _arOcclusionManager.enabled = false;
-
-            await Awaitable.NextFrameAsync();
-            await Awaitable.NextFrameAsync();
-
-            if (_arOcclusionManager == null) return;
-
-            // Briefly enable to verify the subsystem is functional
-            _arOcclusionManager.enabled = true;
-
-            await Awaitable.NextFrameAsync();
-            await Awaitable.NextFrameAsync();
-
-            if (_arOcclusionManager == null) return;
-            var sub = _arOcclusionManager.subsystem;
-            Logger.Info($"Occlusion subsystem: {(sub != null ? sub.GetType().Name : "null")}, running={sub?.running}");
-
-            _permissionReady = true;
-
-            if (_captureActive)
+            if (_permissionReady || _enablingOcclusion) return;
+            _enablingOcclusion = true;
+            try
             {
-                _arOcclusionManager.frameReceived += OnDepthFrame;
-                _subscribed = true;
-                Logger.Info("DepthCapture: subsystem left running (scan already active)");
-            }
-            else
-            {
+                Logger.Info("Verifying AROcclusionManager subsystem...");
+
+                _arOcclusionManager.frameReceived -= OnDepthFrame;
                 _arOcclusionManager.enabled = false;
-                Logger.Info("DepthCapture: subsystem disabled (no active scan)");
+
+                await Awaitable.NextFrameAsync();
+                await Awaitable.NextFrameAsync();
+
+                if (_arOcclusionManager == null) return;
+
+                // Briefly enable to verify the subsystem is functional
+                _arOcclusionManager.enabled = true;
+
+                await Awaitable.NextFrameAsync();
+                await Awaitable.NextFrameAsync();
+
+                if (_arOcclusionManager == null) return;
+                var sub = _arOcclusionManager.subsystem;
+                Logger.Info($"Occlusion subsystem: {(sub != null ? sub.GetType().Name : "null")}, running={sub?.running}");
+
+                _permissionReady = true;
+
+                if (_captureActive)
+                {
+                    _arOcclusionManager.frameReceived += OnDepthFrame;
+                    _subscribed = true;
+                    Logger.Info("DepthCapture: subsystem left running (scan already active)");
+                }
+                else
+                {
+                    _arOcclusionManager.enabled = false;
+                    Logger.Info("DepthCapture: subsystem disabled (no active scan)");
+                }
+            }
+            finally
+            {
+                _enablingOcclusion = false;
             }
         }
 
@@ -396,6 +408,11 @@ namespace Genesis.RoomScan
 
         private void Update()
         {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (_started && !_permissionReady &&
+                Permission.HasUserAuthorizedPermission(ScenePermission))
+                EnableOcclusion();
+#endif
             float t = Time.unscaledTime;
             if (t - _lastLogTime >= 5f)
             {

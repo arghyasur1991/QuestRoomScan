@@ -84,30 +84,7 @@ namespace Genesis.RoomScan
         /// Resolves <c>true</c> immediately if already granted.
         /// </summary>
         public static Task<bool> RequestCameraPermissionAsync()
-        {
-#if UNITY_ANDROID && !UNITY_EDITOR
-            if (Permission.HasUserAuthorizedPermission(CameraPermissionId))
-                return Task.FromResult(true);
-
-            var tcs = new TaskCompletionSource<bool>();
-            var callbacks = new PermissionCallbacks();
-            callbacks.PermissionGranted += _ => tcs.TrySetResult(true);
-            callbacks.PermissionDenied  += _ => tcs.TrySetResult(false);
-            callbacks.PermissionDeniedAndDontAskAgain += _ => tcs.TrySetResult(false);
-            try
-            {
-                Permission.RequestUserPermission(CameraPermissionId, callbacks);
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"PassthroughCameraProvider: permission request failed: {ex.Message}");
-                tcs.TrySetResult(false);
-            }
-            return tcs.Task;
-#else
-            return Task.FromResult(true);
-#endif
-        }
+            => AndroidRuntimePermission.RequestAsync(CameraPermissionId);
 
         /// <inheritdoc />
         public void StartCapture()
