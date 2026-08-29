@@ -151,14 +151,16 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// True when the headset is inside a loaded captured space the same
-        /// way Horizon Space Setup decides "this space". Native
-        /// <c>IsPositionInRoom</c> is the floor outline — it stays true a
-        /// little past a doorway — so a hallway next to a captured room
-        /// still passed. <c>GetCurrentRoom()</c> is worse: it returns the
-        /// last captured room when you leave. We require the headset to sit
-        /// inward of every outer wall plane (including invisible doorway
-        /// faces). Editor returns true so Space Setup is never offered over Link.
+        /// True when the headset is inside <b>any</b> loaded captured space
+        /// (outer wall planes, including doorway faces). Use this at boot
+        /// to decide whether Space Setup is needed — any set-up room is
+        /// enough. A loaded scan is tied to one room; hosts should use
+        /// <see cref="IsHeadsetInsideSceneRoom"/> with the package's stored
+        /// scene-room UUID for that. Native <c>IsPositionInRoom</c> is the
+        /// floor outline and stays true a little past a doorway.
+        /// <c>GetCurrentRoom()</c> returns the last captured UUID after you
+        /// leave — do not use it. Editor returns true so Space Setup is
+        /// never offered over Link.
         /// </summary>
         public bool IsHeadsetInsideASceneRoom()
         {
@@ -166,68 +168,55 @@ namespace Genesis.RoomScan
                 return true;
             if (_mruk == null || _mruk.Rooms == null || _mruk.Rooms.Count == 0)
                 return false;
-
-            Vector3 pos = HeadsetWorldPosition();
-            for (int i = 0; i < _mruk.Rooms.Count; i++)
-            {
-                var room = _mruk.Rooms[i];
-                if (room != null && RoomContainsHeadset(room, pos))
-                    return true;
-            }
-
-            return false;
-        }
-
-        const float OuterWallInsetMetres = 0.08f;
-
-        const MRUKAnchor.SceneLabels OuterWallLabels =
-            MRUKAnchor.SceneLabels.WALL_FACE
-            | MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE;
-
-        static bool RoomContainsHeadset(MRUKRoom room, Vector3 pos)
-        {
-            if (!room.IsPositionInRoom(pos, testVerticalBounds: true))
-                return false;
-            return InsideOuterWalls(room, pos, OuterWallInsetMetres);
+            return SceneRoomQuery.FindContaining(
+                _mruk.Rooms, SceneRoomQuery.HeadsetWorldPosition()) != null;
         }
 
         /// <summary>
-        /// Floor-outline <c>IsPositionInRoom</c> does not drop at a doorway.
-        /// Wall planes (and invisible faces across openings) do: each plane's
-        /// +Z faces into the room, so just outside a door is a negative
-        /// half-space even when the floor polygon still contains the head.
+        /// True when the headset is inside the captured space with this
+        /// Scene API room UUID (the value stored next to the package's
+        /// spatial-anchor UUID). False when the UUID is empty, the room is
+        /// not in the loaded scene model, or the headset has left that
+        /// room — even if another captured room in the house still
+        /// contains the headset. Editor returns true.
         /// </summary>
-        static bool InsideOuterWalls(MRUKRoom room, Vector3 pos, float inset)
+        public bool IsHeadsetInsideSceneRoom(Guid sceneRoomUuid)
         {
-            var anchors = room.Anchors;
-            if (anchors == null || anchors.Count == 0)
+            if (Application.isEditor)
                 return true;
-
-            for (int i = 0; i < anchors.Count; i++)
-            {
-                var a = anchors[i];
-                if (a == null) continue;
-                if ((a.Label & OuterWallLabels) == 0) continue;
-
-                Vector3 inward = room.GetFacingDirection(a);
-                if (inward.sqrMagnitude < 1e-8f)
-                    inward = a.transform.forward;
-                inward.Normalize();
-                if (Vector3.Dot(pos - a.transform.position, inward) < inset)
-                    return false;
-            }
-
-            return true;
+            if (sceneRoomUuid == Guid.Empty)
+                return false;
+            if (_mruk == null || _mruk.Rooms == null)
+                return false;
+            var room = SceneRoomQuery.FindByUuid(_mruk.Rooms, sceneRoomUuid);
+            return SceneRoomQuery.Contains(room, SceneRoomQuery.HeadsetWorldPosition());
         }
 
-        static Vector3 HeadsetWorldPosition()
+        /// <summary>True when a loaded MRUK room still has this Scene API UUID.</summary>
+        public bool HasSceneRoom(Guid sceneRoomUuid)
         {
-            var rig = FindAnyObjectByType<OVRCameraRig>(FindObjectsInactive.Include);
-            if (rig != null && rig.centerEyeAnchor != null)
-                return rig.centerEyeAnchor.position;
-            var cam = Camera.main;
-            return cam != null ? cam.transform.position : Vector3.zero;
+            if (sceneRoomUuid == Guid.Empty || _mruk == null || _mruk.Rooms == null)
+                return false;
+            return SceneRoomQuery.FindByUuid(_mruk.Rooms, sceneRoomUuid) != null;
         }
+
+        /// <summary>
+        /// Scene API UUID of the loaded room that contains
+        /// <paramref name="worldPos"/> (wall-plane test), or
+        /// <see cref="Guid.Empty"/>. Used to bind a spatial anchor to a
+        /// room at scan-save / load.
+        /// </summary>
+        public Guid TryGetSceneRoomUuidAt(Vector3 worldPos)
+        {
+            if (_mruk == null || _mruk.Rooms == null)
+                return Guid.Empty;
+            return SceneRoomQuery.RoomUuid(
+                SceneRoomQuery.FindContaining(_mruk.Rooms, worldPos));
+        }
+
+        /// <summary>Scene API UUID of the loaded room that contains the headset, or empty.</summary>
+        public Guid TryGetSceneRoomUuidContainingHeadset()
+            => TryGetSceneRoomUuidAt(SceneRoomQuery.HeadsetWorldPosition());
 
         /// <summary>
         /// Opens Horizon Space Setup (pauses the Unity app), then reloads

@@ -254,6 +254,9 @@ namespace Genesis.RoomScan
 
         public bool HasRefinedTexture { get; private set; }
         public bool HasHQRefinedTexture { get; private set; }
+
+        /// <summary>The refined-mesh renderer, or null until a refined mesh exists.</summary>
+        public MeshRenderer RefinedMeshRenderer => _refinedRenderer;
         public bool IsRefining { get; private set; }
         public bool IsHQRefining { get; private set; }
         public bool IsMeshEnhancing { get; private set; }

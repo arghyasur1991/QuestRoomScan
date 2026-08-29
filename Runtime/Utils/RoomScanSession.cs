@@ -219,17 +219,23 @@ namespace Genesis.RoomScan
         /// </summary>
         public readonly struct SavedScanInfo
         {
-            public SavedScanInfo(string id, string displayName, long timestamp)
+            public SavedScanInfo(string id, string displayName, long timestamp,
+                string sceneRoomUuid = "")
             {
                 Id = id;
                 DisplayName = displayName ?? string.Empty;
                 Timestamp = timestamp;
+                SceneRoomUuid = sceneRoomUuid ?? string.Empty;
             }
 
             public string Id { get; }
             public string DisplayName { get; }
             /// <summary>Unix milliseconds, newest-first in <see cref="ListSavedScans"/>.</summary>
             public long Timestamp { get; }
+            /// <summary>Scene API UUID of the MRUK room this package was
+            /// scanned in. Empty until the package has been saved or loaded
+            /// once after that field existed.</summary>
+            public string SceneRoomUuid { get; }
         }
 
         /// <summary>
@@ -244,7 +250,7 @@ namespace Genesis.RoomScan
             for (int i = 0; i < packages.Count; i++)
             {
                 var p = packages[i];
-                list.Add(new SavedScanInfo(p.id, p.displayName, p.timestamp));
+                list.Add(new SavedScanInfo(p.id, p.displayName, p.timestamp, p.sceneRoomUuid));
             }
             return list;
         }
@@ -333,16 +339,61 @@ namespace Genesis.RoomScan
             RoomAnchorManager.Instance != null && RoomAnchorManager.Instance.HasSceneRooms;
 
         /// <summary>
-        /// True when the headset is inside a loaded captured space (outer
-        /// wall planes, including doorway faces). False when discovery found
-        /// no rooms, or when the headset has left a captured volume — a
-        /// hallway just outside a loaded room counts as outside. Native
-        /// <c>IsPositionInRoom</c> alone is the floor outline and stays true
-        /// a little past the door. Editor is always true.
+        /// True when the headset is inside <b>any</b> loaded captured space
+        /// (outer wall planes, including doorway faces). Boot / Space Setup
+        /// should use this — any set-up room is enough. A loaded scan is
+        /// tied to one room; use <see cref="IsHeadsetInsideBoundSceneRoom"/>
+        /// for that. Native <c>IsPositionInRoom</c> alone is the floor
+        /// outline and stays true a little past the door. Editor is always true.
         /// </summary>
         public bool IsHeadsetInsideASceneRoom =>
             RoomAnchorManager.Instance != null
             && RoomAnchorManager.Instance.IsHeadsetInsideASceneRoom();
+
+        /// <summary>
+        /// Scene API UUID of the MRUK room the active package was scanned
+        /// in (stored next to the spatial-anchor UUID in
+        /// <c>anchor.json</c> / the package manifest). Empty when no
+        /// package is loaded, or until the first bind. Resolves and
+        /// persists from the localized spatial-anchor pose when missing
+        /// or stale. Editor does not invent a UUID.
+        /// </summary>
+        public Guid BoundSceneRoomUuid
+        {
+            get
+            {
+                if (_persistence == null || !_persistence.HasActivePackage)
+                    return Guid.Empty;
+                string s = _persistence.EnsureAndGetSceneRoomUuid();
+                return Guid.TryParse(s, out var g) ? g : Guid.Empty;
+            }
+        }
+
+        /// <summary>
+        /// True when the headset is inside the active package's bound
+        /// room — not merely some other captured space in the house.
+        /// False when no package is loaded or the bound UUID cannot be
+        /// resolved. Editor is always true.
+        /// </summary>
+        public bool IsHeadsetInsideBoundSceneRoom
+        {
+            get
+            {
+                if (Application.isEditor)
+                    return true;
+                var mgr = RoomAnchorManager.Instance;
+                if (mgr == null) return false;
+                if (_persistence == null || !_persistence.HasActivePackage)
+                    return false;
+                Guid uuid = BoundSceneRoomUuid;
+                if (uuid == Guid.Empty) return false;
+                return mgr.IsHeadsetInsideSceneRoom(uuid);
+            }
+        }
+
+        /// <summary>The refined-mesh renderer for the active scan, or null.</summary>
+        public MeshRenderer RefinedMeshRenderer =>
+            _scanner != null ? _scanner.RefinedMeshRenderer : null;
 
         /// <summary>Completes when scene discovery has finished. Completed
         /// immediately if it already has.</summary>
