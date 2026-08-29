@@ -391,6 +391,36 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>
+        /// After a package is loaded and its spatial anchor has localized:
+        /// true when the headset and that anchor sit in the <b>same</b>
+        /// captured room (wall-plane test). Persists that room's current
+        /// Scene API UUID — a Space Setup redo in the same physical room
+        /// gets a new UUID and must rebind. False when either pose is
+        /// outside a captured volume or they disagree (hallway, a different
+        /// set-up room). Editor is always true.
+        /// </summary>
+        public bool TryRebindBoundSceneRoomIfHeadsetMatches()
+        {
+            if (Application.isEditor)
+                return true;
+            if (_persistence == null || !_persistence.HasActivePackage)
+                return false;
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null) return false;
+
+            Guid atHeadset = mgr.TryGetSceneRoomUuidContainingHeadset();
+            Guid atAnchor = Guid.Empty;
+            if (mgr.HasSpatialAnchor && mgr.SpatialAnchorTransform != null)
+                atAnchor = mgr.TryGetSceneRoomUuidAt(mgr.SpatialAnchorTransform.position);
+
+            if (atHeadset == Guid.Empty || atAnchor == Guid.Empty || atHeadset != atAnchor)
+                return false;
+
+            _persistence.BindSceneRoomUuid(atAnchor);
+            return true;
+        }
+
         /// <summary>The refined-mesh renderer for the active scan, or null.</summary>
         public MeshRenderer RefinedMeshRenderer =>
             _scanner != null ? _scanner.RefinedMeshRenderer : null;

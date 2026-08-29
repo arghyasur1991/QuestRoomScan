@@ -1201,7 +1201,7 @@ namespace Genesis.RoomScan
             Guid resolved = Guid.Empty;
             if (mgr != null && mgr.HasSpatialAnchor && mgr.SpatialAnchorTransform != null)
                 resolved = mgr.TryGetSceneRoomUuidAt(mgr.SpatialAnchorTransform.position);
-            if (resolved == Guid.Empty && mgr != null)
+            else if (mgr != null)
                 resolved = mgr.TryGetSceneRoomUuidContainingHeadset();
             if (resolved == Guid.Empty)
                 return have;
@@ -1228,6 +1228,18 @@ namespace Genesis.RoomScan
             if (entry == null) return;
             entry.sceneRoomUuid = _activeAnchorData.sceneRoomUuid;
             WriteManifest(manifest);
+        }
+
+        /// <summary>
+        /// Write this Scene API UUID onto the active package even when a
+        /// previous UUID is still in the loaded scene model. Used after a
+        /// successful "headset and spatial anchor share a room" check so a
+        /// Space Setup redo in the same physical room rebinds.
+        /// </summary>
+        internal void BindSceneRoomUuid(Guid uuid)
+        {
+            if (uuid == Guid.Empty) return;
+            PersistSceneRoomUuid(uuid.ToString());
         }
 
         /// <summary>
