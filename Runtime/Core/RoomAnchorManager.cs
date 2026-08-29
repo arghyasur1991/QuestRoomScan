@@ -119,6 +119,36 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Re-run <c>LoadSceneFromDevice</c> with capture off. The first
+        /// <see cref="Start"/> load often finishes with zero rooms when
+        /// spatial-data permission was still denied; after the host grants
+        /// it, call this before treating <see cref="HasSceneRooms"/> as
+        /// "this space has no scene model".
+        /// </summary>
+        public async System.Threading.Tasks.Task<bool> ReloadSceneFromDeviceAsync()
+        {
+            if (_mruk == null) return HasSceneRooms;
+
+            Logger.Info("MRUK LoadSceneFromDevice reload (V2FallbackV1, capture=false)...");
+            try
+            {
+                var result = await _mruk.LoadSceneFromDevice(
+                    requestSceneCaptureIfNoDataFound: false,
+                    removeMissingRooms: true,
+                    sceneModel: MRUK.SceneModel.V2FallbackV1);
+                Logger.Info($"LoadSceneFromDevice reload result={result}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"LoadSceneFromDevice reload failed: {ex.Message}");
+            }
+
+            bool hasRooms = _mruk.Rooms != null && _mruk.Rooms.Count > 0;
+            MarkRoomReady(hasRooms);
+            return HasSceneRooms;
+        }
+
+        /// <summary>
         /// Opens Horizon Space Setup (pauses the Unity app), then reloads
         /// the scene model with capture <b>off</b>. Returns true only when
         /// rooms exist after that reload — <c>RequestSpaceSetup</c> itself
@@ -137,16 +167,7 @@ namespace Genesis.RoomScan
             Logger.Info("Requesting Horizon Space Setup (at most once)...");
             bool completed = await OVRScene.RequestSpaceSetup();
             Logger.Info($"RequestSpaceSetup completed={completed} (true on cancel too — check rooms)");
-
-            var result = await _mruk.LoadSceneFromDevice(
-                requestSceneCaptureIfNoDataFound: false,
-                removeMissingRooms: true,
-                sceneModel: MRUK.SceneModel.V2FallbackV1);
-            Logger.Info($"LoadSceneFromDevice after Space Setup result={result}");
-
-            bool hasRooms = _mruk.Rooms != null && _mruk.Rooms.Count > 0;
-            MarkRoomReady(hasRooms);
-            return HasSceneRooms;
+            return await ReloadSceneFromDeviceAsync();
         }
 
         void MarkRoomReady(bool hasRooms)

@@ -340,6 +340,18 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Re-run MRUK scene discovery without opening Space Setup. Use after
+        /// spatial-data permission is granted: the first boot load often
+        /// finished with zero rooms while <c>USE_SCENE</c> was still denied.
+        /// </summary>
+        public Task<bool> ReloadSceneFromDeviceAsync()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null) return Task.FromResult(false);
+            return mgr.ReloadSceneFromDeviceAsync();
+        }
+
+        /// <summary>
         /// Opens Horizon Space Setup (Unity app pauses), then reloads the
         /// scene model with auto-capture off. Returns true only when rooms
         /// exist afterwards — cancel still completes the OS API as true.
