@@ -24,11 +24,24 @@ namespace Genesis.RoomScan
         /// <summary>Singleton instance set in <see cref="Awake"/>.</summary>
         public static RoomAnchorManager Instance { get; private set; }
 
-        /// <summary>Raised once when the MRUK room scene has been loaded and the anchor transform is available.</summary>
+        /// <summary>Raised once when the MRUK room scene has been loaded and the anchor transform is available.
+        /// Fires even when discovery finds zero rooms (see <see cref="HasSceneRooms"/>).</summary>
         public event Action RoomReady;
 
-        /// <summary>True after the MRUK scene has loaded (even if no rooms were found).</summary>
+        /// <summary>True after the MRUK scene discovery attempt has finished
+        /// (including <c>NoRoomsFound</c>, permission failure, or a timeout
+        /// fallback). Hosts should wait on this rather than assuming
+        /// <see cref="RoomReady"/> always arrives via <c>SceneLoadedEvent</c>.</summary>
         public bool IsRoomLoaded { get; private set; }
+
+        /// <summary>True when MRUK has at least one room after discovery.
+        /// Distinct from <see cref="IsRoomLoaded"/>: a finished load with
+        /// no scene model is a valid empty space, not a hang.</summary>
+        public bool HasSceneRooms { get; private set; }
+
+        readonly System.Threading.Tasks.TaskCompletionSource<bool> _readyTcs =
+            new(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+        bool _readySignaled;
 
         private MRUK _mruk;
         private Transform _anchorTransform;
@@ -44,7 +57,10 @@ namespace Genesis.RoomScan
         private IEnumerator Start()
         {
             if (!enabled)
+            {
+                MarkRoomReady(hasRooms: false);
                 yield break;
+            }
 
             _mruk = FindAnyObjectByType<MRUK>();
             if (_mruk == null)
@@ -63,14 +79,92 @@ namespace Genesis.RoomScan
                 _mruk.SceneLoadedEvent.AddListener(OnSceneLoaded);
 
             yield return null;
-            _ = _mruk.LoadSceneFromDevice(sceneModel: MRUK.SceneModel.V2FallbackV1);
-            Logger.Info("MRUK LoadSceneFromDevice started (V2FallbackV1, awaiting SceneLoadedEvent)...");
+
+            // Do not request Horizon Space Setup from this load. A missing
+            // scene model is a host decision (offer a card, then call
+            // RequestSpaceSetupAndReloadAsync at most once). The previous
+            // default (requestSceneCaptureIfNoDataFound: true) paused the
+            // Unity app into Meta's UI with no host copy, and on cancel
+            // SceneLoadedEvent never fired so RoomReady hung.
+            Logger.Info("MRUK LoadSceneFromDevice (V2FallbackV1, capture=false)...");
+            var loadTask = _mruk.LoadSceneFromDevice(
+                requestSceneCaptureIfNoDataFound: false,
+                removeMissingRooms: true,
+                sceneModel: MRUK.SceneModel.V2FallbackV1);
+            while (!loadTask.IsCompleted)
+                yield return null;
+
+            if (loadTask.Exception != null)
+                Logger.Error($"LoadSceneFromDevice failed: {loadTask.Exception.GetBaseException().Message}");
+            else
+                Logger.Info($"LoadSceneFromDevice finished result={loadTask.Result}");
+
+            if (!IsRoomLoaded)
+            {
+                Logger.Warning(
+                    "MRUK load finished without SceneLoadedEvent — treating as no rooms " +
+                    "(IsRoomLoaded/RoomReady still signal so hosts are not stuck).");
+                MarkRoomReady(hasRooms: false);
+            }
+        }
+
+        /// <summary>
+        /// Completes when <see cref="IsRoomLoaded"/> is true. If discovery
+        /// already finished, returns a completed task.
+        /// </summary>
+        public System.Threading.Tasks.Task WaitUntilRoomReadyAsync()
+        {
+            if (IsRoomLoaded) return System.Threading.Tasks.Task.CompletedTask;
+            return _readyTcs.Task;
+        }
+
+        /// <summary>
+        /// Opens Horizon Space Setup (pauses the Unity app), then reloads
+        /// the scene model with capture <b>off</b>. Returns true only when
+        /// rooms exist after that reload — <c>RequestSpaceSetup</c> itself
+        /// completes true on cancel, which is not success-with-rooms.
+        /// Call at most once per empty-space offer. Device-only.
+        /// </summary>
+        public async System.Threading.Tasks.Task<bool> RequestSpaceSetupAndReloadAsync()
+        {
+            if (_mruk == null) return HasSceneRooms;
+            if (Application.isEditor)
+            {
+                Logger.Warning("Space Setup is a device-only Horizon flow.");
+                return HasSceneRooms;
+            }
+
+            Logger.Info("Requesting Horizon Space Setup (at most once)...");
+            bool completed = await OVRScene.RequestSpaceSetup();
+            Logger.Info($"RequestSpaceSetup completed={completed} (true on cancel too — check rooms)");
+
+            var result = await _mruk.LoadSceneFromDevice(
+                requestSceneCaptureIfNoDataFound: false,
+                removeMissingRooms: true,
+                sceneModel: MRUK.SceneModel.V2FallbackV1);
+            Logger.Info($"LoadSceneFromDevice after Space Setup result={result}");
+
+            bool hasRooms = _mruk.Rooms != null && _mruk.Rooms.Count > 0;
+            MarkRoomReady(hasRooms);
+            return HasSceneRooms;
+        }
+
+        void MarkRoomReady(bool hasRooms)
+        {
+            HasSceneRooms = hasRooms;
+            IsRoomLoaded = true;
+            if (_readySignaled)
+                return;
+            _readySignaled = true;
+            _readyTcs.TrySetResult(true);
+            RoomReady?.Invoke();
         }
 
         private void OnDestroy()
         {
             if (_mruk != null && _mruk.SceneLoadedEvent != null)
                 _mruk.SceneLoadedEvent.RemoveListener(OnSceneLoaded);
+            _readyTcs.TrySetResult(false);
             if (Instance == this)
                 Instance = null;
         }
@@ -83,8 +177,7 @@ namespace Genesis.RoomScan
             if (_mruk.Rooms == null || _mruk.Rooms.Count == 0)
             {
                 Logger.Warning("MRUK loaded but no rooms found");
-                IsRoomLoaded = true;
-                RoomReady?.Invoke();
+                MarkRoomReady(hasRooms: false);
                 return;
             }
 
@@ -103,8 +196,7 @@ namespace Genesis.RoomScan
             if (_anchorTransform == null)
             {
                 Logger.Warning("No anchor transform");
-                IsRoomLoaded = true;
-                RoomReady?.Invoke();
+                MarkRoomReady(hasRooms: true);
                 return;
             }
 
@@ -114,9 +206,8 @@ namespace Genesis.RoomScan
             else
                 Logger.Warning($"No FloorAnchors — falling back to MRUKRoom.transform (pos={_anchorTransform.position})");
 
-            IsRoomLoaded = true;
             Logger.Info($"Room ready — anchor pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
-            RoomReady?.Invoke();
+            MarkRoomReady(hasRooms: true);
         }
 
         // ─────────────────────────────────────────────────────────────

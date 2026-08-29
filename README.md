@@ -67,7 +67,7 @@ This is the case the package was built for. Quest's built-in room mesh gives you
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
 - **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, Occlusion, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
 - **Freeze Tint Toggle** — Independent toggle (not tied to render mode) shows/hides a blue tint overlay on frozen voxels in live mesh modes (Vertex, Triplanar, Wireframe). Bindable via `RoomScanInputHandler`.
-- **Game Integration APIs** — `RoomScanSession` provides a high-level facade auto-installed by the Game-Ready preset: `RequestCameraPermissionAsync()` → `StartScanAsync()` → `FreezeInView()` / `UnfreezeInView()` → `await FinalizeScanAsync()` → `ScanResult` with mesh + atlas. `LoadAsync(packageId)` / `LoadLatestAsync()` for later launches. `UnloadActiveScanAsync()` drops the in-memory mesh and spatial-anchor bind without deleting saved packages (needed before a new scan in the same session). `ListSavedScans()` / `DeleteScanAsync(id)` for games that keep several packages; `ClearAllScansAsync()` for a nuclear wipe. For finer control: `LoadRefinedOnlyAsync()` (loads only refined mesh + atlas, no TSDF, < 1 second), `ReleaseScanResources()`, public `RefinedMesh`/`RefinedAtlas` properties, `RefinedMeshReady` event, and `ScanCoverage`/`ScanProgress` metrics for guided UX. Scene understanding accessible via `SceneObjectRegistry` for MRUK + AI detected objects.
+- **Game Integration APIs** — `RoomScanSession` provides a high-level facade auto-installed by the Game-Ready preset: `RequestCameraPermissionAsync()` / `RequestScenePermissionAsync()` / `RequestAnchorPermissionAsync()` → `WaitUntilRoomReadyAsync()` → `StartScanAsync()` → `FreezeInView()` / `UnfreezeInView()` → `await FinalizeScanAsync()` → `ScanResult` with mesh + atlas. `LoadAsync(packageId)` / `LoadLatestAsync()` for later launches. `UnloadActiveScanAsync()` drops the in-memory mesh and spatial-anchor bind without deleting saved packages (needed before a new scan in the same session). `ListSavedScans()` / `DeleteScanAsync(id)` for games that keep several packages; `ClearAllScansAsync()` for a nuclear wipe. `HasSceneRooms` + `RequestSpaceSetupAndReloadAsync()` for hosts that want to offer Horizon Space Setup themselves — `RoomAnchorManager` loads the scene with `requestSceneCaptureIfNoDataFound: false` so a missing model does **not** pause into Meta's UI. For finer control: `LoadRefinedOnlyAsync()` (loads only refined mesh + atlas, no TSDF, < 1 second), `ReleaseScanResources()`, public `RefinedMesh`/`RefinedAtlas` properties, `RefinedMeshReady` event, and `ScanCoverage`/`ScanProgress` metrics for guided UX. Scene understanding accessible via `SceneObjectRegistry` for MRUK + AI detected objects.
 - **Post-Bake Mesh Simplification** — UV-preserving mesh simplification via `meshopt_simplifyWithAttributes` runs after atlas baking (configurable ratio), preserving texture quality. Replaces the old broken pre-bake decimation.
 - **AI Object Detection** — Optional YOLO-based object detection via Unity Inference Engine (Sentis) running during scanning. GPU Non-Maximum Suppression via compute shader (only ~500 bytes readback vs ~200KB for CPU NMS). Detected objects projected to 3D world space via GPU depth projection with temporal snapshot to handle async inference. Head angular velocity gating skips blurry frames. Detection keyframes saved with JSONL metadata for post-processing.
 - **MRUK Scene Understanding** — `RoomUnderstanding` module populates a `SceneObjectRegistry` from Meta's Mixed Reality Utility Kit anchors (walls, floor, ceiling, bed, TV, doors, windows, furniture). Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh for reliable detection. Event-driven anchor updates.
@@ -102,6 +102,7 @@ Additional project-level dependencies (not in `package.json` — installed via M
 
 - `com.oculus.permission.USE_SCENE` (depth API / spatial data)
 - `horizonos.permission.HEADSET_CAMERA` (passthrough camera RGB access)
+- `com.oculus.permission.USE_ANCHOR_API` (spatial anchors)
 
 ## Installation
 
@@ -726,8 +727,16 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `IsScanning` | `bool` | Live scan state (mirrors `RoomScanner.IsScanning`) |
 | `HasSavedScan` | `bool` | True if at least one `pkg_*/` exists on disk |
 | `HasCameraPermission` | `bool` | Horizon OS `HEADSET_CAMERA` granted (always true off-Android) |
+| `HasScenePermission` | `bool` | Horizon OS `USE_SCENE` (spatial data) granted |
+| `HasAnchorPermission` | `bool` | Horizon OS `USE_ANCHOR_API` granted |
+| `IsRoomLoaded` | `bool` | MRUK scene discovery finished (including zero rooms) |
+| `HasSceneRooms` | `bool` | At least one MRUK room after discovery |
 | `ProgressUpdated` | `event Action<ScanProgress>` | Per-frame progress while scanning |
 | `RequestCameraPermissionAsync()` | `Task<bool>` | Awaits the system permission dialog; resolves true if already granted |
+| `RequestScenePermissionAsync()` | `Task<bool>` | Awaits spatial-data permission |
+| `RequestAnchorPermissionAsync()` | `Task<bool>` | Awaits spatial-anchor permission |
+| `WaitUntilRoomReadyAsync()` | `Task` | Completes when scene discovery has finished |
+| `RequestSpaceSetupAndReloadAsync()` | `Task<bool>` | Horizon Space Setup, then reload with auto-capture **off**. True only if rooms exist afterwards (cancel is not success-with-rooms) |
 | `StartScan()` | `void` | Begin a new scan session (creates `_tmp/` package + spatial anchor) |
 | `FreezeInView()` | `void` | Paint voxels in current camera frustum as done; integration continues globally |
 | `UnfreezeInView()` | `void` | Inverse of `FreezeInView` for re-capture of bad regions |

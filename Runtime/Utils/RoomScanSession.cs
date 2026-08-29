@@ -301,5 +301,55 @@ namespace Genesis.RoomScan
         /// or outside Android device builds.</summary>
         public Task<bool> RequestCameraPermissionAsync()
             => PassthroughCameraProvider.RequestCameraPermissionAsync();
+
+        /// <summary>True when Horizon OS <c>USE_SCENE</c> (spatial data) is
+        /// granted. Always true outside Android device builds.</summary>
+        public bool HasScenePermission => AndroidRuntimePermission.Has(AndroidRuntimePermission.Scene);
+
+        /// <summary>Requests spatial-data permission. Resolves true if already
+        /// granted, or outside Android device builds.</summary>
+        public Task<bool> RequestScenePermissionAsync()
+            => AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Scene);
+
+        /// <summary>True when Horizon OS <c>USE_ANCHOR_API</c> is granted.
+        /// Always true outside Android device builds.</summary>
+        public bool HasAnchorPermission => AndroidRuntimePermission.Has(AndroidRuntimePermission.Anchors);
+
+        /// <summary>Requests spatial-anchor permission. Resolves true if
+        /// already granted, or outside Android device builds.</summary>
+        public Task<bool> RequestAnchorPermissionAsync()
+            => AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Anchors);
+
+        /// <summary>True after MRUK scene discovery has finished, including
+        /// an empty space (no rooms). Distinct from <see cref="HasSceneRooms"/>.</summary>
+        public bool IsRoomLoaded =>
+            RoomAnchorManager.Instance != null && RoomAnchorManager.Instance.IsRoomLoaded;
+
+        /// <summary>True when this space has at least one MRUK room after
+        /// discovery. False after a finished load with no scene model.</summary>
+        public bool HasSceneRooms =>
+            RoomAnchorManager.Instance != null && RoomAnchorManager.Instance.HasSceneRooms;
+
+        /// <summary>Completes when scene discovery has finished. Completed
+        /// immediately if it already has.</summary>
+        public Task WaitUntilRoomReadyAsync()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null) return Task.CompletedTask;
+            return mgr.WaitUntilRoomReadyAsync();
+        }
+
+        /// <summary>
+        /// Opens Horizon Space Setup (Unity app pauses), then reloads the
+        /// scene model with auto-capture off. Returns true only when rooms
+        /// exist afterwards — cancel still completes the OS API as true.
+        /// Device-only; editor returns the current room flag.
+        /// </summary>
+        public Task<bool> RequestSpaceSetupAndReloadAsync()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null) return Task.FromResult(false);
+            return mgr.RequestSpaceSetupAndReloadAsync();
+        }
     }
 }
