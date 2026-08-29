@@ -56,6 +56,25 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Drops the in-memory loaded / refined scan without deleting saved
+        /// packages or erasing spatial-anchor UUIDs. Hides the refined mesh,
+        /// unbinds the active spatial anchor, and frees scan GPU if it was
+        /// allocated. Call this when leaving a loaded look to start a new
+        /// scan in the same session — <see cref="StartScanAsync"/> also
+        /// does this on a non-resume start, but hosts usually want the old
+        /// mesh gone <i>before</i> the user presses the scan button.
+        /// Idempotent. Yields two frames after the spatial-anchor GameObject
+        /// is destroyed so the compositor can settle.
+        /// </summary>
+        public async Task UnloadActiveScanAsync()
+        {
+            if (_scanner == null) return;
+            _scanner.UnloadActiveScan();
+            await Task.Yield();
+            await Task.Yield();
+        }
+
+        /// <summary>
         /// Begins a new scan session. The room mesh builds in real-time as
         /// the user looks around. Async because <see cref="RoomScanner.StartScanningAsync"/>
         /// stages the heavy GPU bring-up across a few frames before
@@ -65,6 +84,11 @@ namespace Genesis.RoomScan
         /// wall-clock from await to first integrated frame is ~56 ms,
         /// imperceptible to the user but worth awaiting so callers can
         /// sequence UI feedback ("Scanning…") right after.
+        /// <para>
+        /// A non-resume start first unloads any previously loaded package
+        /// so a second look in the same session does not keep drawing the
+        /// old mesh or create a spatial anchor on top of a still-bound one.
+        /// </para>
         /// </summary>
         public Task StartScanAsync()
         {

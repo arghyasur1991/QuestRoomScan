@@ -945,7 +945,7 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("PassthroughCameraProvider", hasPCAProvider);
             StatusRowOptional("TextureRefinement (atlas baking)", hasRefinement);
             StatusRowOptional("RoomUnderstanding (MRUK bridge)", hasRoomUnderstanding);
-            StatusRowOptional("RoomScanSession (game-dev async API: StartScanAsync / FinalizeScanAsync / LoadLatestAsync)",
+            StatusRowOptional("RoomScanSession (game-dev async API: StartScanAsync / UnloadActiveScanAsync / FinalizeScanAsync / LoadAsync)",
                               _session != null);
 
             if (hasRefinement)
@@ -1193,7 +1193,7 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<RoomUnderstanding>() == null)
                 Undo.AddComponent<RoomUnderstanding>(root);
 
-            // RoomScanSession: public game-dev facade (StartScanAsync / FinalizeScanAsync /
+            // RoomScanSession: public game-dev facade (StartScanAsync / UnloadActiveScanAsync / FinalizeScanAsync /
             // LoadLatestAsync / HasSavedScan / ProgressUpdated). Without it,
             // game code that follows the documented public-API path cannot
             // find RoomScanSession.Instance and bails.

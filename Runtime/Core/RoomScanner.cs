@@ -481,6 +481,26 @@ namespace Genesis.RoomScan
         public async Task StartScanningAsync()
         {
             if (IsScanning) return;
+
+            // Resume is "same-session pause of an in-progress _tmp scan".
+            // Compute it before UnloadActiveScan, which zeros IntegrationCount.
+            bool resuming = _persistence != null
+                && _persistence.ActivePackageId == RoomScanPersistence.TmpPkgId
+                && _volumeIntegrator != null
+                && _volumeIntegrator.IntegrationCount > 0;
+
+            // A LoadAsync in this session leaves the refined mesh drawing and
+            // a spatial anchor localized. Starting a new scan on top of that
+            // (a) keeps the old mesh on screen and (b) CreateAndSaveSpatialAnchorAsync
+            // races the live bound anchor and freezes the compositor. Drop the
+            // in-memory scan first; saved packages stay on disk.
+            if (!resuming)
+            {
+                UnloadActiveScan();
+                await Task.Yield();
+                await Task.Yield();
+            }
+
             IsScanning = true;
             try
             {
@@ -523,14 +543,10 @@ namespace Genesis.RoomScan
                 await Task.Yield();
                 await Task.Yield();
 
-                // ── Stage 3: persistence + per-scan invalidation ────────
-                // Resume within the same session: if we already have an
-                // active tmp package with scan data, keep it instead of
-                // nuking everything.
-                bool resuming = _persistence != null
-                    && _persistence.ActivePackageId == RoomScanPersistence.TmpPkgId
-                    && _volumeIntegrator.IntegrationCount > 0;
-
+                // ── Stage 3: persistence + live preview ─────────────────
+                // In-memory load state was dropped in UnloadActiveScan above
+                // when !resuming. GPU is up now, so switch to the live
+                // vertex preview and open a fresh _tmp package + anchor.
                 if (!resuming)
                 {
                     _prevVertexCount = 0;
@@ -539,50 +555,19 @@ namespace Genesis.RoomScan
                     _prevColorCoverage = 0f;
                     _stabilizedTime = 0f;
 
-                    // Invalidate any previously loaded / refined output. Without
-                    // this, a Begin() that follows a LoadRefinedOnlyAsync (or a
-                    // prior in-session refinement) leaves HasRefinedTexture=true
-                    // and the old _refinedMesh visible, which (a) keeps the stale
-                    // mesh on screen instead of switching to live vertex preview
-                    // and (b) makes RoomScanSession.FinalizeScanAsync skip the
-                    // "if (!HasRefinedTexture) StartTextureRefinement()" gate, so
-                    // the new TSDF gets saved but no fresh refined_mesh.bin is
-                    // ever written. This is the same per-state-reset that
-                    // ClearAllDataAsync does, just narrowed to the things a fresh
-                    // scan must invalidate (volumes are already re-alloc'd above).
-                    HasRefinedTexture = false;
-                    HasHQRefinedTexture = false;
-                    HasEnhancedMesh = false;
-                    LastRefinedResult = null;
-                    LastSimplifiedResult = null;
-                    _cachedUnwrap = null;
-                    _refinedMesh = null;
-                    if (_normalMapTexture != null)
-                    {
-                        Destroy(_normalMapTexture);
-                        _normalMapTexture = null;
-                    }
-                    _gsplatProvider?.ClearSplat();
-                    _gsplatProvider?.ResetSplatTransform();
-                    _downloadedPlyData = null;
-
-                    // Switch render mode off Refined/HQRefined/Splat back to the
-                    // live in-progress preview. Done after the HasRefined* flags
-                    // are cleared so IsModeAvailable() reports the new state
-                    // correctly and the renderer toggles in ApplyRenderMode pick
-                    // up Vertex as the right visible mode.
                     SetRenderMode(ScanRenderMode.Vertex);
 
-                    if (_persistence != null) _persistence.ClearActivePackage();
                     if (_keyframeCollector != null)
                         _keyframeCollector.ClearInMemory();
 
-                    _persistence.CreateTmpPackage();
+                    _persistence?.CreateTmpPackage();
                     _ = CreateScanAnchorAsync();
                 }
 
                 _keyframeCollector?.SetExportDirectory(
-                    Path.Combine(_persistence.ActivePackageDirectory, "keyframes"));
+                    _persistence != null && _persistence.HasActivePackage
+                        ? Path.Combine(_persistence.ActivePackageDirectory, "keyframes")
+                        : null);
 
                 float t = Time.time;
                 _lastIntegrationTime = t;
@@ -705,6 +690,77 @@ namespace Genesis.RoomScan
                 SetRenderMode(HasRefinedTexture ? ScanRenderMode.Refined : ScanRenderMode.None);
 
             Logger.Info("Scan GPU resources released (~400-500 MB freed)");
+        }
+
+        /// <summary>
+        /// Drops the in-memory loaded / refined scan so the next
+        /// <see cref="StartScanningAsync"/> is an empty-room start. Does
+        /// <b>not</b> delete saved packages or erase spatial-anchor UUIDs
+        /// from Horizon OS — use <see cref="RoomScanPersistence.DeletePackageAsync"/>
+        /// for that.
+        /// <para>
+        /// Hides the refined mesh, unbinds the active spatial anchor
+        /// (children detached first), clears the active-package pointer,
+        /// cleans <c>_tmp</c>, and disposes scan GPU resources if they
+        /// were allocated. Idempotent.
+        /// </para>
+        /// </summary>
+        public void UnloadActiveScan()
+        {
+            StopScanning();
+
+            HasRefinedTexture = false;
+            HasHQRefinedTexture = false;
+            HasEnhancedMesh = false;
+            LastRefinedResult = null;
+            LastSimplifiedResult = null;
+            _cachedUnwrap = null;
+            if (_refinedMeshFilter != null)
+                _refinedMeshFilter.sharedMesh = null;
+            if (_refinedMesh != null)
+            {
+                Destroy(_refinedMesh);
+                _refinedMesh = null;
+            }
+            if (_normalMapTexture != null)
+            {
+                Destroy(_normalMapTexture);
+                _normalMapTexture = null;
+            }
+            _gsplatProvider?.ClearSplat();
+            _gsplatProvider?.ResetSplatTransform();
+            _downloadedPlyData = null;
+
+            SetRenderMode(ScanRenderMode.None);
+
+            RoomAnchorManager.Instance?.UnloadActiveSpatialAnchor();
+
+            if (_keyframeCollector != null)
+                _keyframeCollector.ClearInMemory();
+
+            if (_persistence != null)
+            {
+                _persistence.CleanupTmpPackage();
+                _persistence.ClearActivePackage();
+            }
+
+            if (!_scanResourcesReleased)
+            {
+                _volumeIntegrator?.ReleaseVolumes();
+                _meshExtractor?.DisposeOnly();
+                _depthCapture?.ReleaseResources();
+                if (_triplanarCache != null)
+                    _triplanarCache.Clear();
+                _scanResourcesReleased = true;
+            }
+            else
+            {
+                _volumeIntegrator?.Clear();
+                if (_triplanarCache != null)
+                    _triplanarCache.Clear();
+            }
+
+            Logger.Info("Active scan unloaded (saved packages kept)");
         }
 
         /// <summary>
