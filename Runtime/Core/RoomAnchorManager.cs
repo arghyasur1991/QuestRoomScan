@@ -151,13 +151,14 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// True when the headset is inside at least one loaded MRUK room
-        /// volume. <see cref="HasSceneRooms"/> can be true while the player
-        /// stands in a different, uncaptured room: native
-        /// <c>GetCurrentRoom()</c> then returns the last or first captured
-        /// room, not "this space". Test world pose with
-        /// <c>MRUKRoom.IsPositionInRoom</c> instead.
-        /// Editor returns true so Space Setup is never offered over Link.
+        /// True when the headset is inside a loaded captured space the same
+        /// way Horizon Space Setup decides "this space". Native
+        /// <c>IsPositionInRoom</c> is the floor outline — it stays true a
+        /// little past a doorway — so a hallway next to a captured room
+        /// still passed. <c>GetCurrentRoom()</c> is worse: it returns the
+        /// last captured room when you leave. We require the headset to sit
+        /// inward of every outer wall plane (including invisible doorway
+        /// faces). Editor returns true so Space Setup is never offered over Link.
         /// </summary>
         public bool IsHeadsetInsideASceneRoom()
         {
@@ -170,12 +171,53 @@ namespace Genesis.RoomScan
             for (int i = 0; i < _mruk.Rooms.Count; i++)
             {
                 var room = _mruk.Rooms[i];
-                if (room != null && room.IsPositionInRoom(pos, testVerticalBounds: true))
+                if (room != null && RoomContainsHeadset(room, pos))
                     return true;
             }
 
-            Logger.Info($"Headset not inside any of {_mruk.Rooms.Count} loaded room(s) (pos={pos}).");
             return false;
+        }
+
+        const float OuterWallInsetMetres = 0.08f;
+
+        const MRUKAnchor.SceneLabels OuterWallLabels =
+            MRUKAnchor.SceneLabels.WALL_FACE
+            | MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE;
+
+        static bool RoomContainsHeadset(MRUKRoom room, Vector3 pos)
+        {
+            if (!room.IsPositionInRoom(pos, testVerticalBounds: true))
+                return false;
+            return InsideOuterWalls(room, pos, OuterWallInsetMetres);
+        }
+
+        /// <summary>
+        /// Floor-outline <c>IsPositionInRoom</c> does not drop at a doorway.
+        /// Wall planes (and invisible faces across openings) do: each plane's
+        /// +Z faces into the room, so just outside a door is a negative
+        /// half-space even when the floor polygon still contains the head.
+        /// </summary>
+        static bool InsideOuterWalls(MRUKRoom room, Vector3 pos, float inset)
+        {
+            var anchors = room.Anchors;
+            if (anchors == null || anchors.Count == 0)
+                return true;
+
+            for (int i = 0; i < anchors.Count; i++)
+            {
+                var a = anchors[i];
+                if (a == null) continue;
+                if ((a.Label & OuterWallLabels) == 0) continue;
+
+                Vector3 inward = room.GetFacingDirection(a);
+                if (inward.sqrMagnitude < 1e-8f)
+                    inward = a.transform.forward;
+                inward.Normalize();
+                if (Vector3.Dot(pos - a.transform.position, inward) < inset)
+                    return false;
+            }
+
+            return true;
         }
 
         static Vector3 HeadsetWorldPosition()
