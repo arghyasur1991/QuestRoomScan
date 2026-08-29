@@ -36,7 +36,9 @@ namespace Genesis.RoomScan
 
         /// <summary>True when MRUK has at least one room after discovery.
         /// Distinct from <see cref="IsRoomLoaded"/>: a finished load with
-        /// no scene model is a valid empty space, not a hang.</summary>
+        /// no scene model is a valid empty space, not a hang. Distinct from
+        /// <see cref="IsHeadsetInsideASceneRoom"/>: rooms can exist for a
+        /// different space than the one the headset is standing in.</summary>
         public bool HasSceneRooms { get; private set; }
 
         readonly System.Threading.Tasks.TaskCompletionSource<bool> _readyTcs =
@@ -146,6 +148,43 @@ namespace Genesis.RoomScan
             bool hasRooms = _mruk.Rooms != null && _mruk.Rooms.Count > 0;
             MarkRoomReady(hasRooms);
             return HasSceneRooms;
+        }
+
+        /// <summary>
+        /// True when the headset is inside at least one loaded MRUK room
+        /// volume. <see cref="HasSceneRooms"/> can be true while the player
+        /// stands in a different, uncaptured room: native
+        /// <c>GetCurrentRoom()</c> then returns the last or first captured
+        /// room, not "this space". Test world pose with
+        /// <c>MRUKRoom.IsPositionInRoom</c> instead.
+        /// Editor returns true so Space Setup is never offered over Link.
+        /// </summary>
+        public bool IsHeadsetInsideASceneRoom()
+        {
+            if (Application.isEditor)
+                return true;
+            if (_mruk == null || _mruk.Rooms == null || _mruk.Rooms.Count == 0)
+                return false;
+
+            Vector3 pos = HeadsetWorldPosition();
+            for (int i = 0; i < _mruk.Rooms.Count; i++)
+            {
+                var room = _mruk.Rooms[i];
+                if (room != null && room.IsPositionInRoom(pos, testVerticalBounds: true))
+                    return true;
+            }
+
+            Logger.Info($"Headset not inside any of {_mruk.Rooms.Count} loaded room(s) (pos={pos}).");
+            return false;
+        }
+
+        static Vector3 HeadsetWorldPosition()
+        {
+            var rig = FindAnyObjectByType<OVRCameraRig>(FindObjectsInactive.Include);
+            if (rig != null && rig.centerEyeAnchor != null)
+                return rig.centerEyeAnchor.position;
+            var cam = Camera.main;
+            return cam != null ? cam.transform.position : Vector3.zero;
         }
 
         /// <summary>

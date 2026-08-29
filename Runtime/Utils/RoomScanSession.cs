@@ -326,9 +326,21 @@ namespace Genesis.RoomScan
             RoomAnchorManager.Instance != null && RoomAnchorManager.Instance.IsRoomLoaded;
 
         /// <summary>True when this space has at least one MRUK room after
-        /// discovery. False after a finished load with no scene model.</summary>
+        /// discovery. False after a finished load with no scene model.
+        /// Does not mean the headset is inside that room — see
+        /// <see cref="IsHeadsetInsideASceneRoom"/>.</summary>
         public bool HasSceneRooms =>
             RoomAnchorManager.Instance != null && RoomAnchorManager.Instance.HasSceneRooms;
+
+        /// <summary>
+        /// True when the headset is inside at least one loaded MRUK room
+        /// volume. False when discovery found no rooms, or when rooms exist
+        /// for another captured space (a second room in the house). Editor
+        /// is always true.
+        /// </summary>
+        public bool IsHeadsetInsideASceneRoom =>
+            RoomAnchorManager.Instance != null
+            && RoomAnchorManager.Instance.IsHeadsetInsideASceneRoom();
 
         /// <summary>Completes when scene discovery has finished. Completed
         /// immediately if it already has.</summary>
