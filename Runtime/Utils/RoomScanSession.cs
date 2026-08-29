@@ -404,10 +404,12 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Visible <c>WALL_FACE</c> planes of the room that contains the
-        /// headset. Empty in the editor and when the headset is not inside
-        /// a captured room. Hosts pin world-space UI to these without
-        /// taking an MRUK dependency. Clears <paramref name="dest"/>.
+        /// Visible <c>WALL_FACE</c> and <c>SCREEN</c> (TV) planes of the
+        /// room that contains the headset. Empty in the editor and when
+        /// the headset is not inside a captured room. Hosts pin
+        /// world-space UI without taking an MRUK dependency. Clears
+        /// <paramref name="dest"/>. A <see cref="SceneWallFace.IsScreen"/>
+        /// row is the television.
         /// </summary>
         public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest)
         {
@@ -418,6 +420,21 @@ namespace Genesis.RoomScan
                 return 0;
             }
             return u.CopyHeadsetRoomWallFaces(dest);
+        }
+
+        /// <summary>
+        /// Scene API UUID of the loaded room that contains the headset
+        /// (wall-plane test), or empty. Distinct from
+        /// <see cref="BoundSceneRoomUuid"/> (the active scan package).
+        /// Editor does not invent a UUID.
+        /// </summary>
+        public Guid HeadsetSceneRoomUuid
+        {
+            get
+            {
+                var u = Understanding();
+                return u != null ? u.TryGetRoomUuidContainingHeadset() : Guid.Empty;
+            }
         }
 
         /// <summary>

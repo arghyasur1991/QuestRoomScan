@@ -229,8 +229,8 @@ namespace Genesis.RoomScan
             => TryGetRoomUuidAt(Query.HeadsetWorldPosition());
 
         /// <summary>
-        /// Visible <c>WALL_FACE</c> planes of the room that contains
-        /// <paramref name="worldPos"/> (not doorway / inner faces).
+        /// Visible <c>WALL_FACE</c> and <c>SCREEN</c> planes of the room that
+        /// contains <paramref name="worldPos"/> (not doorway / inner faces).
         /// Returns 0 in the editor and when the point is not inside a
         /// captured room. Clears <paramref name="dest"/>.
         /// </summary>
@@ -245,9 +245,10 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Visible <c>WALL_FACE</c> planes of the room that contains the
-        /// headset. Hosts pin world-space UI to these without taking an
-        /// MRUK dependency.
+        /// Visible <c>WALL_FACE</c> and <c>SCREEN</c> (TV) planes of the
+        /// room that contains the headset. Hosts pin world-space UI to these
+        /// without taking an MRUK dependency. A <see cref="SceneWallFace.IsScreen"/>
+        /// row is the television — pin on it rather than a blank wall.
         /// </summary>
         public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest)
             => CopyWallFacesOfRoomContaining(Query.HeadsetWorldPosition(), dest);
@@ -575,8 +576,7 @@ namespace Genesis.RoomScan
                 | MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE;
 
             const MRUKAnchor.SceneLabels PinWallAvoidLabels =
-                MRUKAnchor.SceneLabels.SCREEN
-                | MRUKAnchor.SceneLabels.WALL_ART;
+                MRUKAnchor.SceneLabels.WALL_ART;
 
             internal static Vector3 HeadsetWorldPosition()
             {
@@ -635,38 +635,77 @@ namespace Genesis.RoomScan
 
                 float floorY = FloorY(room);
                 for (int i = 0; i < room.Anchors.Count; i++)
+                    TryAddPinSurface(room, room.Anchors[i], floorY, dst);
+
+                return dst.Count;
+            }
+
+            static void TryAddPinSurface(
+                MRUKRoom room, MRUKAnchor a, float floorY, List<SceneWallFace> dst)
+            {
+                if (a == null) return;
+
+                bool isScreen = a.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN);
+                bool isWall = a.HasAnyLabel(MRUKAnchor.SceneLabels.WALL_FACE)
+                    && !a.HasAnyLabel(MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE)
+                    && !a.HasAnyLabel(MRUKAnchor.SceneLabels.INNER_WALL_FACE);
+                if (!isScreen && !isWall) return;
+
+                Vector3 inward = Inward(room, a);
+                if (Vector3.Dot(inward, Vector3.up) > 0.7f
+                    || Vector3.Dot(inward, Vector3.up) < -0.7f)
+                    return;
+
+                if (!TryPlaneSize(a, out Vector3 center, out float width, out float height))
+                    return;
+
+                float min = isScreen ? 0.15f : 0.2f;
+                if (width < min || height < min) return;
+
+                bool avoid = !isScreen && a.HasAnyLabel(PinWallAvoidLabels);
+                dst.Add(new SceneWallFace(
+                    center, inward, width, height, floorY, avoid, isScreen));
+            }
+
+            static bool TryPlaneSize(
+                MRUKAnchor a, out Vector3 center, out float width, out float height)
+            {
+                center = default;
+                width = 0f;
+                height = 0f;
+
+                if (a.PlaneRect.HasValue)
                 {
-                    var a = room.Anchors[i];
-                    if (a == null) continue;
-                    if (!a.HasAnyLabel(MRUKAnchor.SceneLabels.WALL_FACE)) continue;
-                    if (a.HasAnyLabel(MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE))
-                        continue;
-                    if (a.HasAnyLabel(MRUKAnchor.SceneLabels.INNER_WALL_FACE))
-                        continue;
-                    if (!a.PlaneRect.HasValue) continue;
-
-                    Vector3 inward = Inward(room, a);
-                    if (Vector3.Dot(inward, Vector3.up) > 0.7f
-                        || Vector3.Dot(inward, Vector3.up) < -0.7f)
-                        continue;
-
                     var rect = a.PlaneRect.Value;
                     Vector3 worldX = a.transform.TransformVector(new Vector3(rect.width, 0f, 0f));
                     Vector3 worldY = a.transform.TransformVector(new Vector3(0f, rect.height, 0f));
                     float horizX = Vector3.ProjectOnPlane(worldX, Vector3.up).magnitude;
                     float horizY = Vector3.ProjectOnPlane(worldY, Vector3.up).magnitude;
-                    float width = Mathf.Max(horizX, horizY);
-                    float height = Mathf.Max(
+                    width = Mathf.Max(horizX, horizY);
+                    height = Mathf.Max(
                         Mathf.Abs(Vector3.Dot(worldX, Vector3.up)),
                         Mathf.Abs(Vector3.Dot(worldY, Vector3.up)));
-                    if (width < 0.2f || height < 0.2f) continue;
-
-                    Vector3 center = a.transform.TransformPoint(rect.center);
-                    bool avoid = a.HasAnyLabel(PinWallAvoidLabels);
-                    dst.Add(new SceneWallFace(center, inward, width, height, floorY, avoid));
+                    center = a.transform.TransformPoint(rect.center);
+                    return true;
                 }
 
-                return dst.Count;
+                if (!a.VolumeBounds.HasValue) return false;
+
+                var size = a.VolumeBounds.Value.size;
+                Vector3 wx = a.transform.TransformVector(new Vector3(size.x, 0f, 0f));
+                Vector3 wy = a.transform.TransformVector(new Vector3(0f, size.y, 0f));
+                Vector3 wz = a.transform.TransformVector(new Vector3(0f, 0f, size.z));
+                float hx = Vector3.ProjectOnPlane(wx, Vector3.up).magnitude;
+                float hy = Vector3.ProjectOnPlane(wy, Vector3.up).magnitude;
+                float hz = Vector3.ProjectOnPlane(wz, Vector3.up).magnitude;
+                width = Mathf.Max(hx, Mathf.Max(hy, hz));
+                height = Mathf.Max(
+                    Mathf.Abs(Vector3.Dot(wx, Vector3.up)),
+                    Mathf.Max(
+                        Mathf.Abs(Vector3.Dot(wy, Vector3.up)),
+                        Mathf.Abs(Vector3.Dot(wz, Vector3.up))));
+                center = a.GetAnchorCenter();
+                return true;
             }
 
             static float FloorY(MRUKRoom room)
