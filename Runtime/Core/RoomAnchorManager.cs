@@ -37,7 +37,7 @@ namespace Genesis.RoomScan
         /// <summary>True when MRUK has at least one room after discovery.
         /// Distinct from <see cref="IsRoomLoaded"/>: a finished load with
         /// no scene model is a valid empty space, not a hang. Distinct from
-        /// <see cref="IsHeadsetInsideASceneRoom"/>: rooms can exist for a
+        /// <see cref="RoomScanSession.IsHeadsetInsideASceneRoom"/>: rooms can exist for a
         /// different space than the one the headset is standing in.</summary>
         public bool HasSceneRooms { get; private set; }
 
@@ -151,74 +151,6 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// True when the headset is inside <b>any</b> loaded captured space
-        /// (outer wall planes, including doorway faces). Use this at boot
-        /// to decide whether Space Setup is needed — any set-up room is
-        /// enough. A loaded scan is tied to one room; hosts should use
-        /// <see cref="IsHeadsetInsideSceneRoom"/> with the package's stored
-        /// scene-room UUID for that. Native <c>IsPositionInRoom</c> is the
-        /// floor outline and stays true a little past a doorway.
-        /// <c>GetCurrentRoom()</c> returns the last captured UUID after you
-        /// leave — do not use it. Editor returns true so Space Setup is
-        /// never offered over Link.
-        /// </summary>
-        public bool IsHeadsetInsideASceneRoom()
-        {
-            if (Application.isEditor)
-                return true;
-            if (_mruk == null || _mruk.Rooms == null || _mruk.Rooms.Count == 0)
-                return false;
-            return SceneRoomQuery.FindContaining(
-                _mruk.Rooms, SceneRoomQuery.HeadsetWorldPosition()) != null;
-        }
-
-        /// <summary>
-        /// True when the headset is inside the captured space with this
-        /// Scene API room UUID (the value stored next to the package's
-        /// spatial-anchor UUID). False when the UUID is empty, the room is
-        /// not in the loaded scene model, or the headset has left that
-        /// room — even if another captured room in the house still
-        /// contains the headset. Editor returns true.
-        /// </summary>
-        public bool IsHeadsetInsideSceneRoom(Guid sceneRoomUuid)
-        {
-            if (Application.isEditor)
-                return true;
-            if (sceneRoomUuid == Guid.Empty)
-                return false;
-            if (_mruk == null || _mruk.Rooms == null)
-                return false;
-            var room = SceneRoomQuery.FindByUuid(_mruk.Rooms, sceneRoomUuid);
-            return SceneRoomQuery.Contains(room, SceneRoomQuery.HeadsetWorldPosition());
-        }
-
-        /// <summary>True when a loaded MRUK room still has this Scene API UUID.</summary>
-        public bool HasSceneRoom(Guid sceneRoomUuid)
-        {
-            if (sceneRoomUuid == Guid.Empty || _mruk == null || _mruk.Rooms == null)
-                return false;
-            return SceneRoomQuery.FindByUuid(_mruk.Rooms, sceneRoomUuid) != null;
-        }
-
-        /// <summary>
-        /// Scene API UUID of the loaded room that contains
-        /// <paramref name="worldPos"/> (wall-plane test), or
-        /// <see cref="Guid.Empty"/>. Used to bind a spatial anchor to a
-        /// room at scan-save / load.
-        /// </summary>
-        public Guid TryGetSceneRoomUuidAt(Vector3 worldPos)
-        {
-            if (_mruk == null || _mruk.Rooms == null)
-                return Guid.Empty;
-            return SceneRoomQuery.RoomUuid(
-                SceneRoomQuery.FindContaining(_mruk.Rooms, worldPos));
-        }
-
-        /// <summary>Scene API UUID of the loaded room that contains the headset, or empty.</summary>
-        public Guid TryGetSceneRoomUuidContainingHeadset()
-            => TryGetSceneRoomUuidAt(SceneRoomQuery.HeadsetWorldPosition());
-
-        /// <summary>
         /// Opens Horizon Space Setup (pauses the Unity app), then reloads
         /// the scene model with capture <b>off</b>. Returns true only when
         /// rooms exist after that reload — <c>RequestSpaceSetup</c> itself
@@ -272,10 +204,14 @@ namespace Genesis.RoomScan
                 return;
             }
 
-            MRUKRoom room = _mruk.GetCurrentRoom() ?? _mruk.Rooms[0];
+            MRUKRoom room = RoomUnderstanding.Query.FindContaining(
+                                _mruk.Rooms,
+                                RoomUnderstanding.Query.HeadsetWorldPosition())
+                            ?? _mruk.Rooms[0];
 
             Logger.Info($"MRUK rooms={_mruk.Rooms.Count}, " +
-                        $"current room anchors={room.Anchors.Count}");
+                        $"headset-room anchors={room.Anchors.Count} " +
+                        "(floor transform only; occupancy is RoomUnderstanding)");
             foreach (var a in room.Anchors)
                 Logger.Info($"  anchor: {a.Label} vol={a.VolumeBounds.HasValue} plane={a.PlaneRect.HasValue}");
 

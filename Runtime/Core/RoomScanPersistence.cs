@@ -1191,18 +1191,20 @@ namespace Genesis.RoomScan
 
             _activeAnchorData ??= new PackageAnchorData();
             string have = _activeAnchorData.sceneRoomUuid ?? string.Empty;
-            var mgr = RoomAnchorManager.Instance;
-            if (mgr != null
+            var understanding = RoomUnderstanding.Instance;
+            if (understanding != null
                 && Guid.TryParse(have, out Guid stored)
                 && stored != Guid.Empty
-                && mgr.HasSceneRoom(stored))
+                && understanding.HasRoom(stored))
                 return have;
 
             Guid resolved = Guid.Empty;
-            if (mgr != null && mgr.HasSpatialAnchor && mgr.SpatialAnchorTransform != null)
-                resolved = mgr.TryGetSceneRoomUuidAt(mgr.SpatialAnchorTransform.position);
-            else if (mgr != null)
-                resolved = mgr.TryGetSceneRoomUuidContainingHeadset();
+            var mgr = RoomAnchorManager.Instance;
+            if (understanding != null && mgr != null
+                && mgr.HasSpatialAnchor && mgr.SpatialAnchorTransform != null)
+                resolved = understanding.TryGetRoomUuidAt(mgr.SpatialAnchorTransform.position);
+            else if (understanding != null)
+                resolved = understanding.TryGetRoomUuidContainingHeadset();
             if (resolved == Guid.Empty)
                 return have;
 

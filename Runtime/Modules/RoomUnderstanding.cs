@@ -19,17 +19,26 @@ namespace Genesis.RoomScan
 
     /// <summary>
     /// Wraps Meta MRUK APIs to provide semantic room understanding.
-    /// Game clients query this instead of MRUK directly.
-    /// Falls back to vertex-normal heuristics when MRUK room data is unavailable.
+    /// Occupancy, wall faces, and classification all live here — hosts
+    /// should still prefer <see cref="RoomScanSession"/> rather than
+    /// taking an MRUK dependency. Falls back to vertex-normal heuristics
+    /// when MRUK room data is unavailable.
     /// </summary>
     public class RoomUnderstanding : MonoBehaviour, IRoomScanModule
     {
+        public static RoomUnderstanding Instance { get; private set; }
+
         public string ModuleName => "Room Understanding";
         public void OnModuleInitialize(RoomScanner scanner) { }
 
         private MRUKRoom _room;
         private MRUK _mruk;
         private bool _subscribedToRoomEvents;
+
+        void Awake()
+        {
+            Instance = this;
+        }
 
         /// <summary>
         /// Raised when MRUK anchors change (created, updated, or room updated).
@@ -153,6 +162,95 @@ namespace Genesis.RoomScan
             }
             return result;
         }
+
+        // ─────────────────────────────────────────────────────────────
+        //  Occupancy + wall faces (multi-room; never GetCurrentRoom)
+        // ─────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// True when the headset is inside <b>any</b> loaded captured space
+        /// (outer wall planes, including doorway faces). Boot / Space Setup:
+        /// any set-up room is enough. A loaded scan is tied to one room —
+        /// use <see cref="IsHeadsetInsideRoom"/>. Native
+        /// <c>IsPositionInRoom</c> is the floor outline and stays true a
+        /// little past a doorway. <c>GetCurrentRoom()</c> is last/first after
+        /// you leave — do not use it. Editor returns true.
+        /// </summary>
+        public bool IsHeadsetInsideAnyRoom()
+        {
+            if (Application.isEditor) return true;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null || _mruk.Rooms.Count == 0)
+                return false;
+            return Query.FindContaining(_mruk.Rooms, Query.HeadsetWorldPosition()) != null;
+        }
+
+        /// <summary>
+        /// True when the headset is inside the captured space with this
+        /// Scene API room UUID. False when the UUID is empty, the room is
+        /// not in the loaded scene model, or the headset has left that
+        /// room — even if another captured room still contains the
+        /// headset. Editor returns true.
+        /// </summary>
+        public bool IsHeadsetInsideRoom(Guid sceneRoomUuid)
+        {
+            if (Application.isEditor) return true;
+            if (sceneRoomUuid == Guid.Empty) return false;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null) return false;
+            var room = Query.FindByUuid(_mruk.Rooms, sceneRoomUuid);
+            return Query.Contains(room, Query.HeadsetWorldPosition());
+        }
+
+        /// <summary>True when a loaded MRUK room still has this Scene API UUID.</summary>
+        public bool HasRoom(Guid sceneRoomUuid)
+        {
+            if (sceneRoomUuid == Guid.Empty) return false;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null) return false;
+            return Query.FindByUuid(_mruk.Rooms, sceneRoomUuid) != null;
+        }
+
+        /// <summary>
+        /// Scene API UUID of the loaded room that contains
+        /// <paramref name="worldPos"/> (wall-plane test), or
+        /// <see cref="Guid.Empty"/>.
+        /// </summary>
+        public Guid TryGetRoomUuidAt(Vector3 worldPos)
+        {
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null)
+                return Guid.Empty;
+            return Query.RoomUuid(Query.FindContaining(_mruk.Rooms, worldPos));
+        }
+
+        /// <summary>Scene API UUID of the loaded room that contains the headset, or empty.</summary>
+        public Guid TryGetRoomUuidContainingHeadset()
+            => TryGetRoomUuidAt(Query.HeadsetWorldPosition());
+
+        /// <summary>
+        /// Visible <c>WALL_FACE</c> planes of the room that contains
+        /// <paramref name="worldPos"/> (not doorway / inner faces).
+        /// Returns 0 in the editor and when the point is not inside a
+        /// captured room. Clears <paramref name="dest"/>.
+        /// </summary>
+        public int CopyWallFacesOfRoomContaining(Vector3 worldPos, List<SceneWallFace> dest)
+        {
+            if (dest == null) return 0;
+            dest.Clear();
+            if (Application.isEditor) return 0;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null) return 0;
+            return Query.CopyWallFaces(Query.FindContaining(_mruk.Rooms, worldPos), dest);
+        }
+
+        /// <summary>
+        /// Visible <c>WALL_FACE</c> planes of the room that contains the
+        /// headset. Hosts pin world-space UI to these without taking an
+        /// MRUK dependency.
+        /// </summary>
+        public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest)
+            => CopyWallFacesOfRoomContaining(Query.HeadsetWorldPosition(), dest);
 
         // ─────────────────────────────────────────────────────────────
         //  Scene Object Registry population
@@ -311,17 +409,33 @@ namespace Genesis.RoomScan
         //  Internals
         // ─────────────────────────────────────────────────────────────
 
-        private void EnsureRoom()
+        void EnsureMruk()
         {
-            if (_room != null) return;
-
             if (_mruk == null)
                 _mruk = FindAnyObjectByType<MRUK>();
-            if (_mruk == null) return;
+        }
 
-            _room = _mruk.GetCurrentRoom();
-            if (_room == null && _mruk.Rooms != null && _mruk.Rooms.Count > 0)
-                _room = _mruk.Rooms[0];
+        /// <summary>
+        /// Cached classification room is the volume that contains the
+        /// headset. <c>GetCurrentRoom()</c> is last/first after you leave
+        /// and must not be used. Hallway / no rooms → <c>_room</c> is null
+        /// (do not fall back to <c>Rooms[0]</c>).
+        /// </summary>
+        private void EnsureRoom()
+        {
+            EnsureMruk();
+            MRUKRoom next = null;
+            if (_mruk != null && _mruk.Rooms != null)
+                next = Query.FindContaining(_mruk.Rooms, Query.HeadsetWorldPosition());
+
+            if (next != _room)
+            {
+                if (_room != null)
+                    _room.AnchorCreatedEvent.RemoveListener(OnAnchorCreated);
+                _room = next;
+                if (_room != null)
+                    _room.AnchorCreatedEvent.AddListener(OnAnchorCreated);
+            }
 
             SubscribeToRoomEvents();
         }
@@ -329,16 +443,10 @@ namespace Genesis.RoomScan
         private void SubscribeToRoomEvents()
         {
             if (_subscribedToRoomEvents) return;
+            if (_mruk == null) return;
 
-            if (_mruk != null)
-            {
-                _mruk.RoomCreatedEvent.AddListener(OnRoomCreatedOrUpdated);
-                _mruk.RoomUpdatedEvent.AddListener(OnRoomCreatedOrUpdated);
-            }
-
-            if (_room != null)
-                _room.AnchorCreatedEvent.AddListener(OnAnchorCreated);
-
+            _mruk.RoomCreatedEvent.AddListener(OnRoomCreatedOrUpdated);
+            _mruk.RoomUpdatedEvent.AddListener(OnRoomCreatedOrUpdated);
             _subscribedToRoomEvents = true;
         }
 
@@ -360,14 +468,10 @@ namespace Genesis.RoomScan
 
         private void OnRoomCreatedOrUpdated(MRUKRoom room)
         {
-            // Re-subscribe to the new/updated room's anchor events
-            if (_room != null)
-                _room.AnchorCreatedEvent.RemoveListener(OnAnchorCreated);
-
-            _room = room;
-            _room.AnchorCreatedEvent.AddListener(OnAnchorCreated);
-
-            Logger.Info($"[RoomUnderstanding] Room created/updated — {_room.Anchors?.Count ?? 0} anchors");
+            EnsureRoom();
+            Logger.Info($"[RoomUnderstanding] Room created/updated — " +
+                        $"headset room anchors={_room?.Anchors?.Count ?? 0} " +
+                        $"(event room={room?.Anchors?.Count ?? 0})");
             AnchorsChanged?.Invoke();
         }
 
@@ -388,6 +492,7 @@ namespace Genesis.RoomScan
         private void OnDestroy()
         {
             UnsubscribeFromRoomEvents();
+            if (Instance == this) Instance = null;
         }
 
         private void ClassifyFromMRUK(Vector3[] verts, SurfaceType[] result)
@@ -456,5 +561,153 @@ namespace Genesis.RoomScan
 
         private static bool IsWall(MRUKAnchor anchor) => anchor.HasAnyLabel(WallLabels);
         private static bool IsFurniture(MRUKAnchor anchor) => anchor.HasAnyLabel(FurnitureLabels);
+
+        /// <summary>
+        /// Shared wall-plane occupancy. Native <c>IsPositionInRoom</c> is the
+        /// floor outline; Horizon Space Setup uses the walls.
+        /// </summary>
+        internal static class Query
+        {
+            const float OuterWallInsetMetres = 0.08f;
+
+            const MRUKAnchor.SceneLabels OuterWallLabels =
+                MRUKAnchor.SceneLabels.WALL_FACE
+                | MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE;
+
+            const MRUKAnchor.SceneLabels PinWallAvoidLabels =
+                MRUKAnchor.SceneLabels.SCREEN
+                | MRUKAnchor.SceneLabels.WALL_ART;
+
+            internal static Vector3 HeadsetWorldPosition()
+            {
+                var rig = UnityEngine.Object.FindAnyObjectByType<OVRCameraRig>(
+                    FindObjectsInactive.Include);
+                if (rig != null && rig.centerEyeAnchor != null)
+                    return rig.centerEyeAnchor.position;
+                var cam = Camera.main;
+                return cam != null ? cam.transform.position : Vector3.zero;
+            }
+
+            internal static Guid RoomUuid(MRUKRoom room)
+            {
+                if (room == null || room.Anchor == OVRAnchor.Null)
+                    return Guid.Empty;
+                return room.Anchor.Uuid;
+            }
+
+            internal static bool Contains(MRUKRoom room, Vector3 worldPos)
+            {
+                if (room == null) return false;
+                if (!room.IsPositionInRoom(worldPos, testVerticalBounds: true))
+                    return false;
+                return InsideOuterWalls(room, worldPos);
+            }
+
+            internal static MRUKRoom FindContaining(IList<MRUKRoom> rooms, Vector3 worldPos)
+            {
+                if (rooms == null) return null;
+                for (int i = 0; i < rooms.Count; i++)
+                {
+                    var room = rooms[i];
+                    if (Contains(room, worldPos))
+                        return room;
+                }
+                return null;
+            }
+
+            internal static MRUKRoom FindByUuid(IList<MRUKRoom> rooms, Guid uuid)
+            {
+                if (rooms == null || uuid == Guid.Empty) return null;
+                for (int i = 0; i < rooms.Count; i++)
+                {
+                    var room = rooms[i];
+                    if (RoomUuid(room) == uuid)
+                        return room;
+                }
+                return null;
+            }
+
+            internal static int CopyWallFaces(MRUKRoom room, List<SceneWallFace> dst)
+            {
+                if (dst == null) return 0;
+                dst.Clear();
+                if (room == null || room.Anchors == null) return 0;
+
+                float floorY = FloorY(room);
+                for (int i = 0; i < room.Anchors.Count; i++)
+                {
+                    var a = room.Anchors[i];
+                    if (a == null) continue;
+                    if (!a.HasAnyLabel(MRUKAnchor.SceneLabels.WALL_FACE)) continue;
+                    if (a.HasAnyLabel(MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE))
+                        continue;
+                    if (a.HasAnyLabel(MRUKAnchor.SceneLabels.INNER_WALL_FACE))
+                        continue;
+                    if (!a.PlaneRect.HasValue) continue;
+
+                    Vector3 inward = Inward(room, a);
+                    if (Vector3.Dot(inward, Vector3.up) > 0.7f
+                        || Vector3.Dot(inward, Vector3.up) < -0.7f)
+                        continue;
+
+                    var rect = a.PlaneRect.Value;
+                    Vector3 worldX = a.transform.TransformVector(new Vector3(rect.width, 0f, 0f));
+                    Vector3 worldY = a.transform.TransformVector(new Vector3(0f, rect.height, 0f));
+                    float horizX = Vector3.ProjectOnPlane(worldX, Vector3.up).magnitude;
+                    float horizY = Vector3.ProjectOnPlane(worldY, Vector3.up).magnitude;
+                    float width = Mathf.Max(horizX, horizY);
+                    float height = Mathf.Max(
+                        Mathf.Abs(Vector3.Dot(worldX, Vector3.up)),
+                        Mathf.Abs(Vector3.Dot(worldY, Vector3.up)));
+                    if (width < 0.2f || height < 0.2f) continue;
+
+                    Vector3 center = a.transform.TransformPoint(rect.center);
+                    bool avoid = a.HasAnyLabel(PinWallAvoidLabels);
+                    dst.Add(new SceneWallFace(center, inward, width, height, floorY, avoid));
+                }
+
+                return dst.Count;
+            }
+
+            static float FloorY(MRUKRoom room)
+            {
+                if (room.FloorAnchors != null && room.FloorAnchors.Count > 0)
+                {
+                    var f = room.FloorAnchors[0];
+                    if (f != null) return f.GetAnchorCenter().y;
+                }
+
+                return 0f;
+            }
+
+            static Vector3 Inward(MRUKRoom room, MRUKAnchor a)
+            {
+                Vector3 inward = room.GetFacingDirection(a);
+                if (inward.sqrMagnitude < 1e-8f)
+                    inward = a.transform.forward;
+                inward.Normalize();
+                return inward;
+            }
+
+            static bool InsideOuterWalls(MRUKRoom room, Vector3 worldPos)
+            {
+                var anchors = room.Anchors;
+                if (anchors == null || anchors.Count == 0)
+                    return true;
+
+                for (int i = 0; i < anchors.Count; i++)
+                {
+                    var a = anchors[i];
+                    if (a == null) continue;
+                    if (!a.HasAnyLabel(OuterWallLabels)) continue;
+
+                    if (Vector3.Dot(worldPos - a.transform.position, Inward(room, a))
+                        < OuterWallInsetMetres)
+                        return false;
+                }
+
+                return true;
+            }
+        }
     }
 }

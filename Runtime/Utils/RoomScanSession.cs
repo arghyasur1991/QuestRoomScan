@@ -37,6 +37,13 @@ namespace Genesis.RoomScan
         private RoomScanner _scanner;
         private RoomScanPersistence _persistence;
 
+        RoomUnderstanding Understanding()
+        {
+            if (RoomUnderstanding.Instance != null)
+                return RoomUnderstanding.Instance;
+            return GetComponent<RoomUnderstanding>();
+        }
+
         private void Awake()
         {
             Instance = this;
@@ -346,9 +353,15 @@ namespace Genesis.RoomScan
         /// for that. Native <c>IsPositionInRoom</c> alone is the floor
         /// outline and stays true a little past the door. Editor is always true.
         /// </summary>
-        public bool IsHeadsetInsideASceneRoom =>
-            RoomAnchorManager.Instance != null
-            && RoomAnchorManager.Instance.IsHeadsetInsideASceneRoom();
+        public bool IsHeadsetInsideASceneRoom
+        {
+            get
+            {
+                if (Application.isEditor) return true;
+                var u = Understanding();
+                return u != null && u.IsHeadsetInsideAnyRoom();
+            }
+        }
 
         /// <summary>
         /// Scene API UUID of the MRUK room the active package was scanned
@@ -381,14 +394,30 @@ namespace Genesis.RoomScan
             {
                 if (Application.isEditor)
                     return true;
-                var mgr = RoomAnchorManager.Instance;
-                if (mgr == null) return false;
                 if (_persistence == null || !_persistence.HasActivePackage)
                     return false;
                 Guid uuid = BoundSceneRoomUuid;
                 if (uuid == Guid.Empty) return false;
-                return mgr.IsHeadsetInsideSceneRoom(uuid);
+                var u = Understanding();
+                return u != null && u.IsHeadsetInsideRoom(uuid);
             }
+        }
+
+        /// <summary>
+        /// Visible <c>WALL_FACE</c> planes of the room that contains the
+        /// headset. Empty in the editor and when the headset is not inside
+        /// a captured room. Hosts pin world-space UI to these without
+        /// taking an MRUK dependency. Clears <paramref name="dest"/>.
+        /// </summary>
+        public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest)
+        {
+            var u = Understanding();
+            if (u == null)
+            {
+                dest?.Clear();
+                return 0;
+            }
+            return u.CopyHeadsetRoomWallFaces(dest);
         }
 
         /// <summary>
@@ -406,13 +435,14 @@ namespace Genesis.RoomScan
                 return true;
             if (_persistence == null || !_persistence.HasActivePackage)
                 return false;
-            var mgr = RoomAnchorManager.Instance;
-            if (mgr == null) return false;
+            var u = Understanding();
+            if (u == null) return false;
 
-            Guid atHeadset = mgr.TryGetSceneRoomUuidContainingHeadset();
+            Guid atHeadset = u.TryGetRoomUuidContainingHeadset();
             Guid atAnchor = Guid.Empty;
-            if (mgr.HasSpatialAnchor && mgr.SpatialAnchorTransform != null)
-                atAnchor = mgr.TryGetSceneRoomUuidAt(mgr.SpatialAnchorTransform.position);
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr != null && mgr.HasSpatialAnchor && mgr.SpatialAnchorTransform != null)
+                atAnchor = u.TryGetRoomUuidAt(mgr.SpatialAnchorTransform.position);
 
             if (atHeadset == Guid.Empty || atAnchor == Guid.Empty || atHeadset != atAnchor)
                 return false;

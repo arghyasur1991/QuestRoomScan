@@ -20,7 +20,7 @@ MeshExtractor → GPUSurfaceNets (compute shader: classify → compact → smoot
        ├── TriplanarCache (bake camera → 3 world-space textures + depth maps,
        │                    forward-splat relocation on load)
        ├── KeyframeCollector (motion-gated JPEG keyframes to disk for refinement/splat)
-       ├── RoomUnderstanding (MRUK scene model → SceneObjectRegistry population)
+       ├── RoomUnderstanding (MRUK occupancy, wall faces, classification → SceneObjectRegistry)
        │     └── SceneObjectVisualizer (wireframe boxes + billboard labels)
        └── [separate assembly] ObjectDetectionModule (YOLO inference + GPU NMS + depth projection)
              ├── YoloDetectionModel → NMSCompute.compute (GPU non-maximum suppression)
@@ -918,7 +918,10 @@ Each detection cycle optionally saves:
 
 ## 17. MRUK Scene Understanding
 
-`RoomUnderstanding` populates the shared `SceneObjectRegistry` from Meta's Mixed Reality Utility Kit scene model.
+`RoomUnderstanding` is the MRUK wrapper: occupancy (which captured
+room contains a world point / the headset — never `GetCurrentRoom()`),
+visible `WALL_FACE` planes, classification, and `SceneObjectRegistry`
+population from Meta's Mixed Reality Utility Kit scene model.
 
 ### 17.1 Anchor Population (`PopulateRegistry`)
 
