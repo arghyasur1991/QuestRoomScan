@@ -13,7 +13,10 @@ namespace Genesis.RoomScan
     /// </summary>
     internal static class PointCloudExporter
     {
-        private const int GpuVertexStride = 48; // pos, prevPos, norm, packedColor, voxelFlatIdx, pad
+        private const int GpuVertexStride = GPUSurfaceNets.VertexStride;
+        private const int VertPos = GPUSurfaceNets.VertexPosOffset;
+        private const int VertNorm = GPUSurfaceNets.VertexNormalOffset;
+        private const int VertPacked = GPUSurfaceNets.VertexPackedColorOffset;
         private const string PlyFileName = "points3d.ply";
 
         private static bool _exporting;
@@ -34,6 +37,7 @@ namespace Genesis.RoomScan
 
             try
             {
+                MeshExtractor.Instance?.ExtractForAuthoring();
                 var gpuSN = MeshExtractor.Instance?.GpuSurfaceNets;
                 if (gpuSN == null || gpuSN.VertexBuffer == null)
                 {
@@ -127,15 +131,15 @@ namespace Genesis.RoomScan
             {
                 int off = i * GpuVertexStride;
 
-                bw.Write(BitConverter.ToSingle(vertexData, off));
-                bw.Write(BitConverter.ToSingle(vertexData, off + 4));
-                bw.Write(BitConverter.ToSingle(vertexData, off + 8));
+                bw.Write(BitConverter.ToSingle(vertexData, off + VertPos));
+                bw.Write(BitConverter.ToSingle(vertexData, off + VertPos + 4));
+                bw.Write(BitConverter.ToSingle(vertexData, off + VertPos + 8));
 
-                bw.Write(BitConverter.ToSingle(vertexData, off + 24));
-                bw.Write(BitConverter.ToSingle(vertexData, off + 28));
-                bw.Write(BitConverter.ToSingle(vertexData, off + 32));
+                bw.Write(BitConverter.ToSingle(vertexData, off + VertNorm));
+                bw.Write(BitConverter.ToSingle(vertexData, off + VertNorm + 4));
+                bw.Write(BitConverter.ToSingle(vertexData, off + VertNorm + 8));
 
-                uint packed = BitConverter.ToUInt32(vertexData, off + 36);
+                uint packed = BitConverter.ToUInt32(vertexData, off + VertPacked);
                 bw.Write((byte)(packed & 0xFF));
                 bw.Write((byte)((packed >> 8) & 0xFF));
                 bw.Write((byte)((packed >> 16) & 0xFF));

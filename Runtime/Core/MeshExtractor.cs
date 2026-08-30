@@ -56,6 +56,7 @@ namespace Genesis.RoomScan
         float _lastExtractTime;
         float _extractInterval = 0.125f;
         float _morphStart;
+        bool _presentLiveLook = true;
         static readonly int BirthFadeSecID = Shader.PropertyToID("_RSBirthFadeSec");
         static readonly int BirthGrowID = Shader.PropertyToID("_RSBirthGrow");
         static readonly int ExtractTimeID = Shader.PropertyToID("_RSExtractTime");
@@ -161,8 +162,23 @@ namespace Genesis.RoomScan
                 return false;
 
             _morphStart = Time.time;
+            _presentLiveLook = true;
             Extract();
             return true;
+        }
+
+        /// <summary>
+        /// Dump the current TSDF into the GPU vertex buffer, ignoring morph
+        /// hold and turning off presentation lerp / birth grow. Unwrap, atlas
+        /// bake, and PLY export must go through this so they read extractor
+        /// <c>pos</c>, not the in-flight live look.
+        /// </summary>
+        public void ExtractForAuthoring()
+        {
+            if (_gpuSurfaceNets == null) return;
+            _presentLiveLook = false;
+            _morphStart = 0f;
+            Extract();
         }
 
         /// <summary>
@@ -206,12 +222,12 @@ namespace Genesis.RoomScan
 
         void PushBirthGlobals(float extractTime)
         {
-            Shader.SetGlobalFloat(BirthFadeSecID, birthFadeSeconds);
-            Shader.SetGlobalFloat(BirthGrowID, birthGrowMetres);
+            Shader.SetGlobalFloat(BirthFadeSecID, _presentLiveLook ? birthFadeSeconds : 0f);
+            Shader.SetGlobalFloat(BirthGrowID, _presentLiveLook ? birthGrowMetres : 0f);
             Shader.SetGlobalFloat(ExtractTimeID, extractTime);
             Shader.SetGlobalFloat(ExtractIntervalID, _extractInterval);
             Shader.SetGlobalFloat(MorphStartID, _morphStart);
-            Shader.SetGlobalFloat(MorphSecID, meshMorphSeconds);
+            Shader.SetGlobalFloat(MorphSecID, _presentLiveLook ? meshMorphSeconds : 0f);
         }
 
         /// <summary>

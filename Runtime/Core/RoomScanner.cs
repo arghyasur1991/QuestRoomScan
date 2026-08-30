@@ -479,7 +479,7 @@ namespace Genesis.RoomScan
 
                 MaybeRetryScanRoomBind();
 
-                if (t - _lastMeshTime >= MeshInterval)
+                if (!IsRefining && t - _lastMeshTime >= MeshInterval)
                 {
                     if (_meshExtractor != null && _meshExtractor.TryExtract())
                     {
@@ -1097,6 +1097,10 @@ namespace Genesis.RoomScan
             _textureRefinement.StatusChanged += statusHandler;
             try
             {
+                // Freeze the look: no more integrates / keyframes, and no
+                // morph-held dump as the unwrap source.
+                if (IsScanning)
+                    StopScanning();
                 string keyframeDir = KeyframeDirectory;
                 var unwrap = await EnsureUnwrappedAsync();
                 var (atlasPixels, normalPixels) = await _textureRefinement.BakeAtlasAsync(

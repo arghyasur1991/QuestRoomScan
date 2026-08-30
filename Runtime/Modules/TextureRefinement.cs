@@ -96,7 +96,11 @@ namespace Genesis.RoomScan
             _scanner = scanner;
         }
 
-        private const int GpuVertexStride = 48;
+        // pos @ 0 is the extractor dump. prevPos @ 12 is presentation-only.
+        const int VertStride = GPUSurfaceNets.VertexStride;
+        const int VertPos = GPUSurfaceNets.VertexPosOffset;
+        const int VertNorm = GPUSurfaceNets.VertexNormalOffset;
+        const int VertPacked = GPUSurfaceNets.VertexPackedColorOffset;
 
         internal event Action<string> StatusChanged;
 
@@ -119,6 +123,7 @@ namespace Genesis.RoomScan
             XAtlasWrapper.UnwrapOptions opts)
         {
             ReportStatus("Reading mesh from GPU...");
+            MeshExtractor.Instance?.ExtractForAuthoring();
             var (positions, normals, colors, indices) = await ReadbackMeshAsync();
             if (positions == null || positions.Length == 0)
                 throw new InvalidOperationException("Mesh readback returned no vertices");
@@ -248,7 +253,7 @@ namespace Genesis.RoomScan
                 return (null, null, null, null);
             }
 
-            int bufferCap = vertData.Length / GpuVertexStride;
+            int bufferCap = vertData.Length / VertStride;
             if (vertCount > bufferCap) vertCount = bufferCap;
 
             int idxCap = idxData.Length / 4;
@@ -265,16 +270,16 @@ namespace Genesis.RoomScan
 
             for (int i = 0; i < vertCount; i++)
             {
-                int off = i * GpuVertexStride;
+                int off = i * VertStride;
                 positions[i] = new Vector3(
-                    BitConverter.ToSingle(vertData, off),
-                    BitConverter.ToSingle(vertData, off + 4),
-                    BitConverter.ToSingle(vertData, off + 8));
+                    BitConverter.ToSingle(vertData, off + VertPos),
+                    BitConverter.ToSingle(vertData, off + VertPos + 4),
+                    BitConverter.ToSingle(vertData, off + VertPos + 8));
                 normals[i] = new Vector3(
-                    BitConverter.ToSingle(vertData, off + 24),
-                    BitConverter.ToSingle(vertData, off + 28),
-                    BitConverter.ToSingle(vertData, off + 32));
-                uint packed = BitConverter.ToUInt32(vertData, off + 36);
+                    BitConverter.ToSingle(vertData, off + VertNorm),
+                    BitConverter.ToSingle(vertData, off + VertNorm + 4),
+                    BitConverter.ToSingle(vertData, off + VertNorm + 8));
+                uint packed = BitConverter.ToUInt32(vertData, off + VertPacked);
                 colors[i] = new Color32(
                     (byte)(packed & 0xFF),
                     (byte)((packed >> 8) & 0xFF),

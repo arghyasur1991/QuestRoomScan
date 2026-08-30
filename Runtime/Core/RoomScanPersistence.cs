@@ -945,7 +945,7 @@ namespace Genesis.RoomScan
                 if (cm != null)
                 {
                     cm.Reinitialize();
-                    cm.Extract();
+                    cm.ExtractForAuthoring();
                 }
 
                 // Load splat

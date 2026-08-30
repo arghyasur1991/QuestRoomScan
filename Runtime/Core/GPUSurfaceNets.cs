@@ -82,7 +82,16 @@ namespace Genesis.RoomScan
         private static readonly int ID_SmoothPosB = Shader.PropertyToID("_SmoothPosB");
         private static readonly int ID_TemporalState = Shader.PropertyToID("_TemporalState");
 
-        private const int VertexStride = 48;
+        /// <summary>
+        /// Tightly packed <c>GPUVertex</c> (compute + live shader + CPU readback).
+        /// <c>pos</c> is the extractor dump (temporal-blend output). <c>prevPos</c>
+        /// is presentation-only — the forward shader lerps it; unwrap / atlas /
+        /// PLY must read <see cref="VertexPosOffset"/>.
+        /// </summary>
+        public const int VertexStride = 48;
+        public const int VertexPosOffset = 0;
+        public const int VertexNormalOffset = 24;
+        public const int VertexPackedColorOffset = 36;
         private const int Float3Stride = 12;
 
         public GPUSurfaceNets(ComputeShader compute)
