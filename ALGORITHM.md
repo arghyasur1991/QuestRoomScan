@@ -78,11 +78,13 @@ voxPos = voxelToWorld(coord)            // snapped world position
 ```
 
 **Step 2: Early rejections**
-- Room clip (opt-in `ConfineScanToContainingRoom`): voxel world position fails any uploaded half-space (`dot(pos, n) < w`). Planes are the room's outer walls including doorway `INVISIBLE_WALL_FACE` (same 8 cm inset as occupancy) plus floor/ceiling with 4 cm slack. Default off — unbounded scan.
+- Room clip (opt-in `ConfineScanToContainingRoom`): conservative world AABB first (floor / ceiling / outer walls including doorway `INVISIBLE_WALL_FACE`, no 8 cm inset), then voxel world position fails any uploaded half-space (`dot(pos, n) < w`). Planes use the 8 cm wall inset plus floor/ceiling with 4 cm slack. Default off — unbounded scan.
 - Frozen voxel: `weight < 0` (user FreezeInView)
-- SCREEN plane stamp: voxel inside a fattened MRUK `SCREEN` slab → write analytic plane TSDF (`dot(pos - center, inward)` clamped to `±voxelDistance`) at `maxWeight`, keep RGB projection, skip depth. Glass/bounce depth is ignored; the mesh is one planar sheet.
 - Behind camera: `voxView.z > -0.05`
 - Outside depth FOV: `voxNDC.x/y` outside [0.01, 0.99]
+
+**Step 2b: SCREEN plane stamp (separate dispatch)**
+After the frustum pass, each MRUK `SCREEN` slab is a 3D dispatch over its voxel AABB (8 OBB corners → padded min/max). Analytic plane TSDF (`dot(pos - center, inward)` clamped to `±voxelDistance`) at `maxWeight`, RGB projection kept. Glass/bounce depth from Integrate is overwritten. The frustum kernel does **not** search for TVs.
 
 **Step 3: TSDF computation**
 ```

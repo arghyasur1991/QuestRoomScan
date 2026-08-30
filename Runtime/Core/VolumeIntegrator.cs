@@ -94,6 +94,11 @@ namespace Genesis.RoomScan
         private static readonly int ScreenInwardID = Shader.PropertyToID("gsScreenInward");
         private static readonly int ScreenAxisID = Shader.PropertyToID("gsScreenAxis");
         private static readonly int ScreenBitangentID = Shader.PropertyToID("gsScreenBitangent");
+        private static readonly int UseRoomAabbID = Shader.PropertyToID("gsUseRoomAabb");
+        private static readonly int RoomAabbMinID = Shader.PropertyToID("gsRoomAabbMin");
+        private static readonly int RoomAabbMaxID = Shader.PropertyToID("gsRoomAabbMax");
+        private static readonly int StampVoxMinID = Shader.PropertyToID("gsStampVoxMin");
+        private static readonly int StampVoxMaxID = Shader.PropertyToID("gsStampVoxMax");
 
         public float CameraExposure => cameraExposure;
 
@@ -106,6 +111,7 @@ namespace Genesis.RoomScan
 
         private ComputeKernelHelper _clearKernel;
         private ComputeKernelHelper _integrateKernel;
+        private ComputeKernelHelper _stampKernel;
         private ComputeKernelHelper _pruneKernel;
         private ComputeKernelHelper _freezeKernel;
         private ComputeKernelHelper _unfreezeKernel;
@@ -150,6 +156,9 @@ namespace Genesis.RoomScan
         private int _roomClipCount;
         private int _screenStampCount;
         private bool _confineToRoom;
+        private bool _useRoomAabb;
+        private Vector3 _roomAabbMin;
+        private Vector3 _roomAabbMax;
 
         /// <summary>Total number of integration passes dispatched since startup or the last clear.</summary>
         public int IntegrationCount { get; private set; }
@@ -206,6 +215,10 @@ namespace Genesis.RoomScan
             _integrateKernel = new ComputeKernelHelper(compute, "Integrate");
             _integrateKernel.Set(VolumeRWID, _volume);
             _integrateKernel.Set(ColorVolumeRWID, _colorVolume);
+
+            _stampKernel = new ComputeKernelHelper(compute, "StampScreen");
+            _stampKernel.Set(VolumeRWID, _volume);
+            _stampKernel.Set(ColorVolumeRWID, _colorVolume);
 
             _pruneKernel = new ComputeKernelHelper(compute, "Prune");
             _pruneKernel.Set(VolumeRWID, _volume);
@@ -303,6 +316,8 @@ namespace Genesis.RoomScan
             _clearKernel.Set(ColorVolumeRWID, _colorVolume);
             _integrateKernel.Set(VolumeRWID, _volume);
             _integrateKernel.Set(ColorVolumeRWID, _colorVolume);
+            _stampKernel.Set(VolumeRWID, _volume);
+            _stampKernel.Set(ColorVolumeRWID, _colorVolume);
             _pruneKernel.Set(VolumeRWID, _volume);
             _pruneKernel.Set(ColorVolumeRWID, _colorVolume);
             _freezeKernel.Set(VolumeRWID, _volume);
@@ -657,30 +672,14 @@ namespace Genesis.RoomScan
             compute.SetFloat(WeightGrowthID, weightGrowth);
             compute.SetFloat(MaxWeightID, maxWeight);
 
-            EnsureCamFrameCopy();
-            if (_pendingCamFrame != null && _camFrameCopy != null)
-            {
-                compute.SetTexture(_integrateKernel.KernelIndex, CamRGBID, _camFrameCopy);
-                compute.SetInt(CamAvailableID, 1);
-                compute.SetVector(CamPosID, _pendingCamPos);
-                compute.SetMatrix(CamInvRotID, Matrix4x4.Rotate(Quaternion.Inverse(_pendingCamRot)));
-                compute.SetVector(CamFocalLenID, _pendingFocalLen);
-                compute.SetVector(CamPrincipalPtID, _pendingPrincipalPt);
-                compute.SetVector(CamSensorResID, _pendingSensorRes);
-                compute.SetVector(CamCurrentResID, _pendingCurrentRes);
-                compute.SetFloat(CamExposureID, cameraExposure);
-            }
-            else
-            {
-                compute.SetTexture(_integrateKernel.KernelIndex, CamRGBID, _dummyCamTex);
-                compute.SetInt(CamAvailableID, 0);
-            }
+            BindCameraToKernel(_integrateKernel.KernelIndex);
 
             _integrateKernel.Set(DepthCapture.DepthTexID, dc.DepthTex);
             _integrateKernel.Set(DepthCapture.NormTexID, dc.NormTex);
             _integrateKernel.Set(DepthCapture.DilatedDepthTexID, dc.DilatedDepthTex);
 
             _integrateKernel.DispatchFit(_frustumVolume.count, 1);
+            DispatchScreenStamps();
 
             IntegrationCount++;
             _pendingCamFrame = null;
@@ -713,17 +712,109 @@ namespace Genesis.RoomScan
             Integrated?.Invoke();
         }
 
+        void BindCameraToKernel(int kernelIndex)
+        {
+            EnsureCamFrameCopy();
+            if (_pendingCamFrame != null && _camFrameCopy != null)
+            {
+                compute.SetTexture(kernelIndex, CamRGBID, _camFrameCopy);
+                compute.SetInt(CamAvailableID, 1);
+                compute.SetVector(CamPosID, _pendingCamPos);
+                compute.SetMatrix(CamInvRotID, Matrix4x4.Rotate(Quaternion.Inverse(_pendingCamRot)));
+                compute.SetVector(CamFocalLenID, _pendingFocalLen);
+                compute.SetVector(CamPrincipalPtID, _pendingPrincipalPt);
+                compute.SetVector(CamSensorResID, _pendingSensorRes);
+                compute.SetVector(CamCurrentResID, _pendingCurrentRes);
+                compute.SetFloat(CamExposureID, cameraExposure);
+            }
+            else
+            {
+                compute.SetTexture(kernelIndex, CamRGBID, _dummyCamTex);
+                compute.SetInt(CamAvailableID, 0);
+            }
+        }
+
+        /// <summary>
+        /// Stamp SCREEN slabs as a 3D dispatch over each stamp's voxel AABB
+        /// after Integrate so the analytic plane wins over glass depth.
+        /// The frustum pass no longer searches for TVs.
+        /// </summary>
+        void DispatchScreenStamps()
+        {
+            if (_screenStampCount <= 0 || _stampKernel.Shader == null) return;
+            _stampKernel.Set(VolumeRWID, _volume);
+            _stampKernel.Set(ColorVolumeRWID, _colorVolume);
+            BindCameraToKernel(_stampKernel.KernelIndex);
+            for (int i = 0; i < _screenStampCount; i++)
+            {
+                if (!TryScreenStampVoxelBox(i, out int minX, out int minY, out int minZ,
+                        out int sx, out int sy, out int sz))
+                    continue;
+                compute.SetInts(StampVoxMinID, minX, minY, minZ);
+                compute.SetInts(StampVoxMaxID, minX + sx, minY + sy, minZ + sz);
+                _stampKernel.DispatchFit(sx, sy, sz);
+            }
+        }
+
+        bool TryScreenStampVoxelBox(
+            int i,
+            out int minX, out int minY, out int minZ,
+            out int sx, out int sy, out int sz)
+        {
+            minX = minY = minZ = sx = sy = sz = 0;
+            Vector3 c = _screenCenter[i];
+            float ht = _screenCenter[i].w;
+            Vector3 n = _screenInward[i];
+            float hw = _screenInward[i].w;
+            Vector3 tangent = _screenAxis[i];
+            float hh = _screenAxis[i].w;
+            Vector3 bitangent = _screenBitangent[i];
+
+            Vector3 vmin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            Vector3 vmax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            for (int u = -1; u <= 1; u += 2)
+            for (int v = -1; v <= 1; v += 2)
+            for (int w = -1; w <= 1; w += 2)
+            {
+                Vector3 corner = c + n * (u * ht) + tangent * (v * hw) + bitangent * (w * hh);
+                Vector3 vf = WorldToVoxelFloat(corner);
+                vmin = Vector3.Min(vmin, vf);
+                vmax = Vector3.Max(vmax, vf);
+            }
+
+            minX = Mathf.Clamp(Mathf.FloorToInt(vmin.x) - 1, 0, voxelCount.x);
+            minY = Mathf.Clamp(Mathf.FloorToInt(vmin.y) - 1, 0, voxelCount.y);
+            minZ = Mathf.Clamp(Mathf.FloorToInt(vmin.z) - 1, 0, voxelCount.z);
+            int maxX = Mathf.Clamp(Mathf.CeilToInt(vmax.x) + 1, 0, voxelCount.x);
+            int maxY = Mathf.Clamp(Mathf.CeilToInt(vmax.y) + 1, 0, voxelCount.y);
+            int maxZ = Mathf.Clamp(Mathf.CeilToInt(vmax.z) + 1, 0, voxelCount.z);
+            sx = maxX - minX;
+            sy = maxY - minY;
+            sz = maxZ - minZ;
+            return sx > 0 && sy > 0 && sz > 0;
+        }
+
+        Vector3 WorldToVoxelFloat(Vector3 worldPos)
+            => worldPos / voxelSize
+            + new Vector3(voxelCount.x, voxelCount.y, voxelCount.z) * 0.5f;
+
         /// <summary>
         /// Upload room-clip half-spaces and SCREEN plane stamps for the next
         /// <see cref="Integrate"/> (and for <see cref="BindScanPriors"/> on
         /// other compute shaders that include <c>VolumeHelpers.hlsl</c>).
         /// Pass <paramref name="confine"/> false to keep unbounded TSDF;
         /// SCREEN stamps still apply. Null lists clear that buffer.
+        /// <paramref name="useRoomAabb"/> is a conservative world AABB
+        /// (no wall inset) so <c>gsInsideRoom</c> can reject outside voxels
+        /// before the 32-plane loop.
         /// </summary>
         public void SetScanPriors(
             bool confine,
             List<Vector4> clipPlanes,
-            List<ScanScreenStamp> screenStamps)
+            List<ScanScreenStamp> screenStamps,
+            bool useRoomAabb = false,
+            Vector3 roomAabbMin = default,
+            Vector3 roomAabbMax = default)
         {
             _confineToRoom = confine;
             _roomClipCount = 0;
@@ -777,6 +868,10 @@ namespace Genesis.RoomScan
                     _screenBitangent[i] = Vector4.zero;
                 }
             }
+
+            _useRoomAabb = useRoomAabb && confine && _roomClipCount > 0;
+            _roomAabbMin = roomAabbMin;
+            _roomAabbMax = roomAabbMax;
         }
 
         /// <summary>Drop clip planes and SCREEN stamps (scan stop / unload).</summary>
@@ -799,6 +894,9 @@ namespace Genesis.RoomScan
             target.SetVectorArray(ScreenInwardID, _screenInward);
             target.SetVectorArray(ScreenAxisID, _screenAxis);
             target.SetVectorArray(ScreenBitangentID, _screenBitangent);
+            target.SetInt(UseRoomAabbID, _useRoomAabb ? 1 : 0);
+            target.SetVector(RoomAabbMinID, _roomAabbMin);
+            target.SetVector(RoomAabbMaxID, _roomAabbMax);
         }
 
         /// <summary>

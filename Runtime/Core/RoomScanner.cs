@@ -1532,15 +1532,21 @@ namespace Genesis.RoomScan
             ResolveScanRoomUuid();
             _roomUnderstanding.CopyRoomClipPlanes(_scanRoomUuid, _clipScratch);
             _roomUnderstanding.CopyScreenStamps(_scanRoomUuid, _stampScratch);
+            bool useAabb = false;
+            Vector3 aabbMin = Vector3.zero, aabbMax = Vector3.zero;
+            if (confineScanToContainingRoom)
+                useAabb = _roomUnderstanding.CopyRoomWorldAabb(
+                    _scanRoomUuid, out aabbMin, out aabbMax);
             _volumeIntegrator.SetScanPriors(
-                confineScanToContainingRoom, _clipScratch, _stampScratch);
+                confineScanToContainingRoom, _clipScratch, _stampScratch,
+                useAabb, aabbMin, aabbMax);
 
             if (_stampScratch.Count > 0 || (confineScanToContainingRoom && _clipScratch.Count > 0))
             {
                 Logger.Info(
                     $"[RoomScanner] Scan priors — confine={confineScanToContainingRoom} " +
                     $"room={_scanRoomUuid} clipPlanes={_clipScratch.Count} " +
-                    $"screens={_stampScratch.Count}");
+                    $"aabb={(useAabb ? 1 : 0)} screens={_stampScratch.Count}");
             }
         }
 

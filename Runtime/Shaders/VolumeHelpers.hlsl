@@ -18,6 +18,9 @@ float3 gsExclusionHeads[64];
 int gsConfineToRoom;
 int gsNumRoomClipPlanes;
 float4 gsRoomClipPlanes[32];
+int gsUseRoomAabb;
+float3 gsRoomAabbMin;
+float3 gsRoomAabbMax;
 
 int gsNumScreenStamps;
 float4 gsScreenCenter[4];
@@ -60,6 +63,11 @@ float gsSampleDilatedDepth(float2 uv)
 bool gsInsideRoom(float3 worldPos)
 {
     if (gsConfineToRoom == 0 || gsNumRoomClipPlanes <= 0) return true;
+    if (gsUseRoomAabb != 0)
+    {
+        if (any(worldPos < gsRoomAabbMin) || any(worldPos > gsRoomAabbMax))
+            return false;
+    }
     for (int i = 0; i < gsNumRoomClipPlanes; i++)
     {
         float4 pl = gsRoomClipPlanes[i];

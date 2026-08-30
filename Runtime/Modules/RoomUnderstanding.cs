@@ -302,6 +302,22 @@ namespace Genesis.RoomScan
                 Query.FindByUuid(_mruk.Rooms, sceneRoomUuid), dest);
         }
 
+        /// <summary>
+        /// Conservative world AABB of the captured room (outer walls including
+        /// doorway <c>INVISIBLE_WALL_FACE</c>, floor, ceiling). No 8 cm inset —
+        /// GPU clip still uses the inset half-spaces; this box is only an
+        /// early-out. False when the UUID is missing.
+        /// </summary>
+        public bool CopyRoomWorldAabb(Guid sceneRoomUuid, out Vector3 min, out Vector3 max)
+        {
+            min = max = Vector3.zero;
+            if (sceneRoomUuid == Guid.Empty) return false;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null) return false;
+            return Query.CopyRoomWorldAabb(
+                Query.FindByUuid(_mruk.Rooms, sceneRoomUuid), out min, out max);
+        }
+
         // ─────────────────────────────────────────────────────────────
         //  Scene Object Registry population
         // ─────────────────────────────────────────────────────────────
@@ -851,6 +867,71 @@ namespace Genesis.RoomScan
                 }
 
                 return dst.Count;
+            }
+
+            internal static bool CopyRoomWorldAabb(
+                MRUKRoom room, out Vector3 min, out Vector3 max)
+            {
+                min = max = Vector3.zero;
+                if (room == null) return false;
+
+                bool any = false;
+                Bounds b = default;
+                if (room.Anchors != null)
+                {
+                    for (int i = 0; i < room.Anchors.Count; i++)
+                    {
+                        var a = room.Anchors[i];
+                        if (a == null) continue;
+                        if (!a.HasAnyLabel(OuterWallLabels)
+                            && !a.HasAnyLabel(MRUKAnchor.SceneLabels.FLOOR)
+                            && !a.HasAnyLabel(MRUKAnchor.SceneLabels.CEILING))
+                            continue;
+                        EncapsulateAnchor(a, ref b, ref any);
+                    }
+                }
+
+                if (!any) return false;
+                min = b.min;
+                max = b.max;
+                return true;
+            }
+
+            static void EncapsulateAnchor(MRUKAnchor a, ref Bounds b, ref bool any)
+            {
+                if (a.PlaneRect.HasValue)
+                {
+                    var r = a.PlaneRect.Value;
+                    EncapsulatePoint(a.transform.TransformPoint(new Vector3(r.xMin, r.yMin, 0f)), ref b, ref any);
+                    EncapsulatePoint(a.transform.TransformPoint(new Vector3(r.xMax, r.yMin, 0f)), ref b, ref any);
+                    EncapsulatePoint(a.transform.TransformPoint(new Vector3(r.xMin, r.yMax, 0f)), ref b, ref any);
+                    EncapsulatePoint(a.transform.TransformPoint(new Vector3(r.xMax, r.yMax, 0f)), ref b, ref any);
+                    return;
+                }
+
+                if (!a.VolumeBounds.HasValue) return;
+                var vb = a.VolumeBounds.Value;
+                Vector3 c = vb.center;
+                Vector3 e = vb.extents;
+                for (int x = -1; x <= 1; x += 2)
+                for (int y = -1; y <= 1; y += 2)
+                for (int z = -1; z <= 1; z += 2)
+                    EncapsulatePoint(
+                        a.transform.TransformPoint(c + Vector3.Scale(e, new Vector3(x, y, z))),
+                        ref b, ref any);
+            }
+
+            static void EncapsulatePoint(Vector3 p, ref Bounds b, ref bool any)
+            {
+                if (!any)
+                {
+                    b = new Bounds(p, Vector3.zero);
+                    any = true;
+                }
+                else
+                {
+                    b.Encapsulate(p);
+                }
             }
         }
     }
