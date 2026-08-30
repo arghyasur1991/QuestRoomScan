@@ -305,10 +305,10 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Conservative world AABB of the captured room (outer walls including
-        /// doorway <c>INVISIBLE_WALL_FACE</c>, floor, ceiling), padded by the
-        /// same outward slack as the clip planes so wall voxels are not
-        /// early-out rejected. Occupancy inset is not applied. False when
-        /// the UUID is missing.
+        /// doorway <c>INVISIBLE_WALL_FACE</c>, floor, ceiling), padded by clip
+        /// slack plus the depth-clamp band so near-miss samples can snap onto
+        /// the wall instead of AABB-rejecting. Occupancy inset is not applied.
+        /// False when the UUID is missing.
         /// </summary>
         public bool CopyRoomWorldAabb(Guid sceneRoomUuid, out Vector3 min, out Vector3 max)
         {
@@ -643,6 +643,13 @@ namespace Genesis.RoomScan
             /// pushed <i>outward</i> (the occupancy inset is the opposite).
             /// </summary>
             const float TsdfClipSlackMetres = 0.08f;
+            /// <summary>
+            /// Depth / voxel centres this far past a clip plane are snapped
+            /// onto it. Farther is a real outside hit (hallway) and stays
+            /// rejected. AABB is padded by slack + this so the GPU early-out
+            /// still skips the hallway.
+            /// </summary>
+            internal const float TsdfDepthClampMetres = 0.20f;
 
             const MRUKAnchor.SceneLabels OuterWallLabels =
                 MRUKAnchor.SceneLabels.WALL_FACE
@@ -899,7 +906,7 @@ namespace Genesis.RoomScan
                 }
 
                 if (!any) return false;
-                Vector3 pad = Vector3.one * TsdfClipSlackMetres;
+                Vector3 pad = Vector3.one * (TsdfClipSlackMetres + TsdfDepthClampMetres);
                 min = b.min - pad;
                 max = b.max + pad;
                 return true;

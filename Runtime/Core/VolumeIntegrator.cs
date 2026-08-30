@@ -97,6 +97,7 @@ namespace Genesis.RoomScan
         private static readonly int UseRoomAabbID = Shader.PropertyToID("gsUseRoomAabb");
         private static readonly int RoomAabbMinID = Shader.PropertyToID("gsRoomAabbMin");
         private static readonly int RoomAabbMaxID = Shader.PropertyToID("gsRoomAabbMax");
+        private static readonly int RoomClampMaxID = Shader.PropertyToID("gsRoomClampMax");
         private static readonly int StampVoxMinID = Shader.PropertyToID("gsStampVoxMin");
         private static readonly int StampVoxMaxID = Shader.PropertyToID("gsStampVoxMax");
 
@@ -805,9 +806,9 @@ namespace Genesis.RoomScan
         /// Pass <paramref name="confine"/> false to keep unbounded TSDF;
         /// SCREEN stamps still apply. Null lists clear that buffer.
         /// <paramref name="useRoomAabb"/> is a conservative world AABB
-        /// padded by the clip slack so <c>gsInsideRoom</c> can reject
-        /// outside voxels before the 32-plane loop without dropping
-        /// wall voxels.
+        /// padded by clip slack plus the depth-clamp band so
+        /// <c>gsClampToRoom</c> can reject hallway voxels before the
+        /// plane loop without dropping near-miss wall samples.
         /// </summary>
         public void SetScanPriors(
             bool confine,
@@ -898,6 +899,7 @@ namespace Genesis.RoomScan
             target.SetInt(UseRoomAabbID, _useRoomAabb ? 1 : 0);
             target.SetVector(RoomAabbMinID, _roomAabbMin);
             target.SetVector(RoomAabbMaxID, _roomAabbMax);
+            target.SetFloat(RoomClampMaxID, RoomUnderstanding.Query.TsdfDepthClampMetres);
         }
 
         /// <summary>

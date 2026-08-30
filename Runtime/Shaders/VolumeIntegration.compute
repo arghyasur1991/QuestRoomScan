@@ -90,7 +90,9 @@ void Integrate(uint id : SV_DispatchThreadID)
     uint3 coord = gsWorldToVoxel(vWorldPos);
     float3 voxPos = gsVoxelToWorld(coord);
 
-    if (!gsInsideRoom(voxPos)) return;
+    if (!gsClampToRoom(voxPos)) return;
+    coord = gsWorldToVoxel(voxPos);
+    voxPos = gsVoxelToWorld(coord);
 
     float2 old = gsVolumeRW[coord];
     if (old.y < 0) return; // frozen voxel — skip integration
@@ -110,6 +112,7 @@ void Integrate(uint id : SV_DispatchThreadID)
     float depthNDC = gsDepthSample(voxNDC.xy);
     float3 depthNorm = gsDepthNormalSample(voxNDC.xy).xyz;
     float3 depthPos = gsDepthNDCtoWorld(float3(voxNDC.xy, depthNDC));
+    if (!gsClampDepthRayToRoom(eyePos, depthPos)) return;
 
     float3 eyeToDepth = depthPos - eyePos;
     float depthEyeDist = length(eyeToDepth);

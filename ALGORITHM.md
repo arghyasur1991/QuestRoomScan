@@ -78,7 +78,7 @@ voxPos = voxelToWorld(coord)            // snapped world position
 ```
 
 **Step 2: Early rejections**
-- Room clip (opt-in `ConfineScanToContainingRoom`): conservative world AABB first (floor / ceiling / outer walls including doorway `INVISIBLE_WALL_FACE`, padded by 8 cm), then voxel world position fails any uploaded half-space (`dot(pos, n) < w`). Planes use an **outward** 8 cm slack so wall / floor / ceiling surfaces integrate (occupancy's 8 cm *inset* is the opposite and would skip walls). Default off — unbounded scan.
+- Room clip (opt-in `ConfineScanToContainingRoom`): conservative world AABB first (floor / ceiling / outer walls including doorway `INVISIBLE_WALL_FACE`, padded by 8 cm slack + 20 cm depth-clamp). Voxel centres just outside a clip plane are **clamped onto the hull** (not dropped) and remapped to the in-room voxel. Observed depth that overshoots a wall along the view ray is snapped onto that plane up to 20 cm; farther is a real hallway hit and the sample is skipped (so an open door does not fake-fill). Planes use an **outward** 8 cm slack so wall / floor / ceiling surfaces integrate (occupancy's 8 cm *inset* is the opposite). Default off — unbounded scan.
 - Frozen voxel: `weight < 0` (user FreezeInView)
 - Behind camera: `voxView.z > -0.05`
 - Outside depth FOV: `voxNDC.x/y` outside [0.01, 0.99]

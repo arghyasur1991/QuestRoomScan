@@ -43,12 +43,12 @@ namespace Genesis.RoomScan
         public event Action<Vector3> ScanOutsideRoomAttempted;
 
         /// <summary>
-        /// When true, TSDF skips voxels outside the MRUK room that
-        /// contained the headset when the scan started (padded AABB,
-        /// then outward-slack clip planes so walls integrate). Default
-        /// <c>false</c> (unbounded scan). Set this before
-        /// <see cref="StartScanAsync"/>. SCREEN (TV) plane stamps still
-        /// apply either way.
+        /// When true, TSDF stays inside the MRUK room that contained
+        /// the headset when the scan started (padded AABB; near-miss
+        /// depth clamps onto wall planes so noisy through-wall hits
+        /// still integrate). Default <c>false</c> (unbounded scan).
+        /// Set this before <see cref="StartScanAsync"/>. SCREEN (TV)
+        /// plane stamps still apply either way.
         /// </summary>
         public bool ConfineScanToContainingRoom
         {
