@@ -221,9 +221,10 @@ For each vertex (dispatched indirectly), finds the best-matching detected plane:
 
 ### Stage 4: Adaptive Temporal Vertex Damping (`TemporalBlend` kernel)
 
-`RWTexture3D<float4> _TemporalState` stores previous position (xyz) and stability age (w) per voxel, indexed by 3D coordinate. On subsequent extractions:
+`RWTexture3D<float4> _TemporalState` stores previous position (xyz) and packed fade+stability (w) per voxel, indexed by 3D coordinate. On subsequent extractions:
 
-- **New vertex** (age = −1): Placed instantly at extracted position (α = 1.0, no damping)
+- **New vertex** (age = −1): Placed instantly at extracted position (α = 1.0, no damping). `packedColor.a` is 0 (birth).
+- **Birth fade**: `Temporal.w` packs fade ticks (low byte, 0–255, never resets) with stability age (high bytes). The live shader ramps `packedColor.a` over `_RSBirthFadeExtracts` ticks (cyan gate → photoreal). Opaque, no `clip`. Refined bake ignores this. 0 on `MeshExtractor.birthFadeExtracts` disables the look.
 - **Deadzone**: If position changed less than `temporalDeadzone` (1mm), old position is kept exactly and age increments
 - **Large displacement** (> `convergenceThreshold` = 5mm): α = `alphaMax` (0.85), age resets to 0 — fast convergence
 - **Small displacement** (< convergenceThreshold): Age increments, α = `alphaMin + (alphaMax − alphaMin) × exp(−age × decayRate)`

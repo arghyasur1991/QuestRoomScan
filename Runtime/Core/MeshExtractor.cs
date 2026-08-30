@@ -33,6 +33,9 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Position changes below this (meters) are suppressed entirely.")]
         [Range(0f, 0.01f)] private float temporalDeadzone = 0.001f;
 
+        [SerializeField, Tooltip("Live-mesh birth fade in extraction ticks. 0 = off. At 8 Hz, 5 ≈ 0.6 s. New verts tint cyan then settle to photoreal. Does not change the refined mesh.")]
+        [Range(0, 16)] private int birthFadeExtracts = 5;
+
         [Header("Rendering")]
         [SerializeField] private Material scanMeshMaterial;
 
@@ -44,6 +47,7 @@ namespace Genesis.RoomScan
         private GPUSurfaceNets _gpuSurfaceNets;
         private GPUMeshRenderer _gpuRenderer;
         private int _extractCount;
+        static readonly int BirthFadeExtractsID = Shader.PropertyToID("_RSBirthFadeExtracts");
 
         internal GPUSurfaceNets GpuSurfaceNets => _gpuSurfaceNets;
         public bool IsInitialized => _gpuSurfaceNets != null;
@@ -120,6 +124,8 @@ namespace Genesis.RoomScan
 
             _gpuSurfaceNets.EnsureBuffers(_volume.VoxelCount, gpuVertexBudgetPercent);
 
+            Shader.SetGlobalFloat(BirthFadeExtractsID, birthFadeExtracts);
+
             _gpuRenderer = gameObject.AddComponent<GPUMeshRenderer>();
             _gpuRenderer.GpuMeshMaterial = scanMeshMaterial;
             _gpuRenderer.Initialize(_gpuSurfaceNets, _gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
@@ -138,6 +144,7 @@ namespace Genesis.RoomScan
 
             _extractCount++;
             _gpuSurfaceNets.MinMeshWeight = _volume.MinMeshWeight;
+            Shader.SetGlobalFloat(BirthFadeExtractsID, birthFadeExtracts);
 
             _gpuSurfaceNets.Extract(_volume.Volume, _volume.ColorVolume, _volume.VoxelSize);
 

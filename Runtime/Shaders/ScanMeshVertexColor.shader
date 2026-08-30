@@ -57,6 +57,7 @@ Shader "Genesis/ScanMeshVertexColor"
             float _RSNormalFallback;
             float _RSWireframe;
             float _RSWireThickness;
+            float _RSBirthFadeExtracts;
 
             #define DEPTH_TOLERANCE 0.015
 
@@ -97,6 +98,17 @@ Shader "Genesis/ScanMeshVertexColor"
                 half totalAlpha = colXZ.a * blend.y + colXY.a * blend.z + colYZ.a * blend.x;
 
                 return totalAlpha > 0.01 ? rgb : half3(-1, -1, -1);
+            }
+
+            half3 ApplyBirthFade(half3 color, half packedAlpha)
+            {
+                if (_RSBirthFadeExtracts < 0.5h)
+                    return color;
+                float born = saturate((float)packedAlpha * 255.0 / _RSBirthFadeExtracts);
+                float f = smoothstep(0.0, 1.0, born);
+                // Dim cyan gate then photoreal — opaque, no clip, no extra pass.
+                half3 gate = half3(0.35h, 0.78h, 0.95h);
+                return lerp(color * gate, color, (half)f);
             }
 
             bool IsVoxelFrozen(float3 worldPos)
@@ -168,6 +180,7 @@ Shader "Genesis/ScanMeshVertexColor"
 
                 // 2. Apply freeze tint
                 baseColor = ApplyFreezeTint(baseColor, IN.positionWS);
+                baseColor = ApplyBirthFade(baseColor, IN.color.a);
 
                 // 3. Wireframe: discard interior, white edges blending to vertex color at vertices
                 if (_RSWireframe > 0.5)

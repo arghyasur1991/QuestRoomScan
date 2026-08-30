@@ -169,7 +169,7 @@ namespace Genesis.RoomScan
             if (_coordVertMap == null)
                 throw new InvalidOperationException("Call EnsureBuffers before Extract");
 
-            if (!_temporalInitialized && TemporalAlphaMax < 1f)
+            if (!_temporalInitialized)
                 InitTemporalState();
 
             SetGlobalParams(voxelSize);
@@ -219,12 +219,9 @@ namespace Genesis.RoomScan
                 _compute.DispatchIndirect(_kApplySmooth, _dispatchArgs);
             }
 
-            // 5. Temporal blend (optional)
-            if (TemporalAlphaMax < 1f)
-            {
-                _compute.SetTexture(_kTemporalBlend, ID_TemporalState, _temporalState);
-                _compute.DispatchIndirect(_kTemporalBlend, _dispatchArgs);
-            }
+            // 5. Temporal blend (also stamps packedColor.a birth-fade ticks)
+            _compute.SetTexture(_kTemporalBlend, ID_TemporalState, _temporalState);
+            _compute.DispatchIndirect(_kTemporalBlend, _dispatchArgs);
 
             // 6. Generate indices
             _compute.DispatchIndirect(_kGenerateIndices, _dispatchArgs);
