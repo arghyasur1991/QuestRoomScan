@@ -732,7 +732,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `IsRoomLoaded` | `bool` | MRUK scene discovery finished (including zero rooms) |
 | `HasSceneRooms` | `bool` | At least one MRUK room after discovery (not "headset is in that room") |
 | `IsHeadsetInsideASceneRoom` | `bool` | Headset is inward of every outer wall of **any** loaded room (doorway faces included). Boot / Space Setup: any set-up room is enough. Floor-outline `IsPositionInRoom` is not enough. Always true in the editor |
-| `ConfineScanToContainingRoom` | `bool` | When true, TSDF stays in the MRUK room that contained the headset at scan start (padded AABB; near-miss depth / voxels clamp onto wall planes, far hallway hits still skip). Default **false**. Set before `StartScanAsync` |
+| `ConfineScanToContainingRoom` | `bool` | When true, TSDF stays in the MRUK room that contained the headset at scan start (outer walls / floor / ceiling expanded 50 cm outward, then hard-confined). Default **false**. Set before `StartScanAsync` |
 | `StampScreenPlanes` | `bool` | When true, `SCREEN` (TV) plane stamps are a dedicated voxel-AABB dispatch after Integrate. Default **true**. Set false before `StartScanAsync` to skip |
 | `BoundSceneRoomUuid` | `Guid` | Scene API UUID of the MRUK room the active package was scanned in (stored with the spatial-anchor UUID). Empty when no package is loaded. Rebound from the localized anchor pose if missing or stale |
 | `IsHeadsetInsideBoundSceneRoom` | `bool` | Headset is inside the active package's bound room — not some other captured space. False when no package is loaded. Always true in the editor |

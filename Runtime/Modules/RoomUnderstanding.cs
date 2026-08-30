@@ -270,11 +270,10 @@ namespace Genesis.RoomScan
         /// Half-spaces that bound <paramref name="sceneRoomUuid"/> for GPU
         /// TSDF clip: each <c>Vector4(n, w)</c> is outside when
         /// <c>dot(pos, n) &lt; w</c>. Outer walls (including doorway
-        /// <c>INVISIBLE_WALL_FACE</c>) use an <b>outward</b> slack so the
-        /// wall surface itself integrates — occupancy's 8 cm <i>inset</i>
-        /// would reject those voxels. Floor / ceiling use the same slack
-        /// below / above the plane. Clears <paramref name="dest"/>.
-        /// Returns 0 when the room is missing.
+        /// <c>INVISIBLE_WALL_FACE</c>), floor, and ceiling are expanded
+        /// <b>outward</b> by 50 cm once so a false ceiling / plaster /
+        /// depth noise still integrates. Occupancy's 8 cm inset is unchanged.
+        /// Clears <paramref name="dest"/>. Returns 0 when the room is missing.
         /// </summary>
         public int CopyRoomClipPlanes(Guid sceneRoomUuid, List<Vector4> dest)
         {
@@ -305,10 +304,9 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Conservative world AABB of the captured room (outer walls including
-        /// doorway <c>INVISIBLE_WALL_FACE</c>, floor, ceiling), padded by clip
-        /// slack plus the depth-clamp band so near-miss samples can snap onto
-        /// the wall instead of AABB-rejecting. Occupancy inset is not applied.
-        /// False when the UUID is missing.
+        /// doorway <c>INVISIBLE_WALL_FACE</c>, floor, ceiling), padded by the
+        /// same 50 cm outward expand as the clip planes. Occupancy inset is
+        /// not applied. False when the UUID is missing.
         /// </summary>
         public bool CopyRoomWorldAabb(Guid sceneRoomUuid, out Vector3 min, out Vector3 max)
         {
@@ -638,19 +636,12 @@ namespace Genesis.RoomScan
         {
             const float OuterWallInsetMetres = 0.08f;
             /// <summary>
-            /// TSDF clip slack along the inward normal: the wall / floor /
-            /// ceiling plane itself must integrate, so the half-space is
-            /// pushed <i>outward</i> (the occupancy inset is the opposite).
+            /// TSDF clip hull is the MRUK outer walls / floor / ceiling
+            /// pushed this far <b>outward</b> once, then confined hard.
+            /// Covers a false ceiling above the Scene API plane, wall
+            /// plaster, and Quest depth noise. Occupancy inset is unchanged.
             /// </summary>
-            const float TsdfClipSlackMetres = 0.08f;
-            /// <summary>
-            /// Depth / voxel centres this far past a clip plane are snapped
-            /// onto it. Farther is a real outside hit (hallway) and stays
-            /// rejected. 20 cm was too tight for Quest door noise (striped
-            /// mesh). AABB is padded by slack + this so the GPU early-out
-            /// still skips the hallway.
-            /// </summary>
-            internal const float TsdfDepthClampMetres = 0.50f;
+            const float TsdfClipExpandMetres = 0.50f;
 
             const MRUKAnchor.SceneLabels OuterWallLabels =
                 MRUKAnchor.SceneLabels.WALL_FACE
@@ -832,6 +823,12 @@ namespace Genesis.RoomScan
             const int MaxRoomClipPlanes = 32;
             const int MaxScreenStamps = 4;
 
+            static void AddExpandedPlane(List<Vector4> dst, Vector3 inwardUnit, Vector3 pointOnPlane)
+            {
+                float w = Vector3.Dot(pointOnPlane, inwardUnit) - TsdfClipExpandMetres;
+                dst.Add(new Vector4(inwardUnit.x, inwardUnit.y, inwardUnit.z, w));
+            }
+
             internal static int CopyRoomClipPlanes(MRUKRoom room, List<Vector4> dst)
             {
                 if (dst == null) return 0;
@@ -845,15 +842,11 @@ namespace Genesis.RoomScan
                     if (!a.HasAnyLabel(OuterWallLabels)) continue;
 
                     Vector3 n = Inward(room, a);
-                    float w = Vector3.Dot(a.transform.position, n) - TsdfClipSlackMetres;
-                    dst.Add(new Vector4(n.x, n.y, n.z, w));
+                    AddExpandedPlane(dst, n, a.transform.position);
                 }
 
                 if (dst.Count < MaxRoomClipPlanes)
-                {
-                    float fy = FloorY(room);
-                    dst.Add(new Vector4(0f, 1f, 0f, fy - TsdfClipSlackMetres));
-                }
+                    AddExpandedPlane(dst, Vector3.up, new Vector3(0f, FloorY(room), 0f));
 
                 if (dst.Count < MaxRoomClipPlanes
                     && room.CeilingAnchors != null
@@ -861,7 +854,7 @@ namespace Genesis.RoomScan
                     && room.CeilingAnchors[0] != null)
                 {
                     float cy = room.CeilingAnchors[0].GetAnchorCenter().y;
-                    dst.Add(new Vector4(0f, -1f, 0f, -(cy + TsdfClipSlackMetres)));
+                    AddExpandedPlane(dst, Vector3.down, new Vector3(0f, cy, 0f));
                 }
 
                 return dst.Count;
@@ -907,7 +900,7 @@ namespace Genesis.RoomScan
                 }
 
                 if (!any) return false;
-                Vector3 pad = Vector3.one * (TsdfClipSlackMetres + TsdfDepthClampMetres);
+                Vector3 pad = Vector3.one * TsdfClipExpandMetres;
                 min = b.min - pad;
                 max = b.max + pad;
                 return true;
