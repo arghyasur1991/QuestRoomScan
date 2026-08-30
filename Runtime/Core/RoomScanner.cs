@@ -481,10 +481,12 @@ namespace Genesis.RoomScan
 
                 if (t - _lastMeshTime >= MeshInterval)
                 {
-                    _lastMeshTime = t;
-                    _meshExtractor.Extract();
-                    UpdatePlateauDetection();
-                    MeshExtracted?.Invoke();
+                    if (_meshExtractor != null && _meshExtractor.TryExtract())
+                    {
+                        _lastMeshTime = t;
+                        UpdatePlateauDetection();
+                        MeshExtracted?.Invoke();
+                    }
                 }
             }
 

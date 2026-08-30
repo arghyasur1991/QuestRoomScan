@@ -39,6 +39,9 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("How far new verts start inside the surface (metres) before growing out over birthFadeSeconds.")]
         [Range(0f, 0.2f)] private float birthGrowMetres = 0.08f;
 
+        [SerializeField, Tooltip("Hold-and-morph: lerp the live mesh from the last dump to the next over this many seconds. A new extract does not start until this finishes. 0 = off.")]
+        [Range(0f, 0.6f)] private float meshMorphSeconds = 0.28f;
+
         [Header("Rendering")]
         [SerializeField] private Material scanMeshMaterial;
 
@@ -52,10 +55,13 @@ namespace Genesis.RoomScan
         private int _extractCount;
         float _lastExtractTime;
         float _extractInterval = 0.125f;
+        float _morphStart;
         static readonly int BirthFadeSecID = Shader.PropertyToID("_RSBirthFadeSec");
         static readonly int BirthGrowID = Shader.PropertyToID("_RSBirthGrow");
         static readonly int ExtractTimeID = Shader.PropertyToID("_RSExtractTime");
         static readonly int ExtractIntervalID = Shader.PropertyToID("_RSExtractInterval");
+        static readonly int MorphStartID = Shader.PropertyToID("_RSMorphStart");
+        static readonly int MorphSecID = Shader.PropertyToID("_RSMorphSec");
 
         internal GPUSurfaceNets GpuSurfaceNets => _gpuSurfaceNets;
         public bool IsInitialized => _gpuSurfaceNets != null;
@@ -143,8 +149,27 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Run one GPU mesh extraction, or skip if a previous dump is still
+        /// morphing on screen. The volume keeps integrating; the next accepted
+        /// extract is whatever the TSDF is when this returns true.
+        /// </summary>
+        public bool TryExtract()
+        {
+            if (_gpuSurfaceNets == null) return false;
+            if (meshMorphSeconds > 0.001f && _extractCount > 0
+                && Time.time < _morphStart + meshMorphSeconds)
+                return false;
+
+            _morphStart = Time.time;
+            Extract();
+            return true;
+        }
+
+        /// <summary>
         /// Run one GPU mesh extraction pass from the current TSDF volume state.
-        /// Called by RoomScanner at the configured mesh extraction rate.
+        /// Live scanning goes through <see cref="TryExtract"/> so a morphing
+        /// dump is not overwritten. Persistence and other callers that need
+        /// an immediate remesh may call this directly.
         /// </summary>
         public void Extract()
         {
@@ -185,6 +210,8 @@ namespace Genesis.RoomScan
             Shader.SetGlobalFloat(BirthGrowID, birthGrowMetres);
             Shader.SetGlobalFloat(ExtractTimeID, extractTime);
             Shader.SetGlobalFloat(ExtractIntervalID, _extractInterval);
+            Shader.SetGlobalFloat(MorphStartID, _morphStart);
+            Shader.SetGlobalFloat(MorphSecID, meshMorphSeconds);
         }
 
         /// <summary>
@@ -204,6 +231,8 @@ namespace Genesis.RoomScan
             _gpuSurfaceNets?.Dispose();
             _gpuSurfaceNets = null;
             _lastExtractTime = 0f;
+            _extractCount = 0;
+            _morphStart = 0f;
         }
 
         /// <summary>
@@ -220,6 +249,8 @@ namespace Genesis.RoomScan
             _gpuSurfaceNets?.Dispose();
             _gpuSurfaceNets = null;
             _lastExtractTime = 0f;
+            _extractCount = 0;
+            _morphStart = 0f;
             Init();
         }
     }

@@ -22,9 +22,11 @@ Shader "Genesis/ScanMeshVertexColor"
             struct GPUVertex
             {
                 float3 pos;
+                float3 prevPos;
                 float3 norm;
                 uint   packedColor;
                 uint   voxelFlatIdx;
+                uint   _pad;
             };
             StructuredBuffer<GPUVertex> _SurfaceVerts;
             StructuredBuffer<uint>      _SurfaceIndices;
@@ -141,7 +143,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 GPUVertex gv = _SurfaceVerts[idx];
                 half4 unpacked = UnpackColor(gv.packedColor);
                 float fade = ScanMeshBirthFade(unpacked.a, gv.voxelFlatIdx);
-                float3 pos = ScanMeshBirthDisplace(gv.pos, gv.norm, fade);
+                float3 pos = ScanMeshPresentedPos(gv.pos, gv.prevPos, gv.norm, fade);
 
                 OUT.positionWS  = pos;
                 OUT.positionHCS = TransformWorldToHClip(pos);
@@ -227,9 +229,11 @@ Shader "Genesis/ScanMeshVertexColor"
             struct GPUVertex
             {
                 float3 pos;
+                float3 prevPos;
                 float3 norm;
                 uint   packedColor;
                 uint   voxelFlatIdx;
+                uint   _pad;
             };
             StructuredBuffer<GPUVertex> _SurfaceVerts;
             StructuredBuffer<uint>      _SurfaceIndices;
@@ -247,7 +251,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 uint idx = _SurfaceIndices[vertID];
                 GPUVertex gv = _SurfaceVerts[idx];
                 float fade = ScanMeshBirthFade((gv.packedColor >> 24) / 255.0, gv.voxelFlatIdx);
-                float3 pos = ScanMeshBirthDisplace(gv.pos, gv.norm, fade);
+                float3 pos = ScanMeshPresentedPos(gv.pos, gv.prevPos, gv.norm, fade);
                 OUT.positionHCS = TransformWorldToHClip(pos);
                 return OUT;
             }
@@ -276,9 +280,11 @@ Shader "Genesis/ScanMeshVertexColor"
             struct GPUVertex
             {
                 float3 pos;
+                float3 prevPos;
                 float3 norm;
                 uint   packedColor;
                 uint   voxelFlatIdx;
+                uint   _pad;
             };
             StructuredBuffer<GPUVertex> _SurfaceVerts;
             StructuredBuffer<uint>      _SurfaceIndices;
@@ -297,7 +303,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 uint idx = _SurfaceIndices[vertID];
                 GPUVertex gv = _SurfaceVerts[idx];
                 float fade = ScanMeshBirthFade((gv.packedColor >> 24) / 255.0, gv.voxelFlatIdx);
-                float3 pos = ScanMeshBirthDisplace(gv.pos, gv.norm, fade);
+                float3 pos = ScanMeshPresentedPos(gv.pos, gv.prevPos, gv.norm, fade);
                 OUT.positionHCS = TransformWorldToHClip(pos);
                 OUT.normalWS    = gv.norm;
                 return OUT;

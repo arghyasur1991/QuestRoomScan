@@ -153,7 +153,7 @@ After `warmupIntegrations` (default 15) integration frames, the entire volume is
 
 ## 6. GPU Mesh Extraction (Surface Nets)
 
-`MeshExtractor.Extract()` dispatches `GPUSurfaceNets` — the entire pipeline runs on the GPU with zero CPU readback.
+`MeshExtractor.TryExtract()` dispatches `GPUSurfaceNets` — the entire pipeline runs on the GPU with zero CPU readback. If `meshMorphSeconds` > 0, a dump that is still morphing on screen is skipped (the volume keeps integrating; the next accepted extract is whatever the TSDF is when the morph finishes).
 
 ### Compute Pipeline (`SurfaceNetsExtract.compute`)
 
@@ -225,6 +225,7 @@ For each vertex (dispatched indirectly), finds the best-matching detected plane:
 
 - **New vertex** (age = −1): Placed instantly at extracted position (α = 1.0, no damping). `packedColor.a` is 0 (birth).
 - **Birth fade**: `Temporal.w` packs fade ticks (low byte, 0–255, never resets on the vertex — incremented each extract) with stability age (high bytes). The live shader adds `_Time.y − _RSExtractTime` so the cyan→photoreal settle and a short grow along the normal run **every frame** between dumps. `_RSBirthFadeSec` (default 1 s) / `_RSBirthGrow` (default 8 cm). Opaque, no `clip`. Refined bake ignores this. 0 on `MeshExtractor.birthFadeSeconds` disables the look.
+- **Hold-and-morph**: `GPUVertex` is 48 bytes (`pos`, `prevPos`, `norm`, `packedColor`, `voxelFlatIdx`, pad). `TemporalBlend` writes last dump into `prevPos` (voxel correspondence via `_TemporalState`, not compact index). The forward shader `lerp(prevPos, pos, smoothstep(_Time))` over `meshMorphSeconds` (default 0.28). A new extract does not start until that finishes. 0 disables morph.
 - **Deadzone**: If position changed less than `temporalDeadzone` (1mm), old position is kept exactly and age increments
 - **Large displacement** (> `convergenceThreshold` = 5mm): α = `alphaMax` (0.85), age resets to 0 — fast convergence
 - **Small displacement** (< convergenceThreshold): Age increments, α = `alphaMin + (alphaMax − alphaMin) × exp(−age × decayRate)`
@@ -638,7 +639,7 @@ Runs alongside scanning with no user interaction. Saves posed camera frames dire
 ### 14.2 PointCloudExporter (Quest, on-demand)
 Exports GPU mesh vertices as binary PLY to the active package's keyframe directory (`points3d.ply`):
 - Async GPU readback of the `GPUSurfaceNets` vertex buffer
-- Parses `GPUVertex` structs: position (float3), normal (float3), packedColor (uint) → RGB
+- Parses `GPUVertex` structs: position (float3), prevPos (float3), normal (float3), packedColor (uint) → RGB (stride 48)
 - Writes position, normal, color per vertex in Unity coordinates (left-handed Y-up)
 - Exported on demand: automatically by `GSplatManager` before training upload, or manually via debug menu
 - Provides dense initialization for GS training (10-100x more points than SfM)

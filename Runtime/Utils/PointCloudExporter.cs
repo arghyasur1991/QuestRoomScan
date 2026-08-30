@@ -13,7 +13,7 @@ namespace Genesis.RoomScan
     /// </summary>
     internal static class PointCloudExporter
     {
-        private const int GpuVertexStride = 32; // float3 pos, float3 norm, uint packedColor, uint voxelFlatIdx
+        private const int GpuVertexStride = 48; // pos, prevPos, norm, packedColor, voxelFlatIdx, pad
         private const string PlyFileName = "points3d.ply";
 
         private static bool _exporting;
@@ -131,11 +131,11 @@ namespace Genesis.RoomScan
                 bw.Write(BitConverter.ToSingle(vertexData, off + 4));
                 bw.Write(BitConverter.ToSingle(vertexData, off + 8));
 
-                bw.Write(BitConverter.ToSingle(vertexData, off + 12));
-                bw.Write(BitConverter.ToSingle(vertexData, off + 16));
-                bw.Write(BitConverter.ToSingle(vertexData, off + 20));
+                bw.Write(BitConverter.ToSingle(vertexData, off + 24));
+                bw.Write(BitConverter.ToSingle(vertexData, off + 28));
+                bw.Write(BitConverter.ToSingle(vertexData, off + 32));
 
-                uint packed = BitConverter.ToUInt32(vertexData, off + 24);
+                uint packed = BitConverter.ToUInt32(vertexData, off + 36);
                 bw.Write((byte)(packed & 0xFF));
                 bw.Write((byte)((packed >> 8) & 0xFF));
                 bw.Write((byte)((packed >> 16) & 0xFF));

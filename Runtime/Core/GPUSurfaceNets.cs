@@ -82,7 +82,7 @@ namespace Genesis.RoomScan
         private static readonly int ID_SmoothPosB = Shader.PropertyToID("_SmoothPosB");
         private static readonly int ID_TemporalState = Shader.PropertyToID("_TemporalState");
 
-        private const int VertexStride = 32;
+        private const int VertexStride = 48;
         private const int Float3Stride = 12;
 
         public GPUSurfaceNets(ComputeShader compute)

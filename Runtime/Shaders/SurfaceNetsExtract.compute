@@ -47,14 +47,16 @@ float  _ConvergeThreshold;
 float  _TemporalDeadzone;
 
 // ──────────────────────────────────────────────────────────────────
-//  GPU Vertex (32 bytes, matches StructuredBuffer in render shader)
+//  GPU Vertex (48 bytes, matches StructuredBuffer in render shader)
 // ──────────────────────────────────────────────────────────────────
 struct GPUVertex
 {
     float3 pos;
+    float3 prevPos;
     float3 norm;
     uint   packedColor;
     uint   voxelFlatIdx;
+    uint   _pad;
 };
 
 // ──────────────────────────────────────────────────────────────────
@@ -234,9 +236,11 @@ void ClassifyAndEmit(uint3 id : SV_DispatchThreadID)
 
     GPUVertex v;
     v.pos          = worldPos;
+    v.prevPos      = worldPos;
     v.norm         = norm;
     v.packedColor  = packed;
     v.voxelFlatIdx = (uint)flatIdx;
+    v._pad         = 0;
 
     _Vertices[compactIdx]     = v;
     _CoordVertMap[flatIdx]    = (int)compactIdx;
@@ -352,6 +356,7 @@ void TemporalBlend(uint3 id : SV_DispatchThreadID)
 
     if (prev.w < 0.0)
     {
+        v.prevPos = v.pos;
         v.packedColor = WithPackedAlpha(v.packedColor, 0u);
         _Vertices[id.x] = v;
         _TemporalState[coord] = float4(v.pos, PackTemporalW(0u, 0u));
@@ -364,6 +369,7 @@ void TemporalBlend(uint3 id : SV_DispatchThreadID)
 
     float3 prevPos = prev.xyz;
     float  dist    = distance(v.pos, prevPos);
+    v.prevPos = prevPos;
 
     if (dist < _TemporalDeadzone)
     {

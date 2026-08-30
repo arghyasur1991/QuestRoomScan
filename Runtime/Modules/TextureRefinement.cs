@@ -96,7 +96,7 @@ namespace Genesis.RoomScan
             _scanner = scanner;
         }
 
-        private const int GpuVertexStride = 32;
+        private const int GpuVertexStride = 48;
 
         internal event Action<string> StatusChanged;
 
@@ -271,10 +271,10 @@ namespace Genesis.RoomScan
                     BitConverter.ToSingle(vertData, off + 4),
                     BitConverter.ToSingle(vertData, off + 8));
                 normals[i] = new Vector3(
-                    BitConverter.ToSingle(vertData, off + 12),
-                    BitConverter.ToSingle(vertData, off + 16),
-                    BitConverter.ToSingle(vertData, off + 20));
-                uint packed = BitConverter.ToUInt32(vertData, off + 24);
+                    BitConverter.ToSingle(vertData, off + 24),
+                    BitConverter.ToSingle(vertData, off + 28),
+                    BitConverter.ToSingle(vertData, off + 32));
+                uint packed = BitConverter.ToUInt32(vertData, off + 36);
                 colors[i] = new Color32(
                     (byte)(packed & 0xFF),
                     (byte)((packed >> 8) & 0xFF),
