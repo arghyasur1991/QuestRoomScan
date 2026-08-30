@@ -96,7 +96,7 @@ namespace Genesis.RoomScan
 
         [Header("Scan Rates")]
         [SerializeField] private float integrationHz = 30f;
-        [SerializeField] private float meshExtractionHz = 30f;
+        [SerializeField] private float meshExtractionHz = 8f;
 
         [Header("Render Mode")]
         [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Vertex;
@@ -113,20 +113,20 @@ namespace Genesis.RoomScan
         [Header("Scan Priors")]
         [SerializeField, Tooltip(
             "When true, TSDF stays inside the MRUK room that contained " +
-            "the headset at scan start. Near-miss depth clamps onto wall " +
-            "planes; far hallway hits still skip. Default off so generic " +
-            "hosts keep an unbounded scan. Hosts that want a single-room " +
-            "mesh set this before StartScanningAsync.")]
-        private bool confineScanToContainingRoom;
+            "the headset at scan start (planes expanded 50 cm outward, " +
+            "then hard-confined). Hallway hits past that still skip. " +
+            "Default on. Set false before StartScanningAsync for an " +
+            "unbounded scan.")]
+        private bool confineScanToContainingRoom = true;
 
         [SerializeField]
         [Tooltip("Stamp MRUK SCREEN (TV) planes as analytic TSDF. Default on.")]
         private bool stampScreenPlanes = true;
 
         /// <summary>
-        /// Opt-in room clip for TSDF. Default false. Set before
-        /// <see cref="StartScanningAsync"/>. Changing it during a scan
-        /// re-uploads clip planes on the next bind.
+        /// Room clip for TSDF. Default true. Set false before
+        /// <see cref="StartScanningAsync"/> for an unbounded scan.
+        /// Changing it during a scan re-uploads clip planes on the next bind.
         /// </summary>
         public bool ConfineScanToContainingRoom
         {

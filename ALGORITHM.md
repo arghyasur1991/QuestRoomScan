@@ -78,7 +78,7 @@ voxPos = voxelToWorld(coord)            // snapped world position
 ```
 
 **Step 2: Early rejections**
-- Room clip (opt-in `ConfineScanToContainingRoom`): MRUK outer walls / floor / ceiling are expanded **50 cm outward once**, then confined hard (`gsInsideRoom`). AABB is padded by the same 50 cm. Occupancy's 8 cm *inset* is unchanged. Default off — unbounded scan.
+- Room clip (`ConfineScanToContainingRoom`, default on): MRUK outer walls / floor / ceiling are expanded **50 cm outward once**, then confined hard (`gsInsideRoom`). AABB is padded by the same 50 cm. Occupancy's 8 cm *inset* is unchanged. Set false for an unbounded scan.
 - Frozen voxel: `weight < 0` (user FreezeInView)
 - Behind camera: `voxView.z > -0.05`
 - Outside depth FOV: `voxNDC.x/y` outside [0.01, 0.99]
@@ -562,7 +562,7 @@ Passthrough **visualization** (`OVRPassthroughLayer`) is unrelated and stays on.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `minMeshWeight` | 0.08 | Min voxel weight for Surface Nets to consider |
-| `gpuVertexBudgetPercent` | 0.05 | Max vertex fraction of total voxels |
+| `gpuVertexBudgetPercent` | 0.08 | Max vertex fraction of total voxels |
 | `meshSmoothIterations` | 1 | Post-extraction vertex smoothing passes (0 = off) |
 | `meshSmoothLambda` | 0.33 | Laplacian blend strength per iteration |
 | `meshSmoothBeta` | 0.5 | HC back-projection strength (prevents shrinkage) |
@@ -581,20 +581,21 @@ Passthrough **visualization** (`OVRPassthroughLayer`) is unrelated and stays on.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `cameraExposure` | 3.0 | Exposure boost for dim Quest 3 passthrough |
-| `warmupIntegrations` | 15 | Frames before volume clear |
+| `warmupIntegrations` | 3 | Frames before volume clear |
 | `pruneIntervalSeconds` | 3.0s | Time between prune passes |
 
 ### Scan Rates
 | Mode | Integration | Mesh Extraction |
 |------|-------------|-----------------|
-| Active | 30 Hz | 30 Hz |
+| Active | 30 Hz | 8 Hz |
 
 ### Texture Persistence
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `textureResolution` | 4096 | Triplanar texture resolution (per plane, applies to both color and depth) |
-| `moveThreshold` | 0.3m | Min camera displacement for new keyframe (KeyframeCollector) |
+| `moveThreshold` | 0.4m | Min camera displacement for new keyframe (KeyframeCollector) |
 | `rotateThresholdDeg` | 20° | Min camera rotation for new keyframe (KeyframeCollector) |
+| `minCaptureInterval` | 1.0s | Min seconds between keyframe captures |
 
 ### Room Anchoring & Relocation
 | Parameter | Default | Description |
@@ -611,14 +612,14 @@ Passthrough **visualization** (`OVRPassthroughLayer`) is unrelated and stays on.
 | TSDF volume (256³ RG8_SNorm) | ~32 MB |
 | Color volume (256³ RGBA8_UNorm) | ~64 MB |
 | GPU Surface Nets — coord vertex map (256³ × 4B) | ~64 MB |
-| GPU Surface Nets — vertex buffer (838K × 32B at 5% budget) | ~26 MB |
-| GPU Surface Nets — index buffer (838K × 18 × 4B) | ~58 MB |
-| GPU Surface Nets — smooth ping-pong (2 × 838K × 12B) | ~19 MB |
+| GPU Surface Nets — vertex buffer (1.34M × 48B at 8% budget) | ~64 MB |
+| GPU Surface Nets — index buffer (1.34M × 18 × 4B) | ~92 MB |
+| GPU Surface Nets — smooth ping-pong (2 × 1.34M × 12B) | ~31 MB |
 | GPU Surface Nets — temporal state (256³ × 16B, RWTexture3D RGBA32F) | ~256 MB |
 | Triplanar color textures (3 × 4096² RGBA8) | ~192 MB |
 | Triplanar depth textures (3 × 4096² R8) | ~48 MB |
-| **Total GPU (with triplanar)** | **~759 MB** |
-| **Total GPU (without triplanar)** | **~519 MB** |
+| **Total GPU (with triplanar)** | **~843 MB** |
+| **Total GPU (without triplanar)** | **~603 MB** |
 | **Persistence on disk** | **~34 MB** |
 
 ## 14. Gaussian Splat Pipeline
@@ -627,9 +628,9 @@ End-to-end pipeline: on-device keyframe + point cloud capture → server-based C
 
 ### 14.1 KeyframeCollector (Quest, automatic)
 Runs alongside scanning with no user interaction. Saves posed camera frames directly into the active scan package (`keyframes/`):
-- **Selection**: Motion-gated — translation > 0.3m OR rotation > 20 deg from any saved keyframe
+- **Selection**: Motion-gated — translation > 0.4m OR rotation > 20 deg from any saved keyframe, and at least 1 s since the last capture
 - **Rejection**: Frames with angular velocity > 120 deg/s are discarded (motion blur)
-- **Per frame**: JPEG (1280x960, quality 90) + one JSON line in `frames.jsonl` with:
+- **Per frame**: JPEG (1280x960, quality 95) + one JSON line in `frames.jsonl` with:
   - Position (px, py, pz), rotation quaternion (qx, qy, qz, qw)
   - Intrinsics (fx, fy, cx, cy), sensor resolution, current resolution
 - **I/O**: `AsyncGPUReadback` → JPEG encode → `Task.Run` file write (zero frame stalls)
@@ -735,7 +736,7 @@ After atlas baking, the refined mesh can be optionally simplified using [meshopt
 
 - **Input**: Baked mesh positions, normals, UVs, and index buffer
 - **Operation**: Quadric error metric simplification with UV coordinates as vertex attributes — penalizes collapses that would distort UVs. `meshopt_SimplifyLockBorder` flag prevents vertices on UV seam boundaries from being collapsed, avoiding seam tearing.
-- **Target**: Configurable ratio, inspector slider `postBakeSimplificationRatio ∈ [0.1, 1.0]`. Default: 1.0 (disabled).
+- **Target**: Configurable ratio, inspector slider `postBakeSimplificationRatio ∈ [0.1, 1.0]`. Default: 0.5 (50% triangles). 1.0 disables.
 - **Performance**: <5ms for 100k triangles on ARM64, runs on background thread (`Task.Run`)
 - **Output**: Compacted vertex/index arrays with preserved UVs. Atlas texture is unchanged — simplification only removes geometry, not texels.
 

@@ -16,10 +16,10 @@ namespace Genesis.RoomScan
     public class KeyframeCollector : MonoBehaviour
     {
         [SerializeField, Tooltip("Min translation (m) from any saved keyframe to trigger a new capture")]
-        private float moveThreshold = 0.15f;
+        private float moveThreshold = 0.4f;
 
         [SerializeField, Tooltip("Min rotation (deg) from any saved keyframe to trigger a new capture")]
-        private float rotateThresholdDeg = 10f;
+        private float rotateThresholdDeg = 20f;
 
         [SerializeField, Range(50, 100)]
         private int jpegQuality = 95;
@@ -28,7 +28,7 @@ namespace Genesis.RoomScan
         private float maxAngularVelocity = 120f;
 
         [SerializeField, Tooltip("Min seconds between captures to prevent burst saves")]
-        private float minCaptureInterval = 0.25f;
+        private float minCaptureInterval = 1f;
 
         private string _exportDir;
         private string _imagesDir;

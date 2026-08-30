@@ -36,11 +36,10 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// When true, TSDF stays inside the MRUK room that contained
-        /// the headset when the scan started (padded AABB; near-miss
-        /// depth clamps onto wall planes so noisy through-wall hits
-        /// still integrate). Default <c>false</c> (unbounded scan).
-        /// Set this before <see cref="StartScanAsync"/>. SCREEN (TV)
-        /// plane stamps still apply either way.
+        /// the headset when the scan started (planes expanded 50 cm
+        /// outward, then hard-confined). Default <c>true</c>. Set
+        /// false before <see cref="StartScanAsync"/> for an unbounded
+        /// scan. SCREEN (TV) plane stamps still apply either way.
         /// </summary>
         public bool ConfineScanToContainingRoom
         {

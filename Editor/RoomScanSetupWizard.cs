@@ -1233,6 +1233,49 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<RoomScanSession>() == null)
                 Undo.AddComponent<RoomScanSession>(root);
 
+            ApplyGameReadyScanDefaults(root);
+
+            foreach (var c in root.GetComponents<Component>())
+                WireComponent(c);
+
+            DisableIdleScanHardware();
+        }
+
+        /// <summary>
+        /// Stamp the game-proven scan knobs onto an existing RoomScan root
+        /// (extract 8 Hz, confine on, throttled keyframes, 50% post-bake
+        /// simplify). New components already get these from field defaults;
+        /// this covers scenes serialized against older 30 Hz / unbounded /
+        /// burst-keyframe values.
+        /// </summary>
+        void ApplyGameReadyScanDefaults(GameObject root)
+        {
+            var scanner = root.GetComponent<RoomScanner>();
+            if (scanner != null)
+            {
+                var so = new SerializedObject(scanner);
+                var hz = so.FindProperty("meshExtractionHz");
+                if (hz != null) hz.floatValue = 8f;
+                var confine = so.FindProperty("confineScanToContainingRoom");
+                if (confine != null) confine.boolValue = true;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(scanner);
+            }
+
+            var kf = root.GetComponent<KeyframeCollector>();
+            if (kf != null)
+            {
+                var so = new SerializedObject(kf);
+                var move = so.FindProperty("moveThreshold");
+                if (move != null) move.floatValue = 0.4f;
+                var rot = so.FindProperty("rotateThresholdDeg");
+                if (rot != null) rot.floatValue = 20f;
+                var interval = so.FindProperty("minCaptureInterval");
+                if (interval != null) interval.floatValue = 1f;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(kf);
+            }
+
             var tr = root.GetComponent<TextureRefinement>();
             if (tr != null)
             {
@@ -1246,11 +1289,6 @@ namespace Genesis.RoomScan.Editor
                     Debug.Log("[RoomScan Setup] Set postBakeSimplificationRatio to 0.5 for game-ready mesh");
                 }
             }
-
-            foreach (var c in root.GetComponents<Component>())
-                WireComponent(c);
-
-            DisableIdleScanHardware();
         }
 
         /// <summary>

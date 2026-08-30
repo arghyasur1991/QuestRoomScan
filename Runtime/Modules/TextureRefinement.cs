@@ -87,7 +87,7 @@ namespace Genesis.RoomScan
         [Header("Post-Bake Simplification")]
         [Tooltip("Simplify after atlas baking to preserve UVs (1.0 = disabled, 0.5 = 50% triangles). Runs on background thread.")]
         [Range(0.1f, 1f)]
-        [SerializeField] internal float postBakeSimplificationRatio = 1f;
+        [SerializeField] internal float postBakeSimplificationRatio = 0.5f;
 
         private RoomScanner _scanner;
 
