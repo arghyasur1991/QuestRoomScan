@@ -99,7 +99,7 @@ namespace Genesis.RoomScan
         /// Drops the in-memory loaded / refined scan without deleting saved
         /// packages or erasing spatial-anchor UUIDs. Hides the refined mesh,
         /// unbinds the active spatial anchor, and frees scan GPU if it was
-        /// allocated. Call this when leaving a loaded look to start a new
+        /// allocated. Call this when leaving a loaded scan to start a new
         /// scan in the same session — <see cref="StartScanAsync"/> also
         /// does this on a non-resume start, but hosts usually want the old
         /// mesh gone <i>before</i> the user presses the scan button.
