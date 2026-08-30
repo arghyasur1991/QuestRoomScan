@@ -78,7 +78,7 @@ voxPos = voxelToWorld(coord)            // snapped world position
 ```
 
 **Step 2: Early rejections**
-- Room clip (`ConfineScanToContainingRoom`, default on): MRUK outer walls / floor / ceiling are expanded **50 cm outward once**, then confined hard (`gsInsideRoom`). AABB is padded by the same 50 cm. Occupancy's 8 cm *inset* is unchanged. Set false for an unbounded scan.
+- Room clip (opt-in `ConfineScanToContainingRoom`): MRUK outer walls / floor / ceiling are expanded **50 cm outward once**, then confined hard (`gsInsideRoom`). AABB is padded by the same 50 cm. Occupancy's 8 cm *inset* is unchanged. Default off — unbounded scan. No-op without `RoomUnderstanding`.
 - Frozen voxel: `weight < 0` (user FreezeInView)
 - Behind camera: `voxView.z > -0.05`
 - Outside depth FOV: `voxNDC.x/y` outside [0.01, 0.99]
@@ -946,6 +946,12 @@ Each detection cycle optionally saves:
 room contains a world point / the headset — never `GetCurrentRoom()`),
 visible `WALL_FACE` planes, classification, and `SceneObjectRegistry`
 population from Meta's Mixed Reality Utility Kit scene model.
+
+It is an **optional** module. Without it: scan still runs (depth + RGB +
+TSDF + refine); clip / SCREEN stamps / occupancy APIs no-op. Permissions
+(`USE_SCENE`, `USE_ANCHOR_API`, `HEADSET_CAMERA`) and MRUK scene load
+live on `DepthCapture` / `RoomScanSession` / `RoomAnchorManager`, not
+on this component.
 
 ### 17.1 Anchor Population (`PopulateRegistry`)
 

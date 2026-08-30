@@ -37,9 +37,10 @@ namespace Genesis.RoomScan
         /// <summary>
         /// When true, TSDF stays inside the MRUK room that contained
         /// the headset when the scan started (planes expanded 50 cm
-        /// outward, then hard-confined). Default <c>true</c>. Set
-        /// false before <see cref="StartScanAsync"/> for an unbounded
-        /// scan. SCREEN (TV) plane stamps still apply either way.
+        /// outward, then hard-confined). Default <c>false</c> (unbounded
+        /// scan). Set this before <see cref="StartScanAsync"/>. No-op
+        /// without <see cref="RoomUnderstanding"/>. SCREEN (TV) plane
+        /// stamps still apply either way when that module is present.
         /// </summary>
         public bool ConfineScanToContainingRoom
         {
@@ -54,7 +55,8 @@ namespace Genesis.RoomScan
         /// <summary>
         /// When true, MRUK <c>SCREEN</c> (TV) slabs are stamped as analytic
         /// TSDF after Integrate. Default <c>true</c>. Set before
-        /// <see cref="StartScanAsync"/>.
+        /// <see cref="StartScanAsync"/>. No-op without
+        /// <see cref="RoomUnderstanding"/>.
         /// </summary>
         public bool StampScreenPlanes
         {

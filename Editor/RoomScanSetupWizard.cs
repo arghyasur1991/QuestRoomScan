@@ -1243,10 +1243,11 @@ namespace Genesis.RoomScan.Editor
 
         /// <summary>
         /// Stamp the game-proven scan knobs onto an existing RoomScan root
-        /// (extract 8 Hz, confine on, throttled keyframes, 50% post-bake
-        /// simplify). New components already get these from field defaults;
-        /// this covers scenes serialized against older 30 Hz / unbounded /
-        /// burst-keyframe values.
+        /// (extract 8 Hz, throttled keyframes, 50% post-bake simplify).
+        /// Confine-to-room is host art direction and is left alone.
+        /// New components already get these from field defaults; this
+        /// covers scenes serialized against older 30 Hz / burst-keyframe
+        /// values.
         /// </summary>
         void ApplyGameReadyScanDefaults(GameObject root)
         {
@@ -1256,8 +1257,6 @@ namespace Genesis.RoomScan.Editor
                 var so = new SerializedObject(scanner);
                 var hz = so.FindProperty("meshExtractionHz");
                 if (hz != null) hz.floatValue = 8f;
-                var confine = so.FindProperty("confineScanToContainingRoom");
-                if (confine != null) confine.boolValue = true;
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(scanner);
             }
