@@ -93,6 +93,7 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
     if (maxDelta > DEPTH_EDGE_THRESH) return;
 
     float3 worldPos = gsDepthNDCtoWorld(float3(uv, depthNDC));
+    if (!gsInsideRoom(worldPos)) return;
     float3 normal = gsDepthNormalSample(uv).xyz;
     if (length(normal) < 0.1) return;
     normal = normalize(normal);

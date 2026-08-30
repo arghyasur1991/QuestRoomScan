@@ -86,6 +86,14 @@ namespace Genesis.RoomScan
         private static readonly int CamSensorResID = Shader.PropertyToID("gsCamSensorRes");
         private static readonly int CamCurrentResID = Shader.PropertyToID("gsCamCurrentRes");
         private static readonly int CamExposureID = Shader.PropertyToID("gsCamExposure");
+        private static readonly int ConfineToRoomID = Shader.PropertyToID("gsConfineToRoom");
+        private static readonly int NumRoomClipPlanesID = Shader.PropertyToID("gsNumRoomClipPlanes");
+        private static readonly int RoomClipPlanesID = Shader.PropertyToID("gsRoomClipPlanes");
+        private static readonly int NumScreenStampsID = Shader.PropertyToID("gsNumScreenStamps");
+        private static readonly int ScreenCenterID = Shader.PropertyToID("gsScreenCenter");
+        private static readonly int ScreenInwardID = Shader.PropertyToID("gsScreenInward");
+        private static readonly int ScreenAxisID = Shader.PropertyToID("gsScreenAxis");
+        private static readonly int ScreenBitangentID = Shader.PropertyToID("gsScreenBitangent");
 
         public float CameraExposure => cameraExposure;
 
@@ -130,6 +138,18 @@ namespace Genesis.RoomScan
         /// </summary>
         public readonly List<Transform> ExclusionZones = new();
         private readonly Vector4[] _exclusionPositions = new Vector4[64];
+
+        public const int MaxRoomClipPlanes = 32;
+        public const int MaxScreenStamps = 4;
+
+        private readonly Vector4[] _roomClipPlanes = new Vector4[MaxRoomClipPlanes];
+        private readonly Vector4[] _screenCenter = new Vector4[MaxScreenStamps];
+        private readonly Vector4[] _screenInward = new Vector4[MaxScreenStamps];
+        private readonly Vector4[] _screenAxis = new Vector4[MaxScreenStamps];
+        private readonly Vector4[] _screenBitangent = new Vector4[MaxScreenStamps];
+        private int _roomClipCount;
+        private int _screenStampCount;
+        private bool _confineToRoom;
 
         /// <summary>Total number of integration passes dispatched since startup or the last clear.</summary>
         public int IntegrationCount { get; private set; }
@@ -630,6 +650,8 @@ namespace Genesis.RoomScan
             compute.SetInt(NumExclusionsID, numExclusions);
             compute.SetVectorArray(ExclusionHeadsID, _exclusionPositions);
 
+            BindScanPriors(compute);
+
             compute.SetFloat(BlendRateID, blendRate);
             compute.SetFloat(StabilityID, stability);
             compute.SetFloat(WeightGrowthID, weightGrowth);
@@ -689,6 +711,94 @@ namespace Genesis.RoomScan
             }
 
             Integrated?.Invoke();
+        }
+
+        /// <summary>
+        /// Upload room-clip half-spaces and SCREEN plane stamps for the next
+        /// <see cref="Integrate"/> (and for <see cref="BindScanPriors"/> on
+        /// other compute shaders that include <c>VolumeHelpers.hlsl</c>).
+        /// Pass <paramref name="confine"/> false to keep unbounded TSDF;
+        /// SCREEN stamps still apply. Null lists clear that buffer.
+        /// </summary>
+        public void SetScanPriors(
+            bool confine,
+            List<Vector4> clipPlanes,
+            List<ScanScreenStamp> screenStamps)
+        {
+            _confineToRoom = confine;
+            _roomClipCount = 0;
+            if (clipPlanes != null)
+            {
+                int n = Mathf.Min(clipPlanes.Count, MaxRoomClipPlanes);
+                for (int i = 0; i < n; i++)
+                    _roomClipPlanes[i] = clipPlanes[i];
+                for (int i = n; i < MaxRoomClipPlanes; i++)
+                    _roomClipPlanes[i] = Vector4.zero;
+                _roomClipCount = n;
+            }
+            else
+            {
+                for (int i = 0; i < MaxRoomClipPlanes; i++)
+                    _roomClipPlanes[i] = Vector4.zero;
+            }
+
+            _screenStampCount = 0;
+            if (screenStamps != null)
+            {
+                int n = Mathf.Min(screenStamps.Count, MaxScreenStamps);
+                for (int i = 0; i < n; i++)
+                {
+                    var s = screenStamps[i];
+                    _screenCenter[i] = new Vector4(
+                        s.Center.x, s.Center.y, s.Center.z, s.HalfThickness);
+                    _screenInward[i] = new Vector4(
+                        s.Inward.x, s.Inward.y, s.Inward.z, s.HalfWidth);
+                    _screenAxis[i] = new Vector4(
+                        s.Tangent.x, s.Tangent.y, s.Tangent.z, s.HalfHeight);
+                    _screenBitangent[i] = new Vector4(
+                        s.Bitangent.x, s.Bitangent.y, s.Bitangent.z, 0f);
+                }
+                for (int i = n; i < MaxScreenStamps; i++)
+                {
+                    _screenCenter[i] = Vector4.zero;
+                    _screenInward[i] = Vector4.zero;
+                    _screenAxis[i] = Vector4.zero;
+                    _screenBitangent[i] = Vector4.zero;
+                }
+                _screenStampCount = n;
+            }
+            else
+            {
+                for (int i = 0; i < MaxScreenStamps; i++)
+                {
+                    _screenCenter[i] = Vector4.zero;
+                    _screenInward[i] = Vector4.zero;
+                    _screenAxis[i] = Vector4.zero;
+                    _screenBitangent[i] = Vector4.zero;
+                }
+            }
+        }
+
+        /// <summary>Drop clip planes and SCREEN stamps (scan stop / unload).</summary>
+        public void ClearScanPriors()
+            => SetScanPriors(false, null, null);
+
+        /// <summary>
+        /// Bind the last <see cref="SetScanPriors"/> upload onto any compute
+        /// shader that includes <c>VolumeHelpers.hlsl</c> (Integrate, triplanar
+        /// bake). No-op when <paramref name="target"/> is null.
+        /// </summary>
+        public void BindScanPriors(ComputeShader target)
+        {
+            if (target == null) return;
+            target.SetInt(ConfineToRoomID, _confineToRoom && _roomClipCount > 0 ? 1 : 0);
+            target.SetInt(NumRoomClipPlanesID, _roomClipCount);
+            target.SetVectorArray(RoomClipPlanesID, _roomClipPlanes);
+            target.SetInt(NumScreenStampsID, _screenStampCount);
+            target.SetVectorArray(ScreenCenterID, _screenCenter);
+            target.SetVectorArray(ScreenInwardID, _screenInward);
+            target.SetVectorArray(ScreenAxisID, _screenAxis);
+            target.SetVectorArray(ScreenBitangentID, _screenBitangent);
         }
 
         /// <summary>

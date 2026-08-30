@@ -90,6 +90,32 @@ void Integrate(uint id : SV_DispatchThreadID)
     uint3 coord = gsWorldToVoxel(vWorldPos);
     float3 voxPos = gsVoxelToWorld(coord);
 
+    if (!gsInsideRoom(voxPos)) return;
+
+    float2 old = gsVolumeRW[coord];
+    if (old.y < 0) return; // frozen voxel — skip integration
+
+    float screenDist;
+    if (gsTryScreenStamp(voxPos, screenDist))
+    {
+        gsVolumeRW[coord] = float2(screenDist, gsMaxWeight);
+        if (gsCamAvailable && abs(screenDist) < COLOR_SURFACE_BAND)
+        {
+            float2 uv = ProjectToCameraUV(voxPos);
+            if (uv.x > 0.02 && uv.x < 0.98 && uv.y > 0.02 && uv.y < 0.98)
+            {
+                float4 camColor = gsCamRGB.SampleLevel(gsBilinearClampSampler, uv, 0);
+                float3 boosted = saturate(camColor.rgb * gsCamExposure);
+                float4 oldColor = gsColorVolumeRW[coord];
+                float colorBlend = 0.25;
+                float3 rgb = oldColor.a < 0.01 ? boosted : lerp(oldColor.rgb, boosted, colorBlend);
+                float newAlpha = min(oldColor.a + 0.08, 1.0);
+                gsColorVolumeRW[coord] = float4(rgb, newAlpha);
+            }
+        }
+        return;
+    }
+
     float3 eyePos = gsDepthEyePos();
     float3 eyeToVox = voxPos - eyePos;
     float voxEyeDist = length(eyeToVox);
@@ -145,8 +171,6 @@ void Integrate(uint id : SV_DispatchThreadID)
     float quality = distFactor * angleFactor;
     float q2 = quality * quality;
 
-    float2 old = gsVolumeRW[coord];
-    if (old.y < 0) return; // frozen voxel — skip integration
     float oldVal = old.x;
     float weight = max(old.y, 0);
     bool wasEmpty = weight < 0.001;

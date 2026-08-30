@@ -78,6 +78,9 @@ voxPos = voxelToWorld(coord)            // snapped world position
 ```
 
 **Step 2: Early rejections**
+- Room clip (opt-in `ConfineScanToContainingRoom`): voxel world position fails any uploaded half-space (`dot(pos, n) < w`). Planes are the room's outer walls including doorway `INVISIBLE_WALL_FACE` (same 8 cm inset as occupancy) plus floor/ceiling with 4 cm slack. Default off — unbounded scan.
+- Frozen voxel: `weight < 0` (user FreezeInView)
+- SCREEN plane stamp: voxel inside a fattened MRUK `SCREEN` slab → write analytic plane TSDF (`dot(pos - center, inward)` clamped to `±voxelDistance`) at `maxWeight`, keep RGB projection, skip depth. Glass/bounce depth is ignored; the mesh is one planar sheet.
 - Behind camera: `voxView.z > -0.05`
 - Outside depth FOV: `voxNDC.x/y` outside [0.01, 0.99]
 

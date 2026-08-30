@@ -40,4 +40,68 @@ namespace Genesis.RoomScan
             IsScreen = isScreen;
         }
     }
+
+    /// <summary>
+    /// GPU stamp for a <c>SCREEN</c> (TV): a fattened slab whose TSDF is the
+    /// analytic plane rather than headset depth. Glass and bounce make the
+    /// depth sensor lie; locking the slab to the MRUK plane yields one
+    /// planar sheet. Color still comes from the RGB camera.
+    /// </summary>
+    public readonly struct ScanScreenStamp
+    {
+        public readonly Vector3 Center;
+        /// <summary>Unit vector from the glass into the room.</summary>
+        public readonly Vector3 Inward;
+        public readonly Vector3 Tangent;
+        public readonly Vector3 Bitangent;
+        public readonly float HalfWidth;
+        public readonly float HalfHeight;
+        public readonly float HalfThickness;
+
+        public ScanScreenStamp(
+            Vector3 center,
+            Vector3 inward,
+            Vector3 tangent,
+            Vector3 bitangent,
+            float halfWidth,
+            float halfHeight,
+            float halfThickness)
+        {
+            Center = center;
+            Inward = inward;
+            Tangent = tangent;
+            Bitangent = bitangent;
+            HalfWidth = halfWidth;
+            HalfHeight = halfHeight;
+            HalfThickness = halfThickness;
+        }
+
+        /// <summary>
+        /// Build a stamp from a pin face. Thickness covers a typical TV
+        /// volume (~11 cm) plus a little slack; width/height expand for the
+        /// bezel so Surface Nets do not leave a depth-noise rim.
+        /// </summary>
+        public static ScanScreenStamp FromFace(
+            SceneWallFace face,
+            float halfThickness = 0.13f,
+            float expandMetres = 0.03f)
+        {
+            Vector3 inward = face.Inward.sqrMagnitude > 1e-8f
+                ? face.Inward.normalized
+                : Vector3.forward;
+            Vector3 tangent = Vector3.Cross(Vector3.up, inward);
+            if (tangent.sqrMagnitude < 1e-6f)
+                tangent = Vector3.Cross(Vector3.right, inward);
+            tangent.Normalize();
+            Vector3 bitangent = Vector3.Cross(inward, tangent).normalized;
+            return new ScanScreenStamp(
+                face.Center,
+                inward,
+                tangent,
+                bitangent,
+                face.Width * 0.5f + expandMetres,
+                face.Height * 0.5f + expandMetres,
+                halfThickness);
+        }
+    }
 }

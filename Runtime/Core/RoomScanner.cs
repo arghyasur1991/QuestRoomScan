@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Genesis.RoomScan.UI;
@@ -108,6 +109,39 @@ namespace Genesis.RoomScan
 
         [Header("Logging")]
         [SerializeField] private LogLevel logLevel = LogLevel.Info;
+
+        [Header("Scan Priors")]
+        [SerializeField, Tooltip(
+            "When true, TSDF only integrates voxels inside the MRUK room " +
+            "that contained the headset at scan start (outer walls including " +
+            "doorway faces). Default off so generic hosts keep an unbounded " +
+            "scan. Hosts that want a single-room mesh set this before " +
+            "StartScanningAsync.")]
+        private bool confineScanToContainingRoom;
+
+        /// <summary>
+        /// Opt-in room clip for TSDF. Default false. Set before
+        /// <see cref="StartScanningAsync"/>. Changing it during a scan
+        /// re-uploads clip planes on the next bind.
+        /// </summary>
+        public bool ConfineScanToContainingRoom
+        {
+            get => confineScanToContainingRoom;
+            set
+            {
+                confineScanToContainingRoom = value;
+                if (IsScanning) BindScanPriors();
+            }
+        }
+
+        /// <summary>
+        /// Rate-limited: the gaze probe (eye + forward × 1.8 m) left the
+        /// confined room. Argument is the probe world position. QRS has no
+        /// player copy — the host decides what to show. Does not fire when
+        /// <see cref="ConfineScanToContainingRoom"/> is off or no room was
+        /// bound at scan start.
+        /// </summary>
+        public event Action<Vector3> ScanOutsideRoomAttempted;
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
@@ -392,6 +426,11 @@ namespace Genesis.RoomScan
         private float _lastScannerLog;
         private int _integrateCount;
         private bool _subscribedToAnchorsChanged;
+        private Guid _scanRoomUuid;
+        private float _lastOutsideRoomEvent;
+        private float _lastEmptyRoomBindAttempt;
+        private readonly List<Vector4> _clipScratch = new(32);
+        private readonly List<ScanScreenStamp> _stampScratch = new(4);
 
         private void Update()
         {
@@ -427,6 +466,8 @@ namespace Genesis.RoomScan
                 _volumeIntegrator.Integrate();
                 Integrated?.Invoke();
                 _integrateCount++;
+
+                MaybeNotifyOutsideRoom();
 
                 if (t - _lastMeshTime >= MeshInterval)
                 {
@@ -600,6 +641,8 @@ namespace Genesis.RoomScan
                 }
                 PopulateSceneObjectRegistry();
                 SubscribeToAnchorsChanged();
+                ResolveScanRoomUuid();
+                BindScanPriors();
 
                 Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
                 ScanStarted?.Invoke();
@@ -647,6 +690,9 @@ namespace Genesis.RoomScan
             ICameraProvider provider = GetActiveCameraProvider();
             provider?.StopCapture();
             _depthCapture.StopDepthCapture();
+
+            _volumeIntegrator?.ClearScanPriors();
+            _scanRoomUuid = Guid.Empty;
 
             ScanStopped?.Invoke();
             if (_modules != null)
@@ -1463,6 +1509,95 @@ namespace Genesis.RoomScan
         {
             Logger.Info("[RoomScanner] MRUK anchors changed — re-populating registry");
             PopulateSceneObjectRegistry();
+            if (IsScanning) BindScanPriors();
+        }
+
+        void ResolveScanRoomUuid()
+        {
+            if (_scanRoomUuid != Guid.Empty) return;
+            if (_roomUnderstanding == null) return;
+            _scanRoomUuid = _roomUnderstanding.TryGetRoomUuidContainingHeadset();
+        }
+
+        void BindScanPriors()
+        {
+            if (_volumeIntegrator == null)
+                return;
+            if (_roomUnderstanding == null)
+            {
+                _volumeIntegrator.ClearScanPriors();
+                return;
+            }
+
+            ResolveScanRoomUuid();
+            _roomUnderstanding.CopyRoomClipPlanes(_scanRoomUuid, _clipScratch);
+            _roomUnderstanding.CopyScreenStamps(_scanRoomUuid, _stampScratch);
+            _volumeIntegrator.SetScanPriors(
+                confineScanToContainingRoom, _clipScratch, _stampScratch);
+
+            if (_stampScratch.Count > 0 || (confineScanToContainingRoom && _clipScratch.Count > 0))
+            {
+                Logger.Info(
+                    $"[RoomScanner] Scan priors — confine={confineScanToContainingRoom} " +
+                    $"room={_scanRoomUuid} clipPlanes={_clipScratch.Count} " +
+                    $"screens={_stampScratch.Count}");
+            }
+        }
+
+        const float OutsideRoomProbeMetres = 1.8f;
+        const float OutsideRoomEventInterval = 1.5f;
+
+        void MaybeNotifyOutsideRoom()
+        {
+            if (!confineScanToContainingRoom) return;
+            if (_roomUnderstanding == null) return;
+
+            if (_scanRoomUuid == Guid.Empty)
+            {
+                float now = Time.time;
+                if (now - _lastEmptyRoomBindAttempt >= 2f)
+                {
+                    _lastEmptyRoomBindAttempt = now;
+                    BindScanPriors();
+                }
+                return;
+            }
+
+            if (!TryHeadsetPose(out Vector3 eye, out Vector3 fwd))
+                return;
+
+            Vector3 probe = eye + fwd * OutsideRoomProbeMetres;
+            if (_roomUnderstanding.Contains(_scanRoomUuid, probe))
+                return;
+
+            float t = Time.time;
+            if (t - _lastOutsideRoomEvent < OutsideRoomEventInterval)
+                return;
+            _lastOutsideRoomEvent = t;
+            ScanOutsideRoomAttempted?.Invoke(probe);
+        }
+
+        static bool TryHeadsetPose(out Vector3 pos, out Vector3 fwd)
+        {
+            var rig = FindAnyObjectByType<OVRCameraRig>(FindObjectsInactive.Include);
+            if (rig != null && rig.centerEyeAnchor != null)
+            {
+                pos = rig.centerEyeAnchor.position;
+                fwd = rig.centerEyeAnchor.forward;
+                return true;
+            }
+
+            var cam = Camera.main;
+            if (cam != null)
+            {
+                pos = cam.transform.position;
+                fwd = cam.transform.forward;
+                return true;
+            }
+
+            pos = default;
+            fwd = default;
+            return false;
         }
 
         internal void ApplyHQTexture(Texture2D atlas)

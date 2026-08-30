@@ -253,6 +253,55 @@ namespace Genesis.RoomScan
         public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest)
             => CopyWallFacesOfRoomContaining(Query.HeadsetWorldPosition(), dest);
 
+        /// <summary>
+        /// True when <paramref name="worldPos"/> is inside the captured
+        /// space with this Scene API room UUID (floor outline + outer
+        /// walls). False when the UUID is empty or the room is not loaded.
+        /// </summary>
+        public bool Contains(Guid sceneRoomUuid, Vector3 worldPos)
+        {
+            if (sceneRoomUuid == Guid.Empty) return false;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null) return false;
+            return Query.Contains(Query.FindByUuid(_mruk.Rooms, sceneRoomUuid), worldPos);
+        }
+
+        /// <summary>
+        /// Half-spaces that bound <paramref name="sceneRoomUuid"/> for GPU
+        /// TSDF clip: each <c>Vector4(n, w)</c> is outside when
+        /// <c>dot(pos, n) &lt; w</c>. Outer walls (including doorway
+        /// <c>INVISIBLE_WALL_FACE</c>) use the same 8 cm inset as occupancy.
+        /// Floor / ceiling use a 4 cm slack so voxels just below the floor
+        /// plane still integrate. Clears <paramref name="dest"/>. Returns 0
+        /// when the room is missing.
+        /// </summary>
+        public int CopyRoomClipPlanes(Guid sceneRoomUuid, List<Vector4> dest)
+        {
+            if (dest == null) return 0;
+            dest.Clear();
+            if (sceneRoomUuid == Guid.Empty) return 0;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null) return 0;
+            return Query.CopyRoomClipPlanes(
+                Query.FindByUuid(_mruk.Rooms, sceneRoomUuid), dest);
+        }
+
+        /// <summary>
+        /// <c>SCREEN</c> (TV) stamps for the room. Clears
+        /// <paramref name="dest"/>. At most 4. Empty when the UUID is
+        /// missing or the room has no television.
+        /// </summary>
+        public int CopyScreenStamps(Guid sceneRoomUuid, List<ScanScreenStamp> dest)
+        {
+            if (dest == null) return 0;
+            dest.Clear();
+            if (sceneRoomUuid == Guid.Empty) return 0;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null) return 0;
+            return Query.CopyScreenStamps(
+                Query.FindByUuid(_mruk.Rooms, sceneRoomUuid), dest);
+        }
+
         // ─────────────────────────────────────────────────────────────
         //  Scene Object Registry population
         // ─────────────────────────────────────────────────────────────
@@ -746,6 +795,62 @@ namespace Genesis.RoomScan
                 }
 
                 return true;
+            }
+
+            const float FloorCeilingSlackMetres = 0.04f;
+            const int MaxRoomClipPlanes = 32;
+            const int MaxScreenStamps = 4;
+
+            internal static int CopyRoomClipPlanes(MRUKRoom room, List<Vector4> dst)
+            {
+                if (dst == null) return 0;
+                dst.Clear();
+                if (room == null || room.Anchors == null) return 0;
+
+                for (int i = 0; i < room.Anchors.Count && dst.Count < MaxRoomClipPlanes; i++)
+                {
+                    var a = room.Anchors[i];
+                    if (a == null) continue;
+                    if (!a.HasAnyLabel(OuterWallLabels)) continue;
+
+                    Vector3 n = Inward(room, a);
+                    float w = Vector3.Dot(a.transform.position, n) + OuterWallInsetMetres;
+                    dst.Add(new Vector4(n.x, n.y, n.z, w));
+                }
+
+                if (dst.Count < MaxRoomClipPlanes)
+                {
+                    float fy = FloorY(room);
+                    dst.Add(new Vector4(0f, 1f, 0f, fy - FloorCeilingSlackMetres));
+                }
+
+                if (dst.Count < MaxRoomClipPlanes
+                    && room.CeilingAnchors != null
+                    && room.CeilingAnchors.Count > 0
+                    && room.CeilingAnchors[0] != null)
+                {
+                    float cy = room.CeilingAnchors[0].GetAnchorCenter().y;
+                    dst.Add(new Vector4(0f, -1f, 0f, -(cy + FloorCeilingSlackMetres)));
+                }
+
+                return dst.Count;
+            }
+
+            internal static int CopyScreenStamps(MRUKRoom room, List<ScanScreenStamp> dst)
+            {
+                if (dst == null) return 0;
+                dst.Clear();
+                if (room == null) return 0;
+
+                var faces = new List<SceneWallFace>(4);
+                CopyWallFaces(room, faces);
+                for (int i = 0; i < faces.Count && dst.Count < MaxScreenStamps; i++)
+                {
+                    if (!faces[i].IsScreen) continue;
+                    dst.Add(ScanScreenStamp.FromFace(faces[i]));
+                }
+
+                return dst.Count;
             }
         }
     }

@@ -400,6 +400,8 @@ namespace Genesis.RoomScan
             bakeCompute.SetInt(Shader.PropertyToID("gsNumExclusions"), numExc);
             bakeCompute.SetVectorArray(Shader.PropertyToID("gsExclusionHeads"), excPositions);
 
+            VolumeIntegrator.Instance?.BindScanPriors(bakeCompute);
+
             bakeCompute.SetInts(TriSizeID, textureResolution, textureResolution);
             int splatR = splatRadiusOverride > 0 ? splatRadiusOverride : Mathf.Max(1, textureResolution / 2048);
             bakeCompute.SetInt(Shader.PropertyToID("gsSplatRadius"), splatR);

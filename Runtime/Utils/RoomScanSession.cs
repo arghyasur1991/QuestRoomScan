@@ -34,6 +34,31 @@ namespace Genesis.RoomScan
         /// <summary>Raised each frame during scanning with the latest progress.</summary>
         public event Action<ScanProgress> ProgressUpdated;
 
+        /// <summary>
+        /// Rate-limited while <see cref="ConfineScanToContainingRoom"/> is
+        /// on: the gaze probe left the room bound at scan start. Argument
+        /// is the probe world position. QRS has no player-facing copy —
+        /// subscribe and show your own hint.
+        /// </summary>
+        public event Action<Vector3> ScanOutsideRoomAttempted;
+
+        /// <summary>
+        /// When true, TSDF skips voxels outside the MRUK room that
+        /// contained the headset when the scan started. Default
+        /// <c>false</c> (unbounded scan). Set this before
+        /// <see cref="StartScanAsync"/>. SCREEN (TV) plane stamps still
+        /// apply either way.
+        /// </summary>
+        public bool ConfineScanToContainingRoom
+        {
+            get => _scanner != null && _scanner.ConfineScanToContainingRoom;
+            set
+            {
+                if (_scanner != null)
+                    _scanner.ConfineScanToContainingRoom = value;
+            }
+        }
+
         private RoomScanner _scanner;
         private RoomScanPersistence _persistence;
 
@@ -53,8 +78,25 @@ namespace Genesis.RoomScan
 
         private void OnDestroy()
         {
+            if (_scanner != null)
+                _scanner.ScanOutsideRoomAttempted -= OnScanOutsideRoomAttempted;
             if (Instance == this) Instance = null;
         }
+
+        private void OnEnable()
+        {
+            if (_scanner != null)
+                _scanner.ScanOutsideRoomAttempted += OnScanOutsideRoomAttempted;
+        }
+
+        private void OnDisable()
+        {
+            if (_scanner != null)
+                _scanner.ScanOutsideRoomAttempted -= OnScanOutsideRoomAttempted;
+        }
+
+        void OnScanOutsideRoomAttempted(Vector3 probe)
+            => ScanOutsideRoomAttempted?.Invoke(probe);
 
         private void Update()
         {
