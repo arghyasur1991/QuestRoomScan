@@ -17,6 +17,7 @@ Shader "Genesis/ScanMeshVertexColor"
             #pragma fragment frag
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "ScanMeshBirth.hlsl"
 
             struct GPUVertex
             {
@@ -57,7 +58,6 @@ Shader "Genesis/ScanMeshVertexColor"
             float _RSNormalFallback;
             float _RSWireframe;
             float _RSWireThickness;
-            float _RSBirthFadeExtracts;
 
             #define DEPTH_TOLERANCE 0.015
 
@@ -100,15 +100,12 @@ Shader "Genesis/ScanMeshVertexColor"
                 return totalAlpha > 0.01 ? rgb : half3(-1, -1, -1);
             }
 
-            half3 ApplyBirthFade(half3 color, half packedAlpha)
+            half3 ApplyBirthFade(half3 color, half fade)
             {
-                if (_RSBirthFadeExtracts < 0.5h)
+                if (_RSBirthFadeSec < 0.001h)
                     return color;
-                float born = saturate((float)packedAlpha * 255.0 / _RSBirthFadeExtracts);
-                float f = smoothstep(0.0, 1.0, born);
-                // Dim cyan gate then photoreal — opaque, no clip, no extra pass.
                 half3 gate = half3(0.35h, 0.78h, 0.95h);
-                return lerp(color * gate, color, (half)f);
+                return lerp(color * gate, color, fade);
             }
 
             bool IsVoxelFrozen(float3 worldPos)
@@ -142,11 +139,14 @@ Shader "Genesis/ScanMeshVertexColor"
 
                 uint idx = _SurfaceIndices[vertID];
                 GPUVertex gv = _SurfaceVerts[idx];
+                half4 unpacked = UnpackColor(gv.packedColor);
+                float fade = ScanMeshBirthFade(unpacked.a, gv.voxelFlatIdx);
+                float3 pos = ScanMeshBirthDisplace(gv.pos, gv.norm, fade);
 
-                OUT.positionWS  = gv.pos;
-                OUT.positionHCS = TransformWorldToHClip(gv.pos);
+                OUT.positionWS  = pos;
+                OUT.positionHCS = TransformWorldToHClip(pos);
                 OUT.normalWS    = gv.norm;
-                OUT.color       = UnpackColor(gv.packedColor);
+                OUT.color       = half4(unpacked.rgb, fade);
 
                 // Barycentric coords for wireframe: each triangle vertex gets one axis
                 uint triVert = vertID % 3;
@@ -222,6 +222,7 @@ Shader "Genesis/ScanMeshVertexColor"
             #pragma fragment frag
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "ScanMeshBirth.hlsl"
 
             struct GPUVertex
             {
@@ -244,7 +245,10 @@ Shader "Genesis/ScanMeshVertexColor"
                 Varyings OUT = (Varyings)0;
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
                 uint idx = _SurfaceIndices[vertID];
-                OUT.positionHCS = TransformWorldToHClip(_SurfaceVerts[idx].pos);
+                GPUVertex gv = _SurfaceVerts[idx];
+                float fade = ScanMeshBirthFade((gv.packedColor >> 24) / 255.0, gv.voxelFlatIdx);
+                float3 pos = ScanMeshBirthDisplace(gv.pos, gv.norm, fade);
+                OUT.positionHCS = TransformWorldToHClip(pos);
                 return OUT;
             }
 
@@ -267,6 +271,7 @@ Shader "Genesis/ScanMeshVertexColor"
             #pragma fragment frag
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "ScanMeshBirth.hlsl"
 
             struct GPUVertex
             {
@@ -291,7 +296,9 @@ Shader "Genesis/ScanMeshVertexColor"
                 UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(OUT);
                 uint idx = _SurfaceIndices[vertID];
                 GPUVertex gv = _SurfaceVerts[idx];
-                OUT.positionHCS = TransformWorldToHClip(gv.pos);
+                float fade = ScanMeshBirthFade((gv.packedColor >> 24) / 255.0, gv.voxelFlatIdx);
+                float3 pos = ScanMeshBirthDisplace(gv.pos, gv.norm, fade);
+                OUT.positionHCS = TransformWorldToHClip(pos);
                 OUT.normalWS    = gv.norm;
                 return OUT;
             }
