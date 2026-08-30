@@ -732,7 +732,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `IsRoomLoaded` | `bool` | MRUK scene discovery finished (including zero rooms) |
 | `HasSceneRooms` | `bool` | At least one MRUK room after discovery (not "headset is in that room") |
 | `IsHeadsetInsideASceneRoom` | `bool` | Headset is inward of every outer wall of **any** loaded room (doorway faces included). Boot / Space Setup: any set-up room is enough. Floor-outline `IsPositionInRoom` is not enough. Always true in the editor |
-| `ConfineScanToContainingRoom` | `bool` | When true, TSDF skips voxels outside the MRUK room that contained the headset at scan start (conservative AABB, then inset clip planes). Default **false**. Set before `StartScanAsync` |
+| `ConfineScanToContainingRoom` | `bool` | When true, TSDF skips voxels outside the MRUK room that contained the headset at scan start (padded AABB, then outward-slack clip planes so walls integrate). Default **false**. Set before `StartScanAsync` |
 | `StampScreenPlanes` | `bool` | When true, `SCREEN` (TV) plane stamps are a dedicated voxel-AABB dispatch after Integrate. Default **true**. Set false before `StartScanAsync` to skip |
 | `ScanOutsideRoomAttempted` | `event Action<Vector3>` | Rate-limited while confined: gaze probe (eye + forward × 1.8 m) left that room. Argument is the probe world position. No player copy in QRS — host shows its own hint |
 | `BoundSceneRoomUuid` | `Guid` | Scene API UUID of the MRUK room the active package was scanned in (stored with the spatial-anchor UUID). Empty when no package is loaded. Rebound from the localized anchor pose if missing or stale |

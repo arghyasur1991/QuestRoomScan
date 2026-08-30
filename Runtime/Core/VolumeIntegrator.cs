@@ -805,8 +805,9 @@ namespace Genesis.RoomScan
         /// Pass <paramref name="confine"/> false to keep unbounded TSDF;
         /// SCREEN stamps still apply. Null lists clear that buffer.
         /// <paramref name="useRoomAabb"/> is a conservative world AABB
-        /// (no wall inset) so <c>gsInsideRoom</c> can reject outside voxels
-        /// before the 32-plane loop.
+        /// padded by the clip slack so <c>gsInsideRoom</c> can reject
+        /// outside voxels before the 32-plane loop without dropping
+        /// wall voxels.
         /// </summary>
         public void SetScanPriors(
             bool confine,

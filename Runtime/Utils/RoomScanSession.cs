@@ -44,7 +44,8 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// When true, TSDF skips voxels outside the MRUK room that
-        /// contained the headset when the scan started. Default
+        /// contained the headset when the scan started (padded AABB,
+        /// then outward-slack clip planes so walls integrate). Default
         /// <c>false</c> (unbounded scan). Set this before
         /// <see cref="StartScanAsync"/>. SCREEN (TV) plane stamps still
         /// apply either way.

@@ -113,10 +113,10 @@ namespace Genesis.RoomScan
         [Header("Scan Priors")]
         [SerializeField, Tooltip(
             "When true, TSDF only integrates voxels inside the MRUK room " +
-            "that contained the headset at scan start (outer walls including " +
-            "doorway faces). Default off so generic hosts keep an unbounded " +
-            "scan. Hosts that want a single-room mesh set this before " +
-            "StartScanningAsync.")]
+            "that contained the headset at scan start (padded AABB, then " +
+            "outward-slack clip planes so wall surfaces integrate). Default " +
+            "off so generic hosts keep an unbounded scan. Hosts that want a " +
+            "single-room mesh set this before StartScanningAsync.")]
         private bool confineScanToContainingRoom;
 
         [SerializeField]

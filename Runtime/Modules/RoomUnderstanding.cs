@@ -270,10 +270,11 @@ namespace Genesis.RoomScan
         /// Half-spaces that bound <paramref name="sceneRoomUuid"/> for GPU
         /// TSDF clip: each <c>Vector4(n, w)</c> is outside when
         /// <c>dot(pos, n) &lt; w</c>. Outer walls (including doorway
-        /// <c>INVISIBLE_WALL_FACE</c>) use the same 8 cm inset as occupancy.
-        /// Floor / ceiling use a 4 cm slack so voxels just below the floor
-        /// plane still integrate. Clears <paramref name="dest"/>. Returns 0
-        /// when the room is missing.
+        /// <c>INVISIBLE_WALL_FACE</c>) use an <b>outward</b> slack so the
+        /// wall surface itself integrates — occupancy's 8 cm <i>inset</i>
+        /// would reject those voxels. Floor / ceiling use the same slack
+        /// below / above the plane. Clears <paramref name="dest"/>.
+        /// Returns 0 when the room is missing.
         /// </summary>
         public int CopyRoomClipPlanes(Guid sceneRoomUuid, List<Vector4> dest)
         {
@@ -304,9 +305,10 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Conservative world AABB of the captured room (outer walls including
-        /// doorway <c>INVISIBLE_WALL_FACE</c>, floor, ceiling). No 8 cm inset —
-        /// GPU clip still uses the inset half-spaces; this box is only an
-        /// early-out. False when the UUID is missing.
+        /// doorway <c>INVISIBLE_WALL_FACE</c>, floor, ceiling), padded by the
+        /// same outward slack as the clip planes so wall voxels are not
+        /// early-out rejected. Occupancy inset is not applied. False when
+        /// the UUID is missing.
         /// </summary>
         public bool CopyRoomWorldAabb(Guid sceneRoomUuid, out Vector3 min, out Vector3 max)
         {
@@ -635,6 +637,12 @@ namespace Genesis.RoomScan
         internal static class Query
         {
             const float OuterWallInsetMetres = 0.08f;
+            /// <summary>
+            /// TSDF clip slack along the inward normal: the wall / floor /
+            /// ceiling plane itself must integrate, so the half-space is
+            /// pushed <i>outward</i> (the occupancy inset is the opposite).
+            /// </summary>
+            const float TsdfClipSlackMetres = 0.08f;
 
             const MRUKAnchor.SceneLabels OuterWallLabels =
                 MRUKAnchor.SceneLabels.WALL_FACE
@@ -813,7 +821,6 @@ namespace Genesis.RoomScan
                 return true;
             }
 
-            const float FloorCeilingSlackMetres = 0.04f;
             const int MaxRoomClipPlanes = 32;
             const int MaxScreenStamps = 4;
 
@@ -830,14 +837,14 @@ namespace Genesis.RoomScan
                     if (!a.HasAnyLabel(OuterWallLabels)) continue;
 
                     Vector3 n = Inward(room, a);
-                    float w = Vector3.Dot(a.transform.position, n) + OuterWallInsetMetres;
+                    float w = Vector3.Dot(a.transform.position, n) - TsdfClipSlackMetres;
                     dst.Add(new Vector4(n.x, n.y, n.z, w));
                 }
 
                 if (dst.Count < MaxRoomClipPlanes)
                 {
                     float fy = FloorY(room);
-                    dst.Add(new Vector4(0f, 1f, 0f, fy - FloorCeilingSlackMetres));
+                    dst.Add(new Vector4(0f, 1f, 0f, fy - TsdfClipSlackMetres));
                 }
 
                 if (dst.Count < MaxRoomClipPlanes
@@ -846,7 +853,7 @@ namespace Genesis.RoomScan
                     && room.CeilingAnchors[0] != null)
                 {
                     float cy = room.CeilingAnchors[0].GetAnchorCenter().y;
-                    dst.Add(new Vector4(0f, -1f, 0f, -(cy + FloorCeilingSlackMetres)));
+                    dst.Add(new Vector4(0f, -1f, 0f, -(cy + TsdfClipSlackMetres)));
                 }
 
                 return dst.Count;
@@ -892,8 +899,9 @@ namespace Genesis.RoomScan
                 }
 
                 if (!any) return false;
-                min = b.min;
-                max = b.max;
+                Vector3 pad = Vector3.one * TsdfClipSlackMetres;
+                min = b.min - pad;
+                max = b.max + pad;
                 return true;
             }
 
