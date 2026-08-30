@@ -322,11 +322,36 @@ namespace Genesis.RoomScan.Editor
             if (target.GetComponent<ARCameraManager>() == null)
                 Undo.AddComponent<ARCameraManager>(target);
 
-            if (target.GetComponent<AROcclusionManager>() == null)
-                Undo.AddComponent<AROcclusionManager>(target);
+            var occl = target.GetComponent<AROcclusionManager>();
+            if (occl == null)
+                occl = Undo.AddComponent<AROcclusionManager>(target);
+            // Depth sensor starts only from DepthCapture.StartDepthCapture.
+            occl.enabled = false;
+            DisableIdleScanHardware();
 
             MarkDirty();
             Refresh();
+        }
+
+        /// <summary>
+        /// Leave AROcclusionManager and PassthroughCameraAccess disabled in
+        /// the scene. RoomScanner enables them for the scan window only.
+        /// USE_SCENE / HEADSET_CAMERA permission is still requested by the host.
+        /// </summary>
+        void DisableIdleScanHardware()
+        {
+            foreach (var occl in Object.FindObjectsByType<AROcclusionManager>(FindObjectsInactive.Include))
+            {
+                if (occl == null || !occl.enabled) continue;
+                occl.enabled = false;
+                EditorUtility.SetDirty(occl);
+            }
+            foreach (var pca in Object.FindObjectsByType<PassthroughCameraAccess>(FindObjectsInactive.Include))
+            {
+                if (pca == null || !pca.enabled) continue;
+                pca.enabled = false;
+                EditorUtility.SetDirty(pca);
+            }
         }
 
         // -- Project Settings ---------------------------------------------
@@ -852,7 +877,10 @@ namespace Genesis.RoomScan.Editor
             // play mode without an XR loader; that's expected and can't be
             // fixed from outside Meta's package — build to device to test.
             if (root.GetComponent<PassthroughCameraAccess>() == null)
-                Undo.AddComponent<PassthroughCameraAccess>(root);
+            {
+                var pca = Undo.AddComponent<PassthroughCameraAccess>(root);
+                pca.enabled = false;
+            }
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
 
@@ -906,6 +934,8 @@ namespace Genesis.RoomScan.Editor
 
             // EventSystem + VR controller UI input pipeline
             EnsureVRInputInfrastructure();
+
+            DisableIdleScanHardware();
 
             MarkDirty();
             Refresh();
@@ -1183,8 +1213,11 @@ namespace Genesis.RoomScan.Editor
             // PCA + ARSession + AROcclusionManager will spam errors in
             // Editor play mode without an XR loader; that's expected,
             // build to device.
-            if (UnityEngine.Object.FindAnyObjectByType<PassthroughCameraAccess>() == null)
-                Undo.AddComponent<PassthroughCameraAccess>(root);
+            if (UnityEngine.Object.FindAnyObjectByType<PassthroughCameraAccess>(FindObjectsInactive.Include) == null)
+            {
+                var pca = Undo.AddComponent<PassthroughCameraAccess>(root);
+                pca.enabled = false;
+            }
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
 
@@ -1216,6 +1249,8 @@ namespace Genesis.RoomScan.Editor
 
             foreach (var c in root.GetComponents<Component>())
                 WireComponent(c);
+
+            DisableIdleScanHardware();
         }
 
         /// <summary>

@@ -251,6 +251,7 @@ namespace Genesis.RoomScan.Editor
             // own "Outstanding Issues" panel shows two red rows and Passthrough
             // simply doesn't render.
             EnsurePassthroughSceneConfig();
+            DisableIdleScanHardware();
         }
 
         /// <summary>

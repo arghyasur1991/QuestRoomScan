@@ -89,8 +89,10 @@ namespace Genesis.RoomScan
         public static bool DepthAvailable { get; private set; }
 
         /// <summary>
-        /// True after USE_SCENE permission is confirmed and the initial subsystem check passes.
-        /// Until this is set, <see cref="StartDepthCapture"/> is a no-op.
+        /// True after USE_SCENE permission is observed (host asks at boot via
+        /// <see cref="RoomScanSession.RequestScenePermissionAsync"/>). Does not
+        /// start the depth sensor. <see cref="StartDepthCapture"/> queues until
+        /// this is set, then <see cref="ApplyCaptureState"/> enables hardware.
         /// </summary>
         private bool _permissionReady;
 
@@ -163,6 +165,11 @@ namespace Genesis.RoomScan
         private void Awake()
         {
             Instance = this;
+            // All Awakes run before any OnEnable. Disable here so a scene-serialized
+            // AROcclusionManager never starts the Quest depth sensor at load.
+            var occl = FindAnyObjectByType<AROcclusionManager>(FindObjectsInactive.Include);
+            if (occl != null)
+                occl.enabled = false;
         }
 
         private void Start()
@@ -179,7 +186,7 @@ namespace Genesis.RoomScan
 
             EnsureARSession();
 
-            _arOcclusionManager = FindAnyObjectByType<AROcclusionManager>();
+            _arOcclusionManager = FindAnyObjectByType<AROcclusionManager>(FindObjectsInactive.Include);
             if (!_arOcclusionManager)
                 throw new Exception("[RoomScan] AROcclusionManager not found in scene");
 
@@ -200,9 +207,9 @@ namespace Genesis.RoomScan
             for (int i = 0; i < dilationSteps; i++)
                 _dilationMaxStep *= 2;
 
-            // Disable occlusion manager initially, enable after permission is confirmed
             _arOcclusionManager.enabled = false;
-            CheckPermissionAndEnable();
+            CheckPermissionAndMarkReady();
+            ApplyCaptureState();
 
             _started = true;
         }
@@ -247,94 +254,82 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Enable occlusion once <c>USE_SCENE</c> is granted. Does <b>not</b>
+        /// Observe <c>USE_SCENE</c> without starting capture. Does <b>not</b>
         /// call <c>RequestUserPermission</c> — a second request while the host
         /// (or <c>OVRManager</c>) already has a dialog up is dropped by Android
         /// with no UI. Hosts ask via <see cref="RoomScanSession.RequestScenePermissionAsync"/>.
         /// </summary>
-        private void CheckPermissionAndEnable()
+        private void CheckPermissionAndMarkReady()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (Permission.HasUserAuthorizedPermission(ScenePermission))
             {
-                EnableOcclusion();
+                MarkScenePermissionReady();
             }
-            else
+            else if (!_permissionReady)
             {
                 Logger.Info(
                     "USE_SCENE not granted yet — waiting (host requests via RoomScanSession)");
             }
 #else
-            EnableOcclusion();
+            MarkScenePermissionReady();
 #endif
         }
 
-        private bool _subscribed;
-        bool _enablingOcclusion;
+        private void MarkScenePermissionReady()
+        {
+            if (_permissionReady) return;
+            _permissionReady = true;
+            Logger.Info("DepthCapture: USE_SCENE ready (sensor stays off until StartDepthCapture)");
+        }
 
-        private async void EnableOcclusion()
+        private bool _subscribed;
+
+        /// <summary>
+        /// Enable the occlusion subsystem only while a scan is active and
+        /// USE_SCENE is granted. Permission alone must not start the sensor.
+        /// </summary>
+        private void ApplyCaptureState()
         {
             if (_arOcclusionManager == null) return;
-            if (_permissionReady || _enablingOcclusion) return;
-            _enablingOcclusion = true;
-            try
+
+            bool want = _captureActive && _permissionReady;
+            if (want)
             {
-                Logger.Info("Verifying AROcclusionManager subsystem...");
-
-                _arOcclusionManager.frameReceived -= OnDepthFrame;
-                _arOcclusionManager.enabled = false;
-
-                await Awaitable.NextFrameAsync();
-                await Awaitable.NextFrameAsync();
-
-                if (_arOcclusionManager == null) return;
-
-                // Briefly enable to verify the subsystem is functional
-                _arOcclusionManager.enabled = true;
-
-                await Awaitable.NextFrameAsync();
-                await Awaitable.NextFrameAsync();
-
-                if (_arOcclusionManager == null) return;
-                var sub = _arOcclusionManager.subsystem;
-                Logger.Info($"Occlusion subsystem: {(sub != null ? sub.GetType().Name : "null")}, running={sub?.running}");
-
-                _permissionReady = true;
-
-                if (_captureActive)
+                if (!_arOcclusionManager.enabled)
+                    _arOcclusionManager.enabled = true;
+                if (!_subscribed)
                 {
                     _arOcclusionManager.frameReceived += OnDepthFrame;
                     _subscribed = true;
-                    Logger.Info("DepthCapture: subsystem left running (scan already active)");
-                }
-                else
-                {
-                    _arOcclusionManager.enabled = false;
-                    Logger.Info("DepthCapture: subsystem disabled (no active scan)");
                 }
             }
-            finally
+            else
             {
-                _enablingOcclusion = false;
+                if (_subscribed)
+                {
+                    _arOcclusionManager.frameReceived -= OnDepthFrame;
+                    _subscribed = false;
+                }
+                if (_arOcclusionManager.enabled)
+                    _arOcclusionManager.enabled = false;
+                DepthAvailable = false;
             }
         }
 
         /// <summary>
         /// Enables the AROcclusionManager and subscribes to depth frames.
-        /// Called by RoomScanner when scanning starts.
+        /// Called by RoomScanner when scanning starts. If USE_SCENE is not
+        /// yet granted, capture starts when the host permission arrives.
         /// </summary>
         public void StartDepthCapture()
         {
             _captureActive = true;
-            if (!_permissionReady || _arOcclusionManager == null) return;
-            if (!_arOcclusionManager.enabled)
-                _arOcclusionManager.enabled = true;
-            if (!_subscribed)
-            {
-                _arOcclusionManager.frameReceived += OnDepthFrame;
-                _subscribed = true;
-            }
-            Logger.Info("DepthCapture: subsystem started");
+            ApplyCaptureState();
+            if (_permissionReady && _arOcclusionManager != null)
+                Logger.Info("DepthCapture: subsystem started");
+            else
+                Logger.Info("DepthCapture: queued until USE_SCENE is granted");
         }
 
         /// <summary>
@@ -345,16 +340,8 @@ namespace Genesis.RoomScan
         public void StopDepthCapture()
         {
             _captureActive = false;
-            if (_arOcclusionManager != null)
-            {
-                if (_subscribed)
-                {
-                    _arOcclusionManager.frameReceived -= OnDepthFrame;
-                    _subscribed = false;
-                }
-                _arOcclusionManager.enabled = false;
-            }
-            DepthAvailable = false;
+            ApplyCaptureState();
+            Logger.Info("DepthCapture: subsystem stopped");
         }
 
         private void OnApplicationPause(bool paused)
@@ -371,19 +358,23 @@ namespace Genesis.RoomScan
                 }
                 DepthAvailable = false;
             }
-            else if (_captureActive)
+            else
             {
-                CheckPermissionAndEnable();
+                CheckPermissionAndMarkReady();
+                ApplyCaptureState();
             }
         }
 
         private void OnDisable()
         {
-            if (_arOcclusionManager != null && _subscribed)
+            if (_arOcclusionManager == null) return;
+            if (_subscribed)
             {
                 _arOcclusionManager.frameReceived -= OnDepthFrame;
                 _subscribed = false;
             }
+            _arOcclusionManager.enabled = false;
+            DepthAvailable = false;
         }
 
         private void OnDestroy()
@@ -411,8 +402,12 @@ namespace Genesis.RoomScan
 #if UNITY_ANDROID && !UNITY_EDITOR
             if (_started && !_permissionReady &&
                 Permission.HasUserAuthorizedPermission(ScenePermission))
-                EnableOcclusion();
+            {
+                MarkScenePermissionReady();
+                ApplyCaptureState();
+            }
 #endif
+            if (!_captureActive) return;
             float t = Time.unscaledTime;
             if (t - _lastLogTime >= 5f)
             {

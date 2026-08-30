@@ -20,7 +20,14 @@ namespace Genesis.RoomScan
     /// camera handle — first session worked, subsequent sessions stuck because
     /// PCA self-disables when <c>Play()</c> fails.
     /// </para>
+    /// RGB capture starts only from <see cref="StartCapture"/> (scan start)
+    /// and stops from <see cref="StopCapture"/>. The scene component is
+    /// disabled at Awake so a Building Block left enabled does not open the
+    /// headset cameras at boot. HEADSET_CAMERA is still requested by the host
+    /// via <see cref="RequestCameraPermissionAsync"/> — that is independent
+    /// of starting capture.
     /// </summary>
+    [DefaultExecutionOrder(-50)]
     public class PassthroughCameraProvider : MonoBehaviour, ICameraProvider
     {
         /// <summary>The Horizon OS permission required by PCA on Quest 3+.</summary>
@@ -32,6 +39,13 @@ namespace Genesis.RoomScan
         [SerializeField] private int maxFramerate = 30;
 
         private PassthroughCameraAccess _pca;
+
+        private void Awake()
+        {
+            AdoptOrFindPca();
+            if (_pca != null)
+                _pca.enabled = false;
+        }
 
         /// <inheritdoc />
         public bool IsReady => _pca != null && _pca.IsPlaying && _pca.IsUpdatedThisFrame;
@@ -101,26 +115,8 @@ namespace Genesis.RoomScan
             }
 #endif
 
-            // Scene-wide find: re-use the PCA from the Meta XR Building Block
-            // (typically attached to OVRCameraRig). Falling back to a
-            // GameObject-local AddComponent here was the bug that caused two
-            // PCAs to race for the camera handle — PCA's native side allows
-            // exactly one instance per camera position, so the second one
-            // self-disables and from then on neither one plays.
-            if (_pca == null)
-            {
-                _pca = FindAnyObjectByType<PassthroughCameraAccess>(FindObjectsInactive.Include);
-                if (_pca == null)
-                {
-                    Logger.Warning("PassthroughCameraProvider: no PassthroughCameraAccess in scene — adding one to " +
-                                   $"'{gameObject.name}'. Prefer letting Meta's Building Block place it on the OVRCameraRig.");
-                    _pca = gameObject.AddComponent<PassthroughCameraAccess>();
-                }
-                else
-                {
-                    Logger.Info($"PassthroughCameraProvider: adopted existing PassthroughCameraAccess on '{_pca.gameObject.name}'.");
-                }
-            }
+            AdoptOrFindPca();
+            if (_pca == null) return;
 
             // PCA forbids MaxFramerate changes while running. Drive it disabled
             // for the property writes, then re-enable so OnEnable runs cleanly.
@@ -138,6 +134,30 @@ namespace Genesis.RoomScan
         {
             if (_pca != null)
                 _pca.enabled = false;
+        }
+
+        private void AdoptOrFindPca()
+        {
+            // Scene-wide find: re-use the PCA from the Meta XR Building Block
+            // (typically attached to OVRCameraRig). Falling back to a
+            // GameObject-local AddComponent here was the bug that caused two
+            // PCAs to race for the camera handle — PCA's native side allows
+            // exactly one instance per camera position, so the second one
+            // self-disables and from then on neither one plays.
+            if (_pca != null) return;
+
+            _pca = FindAnyObjectByType<PassthroughCameraAccess>(FindObjectsInactive.Include);
+            if (_pca == null)
+            {
+                Logger.Warning("PassthroughCameraProvider: no PassthroughCameraAccess in scene — adding one to " +
+                               $"'{gameObject.name}'. Prefer letting Meta's Building Block place it on the OVRCameraRig.");
+                _pca = gameObject.AddComponent<PassthroughCameraAccess>();
+                _pca.enabled = false;
+            }
+            else
+            {
+                Logger.Info($"PassthroughCameraProvider: adopted existing PassthroughCameraAccess on '{_pca.gameObject.name}'.");
+            }
         }
 
         private void OnDestroy()

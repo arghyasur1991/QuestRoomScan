@@ -493,12 +493,28 @@ Per mesh extraction cycle, `UpdatePlateauDetection` tracks:
 
 ## 12b. Depth Subsystem Gating
 
-`DepthCapture` manages the `AROcclusionManager` lifecycle to avoid unnecessary GPU work:
-- **`StartDepthCapture()`**: Enables `AROcclusionManager`, subscribes to `frameReceived`. Called by `RoomScanner.StartScanningAsync()`.
-- **`StopDepthCapture()`**: Unsubscribes, disables `AROcclusionManager` (calls `subsystem.Stop()` — shuts down depth sensor and neural inference on Quest). Called by `RoomScanner.StopScanning()`.
-- **`_permissionReady`**: Set once after USE_SCENE permission is confirmed and subsystem verified.
-- **`_captureActive`**: Persists across app pause/resume. `OnApplicationPause(false)` only re-enables the subsystem if `_captureActive` was true.
-- On startup, `EnableOcclusion()` briefly enables the subsystem for verification, then disables it unless scanning is already active.
+`DepthCapture` manages the `AROcclusionManager` lifecycle so the Quest depth
+sensor and neural depth pipeline run **only while a scan is active**:
+
+- **Boot / idle:** `Awake` disables `AROcclusionManager` before its `OnEnable`
+  (all Awakes run first). Scene YAML and the setup wizard leave the component
+  disabled. Observing `USE_SCENE` sets `_permissionReady` only — it does **not**
+  start the subsystem. Hosts still request that permission at boot via
+  `RoomScanSession.RequestScenePermissionAsync`.
+- **`StartDepthCapture()`:** Sets `_captureActive`. When permission is ready,
+  enables `AROcclusionManager` and subscribes to `frameReceived`. Called by
+  `RoomScanner.StartScanningAsync()`.
+- **`StopDepthCapture()`:** Unsubscribes and disables the manager (stops the
+  sensor). Called by `RoomScanner.StopScanning()`.
+- **`_captureActive`:** Persists across app pause/resume. `OnApplicationPause(false)`
+  re-enables the subsystem only if a scan was in progress.
+
+Do not briefly enable the subsystem at startup to "verify" it — that restarts
+capture on every boot.
+
+Passthrough Camera Access (RGB) follows the same rule: `PassthroughCameraProvider.Awake`
+disables the scene PCA; `StartCapture` / `StopCapture` bracket the scan.
+Passthrough **visualization** (`OVRPassthroughLayer`) is unrelated and stays on.
 
 ## 13. Key Parameters
 
