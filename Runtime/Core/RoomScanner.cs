@@ -154,15 +154,6 @@ namespace Genesis.RoomScan
             }
         }
 
-        /// <summary>
-        /// Rate-limited: the gaze probe (eye + forward × 1.8 m) left the
-        /// confined room. Argument is the probe world position. QRS has no
-        /// player copy — the host decides what to show. Does not fire when
-        /// <see cref="ConfineScanToContainingRoom"/> is off or no room was
-        /// bound at scan start.
-        /// </summary>
-        public event Action<Vector3> ScanOutsideRoomAttempted;
-
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
         // ─────────────────────────────────────────────────────────────
@@ -447,7 +438,6 @@ namespace Genesis.RoomScan
         private int _integrateCount;
         private bool _subscribedToAnchorsChanged;
         private Guid _scanRoomUuid;
-        private float _lastOutsideRoomEvent;
         private float _lastEmptyRoomBindAttempt;
         private readonly List<Vector4> _clipScratch = new(32);
         private readonly List<ScanScreenStamp> _stampScratch = new(4);
@@ -487,7 +477,7 @@ namespace Genesis.RoomScan
                 Integrated?.Invoke();
                 _integrateCount++;
 
-                MaybeNotifyOutsideRoom();
+                MaybeRetryScanRoomBind();
 
                 if (t - _lastMeshTime >= MeshInterval)
                 {
@@ -1573,60 +1563,16 @@ namespace Genesis.RoomScan
             }
         }
 
-        const float OutsideRoomProbeMetres = 1.8f;
-        const float OutsideRoomEventInterval = 1.5f;
-
-        void MaybeNotifyOutsideRoom()
+        void MaybeRetryScanRoomBind()
         {
             if (!confineScanToContainingRoom) return;
             if (_roomUnderstanding == null) return;
+            if (_scanRoomUuid != Guid.Empty) return;
 
-            if (_scanRoomUuid == Guid.Empty)
-            {
-                float now = Time.time;
-                if (now - _lastEmptyRoomBindAttempt >= 2f)
-                {
-                    _lastEmptyRoomBindAttempt = now;
-                    BindScanPriors();
-                }
-                return;
-            }
-
-            if (!TryHeadsetPose(out Vector3 eye, out Vector3 fwd))
-                return;
-
-            Vector3 probe = eye + fwd * OutsideRoomProbeMetres;
-            if (_roomUnderstanding.Contains(_scanRoomUuid, probe))
-                return;
-
-            float t = Time.time;
-            if (t - _lastOutsideRoomEvent < OutsideRoomEventInterval)
-                return;
-            _lastOutsideRoomEvent = t;
-            ScanOutsideRoomAttempted?.Invoke(probe);
-        }
-
-        static bool TryHeadsetPose(out Vector3 pos, out Vector3 fwd)
-        {
-            var rig = FindAnyObjectByType<OVRCameraRig>(FindObjectsInactive.Include);
-            if (rig != null && rig.centerEyeAnchor != null)
-            {
-                pos = rig.centerEyeAnchor.position;
-                fwd = rig.centerEyeAnchor.forward;
-                return true;
-            }
-
-            var cam = Camera.main;
-            if (cam != null)
-            {
-                pos = cam.transform.position;
-                fwd = cam.transform.forward;
-                return true;
-            }
-
-            pos = default;
-            fwd = default;
-            return false;
+            float now = Time.time;
+            if (now - _lastEmptyRoomBindAttempt < 2f) return;
+            _lastEmptyRoomBindAttempt = now;
+            BindScanPriors();
         }
 
         internal void ApplyHQTexture(Texture2D atlas)

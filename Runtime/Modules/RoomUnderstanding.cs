@@ -646,10 +646,11 @@ namespace Genesis.RoomScan
             /// <summary>
             /// Depth / voxel centres this far past a clip plane are snapped
             /// onto it. Farther is a real outside hit (hallway) and stays
-            /// rejected. AABB is padded by slack + this so the GPU early-out
+            /// rejected. 20 cm was too tight for Quest door noise (striped
+            /// mesh). AABB is padded by slack + this so the GPU early-out
             /// still skips the hallway.
             /// </summary>
-            internal const float TsdfDepthClampMetres = 0.20f;
+            internal const float TsdfDepthClampMetres = 0.50f;
 
             const MRUKAnchor.SceneLabels OuterWallLabels =
                 MRUKAnchor.SceneLabels.WALL_FACE
