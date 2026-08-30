@@ -83,8 +83,8 @@ voxPos = voxelToWorld(coord)            // snapped world position
 - Behind camera: `voxView.z > -0.05`
 - Outside depth FOV: `voxNDC.x/y` outside [0.01, 0.99]
 
-**Step 2b: SCREEN plane stamp (separate dispatch)**
-After the frustum pass, each MRUK `SCREEN` slab is a 3D dispatch over its voxel AABB (8 OBB corners → padded min/max). Analytic plane TSDF (`dot(pos - center, inward)` clamped to `±voxelDistance`) at `maxWeight`, RGB projection kept. Glass/bounce depth from Integrate is overwritten. The frustum kernel does **not** search for TVs.
+**Step 2b: SCREEN plane stamp (separate dispatch, opt-in `StampScreenPlanes`, default on)**
+After the frustum pass, each MRUK `SCREEN` slab is a 3D dispatch over its voxel AABB (8 OBB corners → padded min/max). Analytic plane TSDF (`dot(pos - center, inward)` clamped to `±voxelDistance`) at `maxWeight`, RGB projection kept. Glass/bounce depth from Integrate is overwritten. The frustum kernel does **not** search for TVs. Off: no stamp kernel.
 
 **Step 3: TSDF computation**
 ```

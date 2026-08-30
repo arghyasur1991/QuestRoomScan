@@ -59,6 +59,21 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>
+        /// When true, MRUK <c>SCREEN</c> (TV) slabs are stamped as analytic
+        /// TSDF after Integrate. Default <c>true</c>. Set before
+        /// <see cref="StartScanAsync"/>.
+        /// </summary>
+        public bool StampScreenPlanes
+        {
+            get => _scanner != null && _scanner.StampScreenPlanes;
+            set
+            {
+                if (_scanner != null)
+                    _scanner.StampScreenPlanes = value;
+            }
+        }
+
         private RoomScanner _scanner;
         private RoomScanPersistence _persistence;
 

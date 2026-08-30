@@ -119,6 +119,10 @@ namespace Genesis.RoomScan
             "StartScanningAsync.")]
         private bool confineScanToContainingRoom;
 
+        [SerializeField]
+        [Tooltip("Stamp MRUK SCREEN (TV) planes as analytic TSDF. Default on.")]
+        private bool stampScreenPlanes = true;
+
         /// <summary>
         /// Opt-in room clip for TSDF. Default false. Set before
         /// <see cref="StartScanningAsync"/>. Changing it during a scan
@@ -130,6 +134,22 @@ namespace Genesis.RoomScan
             set
             {
                 confineScanToContainingRoom = value;
+                if (IsScanning) BindScanPriors();
+            }
+        }
+
+        /// <summary>
+        /// When true, MRUK <c>SCREEN</c> (TV) slabs are stamped as analytic
+        /// TSDF after each Integrate. Default true. Hosts can turn this
+        /// off before <see cref="StartScanningAsync"/> to measure cost or
+        /// keep glass depth.
+        /// </summary>
+        public bool StampScreenPlanes
+        {
+            get => stampScreenPlanes;
+            set
+            {
+                stampScreenPlanes = value;
                 if (IsScanning) BindScanPriors();
             }
         }
@@ -1531,7 +1551,10 @@ namespace Genesis.RoomScan
 
             ResolveScanRoomUuid();
             _roomUnderstanding.CopyRoomClipPlanes(_scanRoomUuid, _clipScratch);
-            _roomUnderstanding.CopyScreenStamps(_scanRoomUuid, _stampScratch);
+            if (stampScreenPlanes)
+                _roomUnderstanding.CopyScreenStamps(_scanRoomUuid, _stampScratch);
+            else
+                _stampScratch.Clear();
             bool useAabb = false;
             Vector3 aabbMin = Vector3.zero, aabbMax = Vector3.zero;
             if (confineScanToContainingRoom)
