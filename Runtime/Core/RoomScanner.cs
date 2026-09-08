@@ -571,6 +571,7 @@ namespace Genesis.RoomScan
                 // _scanResourcesReleased branch uses Reinitialize because
                 // ReleaseScanResources explicitly disposes the mesh
                 // extractor and we need a true rebuild, not a no-op.
+                Logger.Info("StartScanning stage 1 — TSDF volumes");
                 _volumeIntegrator.ReallocateVolumes();
 
                 // Yield twice so the render thread can (a) actually commit
@@ -582,6 +583,7 @@ namespace Genesis.RoomScan
                 await Task.Yield();
 
                 // ── Stage 2: Surface Nets mesh extractor ────────────────
+                Logger.Info("StartScanning stage 2 — Surface Nets extractor");
                 if (_scanResourcesReleased)
                 {
                     _meshExtractor.Reinitialize();
@@ -604,6 +606,7 @@ namespace Genesis.RoomScan
                 // In-memory load state was dropped in UnloadActiveScan above
                 // when !resuming. GPU is up now, so switch to the live
                 // vertex preview and open a fresh _tmp package + anchor.
+                Logger.Info("StartScanning stage 3 — persistence and preview");
                 if (!resuming)
                 {
                     _prevVertexCount = 0;
@@ -639,8 +642,24 @@ namespace Genesis.RoomScan
                 // is clean, so PCA can win the handshake and MRUK keeps
                 // pulling frames steadily.
                 ICameraProvider provider = GetActiveCameraProvider();
+                Logger.Info("StartScanning stage 4a — enabling passthrough camera");
                 provider?.StartCapture();
+
+                // PCA and AROcclusionManager are two heavy native subsystems,
+                // and this method's own rule is that nothing heavy may land in
+                // the frame either of them enables. The staging above only
+                // separated our allocations from PCA; PCA and depth still
+                // enabled back to back. The original logcat put the Vulkan
+                // corruption "the moment provider.StartCapture() returned",
+                // which is this line. Give PCA its own frames to finish the
+                // MRUK hardware-buffer-queue handshake before the depth
+                // sensor and its inference pipeline come up.
+                await Task.Yield();
+                await Task.Yield();
+
+                Logger.Info("StartScanning stage 4b — enabling depth capture");
                 _depthCapture.StartDepthCapture();
+                await Task.Yield();
 
                 if (!resuming)
                 {
