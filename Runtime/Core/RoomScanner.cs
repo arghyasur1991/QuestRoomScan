@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
@@ -269,9 +268,6 @@ namespace Genesis.RoomScan
         private bool _started;
         private bool _serverTrainingInProgress;
         private bool _scanResourcesReleased;
-
-        /// <summary>Set in stage 3, consumed after stage 4. See StartScanningAsync.</summary>
-        private bool _wantScanAnchor;
 
         // Plateau detection state
         private int _prevVertexCount;
@@ -575,16 +571,7 @@ namespace Genesis.RoomScan
                 // _scanResourcesReleased branch uses Reinitialize because
                 // ReleaseScanResources explicitly disposes the mesh
                 // extractor and we need a true rebuild, not a no-op.
-                // Per-step timing. C# ms is the call itself; "frame" is the
-                // wall time the following yields actually cost, which is
-                // where the ~10 s goes — the calls all return fast.
-                var swTotal = System.Diagnostics.Stopwatch.StartNew();
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-
-                Logger.Info("StartScanning stage 1 — TSDF volumes");
                 _volumeIntegrator.ReallocateVolumes();
-                Logger.Info($"StartScanning stage 1 call took {sw.Elapsed.TotalMilliseconds:0} ms");
-                sw.Restart();
 
                 // Yield twice so the render thread can (a) actually commit
                 // the two 256³ 3D RT allocations to VRAM, and (b) run the
@@ -593,11 +580,8 @@ namespace Genesis.RoomScan
                 // before the much bigger Surface Nets alloc lands.
                 await Task.Yield();
                 await Task.Yield();
-                Logger.Info($"StartScanning stage 1 frames took {sw.Elapsed.TotalMilliseconds:0} ms");
-                sw.Restart();
 
                 // ── Stage 2: Surface Nets mesh extractor ────────────────
-                Logger.Info("StartScanning stage 2 — Surface Nets extractor");
                 if (_scanResourcesReleased)
                 {
                     _meshExtractor.Reinitialize();
@@ -613,18 +597,13 @@ namespace Genesis.RoomScan
                 // This is the critical pair — without it, PCA's native
                 // OnEnable lands in the same frame as the first Surface
                 // Nets dispatch and the MRUK fence handshake fails.
-                Logger.Info($"StartScanning stage 2 call took {sw.Elapsed.TotalMilliseconds:0} ms");
-                sw.Restart();
                 await Task.Yield();
                 await Task.Yield();
-                Logger.Info($"StartScanning stage 2 frames took {sw.Elapsed.TotalMilliseconds:0} ms");
-                sw.Restart();
 
                 // ── Stage 3: persistence + live preview ─────────────────
                 // In-memory load state was dropped in UnloadActiveScan above
                 // when !resuming. GPU is up now, so switch to the live
                 // vertex preview and open a fresh _tmp package + anchor.
-                Logger.Info("StartScanning stage 3 — persistence and preview");
                 if (!resuming)
                 {
                     _prevVertexCount = 0;
@@ -639,9 +618,7 @@ namespace Genesis.RoomScan
                         _keyframeCollector.ClearInMemory();
 
                     _persistence?.CreateTmpPackage();
-                    // Anchor creation is deferred to the end of this method —
-                    // see the call after stage 4.
-                    _wantScanAnchor = true;
+                    _ = CreateScanAnchorAsync();
                 }
 
                 _keyframeCollector?.SetExportDirectory(
@@ -662,48 +639,8 @@ namespace Genesis.RoomScan
                 // is clean, so PCA can win the handshake and MRUK keeps
                 // pulling frames steadily.
                 ICameraProvider provider = GetActiveCameraProvider();
-
-                // Start PCA from *after* a frame has been presented, not from
-                // the middle of one.
-                //
-                // `Task.Yield()` resumes inside the player loop, so every
-                // stage above still runs mid-frame with the render thread
-                // busy. PCA's `Play` has to create an OpenXR swapchain for the
-                // camera image, and doing that against in-flight GPU work
-                // deadlocks: measured on a Quest 3 (2026-09-09), the camera
-                // opened in 22 ms and then `SwapchainData created` did not
-                // arrive for **70 s** — the app stopped submitting frames, its
-                // FenceChecker timed out every ~10 s, capture requests failed
-                // with `Device error code 3` every 8 s, and what finally broke
-                // it was the runtime's own watchdog logging
-                // `VrRuntimeClient: Successful post-timeout fence reset`.
-                //
-                // This is the same shape as the lazy-alloc regression: PCA and
-                // depth used to enable at scene load, across idle boot frames,
-                // and were moved to the scan for power and privacy. The frame
-                // they now land in is the problem, not the work itself.
-                // `WaitForEndOfFrame` is the one hop that guarantees the frame
-                // is drawn before we touch them.
-                Logger.Info($"StartScanning stage 3 took {sw.Elapsed.TotalMilliseconds:0} ms");
-                sw.Restart();
-
-                Logger.Info("StartScanning stage 4a — enabling passthrough camera");
-                await WaitForEndOfFrameAsync();
-                Logger.Info($"StartScanning stage 4a first frame took {sw.Elapsed.TotalMilliseconds:0} ms");
-                sw.Restart();
                 provider?.StartCapture();
-                Logger.Info($"StartScanning StartCapture call took {sw.Elapsed.TotalMilliseconds:0} ms");
-                sw.Restart();
-                await WaitForEndOfFrameAsync();
-
-                Logger.Info($"StartScanning stage 4b — enabling depth capture "
-                            + $"(after {sw.Elapsed.TotalMilliseconds:0} ms)");
-                sw.Restart();
-                await WaitForEndOfFrameAsync();
                 _depthCapture.StartDepthCapture();
-                Logger.Info($"StartScanning depth start took {sw.Elapsed.TotalMilliseconds:0} ms");
-                await Task.Yield();
-                Logger.Info($"StartScanning bring-up total {swTotal.Elapsed.TotalMilliseconds:0} ms");
 
                 if (!resuming)
                 {
@@ -720,22 +657,6 @@ namespace Genesis.RoomScan
                 ResolveScanRoomUuid();
                 BindScanPriors();
 
-                // Create the scan's spatial anchor only once the bring-up is
-                // done. It used to be fired from stage 3, in the middle of it,
-                // and that is where frames start costing ~10 s: the anchor
-                // framework recalculates its rigid scene on a 10.0277 s cycle
-                // ("New Rigid Scene calculated using 9 anchors … seconds since
-                // last update"), the app's FenceChecker then times out on the
-                // same ~10.03 s cadence, and a create issued into that window
-                // took a full cycle to come back. Still fire-and-forget: the
-                // anchor is only needed by the time the package is saved.
-                if (_wantScanAnchor)
-                {
-                    _wantScanAnchor = false;
-                    Logger.Info("StartScanning stage 5 — spatial anchor (deferred)");
-                    _ = CreateScanAnchorAsync();
-                }
-
                 Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
                 ScanStarted?.Invoke();
                 if (_modules != null)
@@ -749,25 +670,6 @@ namespace Genesis.RoomScan
                 IsScanning = false;
                 throw;
             }
-        }
-
-        /// <summary>
-        /// Resume after the current frame has been drawn, from an
-        /// <c>async Task</c>. <c>Task.Yield</c> cannot do this: it resumes
-        /// inside the player loop, still mid-frame. Anything that creates or
-        /// destroys a swapchain wants the frame finished first — see stage 4.
-        /// </summary>
-        private Task WaitForEndOfFrameAsync()
-        {
-            var done = new TaskCompletionSource<bool>();
-            StartCoroutine(EndOfFrameRoutine(done));
-            return done.Task;
-        }
-
-        private static IEnumerator EndOfFrameRoutine(TaskCompletionSource<bool> done)
-        {
-            yield return new WaitForEndOfFrame();
-            done.TrySetResult(true);
         }
 
         /// <summary>
