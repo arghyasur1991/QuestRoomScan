@@ -575,8 +575,16 @@ namespace Genesis.RoomScan
                 // _scanResourcesReleased branch uses Reinitialize because
                 // ReleaseScanResources explicitly disposes the mesh
                 // extractor and we need a true rebuild, not a no-op.
+                // Per-step timing. C# ms is the call itself; "frame" is the
+                // wall time the following yields actually cost, which is
+                // where the ~10 s goes — the calls all return fast.
+                var swTotal = System.Diagnostics.Stopwatch.StartNew();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+
                 Logger.Info("StartScanning stage 1 — TSDF volumes");
                 _volumeIntegrator.ReallocateVolumes();
+                Logger.Info($"StartScanning stage 1 call took {sw.Elapsed.TotalMilliseconds:0} ms");
+                sw.Restart();
 
                 // Yield twice so the render thread can (a) actually commit
                 // the two 256³ 3D RT allocations to VRAM, and (b) run the
@@ -585,6 +593,8 @@ namespace Genesis.RoomScan
                 // before the much bigger Surface Nets alloc lands.
                 await Task.Yield();
                 await Task.Yield();
+                Logger.Info($"StartScanning stage 1 frames took {sw.Elapsed.TotalMilliseconds:0} ms");
+                sw.Restart();
 
                 // ── Stage 2: Surface Nets mesh extractor ────────────────
                 Logger.Info("StartScanning stage 2 — Surface Nets extractor");
@@ -603,8 +613,12 @@ namespace Genesis.RoomScan
                 // This is the critical pair — without it, PCA's native
                 // OnEnable lands in the same frame as the first Surface
                 // Nets dispatch and the MRUK fence handshake fails.
+                Logger.Info($"StartScanning stage 2 call took {sw.Elapsed.TotalMilliseconds:0} ms");
+                sw.Restart();
                 await Task.Yield();
                 await Task.Yield();
+                Logger.Info($"StartScanning stage 2 frames took {sw.Elapsed.TotalMilliseconds:0} ms");
+                sw.Restart();
 
                 // ── Stage 3: persistence + live preview ─────────────────
                 // In-memory load state was dropped in UnloadActiveScan above
@@ -670,15 +684,26 @@ namespace Genesis.RoomScan
                 // they now land in is the problem, not the work itself.
                 // `WaitForEndOfFrame` is the one hop that guarantees the frame
                 // is drawn before we touch them.
+                Logger.Info($"StartScanning stage 3 took {sw.Elapsed.TotalMilliseconds:0} ms");
+                sw.Restart();
+
                 Logger.Info("StartScanning stage 4a — enabling passthrough camera");
                 await WaitForEndOfFrameAsync();
+                Logger.Info($"StartScanning stage 4a first frame took {sw.Elapsed.TotalMilliseconds:0} ms");
+                sw.Restart();
                 provider?.StartCapture();
+                Logger.Info($"StartScanning StartCapture call took {sw.Elapsed.TotalMilliseconds:0} ms");
+                sw.Restart();
                 await WaitForEndOfFrameAsync();
 
-                Logger.Info("StartScanning stage 4b — enabling depth capture");
+                Logger.Info($"StartScanning stage 4b — enabling depth capture "
+                            + $"(after {sw.Elapsed.TotalMilliseconds:0} ms)");
+                sw.Restart();
                 await WaitForEndOfFrameAsync();
                 _depthCapture.StartDepthCapture();
+                Logger.Info($"StartScanning depth start took {sw.Elapsed.TotalMilliseconds:0} ms");
                 await Task.Yield();
+                Logger.Info($"StartScanning bring-up total {swTotal.Elapsed.TotalMilliseconds:0} ms");
 
                 if (!resuming)
                 {
