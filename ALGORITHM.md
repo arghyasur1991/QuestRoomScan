@@ -79,9 +79,9 @@ voxPos = voxelToWorld(coord)            // snapped world position
 
 **Step 2: Early rejections**
 - Room clip (opt-in `ConfineScanToContainingRoom`): MRUK outer walls / floor / ceiling are expanded **50 cm outward once**, then confined hard (`gsInsideRoom`). AABB is padded by the same 50 cm. Occupancy's 8 cm *inset* is unchanged. Default off — unbounded scan. No-op without `RoomUnderstanding`.
-- Frozen voxel: `weight < 0` (user FreezeInView)
 - Behind camera: `voxView.z > -0.05`
 - Outside depth FOV: `voxNDC.x/y` outside [0.01, 0.99]
+- Frozen voxel: `weight < 0` (user FreezeInView) — the first volume read, after the analytic rejections above
 
 **Step 2b: SCREEN plane stamp (separate dispatch, opt-in `StampScreenPlanes`, default on)**
 After the frustum pass, each MRUK `SCREEN` slab is a 3D dispatch over its voxel AABB (8 OBB corners → padded min/max). Analytic plane TSDF (`dot(pos - center, inward)` clamped to `±voxelDistance`) at `maxWeight`, RGB projection kept. Glass/bounce depth from Integrate is overwritten. The frustum kernel does **not** search for TVs. Off: no stamp kernel.

@@ -106,15 +106,18 @@ Additional project-level dependencies (not in `package.json` — installed via M
 
 ## Installation
 
-Add to your project's `Packages/manifest.json`:
+Add to your project's `Packages/manifest.json`, pinned to a release tag:
 
 ```json
 {
   "dependencies": {
-    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git"
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.0.0"
   }
 }
 ```
+
+Drop the `#v1.0.0` suffix to track `main`. Releases and their notes are in
+[`CHANGELOG.md`](CHANGELOG.md); `main` only moves by squash-merged release PR.
 
 For Gaussian Splat support, also add the optional dependency:
 
@@ -502,10 +505,9 @@ if (session.HasSavedScan)
     await session.ClearAllScansAsync();
 
 // 2. Begin scanning. The room mesh builds in real-time as the user looks around.
-//    Awaitable: StartScanAsync stages the heavy GPU bring-up across ~4 yielded
-//    frames (~56 ms total) before enabling the passthrough camera, so PCA's
-//    hardware-buffer handshake doesn't race our compute dispatches and tank
-//    MRUK/Vulkan. Below human-perception threshold for "press registered".
+//    Awaitable: StartScanAsync stages the ~600 MB GPU bring-up across ~4 yielded
+//    frames (~56 ms total) before enabling the passthrough camera and depth
+//    sensor. Below the human-perception threshold for "press registered".
 await session.StartScanAsync();
 session.ProgressUpdated += p => progressBar.value = p.OverallProgress;
 
@@ -748,7 +750,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `WaitUntilRoomReadyAsync()` | `Task` | Completes when scene discovery has finished |
 | `ReloadSceneFromDeviceAsync()` | `Task<bool>` | Re-run discovery with auto-capture **off** (no Space Setup). True if rooms exist. Use after spatial-data permission is granted — the first load often finished empty while `USE_SCENE` was still denied. |
 | `RequestSpaceSetupAndReloadAsync()` | `Task<bool>` | Horizon Space Setup, then reload with auto-capture **off**. True only if rooms exist afterwards (cancel is not success-with-rooms) |
-| `StartScan()` | `void` | Begin a new scan session (creates `_tmp/` package + spatial anchor) |
+| `StartScanAsync()` | `Task` | Begin a new scan session (unloads a loaded package on a non-resume start, creates `_tmp/` package + spatial anchor; completes at the first integrated frame) |
 | `FreezeInView()` | `void` | Paint voxels in current camera frustum as done; integration continues globally |
 | `UnfreezeInView()` | `void` | Inverse of `FreezeInView` for re-capture of bad regions |
 | `FinalizeScanAsync()` | `Task<ScanResult>` | Stop scanning → refine → save → release GPU; returns mesh + atlas + package id |
