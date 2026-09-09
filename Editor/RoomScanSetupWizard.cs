@@ -322,11 +322,36 @@ namespace Genesis.RoomScan.Editor
             if (target.GetComponent<ARCameraManager>() == null)
                 Undo.AddComponent<ARCameraManager>(target);
 
-            if (target.GetComponent<AROcclusionManager>() == null)
-                Undo.AddComponent<AROcclusionManager>(target);
+            var occl = target.GetComponent<AROcclusionManager>();
+            if (occl == null)
+                occl = Undo.AddComponent<AROcclusionManager>(target);
+            // Depth sensor starts only from DepthCapture.StartDepthCapture.
+            occl.enabled = false;
+            DisableIdleScanHardware();
 
             MarkDirty();
             Refresh();
+        }
+
+        /// <summary>
+        /// Leave AROcclusionManager and PassthroughCameraAccess disabled in
+        /// the scene. RoomScanner enables them for the scan window only.
+        /// USE_SCENE / HEADSET_CAMERA permission is still requested by the host.
+        /// </summary>
+        void DisableIdleScanHardware()
+        {
+            foreach (var occl in Object.FindObjectsByType<AROcclusionManager>(FindObjectsInactive.Include))
+            {
+                if (occl == null || !occl.enabled) continue;
+                occl.enabled = false;
+                EditorUtility.SetDirty(occl);
+            }
+            foreach (var pca in Object.FindObjectsByType<PassthroughCameraAccess>(FindObjectsInactive.Include))
+            {
+                if (pca == null || !pca.enabled) continue;
+                pca.enabled = false;
+                EditorUtility.SetDirty(pca);
+            }
         }
 
         // -- Project Settings ---------------------------------------------
@@ -852,7 +877,10 @@ namespace Genesis.RoomScan.Editor
             // play mode without an XR loader; that's expected and can't be
             // fixed from outside Meta's package — build to device to test.
             if (root.GetComponent<PassthroughCameraAccess>() == null)
-                Undo.AddComponent<PassthroughCameraAccess>(root);
+            {
+                var pca = Undo.AddComponent<PassthroughCameraAccess>(root);
+                pca.enabled = false;
+            }
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
 
@@ -907,6 +935,8 @@ namespace Genesis.RoomScan.Editor
             // EventSystem + VR controller UI input pipeline
             EnsureVRInputInfrastructure();
 
+            DisableIdleScanHardware();
+
             MarkDirty();
             Refresh();
         }
@@ -945,7 +975,7 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional("PassthroughCameraProvider", hasPCAProvider);
             StatusRowOptional("TextureRefinement (atlas baking)", hasRefinement);
             StatusRowOptional("RoomUnderstanding (MRUK bridge)", hasRoomUnderstanding);
-            StatusRowOptional("RoomScanSession (game-dev async API: StartScanAsync / FinalizeScanAsync / LoadLatestAsync)",
+            StatusRowOptional("RoomScanSession (game-dev async API: StartScanAsync / UnloadActiveScanAsync / FinalizeScanAsync / LoadAsync)",
                               _session != null);
 
             if (hasRefinement)
@@ -971,7 +1001,7 @@ namespace Genesis.RoomScan.Editor
             StatusRowOptional($"Active build profile = Meta Quest (current: {profileLabel})", activeProfileIsMetaQuest);
             StatusRowOptional("URP pipeline asset (Quest defaults)", _urpConfigured);
             StatusRowOptional("Meta XR Building Blocks (Camera Rig + Passthrough + PCA)", _bbAllPresent);
-            StatusRowOptional("Passthrough scene config (OVRManager + transparent center camera + HEADSET_CAMERA on startup)",
+            StatusRowOptional("Passthrough scene config (OVRManager + transparent center camera; no startup permission dialog)",
                               _ovrPassthroughReady);
             StatusRowOptional("AR Session + AROcclusionManager", _arSession != null && _arOcclusion != null);
             StatusRowOptional("AndroidManifest (Quest VR features + permissions + cleartext)",
@@ -1183,8 +1213,11 @@ namespace Genesis.RoomScan.Editor
             // PCA + ARSession + AROcclusionManager will spam errors in
             // Editor play mode without an XR loader; that's expected,
             // build to device.
-            if (UnityEngine.Object.FindAnyObjectByType<PassthroughCameraAccess>() == null)
-                Undo.AddComponent<PassthroughCameraAccess>(root);
+            if (UnityEngine.Object.FindAnyObjectByType<PassthroughCameraAccess>(FindObjectsInactive.Include) == null)
+            {
+                var pca = Undo.AddComponent<PassthroughCameraAccess>(root);
+                pca.enabled = false;
+            }
             if (root.GetComponent<PassthroughCameraProvider>() == null)
                 Undo.AddComponent<PassthroughCameraProvider>(root);
 
@@ -1193,12 +1226,54 @@ namespace Genesis.RoomScan.Editor
             if (root.GetComponent<RoomUnderstanding>() == null)
                 Undo.AddComponent<RoomUnderstanding>(root);
 
-            // RoomScanSession: public game-dev facade (StartScanAsync / FinalizeScanAsync /
+            // RoomScanSession: public game-dev facade (StartScanAsync / UnloadActiveScanAsync / FinalizeScanAsync /
             // LoadLatestAsync / HasSavedScan / ProgressUpdated). Without it,
             // game code that follows the documented public-API path cannot
             // find RoomScanSession.Instance and bails.
             if (root.GetComponent<RoomScanSession>() == null)
                 Undo.AddComponent<RoomScanSession>(root);
+
+            ApplyGameReadyScanDefaults(root);
+
+            foreach (var c in root.GetComponents<Component>())
+                WireComponent(c);
+
+            DisableIdleScanHardware();
+        }
+
+        /// <summary>
+        /// Stamp the game-proven scan knobs onto an existing RoomScan root
+        /// (extract 8 Hz, throttled keyframes, 50% post-bake simplify).
+        /// Confine-to-room is host art direction and is left alone.
+        /// New components already get these from field defaults; this
+        /// covers scenes serialized against older 30 Hz / burst-keyframe
+        /// values.
+        /// </summary>
+        void ApplyGameReadyScanDefaults(GameObject root)
+        {
+            var scanner = root.GetComponent<RoomScanner>();
+            if (scanner != null)
+            {
+                var so = new SerializedObject(scanner);
+                var hz = so.FindProperty("meshExtractionHz");
+                if (hz != null) hz.floatValue = 8f;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(scanner);
+            }
+
+            var kf = root.GetComponent<KeyframeCollector>();
+            if (kf != null)
+            {
+                var so = new SerializedObject(kf);
+                var move = so.FindProperty("moveThreshold");
+                if (move != null) move.floatValue = 0.4f;
+                var rot = so.FindProperty("rotateThresholdDeg");
+                if (rot != null) rot.floatValue = 20f;
+                var interval = so.FindProperty("minCaptureInterval");
+                if (interval != null) interval.floatValue = 1f;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(kf);
+            }
 
             var tr = root.GetComponent<TextureRefinement>();
             if (tr != null)
@@ -1213,9 +1288,6 @@ namespace Genesis.RoomScan.Editor
                     Debug.Log("[RoomScan Setup] Set postBakeSimplificationRatio to 0.5 for game-ready mesh");
                 }
             }
-
-            foreach (var c in root.GetComponents<Component>())
-                WireComponent(c);
         }
 
         /// <summary>

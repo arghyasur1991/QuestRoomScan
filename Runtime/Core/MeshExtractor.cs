@@ -33,6 +33,15 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Position changes below this (meters) are suppressed entirely.")]
         [Range(0f, 0.01f)] private float temporalDeadzone = 0.001f;
 
+        [SerializeField, Tooltip("Live-mesh birth duration in seconds. 0 = off. Fills every frame between extracts (cyan then photoreal, grow along the normal). Does not change the refined mesh.")]
+        [Range(0f, 2f)] private float birthFadeSeconds = 1f;
+
+        [SerializeField, Tooltip("How far new verts start inside the surface (metres) before growing out over birthFadeSeconds.")]
+        [Range(0f, 0.2f)] private float birthGrowMetres = 0.08f;
+
+        [SerializeField, Tooltip("Hold-and-morph: lerp the live mesh from the last dump to the next over this many seconds. A new extract does not start until this finishes. 0 = off.")]
+        [Range(0f, 0.6f)] private float meshMorphSeconds = 0.28f;
+
         [Header("Rendering")]
         [SerializeField] private Material scanMeshMaterial;
 
@@ -44,6 +53,16 @@ namespace Genesis.RoomScan
         private GPUSurfaceNets _gpuSurfaceNets;
         private GPUMeshRenderer _gpuRenderer;
         private int _extractCount;
+        float _lastExtractTime;
+        float _extractInterval = 0.125f;
+        float _morphStart;
+        bool _presentLiveLook = true;
+        static readonly int BirthFadeSecID = Shader.PropertyToID("_RSBirthFadeSec");
+        static readonly int BirthGrowID = Shader.PropertyToID("_RSBirthGrow");
+        static readonly int ExtractTimeID = Shader.PropertyToID("_RSExtractTime");
+        static readonly int ExtractIntervalID = Shader.PropertyToID("_RSExtractInterval");
+        static readonly int MorphStartID = Shader.PropertyToID("_RSMorphStart");
+        static readonly int MorphSecID = Shader.PropertyToID("_RSMorphSec");
 
         internal GPUSurfaceNets GpuSurfaceNets => _gpuSurfaceNets;
         public bool IsInitialized => _gpuSurfaceNets != null;
@@ -120,6 +139,8 @@ namespace Genesis.RoomScan
 
             _gpuSurfaceNets.EnsureBuffers(_volume.VoxelCount, gpuVertexBudgetPercent);
 
+            PushBirthGlobals(Time.time);
+
             _gpuRenderer = gameObject.AddComponent<GPUMeshRenderer>();
             _gpuRenderer.GpuMeshMaterial = scanMeshMaterial;
             _gpuRenderer.Initialize(_gpuSurfaceNets, _gpuSurfaceNets.GetVolumeBounds(_volume.VoxelSize));
@@ -129,8 +150,42 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Run one GPU mesh extraction, or skip if a previous dump is still
+        /// morphing on screen. The volume keeps integrating; the next accepted
+        /// extract is whatever the TSDF is when this returns true.
+        /// </summary>
+        public bool TryExtract()
+        {
+            if (_gpuSurfaceNets == null) return false;
+            if (meshMorphSeconds > 0.001f && _extractCount > 0
+                && Time.time < _morphStart + meshMorphSeconds)
+                return false;
+
+            _morphStart = Time.time;
+            _presentLiveLook = true;
+            Extract();
+            return true;
+        }
+
+        /// <summary>
+        /// Dump the current TSDF into the GPU vertex buffer, ignoring morph
+        /// hold and turning off presentation lerp / birth grow. Unwrap, atlas
+        /// bake, and PLY export must go through this so they read extractor
+        /// <c>pos</c>, not the in-flight live look.
+        /// </summary>
+        public void ExtractForAuthoring()
+        {
+            if (_gpuSurfaceNets == null) return;
+            _presentLiveLook = false;
+            _morphStart = 0f;
+            Extract();
+        }
+
+        /// <summary>
         /// Run one GPU mesh extraction pass from the current TSDF volume state.
-        /// Called by RoomScanner at the configured mesh extraction rate.
+        /// Live scanning goes through <see cref="TryExtract"/> so a morphing
+        /// dump is not overwritten. Persistence and other callers that need
+        /// an immediate remesh may call this directly.
         /// </summary>
         public void Extract()
         {
@@ -138,6 +193,11 @@ namespace Genesis.RoomScan
 
             _extractCount++;
             _gpuSurfaceNets.MinMeshWeight = _volume.MinMeshWeight;
+            float now = Time.time;
+            if (_lastExtractTime > 0f)
+                _extractInterval = Mathf.Max(0.02f, now - _lastExtractTime);
+            _lastExtractTime = now;
+            PushBirthGlobals(now);
 
             _gpuSurfaceNets.Extract(_volume.Volume, _volume.ColorVolume, _volume.VoxelSize);
 
@@ -160,6 +220,16 @@ namespace Genesis.RoomScan
             }
         }
 
+        void PushBirthGlobals(float extractTime)
+        {
+            Shader.SetGlobalFloat(BirthFadeSecID, _presentLiveLook ? birthFadeSeconds : 0f);
+            Shader.SetGlobalFloat(BirthGrowID, _presentLiveLook ? birthGrowMetres : 0f);
+            Shader.SetGlobalFloat(ExtractTimeID, extractTime);
+            Shader.SetGlobalFloat(ExtractIntervalID, _extractInterval);
+            Shader.SetGlobalFloat(MorphStartID, _morphStart);
+            Shader.SetGlobalFloat(MorphSecID, _presentLiveLook ? meshMorphSeconds : 0f);
+        }
+
         /// <summary>
         /// Release GPU resources without re-creating them.
         /// Used by ClearAllData to avoid a heavy re-alloc while the GPU may
@@ -176,6 +246,9 @@ namespace Genesis.RoomScan
             }
             _gpuSurfaceNets?.Dispose();
             _gpuSurfaceNets = null;
+            _lastExtractTime = 0f;
+            _extractCount = 0;
+            _morphStart = 0f;
         }
 
         /// <summary>
@@ -191,6 +264,9 @@ namespace Genesis.RoomScan
             }
             _gpuSurfaceNets?.Dispose();
             _gpuSurfaceNets = null;
+            _lastExtractTime = 0f;
+            _extractCount = 0;
+            _morphStart = 0f;
             Init();
         }
     }

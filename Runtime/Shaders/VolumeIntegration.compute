@@ -39,21 +39,24 @@ float2 gsCamSensorRes;
 float2 gsCamCurrentRes;
 float gsCamExposure;
 
+// Single exit on purpose: DXC's Vulkan path flattens early returns into a
+// function-named temp and then warns it is "potentially uninitialized".
 float2 ProjectToCameraUV(float3 worldPos)
 {
+    float2 uv = float2(-1, -1);
     float3 localPos = mul(gsCamInvRot, float4(worldPos - gsCamPos, 1.0)).xyz;
-    if (localPos.z <= 0.001) return float2(-1, -1);
+    if (localPos.z > 0.001)
+    {
+        float2 sensorPt = float2(
+            (localPos.x / localPos.z) * gsCamFocalLen.x + gsCamPrincipalPt.x,
+            (localPos.y / localPos.z) * gsCamFocalLen.y + gsCamPrincipalPt.y);
 
-    float2 sensorPt = float2(
-        (localPos.x / localPos.z) * gsCamFocalLen.x + gsCamPrincipalPt.x,
-        (localPos.y / localPos.z) * gsCamFocalLen.y + gsCamPrincipalPt.y);
-
-    float2 scaleFactor = gsCamCurrentRes / gsCamSensorRes;
-    scaleFactor /= max(scaleFactor.x, scaleFactor.y);
-    float2 cropMin = gsCamSensorRes * (1.0 - scaleFactor) * 0.5;
-    float2 cropSize = gsCamSensorRes * scaleFactor;
-    float2 uv = (sensorPt - cropMin) / cropSize;
-
+        float2 scaleFactor = gsCamCurrentRes / gsCamSensorRes;
+        scaleFactor /= max(scaleFactor.x, scaleFactor.y);
+        float2 cropMin = gsCamSensorRes * (1.0 - scaleFactor) * 0.5;
+        float2 cropSize = gsCamSensorRes * scaleFactor;
+        uv = (sensorPt - cropMin) / cropSize;
+    }
     return uv;
 }
 
@@ -90,6 +93,8 @@ void Integrate(uint id : SV_DispatchThreadID)
     uint3 coord = gsWorldToVoxel(vWorldPos);
     float3 voxPos = gsVoxelToWorld(coord);
 
+    if (!gsInsideRoom(voxPos)) return;
+
     float3 eyePos = gsDepthEyePos();
     float3 eyeToVox = voxPos - eyePos;
     float voxEyeDist = length(eyeToVox);
@@ -102,9 +107,14 @@ void Integrate(uint id : SV_DispatchThreadID)
     if (voxNDC.x < 0.01 || voxNDC.x > 0.99 || voxNDC.y < 0.01 || voxNDC.y > 0.99)
         return;
 
+    // Volume read only after the cheap analytic rejections above.
+    float2 old = gsVolumeRW[coord];
+    if (old.y < 0) return; // frozen voxel — skip integration
+
     float depthNDC = gsDepthSample(voxNDC.xy);
     float3 depthNorm = gsDepthNormalSample(voxNDC.xy).xyz;
     float3 depthPos = gsDepthNDCtoWorld(float3(voxNDC.xy, depthNDC));
+    if (!gsInsideRoom(depthPos)) return;
 
     float3 eyeToDepth = depthPos - eyePos;
     float depthEyeDist = length(eyeToDepth);
@@ -145,8 +155,6 @@ void Integrate(uint id : SV_DispatchThreadID)
     float quality = distFactor * angleFactor;
     float q2 = quality * quality;
 
-    float2 old = gsVolumeRW[coord];
-    if (old.y < 0) return; // frozen voxel — skip integration
     float oldVal = old.x;
     float weight = max(old.y, 0);
     bool wasEmpty = weight < 0.001;
@@ -191,6 +199,45 @@ void Integrate(uint id : SV_DispatchThreadID)
             float colorBlend = quality * 0.3;
             float3 rgb = oldColor.a < 0.01 ? boosted : lerp(oldColor.rgb, boosted, colorBlend);
             float newAlpha = min(oldColor.a + quality * 0.05, 1.0);
+            gsColorVolumeRW[coord] = float4(rgb, newAlpha);
+        }
+    }
+}
+
+#pragma kernel StampScreen
+
+int3 gsStampVoxMin;
+int3 gsStampVoxMax;
+
+[numthreads(4, 4, 4)]
+void StampScreen(uint3 id : SV_DispatchThreadID)
+{
+    int3 coordI = gsStampVoxMin + (int3)id;
+    if (any(coordI >= gsStampVoxMax) || any(coordI < 0)) return;
+    uint3 coord = (uint3)coordI;
+    if (any(coord >= gsVoxCount)) return;
+
+    float3 voxPos = gsVoxelToWorld(coord);
+    if (!gsInsideRoom(voxPos)) return;
+
+    float2 old = gsVolumeRW[coord];
+    if (old.y < 0) return;
+
+    float screenDist;
+    if (!gsTryScreenStamp(voxPos, screenDist)) return;
+
+    gsVolumeRW[coord] = float2(screenDist, gsMaxWeight);
+    if (gsCamAvailable && abs(screenDist) < COLOR_SURFACE_BAND)
+    {
+        float2 uv = ProjectToCameraUV(voxPos);
+        if (uv.x > 0.02 && uv.x < 0.98 && uv.y > 0.02 && uv.y < 0.98)
+        {
+            float4 camColor = gsCamRGB.SampleLevel(gsBilinearClampSampler, uv, 0);
+            float3 boosted = saturate(camColor.rgb * gsCamExposure);
+            float4 oldColor = gsColorVolumeRW[coord];
+            float colorBlend = 0.25;
+            float3 rgb = oldColor.a < 0.01 ? boosted : lerp(oldColor.rgb, boosted, colorBlend);
+            float newAlpha = min(oldColor.a + 0.08, 1.0);
             gsColorVolumeRW[coord] = float4(rgb, newAlpha);
         }
     }

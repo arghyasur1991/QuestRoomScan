@@ -82,7 +82,16 @@ namespace Genesis.RoomScan
         private static readonly int ID_SmoothPosB = Shader.PropertyToID("_SmoothPosB");
         private static readonly int ID_TemporalState = Shader.PropertyToID("_TemporalState");
 
-        private const int VertexStride = 32;
+        /// <summary>
+        /// Tightly packed <c>GPUVertex</c> (compute + live shader + CPU readback).
+        /// <c>pos</c> is the extractor dump (temporal-blend output). <c>prevPos</c>
+        /// is presentation-only — the forward shader lerps it; unwrap / atlas /
+        /// PLY must read <see cref="VertexPosOffset"/>.
+        /// </summary>
+        public const int VertexStride = 48;
+        public const int VertexPosOffset = 0;
+        public const int VertexNormalOffset = 24;
+        public const int VertexPackedColorOffset = 36;
         private const int Float3Stride = 12;
 
         public GPUSurfaceNets(ComputeShader compute)
@@ -123,6 +132,23 @@ namespace Genesis.RoomScan
             _counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 2, 4);
             _dispatchArgs = new GraphicsBuffer(structuredIndirect, 3, 4);
             _drawIndirectArgs = new GraphicsBuffer(structuredIndirect, 5, 4);
+
+            // GraphicsBuffer contents are not zero-initialised: a fresh buffer
+            // holds whatever last occupied that memory. Nothing writes these
+            // until the first Extract (BuildIndirectArgs), yet GPUMeshRenderer
+            // draws from _drawIndirectArgs every LateUpdate as soon as the
+            // vertex render mode is on -- which happens at scan start, while
+            // depth is still coming up and Extract cannot run. A garbage
+            // indexCount there makes the GPU draw millions of triangles per
+            // frame reading past _indices: measured on Quest 3 as the OS GPU
+            // pressure pinning at max, frames costing ~10 s, and the runtime
+            // resetting fences until the first extraction happened to write
+            // sane values 30-70 s later. Whether the garbage was zero depended
+            // on what the app had freed just before -- a scan started after a
+            // video call inherited its recycled memory and hung; one started
+            // fresh did not. Draw nothing until told otherwise.
+            _drawIndirectArgs.SetData(new uint[] { 0u, 1u, 0u, 0u, 0u });
+            _dispatchArgs.SetData(new uint[] { 0u, 0u, 0u });
             _smoothPosA = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, Float3Stride);
             _smoothPosB = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, Float3Stride);
 
@@ -169,7 +195,7 @@ namespace Genesis.RoomScan
             if (_coordVertMap == null)
                 throw new InvalidOperationException("Call EnsureBuffers before Extract");
 
-            if (!_temporalInitialized && TemporalAlphaMax < 1f)
+            if (!_temporalInitialized)
                 InitTemporalState();
 
             SetGlobalParams(voxelSize);
@@ -219,12 +245,9 @@ namespace Genesis.RoomScan
                 _compute.DispatchIndirect(_kApplySmooth, _dispatchArgs);
             }
 
-            // 5. Temporal blend (optional)
-            if (TemporalAlphaMax < 1f)
-            {
-                _compute.SetTexture(_kTemporalBlend, ID_TemporalState, _temporalState);
-                _compute.DispatchIndirect(_kTemporalBlend, _dispatchArgs);
-            }
+            // 5. Temporal blend (also stamps packedColor.a birth-fade ticks)
+            _compute.SetTexture(_kTemporalBlend, ID_TemporalState, _temporalState);
+            _compute.DispatchIndirect(_kTemporalBlend, _dispatchArgs);
 
             // 6. Generate indices
             _compute.DispatchIndirect(_kGenerateIndices, _dispatchArgs);

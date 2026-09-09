@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using UnityEngine;
 
@@ -33,8 +34,49 @@ namespace Genesis.RoomScan
         /// <summary>Raised each frame during scanning with the latest progress.</summary>
         public event Action<ScanProgress> ProgressUpdated;
 
+        /// <summary>
+        /// When true, TSDF stays inside the MRUK room that contained
+        /// the headset when the scan started (planes expanded 50 cm
+        /// outward, then hard-confined). Default <c>false</c> (unbounded
+        /// scan). Set this before <see cref="StartScanAsync"/>. No-op
+        /// without <see cref="RoomUnderstanding"/>. SCREEN (TV) plane
+        /// stamps still apply either way when that module is present.
+        /// </summary>
+        public bool ConfineScanToContainingRoom
+        {
+            get => _scanner != null && _scanner.ConfineScanToContainingRoom;
+            set
+            {
+                if (_scanner != null)
+                    _scanner.ConfineScanToContainingRoom = value;
+            }
+        }
+
+        /// <summary>
+        /// When true, MRUK <c>SCREEN</c> (TV) slabs are stamped as analytic
+        /// TSDF after Integrate. Default <c>true</c>. Set before
+        /// <see cref="StartScanAsync"/>. No-op without
+        /// <see cref="RoomUnderstanding"/>.
+        /// </summary>
+        public bool StampScreenPlanes
+        {
+            get => _scanner != null && _scanner.StampScreenPlanes;
+            set
+            {
+                if (_scanner != null)
+                    _scanner.StampScreenPlanes = value;
+            }
+        }
+
         private RoomScanner _scanner;
         private RoomScanPersistence _persistence;
+
+        RoomUnderstanding Understanding()
+        {
+            if (RoomUnderstanding.Instance != null)
+                return RoomUnderstanding.Instance;
+            return GetComponent<RoomUnderstanding>();
+        }
 
         private void Awake()
         {
@@ -55,15 +97,39 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Drops the in-memory loaded / refined scan without deleting saved
+        /// packages or erasing spatial-anchor UUIDs. Hides the refined mesh,
+        /// unbinds the active spatial anchor, and frees scan GPU if it was
+        /// allocated. Call this when leaving a loaded scan to start a new
+        /// scan in the same session — <see cref="StartScanAsync"/> also
+        /// does this on a non-resume start, but hosts usually want the old
+        /// mesh gone <i>before</i> the user presses the scan button.
+        /// Idempotent. Yields two frames after the spatial-anchor GameObject
+        /// is destroyed so the deferred <c>Destroy</c> has run before the
+        /// caller creates a new one.
+        /// </summary>
+        public async Task UnloadActiveScanAsync()
+        {
+            if (_scanner == null) return;
+            _scanner.UnloadActiveScan();
+            await Task.Yield();
+            await Task.Yield();
+        }
+
+        /// <summary>
         /// Begins a new scan session. The room mesh builds in real-time as
         /// the user looks around. Async because <see cref="RoomScanner.StartScanningAsync"/>
-        /// stages the heavy GPU bring-up across a few frames before
-        /// enabling the passthrough camera (otherwise the PCA / MRUK
-        /// handshake races our compute dispatches and the compositor
-        /// freezes — see that method's docs for the full story). Total
-        /// wall-clock from await to first integrated frame is ~56 ms,
+        /// stages the ~600 MB GPU bring-up across a few frames before
+        /// enabling the passthrough camera and depth sensor (see that
+        /// method's docs). Total wall-clock from await to first integrated
+        /// frame is ~56 ms,
         /// imperceptible to the user but worth awaiting so callers can
         /// sequence UI feedback ("Scanning…") right after.
+        /// <para>
+        /// A non-resume start first unloads any previously loaded package
+        /// so a second look in the same session does not keep drawing the
+        /// old mesh or create a spatial anchor on top of a still-bound one.
+        /// </para>
         /// </summary>
         public Task StartScanAsync()
         {
@@ -187,13 +253,67 @@ namespace Genesis.RoomScan
         public bool HasSavedScan => _persistence != null && _persistence.HasAnyPackage();
 
         /// <summary>
+        /// Snapshot of one saved scan package. Games that keep several rooms
+        /// (one package per save) use this with <see cref="LoadAsync"/> and
+        /// <see cref="DeleteScanAsync"/> instead of <see cref="LoadLatestAsync"/>
+        /// / <see cref="ClearAllScansAsync"/>.
+        /// </summary>
+        public readonly struct SavedScanInfo
+        {
+            public SavedScanInfo(string id, string displayName, long timestamp,
+                string sceneRoomUuid = "")
+            {
+                Id = id;
+                DisplayName = displayName ?? string.Empty;
+                Timestamp = timestamp;
+                SceneRoomUuid = sceneRoomUuid ?? string.Empty;
+            }
+
+            public string Id { get; }
+            public string DisplayName { get; }
+            /// <summary>Unix seconds (UTC); <see cref="ListSavedScans"/> is newest-first.</summary>
+            public long Timestamp { get; }
+            /// <summary>Scene API UUID of the MRUK room this package was
+            /// scanned in. Empty until the package has been saved or loaded
+            /// once after that field existed.</summary>
+            public string SceneRoomUuid { get; }
+        }
+
+        /// <summary>
+        /// Every saved scan package, newest first. Empty when nothing is on
+        /// disk. Does not load meshes.
+        /// </summary>
+        public IReadOnlyList<SavedScanInfo> ListSavedScans()
+        {
+            if (_persistence == null) return Array.Empty<SavedScanInfo>();
+            var packages = _persistence.ListPackages();
+            var list = new List<SavedScanInfo>(packages.Count);
+            for (int i = 0; i < packages.Count; i++)
+            {
+                var p = packages[i];
+                list.Add(new SavedScanInfo(p.id, p.displayName, p.timestamp, p.sceneRoomUuid));
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// Deletes one saved scan package (mesh, atlas, keyframes, triplanar,
+        /// manifest entry) and erases its spatial anchor from Horizon OS.
+        /// No-op when the id is missing or already gone.
+        /// </summary>
+        public Task DeleteScanAsync(string packageId)
+        {
+            if (_persistence == null || string.IsNullOrEmpty(packageId))
+                return Task.CompletedTask;
+            return _persistence.DeletePackageAsync(packageId);
+        }
+
+        /// <summary>
         /// Deletes every saved scan package on disk (mesh, atlas, keyframes,
         /// triplanar, manifest) and erases each package's spatial anchor from
-        /// Horizon OS. Intended for game flows where there is exactly one
-        /// "current" scan and a rescan should obsolete everything that came
-        /// before — call this immediately before <see cref="StartScan"/> to
-        /// stop the on-device scan store from growing unbounded.
-        /// Safe to call when nothing is saved (returns immediately).
+        /// Horizon OS. Nuclear option — games that keep several packages
+        /// should call <see cref="DeleteScanAsync"/> for the one they are
+        /// replacing. Safe to call when nothing is saved (returns immediately).
         /// </summary>
         public Task ClearAllScansAsync()
         {
@@ -228,5 +348,196 @@ namespace Genesis.RoomScan
         /// or outside Android device builds.</summary>
         public Task<bool> RequestCameraPermissionAsync()
             => PassthroughCameraProvider.RequestCameraPermissionAsync();
+
+        /// <summary>True when Horizon OS <c>USE_SCENE</c> (spatial data) is
+        /// granted. Always true outside Android device builds.</summary>
+        public bool HasScenePermission => AndroidRuntimePermission.Has(AndroidRuntimePermission.Scene);
+
+        /// <summary>Requests spatial-data permission. Resolves true if already
+        /// granted, or outside Android device builds.</summary>
+        public Task<bool> RequestScenePermissionAsync()
+            => AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Scene);
+
+        /// <summary>True when Horizon OS <c>USE_ANCHOR_API</c> is granted.
+        /// Always true outside Android device builds.</summary>
+        public bool HasAnchorPermission => AndroidRuntimePermission.Has(AndroidRuntimePermission.Anchors);
+
+        /// <summary>Requests spatial-anchor permission. Resolves true if
+        /// already granted, or outside Android device builds.</summary>
+        public Task<bool> RequestAnchorPermissionAsync()
+            => AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Anchors);
+
+        /// <summary>True after MRUK scene discovery has finished, including
+        /// an empty space (no rooms). Distinct from <see cref="HasSceneRooms"/>.</summary>
+        public bool IsRoomLoaded =>
+            RoomAnchorManager.Instance != null && RoomAnchorManager.Instance.IsRoomLoaded;
+
+        /// <summary>True when this space has at least one MRUK room after
+        /// discovery. False after a finished load with no scene model.
+        /// Does not mean the headset is inside that room — see
+        /// <see cref="IsHeadsetInsideASceneRoom"/>.</summary>
+        public bool HasSceneRooms =>
+            RoomAnchorManager.Instance != null && RoomAnchorManager.Instance.HasSceneRooms;
+
+        /// <summary>
+        /// True when the headset is inside <b>any</b> loaded captured space
+        /// (outer wall planes, including doorway faces). Boot / Space Setup
+        /// should use this — any set-up room is enough. A loaded scan is
+        /// tied to one room; use <see cref="IsHeadsetInsideBoundSceneRoom"/>
+        /// for that. Native <c>IsPositionInRoom</c> alone is the floor
+        /// outline and stays true a little past the door. Editor is always true.
+        /// </summary>
+        public bool IsHeadsetInsideASceneRoom
+        {
+            get
+            {
+                if (Application.isEditor) return true;
+                var u = Understanding();
+                return u != null && u.IsHeadsetInsideAnyRoom();
+            }
+        }
+
+        /// <summary>
+        /// Scene API UUID of the MRUK room the active package was scanned
+        /// in (stored next to the spatial-anchor UUID in
+        /// <c>anchor.json</c> / the package manifest). Empty when no
+        /// package is loaded, or until the first bind. Resolves and
+        /// persists from the localized spatial-anchor pose when missing
+        /// or stale. Editor does not invent a UUID.
+        /// </summary>
+        public Guid BoundSceneRoomUuid
+        {
+            get
+            {
+                if (_persistence == null || !_persistence.HasActivePackage)
+                    return Guid.Empty;
+                string s = _persistence.EnsureAndGetSceneRoomUuid();
+                return Guid.TryParse(s, out var g) ? g : Guid.Empty;
+            }
+        }
+
+        /// <summary>
+        /// True when the headset is inside the active package's bound
+        /// room — not merely some other captured space in the house.
+        /// False when no package is loaded or the bound UUID cannot be
+        /// resolved. Editor is always true.
+        /// </summary>
+        public bool IsHeadsetInsideBoundSceneRoom
+        {
+            get
+            {
+                if (Application.isEditor)
+                    return true;
+                if (_persistence == null || !_persistence.HasActivePackage)
+                    return false;
+                Guid uuid = BoundSceneRoomUuid;
+                if (uuid == Guid.Empty) return false;
+                var u = Understanding();
+                return u != null && u.IsHeadsetInsideRoom(uuid);
+            }
+        }
+
+        /// <summary>
+        /// Visible <c>WALL_FACE</c> and <c>SCREEN</c> (TV) planes of the
+        /// room that contains the headset. Empty in the editor and when
+        /// the headset is not inside a captured room. Hosts pin
+        /// world-space UI without taking an MRUK dependency. Clears
+        /// <paramref name="dest"/>. A <see cref="SceneWallFace.IsScreen"/>
+        /// row is the television.
+        /// </summary>
+        public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest)
+        {
+            var u = Understanding();
+            if (u == null)
+            {
+                dest?.Clear();
+                return 0;
+            }
+            return u.CopyHeadsetRoomWallFaces(dest);
+        }
+
+        /// <summary>
+        /// Scene API UUID of the loaded room that contains the headset
+        /// (wall-plane test), or empty. Distinct from
+        /// <see cref="BoundSceneRoomUuid"/> (the active scan package).
+        /// Editor does not invent a UUID.
+        /// </summary>
+        public Guid HeadsetSceneRoomUuid
+        {
+            get
+            {
+                var u = Understanding();
+                return u != null ? u.TryGetRoomUuidContainingHeadset() : Guid.Empty;
+            }
+        }
+
+        /// <summary>
+        /// After a package is loaded and its spatial anchor has localized:
+        /// true when the headset and that anchor sit in the <b>same</b>
+        /// captured room (wall-plane test). Persists that room's current
+        /// Scene API UUID — a Space Setup redo in the same physical room
+        /// gets a new UUID and must rebind. False when either pose is
+        /// outside a captured volume or they disagree (hallway, a different
+        /// set-up room). Editor is always true.
+        /// </summary>
+        public bool TryRebindBoundSceneRoomIfHeadsetMatches()
+        {
+            if (Application.isEditor)
+                return true;
+            if (_persistence == null || !_persistence.HasActivePackage)
+                return false;
+            var u = Understanding();
+            if (u == null) return false;
+
+            Guid atHeadset = u.TryGetRoomUuidContainingHeadset();
+            Guid atAnchor = Guid.Empty;
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr != null && mgr.HasSpatialAnchor && mgr.SpatialAnchorTransform != null)
+                atAnchor = u.TryGetRoomUuidAt(mgr.SpatialAnchorTransform.position);
+
+            if (atHeadset == Guid.Empty || atAnchor == Guid.Empty || atHeadset != atAnchor)
+                return false;
+
+            _persistence.BindSceneRoomUuid(atAnchor);
+            return true;
+        }
+
+        /// <summary>The refined-mesh renderer for the active scan, or null.</summary>
+        public MeshRenderer RefinedMeshRenderer =>
+            _scanner != null ? _scanner.RefinedMeshRenderer : null;
+
+        /// <summary>Completes when scene discovery has finished. Completed
+        /// immediately if it already has.</summary>
+        public Task WaitUntilRoomReadyAsync()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null) return Task.CompletedTask;
+            return mgr.WaitUntilRoomReadyAsync();
+        }
+
+        /// <summary>
+        /// Re-run MRUK scene discovery without opening Space Setup. Use after
+        /// spatial-data permission is granted: the first boot load often
+        /// finished with zero rooms while <c>USE_SCENE</c> was still denied.
+        /// </summary>
+        public Task<bool> ReloadSceneFromDeviceAsync()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null) return Task.FromResult(false);
+            return mgr.ReloadSceneFromDeviceAsync();
+        }
+
+        /// <summary>
+        /// Opens Horizon Space Setup (Unity app pauses), then reloads the
+        /// scene model with auto-capture off. Returns true only when rooms
+        /// exist afterwards — cancel still completes the OS API as true.
+        /// Device-only; editor returns the current room flag.
+        /// </summary>
+        public Task<bool> RequestSpaceSetupAndReloadAsync()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null) return Task.FromResult(false);
+            return mgr.RequestSpaceSetupAndReloadAsync();
+        }
     }
 }

@@ -524,13 +524,15 @@ RWStructuredBuffer<uint> _NormalBuf;
 // Returns luminance of a texel, or fallback if the texel is empty (alpha=0).
 // Using the center's own luminance as fallback means UV island seams produce
 // zero gradient instead of a false edge.
+// Single exit on purpose: DXC flattens early returns into a function-named
+// temp and then warns it is "potentially uninitialized".
 uint PackedToLum(uint packed, uint fallback)
 {
-    if ((packed >> 24) == 0) return fallback;
     uint cr = packed & 0xFF;
     uint cg = (packed >> 8) & 0xFF;
     uint cb = (packed >> 16) & 0xFF;
-    return (cr * 77 + cg * 150 + cb * 29) >> 8;
+    uint lum = (cr * 77 + cg * 150 + cb * 29) >> 8;
+    return (packed >> 24) == 0 ? fallback : lum;
 }
 
 uint SampleLum(int x, int y, uint centerLum)

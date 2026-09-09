@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using Genesis.RoomScan.UI;
@@ -95,7 +96,7 @@ namespace Genesis.RoomScan
 
         [Header("Scan Rates")]
         [SerializeField] private float integrationHz = 30f;
-        [SerializeField] private float meshExtractionHz = 30f;
+        [SerializeField] private float meshExtractionHz = 8f;
 
         [Header("Render Mode")]
         [SerializeField] private ScanRenderMode renderMode = ScanRenderMode.Vertex;
@@ -108,6 +109,51 @@ namespace Genesis.RoomScan
 
         [Header("Logging")]
         [SerializeField] private LogLevel logLevel = LogLevel.Info;
+
+        [Header("Scan Priors")]
+        [SerializeField, Tooltip(
+            "When true, TSDF stays inside the MRUK room that contained " +
+            "the headset at scan start (planes expanded 50 cm outward, " +
+            "then hard-confined). Hallway hits past that still skip. " +
+            "Default off. Hosts that want a single-room mesh set this " +
+            "before StartScanningAsync. No-op without RoomUnderstanding.")]
+        private bool confineScanToContainingRoom;
+
+        [SerializeField]
+        [Tooltip("Stamp MRUK SCREEN (TV) planes as analytic TSDF. Default on. No-op without RoomUnderstanding.")]
+        private bool stampScreenPlanes = true;
+
+        /// <summary>
+        /// Opt-in room clip for TSDF. Default false. Set true before
+        /// <see cref="StartScanningAsync"/>. No-op without
+        /// <see cref="RoomUnderstanding"/>. Changing it during a scan
+        /// re-uploads clip planes on the next bind.
+        /// </summary>
+        public bool ConfineScanToContainingRoom
+        {
+            get => confineScanToContainingRoom;
+            set
+            {
+                confineScanToContainingRoom = value;
+                if (IsScanning) BindScanPriors();
+            }
+        }
+
+        /// <summary>
+        /// When true, MRUK <c>SCREEN</c> (TV) slabs are stamped as analytic
+        /// TSDF after each Integrate. Default true. Hosts can turn this
+        /// off before <see cref="StartScanningAsync"/> to measure cost or
+        /// keep glass depth.
+        /// </summary>
+        public bool StampScreenPlanes
+        {
+            get => stampScreenPlanes;
+            set
+            {
+                stampScreenPlanes = value;
+                if (IsScanning) BindScanPriors();
+            }
+        }
 
         // ─────────────────────────────────────────────────────────────
         //  Sibling component cache (resolved in Awake)
@@ -254,6 +300,9 @@ namespace Genesis.RoomScan
 
         public bool HasRefinedTexture { get; private set; }
         public bool HasHQRefinedTexture { get; private set; }
+
+        /// <summary>The refined-mesh renderer, or null until a refined mesh exists.</summary>
+        public MeshRenderer RefinedMeshRenderer => _refinedRenderer;
         public bool IsRefining { get; private set; }
         public bool IsHQRefining { get; private set; }
         public bool IsMeshEnhancing { get; private set; }
@@ -389,6 +438,10 @@ namespace Genesis.RoomScan
         private float _lastScannerLog;
         private int _integrateCount;
         private bool _subscribedToAnchorsChanged;
+        private Guid _scanRoomUuid;
+        private float _lastEmptyRoomBindAttempt;
+        private readonly List<Vector4> _clipScratch = new(32);
+        private readonly List<ScanScreenStamp> _stampScratch = new(4);
 
         private void Update()
         {
@@ -425,12 +478,16 @@ namespace Genesis.RoomScan
                 Integrated?.Invoke();
                 _integrateCount++;
 
-                if (t - _lastMeshTime >= MeshInterval)
+                MaybeRetryScanRoomBind();
+
+                if (!IsRefining && t - _lastMeshTime >= MeshInterval)
                 {
-                    _lastMeshTime = t;
-                    _meshExtractor.Extract();
-                    UpdatePlateauDetection();
-                    MeshExtracted?.Invoke();
+                    if (_meshExtractor != null && _meshExtractor.TryExtract())
+                    {
+                        _lastMeshTime = t;
+                        UpdatePlateauDetection();
+                        MeshExtracted?.Invoke();
+                    }
                 }
             }
 
@@ -451,36 +508,105 @@ namespace Genesis.RoomScan
         /// clears in-memory keyframes, and starts the active camera provider.
         ///
         /// <para>
-        /// <b>Async by necessity, not by API preference.</b> The lazy GPU
-        /// bring-up (~150 MB TSDF + ~480 MB Surface Nets) and the
-        /// passthrough-camera handshake (PCA → MRUK) are both heavy work
-        /// for the render thread, and if they land in the same Unity frame
-        /// PCA's hardware-buffer-queue handshake loses the race against
-        /// our compute dispatches: MRUK then spams "Hardware buffer queue
-        /// is empty", Vulkan submit corrupts with
-        /// VK_ERROR_INITIALIZATION_FAILED, and the compositor never
-        /// recovers (perceived as a permanent hang on the user's first
-        /// A-press). The fix is to do the GPU allocations + first
-        /// dispatches first, yield twice between each step so the render
-        /// thread commits the new resources across separate frames, and
-        /// only then enable PCA + AROcclusionManager. Total wall-clock
-        /// cost on a Quest 3 is ~56 ms (4 frames at 72 fps) — below the
-        /// "press registered" threshold of human perception.
+        /// <b>Permissions are requested here</b>, in sequence, for whatever is
+        /// still missing: <c>USE_SCENE</c> (required — a denial aborts the
+        /// start), then <c>HEADSET_CAMERA</c> and <c>USE_ANCHOR_API</c> (a
+        /// denial degrades). Hosts that want the dialogs at boot for UX call
+        /// <see cref="RoomScanSession.RequestScenePermissionAsync"/> and
+        /// friends first; the requests here are then no-ops. Nothing else in
+        /// the package calls <c>RequestUserPermission</c>.
         /// </para>
         ///
         /// <para>
-        /// Eager allocation in <c>Awake</c>/<c>Start</c> avoided the bug
-        /// because the render thread had committed all VRAM and run the
-        /// first dispatches across multiple uneventful boot-splash frames
-        /// before the user could ever press A. The lazy-alloc landing
-        /// regressed that without realising the timing was load-bearing.
-        /// We keep lazy alloc (so the load-existing-scan path doesn't pay
-        /// the 600 MB cost) and add the inline staging instead.
+        /// <b>Async by necessity, not by API preference.</b> The lazy GPU
+        /// bring-up (~150 MB TSDF + ~480 MB Surface Nets) is staged across
+        /// frames: allocate the volumes, yield twice so the render thread
+        /// commits them and runs the first Clear, allocate the mesh
+        /// extractor, yield twice again, then switch to the live preview
+        /// and enable PCA + AROcclusionManager. Total wall-clock on a
+        /// Quest 3 is ~56 ms (4 frames at 72 fps), below the threshold at
+        /// which a press feels unregistered. Allocating 600 MB and opening
+        /// two camera pipelines in a single frame is a worst case for the
+        /// render thread that the staging avoids.
+        /// </para>
+        ///
+        /// <para>
+        /// History: a multi-second "hang on the first A-press" was once
+        /// attributed to this timing (PCA's MRUK handshake losing a race
+        /// to the compute dispatches). The measured cause was different —
+        /// <see cref="GPUSurfaceNets"/> drew from an indirect-args buffer
+        /// that nothing had written yet, and whether that garbage happened
+        /// to be zero depended on what the host had just freed. Eager
+        /// allocation at boot avoided it only because boot memory was
+        /// clean. The buffer is now zeroed at allocation; the staging is
+        /// kept because it is cheap and spreads the render-thread load.
         /// </para>
         /// </summary>
         public async Task StartScanningAsync()
         {
-            if (IsScanning) return;
+            if (IsScanning || _startingScan) return;
+
+            // Permissions first, before anything is torn down or allocated:
+            // the user may take a while on the dialogs, and a denied USE_SCENE
+            // means there is no scan to start. Requests are serialised inside
+            // AndroidRuntimePermission and free once granted, so a host that
+            // already asked at boot pays nothing here.
+            _startingScan = true;
+            try
+            {
+                if (!await EnsureScanPermissionsAsync())
+                    return;
+                await StartScanningCoreAsync();
+            }
+            finally
+            {
+                _startingScan = false;
+            }
+        }
+
+        private bool _startingScan;
+
+        /// <summary>
+        /// USE_SCENE is required (no depth, no scan). HEADSET_CAMERA and
+        /// USE_ANCHOR_API are requested too but a denial only degrades:
+        /// depth-only colour from normals, and a save without a spatial
+        /// anchor (floor-anchor relocation fallback).
+        /// </summary>
+        private async Task<bool> EnsureScanPermissionsAsync()
+        {
+            if (!await AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Scene))
+            {
+                Logger.Error("USE_SCENE denied — the depth sensor is required to scan. Not starting.");
+                return false;
+            }
+            if (!await AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Camera))
+                Logger.Warning("HEADSET_CAMERA denied — scanning depth-only; vertex colour falls back to normals.");
+            if (!await AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Anchors))
+                Logger.Warning("USE_ANCHOR_API denied — this scan will save without a spatial anchor.");
+            return true;
+        }
+
+        private async Task StartScanningCoreAsync()
+        {
+            // Resume is "same-session pause of an in-progress _tmp scan".
+            // Compute it before UnloadActiveScan, which zeros IntegrationCount.
+            bool resuming = _persistence != null
+                && _persistence.ActivePackageId == RoomScanPersistence.TmpPkgId
+                && _volumeIntegrator != null
+                && _volumeIntegrator.IntegrationCount > 0;
+
+            // A LoadAsync in this session leaves the refined mesh drawing and
+            // a spatial anchor localized. Starting a new scan on top of that
+            // keeps the old mesh on screen and would create a second spatial
+            // anchor while the first is still bound. Drop the in-memory scan
+            // first; saved packages stay on disk.
+            if (!resuming)
+            {
+                UnloadActiveScan();
+                await Task.Yield();
+                await Task.Yield();
+            }
+
             IsScanning = true;
             try
             {
@@ -499,8 +625,8 @@ namespace Genesis.RoomScan
                 // Yield twice so the render thread can (a) actually commit
                 // the two 256³ 3D RT allocations to VRAM, and (b) run the
                 // first Clear compute dispatch. One yield is "next frame";
-                // two yields gives the compositor a clean frame in between
-                // before the much bigger Surface Nets alloc lands.
+                // two yields gives a clean frame in between before the
+                // much bigger Surface Nets alloc lands.
                 await Task.Yield();
                 await Task.Yield();
 
@@ -523,14 +649,10 @@ namespace Genesis.RoomScan
                 await Task.Yield();
                 await Task.Yield();
 
-                // ── Stage 3: persistence + per-scan invalidation ────────
-                // Resume within the same session: if we already have an
-                // active tmp package with scan data, keep it instead of
-                // nuking everything.
-                bool resuming = _persistence != null
-                    && _persistence.ActivePackageId == RoomScanPersistence.TmpPkgId
-                    && _volumeIntegrator.IntegrationCount > 0;
-
+                // ── Stage 3: persistence + live preview ─────────────────
+                // In-memory load state was dropped in UnloadActiveScan above
+                // when !resuming. GPU is up now, so switch to the live
+                // vertex preview and open a fresh _tmp package + anchor.
                 if (!resuming)
                 {
                     _prevVertexCount = 0;
@@ -539,50 +661,19 @@ namespace Genesis.RoomScan
                     _prevColorCoverage = 0f;
                     _stabilizedTime = 0f;
 
-                    // Invalidate any previously loaded / refined output. Without
-                    // this, a Begin() that follows a LoadRefinedOnlyAsync (or a
-                    // prior in-session refinement) leaves HasRefinedTexture=true
-                    // and the old _refinedMesh visible, which (a) keeps the stale
-                    // mesh on screen instead of switching to live vertex preview
-                    // and (b) makes RoomScanSession.FinalizeScanAsync skip the
-                    // "if (!HasRefinedTexture) StartTextureRefinement()" gate, so
-                    // the new TSDF gets saved but no fresh refined_mesh.bin is
-                    // ever written. This is the same per-state-reset that
-                    // ClearAllDataAsync does, just narrowed to the things a fresh
-                    // scan must invalidate (volumes are already re-alloc'd above).
-                    HasRefinedTexture = false;
-                    HasHQRefinedTexture = false;
-                    HasEnhancedMesh = false;
-                    LastRefinedResult = null;
-                    LastSimplifiedResult = null;
-                    _cachedUnwrap = null;
-                    _refinedMesh = null;
-                    if (_normalMapTexture != null)
-                    {
-                        Destroy(_normalMapTexture);
-                        _normalMapTexture = null;
-                    }
-                    _gsplatProvider?.ClearSplat();
-                    _gsplatProvider?.ResetSplatTransform();
-                    _downloadedPlyData = null;
-
-                    // Switch render mode off Refined/HQRefined/Splat back to the
-                    // live in-progress preview. Done after the HasRefined* flags
-                    // are cleared so IsModeAvailable() reports the new state
-                    // correctly and the renderer toggles in ApplyRenderMode pick
-                    // up Vertex as the right visible mode.
                     SetRenderMode(ScanRenderMode.Vertex);
 
-                    if (_persistence != null) _persistence.ClearActivePackage();
                     if (_keyframeCollector != null)
                         _keyframeCollector.ClearInMemory();
 
-                    _persistence.CreateTmpPackage();
+                    _persistence?.CreateTmpPackage();
                     _ = CreateScanAnchorAsync();
                 }
 
                 _keyframeCollector?.SetExportDirectory(
-                    Path.Combine(_persistence.ActivePackageDirectory, "keyframes"));
+                    _persistence != null && _persistence.HasActivePackage
+                        ? Path.Combine(_persistence.ActivePackageDirectory, "keyframes")
+                        : null);
 
                 float t = Time.time;
                 _lastIntegrationTime = t;
@@ -612,6 +703,8 @@ namespace Genesis.RoomScan
                 }
                 PopulateSceneObjectRegistry();
                 SubscribeToAnchorsChanged();
+                ResolveScanRoomUuid();
+                BindScanPriors();
 
                 Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
                 ScanStarted?.Invoke();
@@ -660,6 +753,9 @@ namespace Genesis.RoomScan
             provider?.StopCapture();
             _depthCapture.StopDepthCapture();
 
+            _volumeIntegrator?.ClearScanPriors();
+            _scanRoomUuid = Guid.Empty;
+
             ScanStopped?.Invoke();
             if (_modules != null)
                 foreach (var m in _modules) m.OnScanStopped();
@@ -705,6 +801,77 @@ namespace Genesis.RoomScan
                 SetRenderMode(HasRefinedTexture ? ScanRenderMode.Refined : ScanRenderMode.None);
 
             Logger.Info("Scan GPU resources released (~400-500 MB freed)");
+        }
+
+        /// <summary>
+        /// Drops the in-memory loaded / refined scan so the next
+        /// <see cref="StartScanningAsync"/> is an empty-room start. Does
+        /// <b>not</b> delete saved packages or erase spatial-anchor UUIDs
+        /// from Horizon OS — use <see cref="RoomScanPersistence.DeletePackageAsync"/>
+        /// for that.
+        /// <para>
+        /// Hides the refined mesh, unbinds the active spatial anchor
+        /// (children detached first), clears the active-package pointer,
+        /// cleans <c>_tmp</c>, and disposes scan GPU resources if they
+        /// were allocated. Idempotent.
+        /// </para>
+        /// </summary>
+        public void UnloadActiveScan()
+        {
+            StopScanning();
+
+            HasRefinedTexture = false;
+            HasHQRefinedTexture = false;
+            HasEnhancedMesh = false;
+            LastRefinedResult = null;
+            LastSimplifiedResult = null;
+            _cachedUnwrap = null;
+            if (_refinedMeshFilter != null)
+                _refinedMeshFilter.sharedMesh = null;
+            if (_refinedMesh != null)
+            {
+                Destroy(_refinedMesh);
+                _refinedMesh = null;
+            }
+            if (_normalMapTexture != null)
+            {
+                Destroy(_normalMapTexture);
+                _normalMapTexture = null;
+            }
+            _gsplatProvider?.ClearSplat();
+            _gsplatProvider?.ResetSplatTransform();
+            _downloadedPlyData = null;
+
+            SetRenderMode(ScanRenderMode.None);
+
+            RoomAnchorManager.Instance?.UnloadActiveSpatialAnchor();
+
+            if (_keyframeCollector != null)
+                _keyframeCollector.ClearInMemory();
+
+            if (_persistence != null)
+            {
+                _persistence.CleanupTmpPackage();
+                _persistence.ClearActivePackage();
+            }
+
+            if (!_scanResourcesReleased)
+            {
+                _volumeIntegrator?.ReleaseVolumes();
+                _meshExtractor?.DisposeOnly();
+                _depthCapture?.ReleaseResources();
+                if (_triplanarCache != null)
+                    _triplanarCache.Clear();
+                _scanResourcesReleased = true;
+            }
+            else
+            {
+                _volumeIntegrator?.Clear();
+                if (_triplanarCache != null)
+                    _triplanarCache.Clear();
+            }
+
+            Logger.Info("Active scan unloaded (saved packages kept)");
         }
 
         /// <summary>
@@ -980,6 +1147,10 @@ namespace Genesis.RoomScan
             _textureRefinement.StatusChanged += statusHandler;
             try
             {
+                // Freeze the look: no more integrates / keyframes, and no
+                // morph-held dump as the unwrap source.
+                if (IsScanning)
+                    StopScanning();
                 string keyframeDir = KeyframeDirectory;
                 var unwrap = await EnsureUnwrappedAsync();
                 var (atlasPixels, normalPixels) = await _textureRefinement.BakeAtlasAsync(
@@ -1404,6 +1575,60 @@ namespace Genesis.RoomScan
         {
             Logger.Info("[RoomScanner] MRUK anchors changed — re-populating registry");
             PopulateSceneObjectRegistry();
+            if (IsScanning) BindScanPriors();
+        }
+
+        void ResolveScanRoomUuid()
+        {
+            if (_scanRoomUuid != Guid.Empty) return;
+            if (_roomUnderstanding == null) return;
+            _scanRoomUuid = _roomUnderstanding.TryGetRoomUuidContainingHeadset();
+        }
+
+        void BindScanPriors()
+        {
+            if (_volumeIntegrator == null)
+                return;
+            if (_roomUnderstanding == null)
+            {
+                _volumeIntegrator.ClearScanPriors();
+                return;
+            }
+
+            ResolveScanRoomUuid();
+            _roomUnderstanding.CopyRoomClipPlanes(_scanRoomUuid, _clipScratch);
+            if (stampScreenPlanes)
+                _roomUnderstanding.CopyScreenStamps(_scanRoomUuid, _stampScratch);
+            else
+                _stampScratch.Clear();
+            bool useAabb = false;
+            Vector3 aabbMin = Vector3.zero, aabbMax = Vector3.zero;
+            if (confineScanToContainingRoom)
+                useAabb = _roomUnderstanding.CopyRoomWorldAabb(
+                    _scanRoomUuid, out aabbMin, out aabbMax);
+            _volumeIntegrator.SetScanPriors(
+                confineScanToContainingRoom, _clipScratch, _stampScratch,
+                useAabb, aabbMin, aabbMax);
+
+            if (_stampScratch.Count > 0 || (confineScanToContainingRoom && _clipScratch.Count > 0))
+            {
+                Logger.Info(
+                    $"[RoomScanner] Scan priors — confine={confineScanToContainingRoom} " +
+                    $"room={_scanRoomUuid} clipPlanes={_clipScratch.Count} " +
+                    $"aabb={(useAabb ? 1 : 0)} screens={_stampScratch.Count}");
+            }
+        }
+
+        void MaybeRetryScanRoomBind()
+        {
+            if (!confineScanToContainingRoom) return;
+            if (_roomUnderstanding == null) return;
+            if (_scanRoomUuid != Guid.Empty) return;
+
+            float now = Time.time;
+            if (now - _lastEmptyRoomBindAttempt < 2f) return;
+            _lastEmptyRoomBindAttempt = now;
+            BindScanPriors();
         }
 
         internal void ApplyHQTexture(Texture2D atlas)

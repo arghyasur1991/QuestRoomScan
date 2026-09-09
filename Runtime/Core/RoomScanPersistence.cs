@@ -21,6 +21,9 @@ namespace Genesis.RoomScan
         public string displayName;
         public long timestamp;
         public string anchorUuid;
+        /// <summary>Scene API UUID of the MRUK room this package was scanned
+        /// in. Empty on packages saved before this field existed.</summary>
+        public string sceneRoomUuid;
         public bool hasTriplanar;
         public bool hasSplat;
         public bool hasRefined;
@@ -49,6 +52,9 @@ namespace Genesis.RoomScan
     internal class PackageAnchorData
     {
         public string anchorUuid;
+        /// <summary>Scene API UUID of the MRUK room this package was scanned
+        /// in. Same value as the matching <see cref="ScanPackageEntry"/>.</summary>
+        public string sceneRoomUuid;
         public float[] baseMatrixAtSave;
         public float[] splatMatrixAtCreate;
         public float[] refinedMatrixAtCreate;
@@ -352,6 +358,8 @@ namespace Genesis.RoomScan
                     displayName = $"Scan {DateTime.Now:MMM dd HH:mm}",
                     timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
                     anchorUuid = anchorUuidStr,
+                    sceneRoomUuid = _activeAnchorData != null
+                        ? _activeAnchorData.sceneRoomUuid : "",
                     hasTriplanar = triRes > 0,
                     hasKeyframes = hasKf,
                     hasSplat = File.Exists(Path.Combine(pkgDir, "splat.ply")),
@@ -365,6 +373,7 @@ namespace Genesis.RoomScan
 
                 ActivePackageId = pkgId;
                 _activeAnchorData = anchorData;
+                EnsureAndGetSceneRoomUuid();
 
                 float sizeMB = new FileInfo(scanBinPath).Length / (1024f * 1024f);
                 Logger.Info($"Package saved: {pkgId} ({sizeMB:F1}MB), " +
@@ -810,6 +819,7 @@ namespace Genesis.RoomScan
                 if (scanBinFallbackMatrix.HasValue)
                     _activeAnchorData.baseMatrixAtSave = MatrixToFloats(scanBinFallbackMatrix.Value);
             }
+            EnsureAndGetSceneRoomUuid();
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -935,7 +945,7 @@ namespace Genesis.RoomScan
                 if (cm != null)
                 {
                     cm.Reinitialize();
-                    cm.Extract();
+                    cm.ExtractForAuthoring();
                 }
 
                 // Load splat
@@ -1165,6 +1175,73 @@ namespace Genesis.RoomScan
             _activeAnchorData.baseMatrixAtSave = MatrixToFloats(matrix);
             WriteAnchorData(PkgAnchorJson, _activeAnchorData);
             Logger.Info($"Session anchor written to {ActivePackageId} — uuid={uuid}");
+            EnsureAndGetSceneRoomUuid();
+        }
+
+        /// <summary>
+        /// Scene API UUID stored with the active package's spatial anchor, or
+        /// empty. Resolves and persists when missing or stale (Space Setup
+        /// redo changes room UUIDs; the spatial-anchor pose is the stable
+        /// physical binding). Main thread only.
+        /// </summary>
+        internal string EnsureAndGetSceneRoomUuid()
+        {
+            if (!HasActivePackage)
+                return string.Empty;
+
+            _activeAnchorData ??= new PackageAnchorData();
+            string have = _activeAnchorData.sceneRoomUuid ?? string.Empty;
+            var understanding = RoomUnderstanding.Instance;
+            if (understanding != null
+                && Guid.TryParse(have, out Guid stored)
+                && stored != Guid.Empty
+                && understanding.HasRoom(stored))
+                return have;
+
+            Guid resolved = Guid.Empty;
+            var mgr = RoomAnchorManager.Instance;
+            if (understanding != null && mgr != null
+                && mgr.HasSpatialAnchor && mgr.SpatialAnchorTransform != null)
+                resolved = understanding.TryGetRoomUuidAt(mgr.SpatialAnchorTransform.position);
+            else if (understanding != null)
+                resolved = understanding.TryGetRoomUuidContainingHeadset();
+            if (resolved == Guid.Empty)
+                return have;
+
+            string s = resolved.ToString();
+            if (!string.Equals(s, have, StringComparison.Ordinal))
+            {
+                PersistSceneRoomUuid(s);
+                Logger.Info($"Bound scene room {s} to package {ActivePackageId}" +
+                            (string.IsNullOrEmpty(have) ? "" : $" (was {have})"));
+            }
+            return s;
+        }
+
+        void PersistSceneRoomUuid(string uuid)
+        {
+            _activeAnchorData ??= new PackageAnchorData();
+            _activeAnchorData.sceneRoomUuid = uuid ?? string.Empty;
+            if (HasActivePackage)
+                WriteAnchorData(PkgAnchorJson, _activeAnchorData);
+
+            var manifest = ReadManifest();
+            var entry = manifest.packages.Find(p => p.id == ActivePackageId);
+            if (entry == null) return;
+            entry.sceneRoomUuid = _activeAnchorData.sceneRoomUuid;
+            WriteManifest(manifest);
+        }
+
+        /// <summary>
+        /// Write this Scene API UUID onto the active package even when a
+        /// previous UUID is still in the loaded scene model. Used after a
+        /// successful "headset and spatial anchor share a room" check so a
+        /// Space Setup redo in the same physical room rebinds.
+        /// </summary>
+        internal void BindSceneRoomUuid(Guid uuid)
+        {
+            if (uuid == Guid.Empty) return;
+            PersistSceneRoomUuid(uuid.ToString());
         }
 
         /// <summary>
