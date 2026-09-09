@@ -132,6 +132,23 @@ namespace Genesis.RoomScan
             _counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 2, 4);
             _dispatchArgs = new GraphicsBuffer(structuredIndirect, 3, 4);
             _drawIndirectArgs = new GraphicsBuffer(structuredIndirect, 5, 4);
+
+            // GraphicsBuffer contents are not zero-initialised: a fresh buffer
+            // holds whatever last occupied that memory. Nothing writes these
+            // until the first Extract (BuildIndirectArgs), yet GPUMeshRenderer
+            // draws from _drawIndirectArgs every LateUpdate as soon as the
+            // vertex render mode is on -- which happens at scan start, while
+            // depth is still coming up and Extract cannot run. A garbage
+            // indexCount there makes the GPU draw millions of triangles per
+            // frame reading past _indices: measured on Quest 3 as the OS GPU
+            // pressure pinning at max, frames costing ~10 s, and the runtime
+            // resetting fences until the first extraction happened to write
+            // sane values 30-70 s later. Whether the garbage was zero depended
+            // on what the app had freed just before -- a scan started after a
+            // video call inherited its recycled memory and hung; one started
+            // fresh did not. Draw nothing until told otherwise.
+            _drawIndirectArgs.SetData(new uint[] { 0u, 1u, 0u, 0u, 0u });
+            _dispatchArgs.SetData(new uint[] { 0u, 0u, 0u });
             _smoothPosA = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, Float3Stride);
             _smoothPosB = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, Float3Stride);
 
