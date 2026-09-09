@@ -39,21 +39,24 @@ float2 gsCamSensorRes;
 float2 gsCamCurrentRes;
 float gsCamExposure;
 
+// Single exit on purpose: DXC's Vulkan path flattens early returns into a
+// function-named temp and then warns it is "potentially uninitialized".
 float2 ProjectToCameraUV(float3 worldPos)
 {
+    float2 uv = float2(-1, -1);
     float3 localPos = mul(gsCamInvRot, float4(worldPos - gsCamPos, 1.0)).xyz;
-    if (localPos.z <= 0.001) return float2(-1, -1);
+    if (localPos.z > 0.001)
+    {
+        float2 sensorPt = float2(
+            (localPos.x / localPos.z) * gsCamFocalLen.x + gsCamPrincipalPt.x,
+            (localPos.y / localPos.z) * gsCamFocalLen.y + gsCamPrincipalPt.y);
 
-    float2 sensorPt = float2(
-        (localPos.x / localPos.z) * gsCamFocalLen.x + gsCamPrincipalPt.x,
-        (localPos.y / localPos.z) * gsCamFocalLen.y + gsCamPrincipalPt.y);
-
-    float2 scaleFactor = gsCamCurrentRes / gsCamSensorRes;
-    scaleFactor /= max(scaleFactor.x, scaleFactor.y);
-    float2 cropMin = gsCamSensorRes * (1.0 - scaleFactor) * 0.5;
-    float2 cropSize = gsCamSensorRes * scaleFactor;
-    float2 uv = (sensorPt - cropMin) / cropSize;
-
+        float2 scaleFactor = gsCamCurrentRes / gsCamSensorRes;
+        scaleFactor /= max(scaleFactor.x, scaleFactor.y);
+        float2 cropMin = gsCamSensorRes * (1.0 - scaleFactor) * 0.5;
+        float2 cropSize = gsCamSensorRes * scaleFactor;
+        uv = (sensorPt - cropMin) / cropSize;
+    }
     return uv;
 }
 

@@ -60,36 +60,43 @@ float gsSampleDilatedDepth(float2 uv)
     return gsDilatedDepth.SampleLevel(gsVolPointClampSampler, uv, 0).z;
 }
 
+// Single exit on purpose: DXC's Vulkan path flattens early returns into a
+// function-named temp and then warns it is "potentially uninitialized".
 bool gsInsideRoom(float3 worldPos)
 {
-    if (gsConfineToRoom == 0 || gsNumRoomClipPlanes <= 0) return true;
-    if (gsUseRoomAabb != 0)
+    bool inside = true;
+    if (gsConfineToRoom != 0 && gsNumRoomClipPlanes > 0)
     {
-        if (any(worldPos < gsRoomAabbMin) || any(worldPos > gsRoomAabbMax))
-            return false;
+        if (gsUseRoomAabb != 0
+            && (any(worldPos < gsRoomAabbMin) || any(worldPos > gsRoomAabbMax)))
+            inside = false;
+
+        for (int i = 0; inside && i < gsNumRoomClipPlanes; i++)
+        {
+            float4 pl = gsRoomClipPlanes[i];
+            if (dot(worldPos, pl.xyz) < pl.w)
+                inside = false;
+        }
     }
-    for (int i = 0; i < gsNumRoomClipPlanes; i++)
-    {
-        float4 pl = gsRoomClipPlanes[i];
-        if (dot(worldPos, pl.xyz) < pl.w)
-            return false;
-    }
-    return true;
+    return inside;
 }
 
 bool gsTryScreenStamp(float3 worldPos, out float sDistNorm)
 {
     sDistNorm = 0;
-    for (int s = 0; s < gsNumScreenStamps; s++)
+    bool hit = false;
+    for (int s = 0; !hit && s < gsNumScreenStamps; s++)
     {
         float3 d = worldPos - gsScreenCenter[s].xyz;
         float3 n = gsScreenInward[s].xyz;
         float sd = dot(d, n);
-        if (abs(sd) > gsScreenCenter[s].w) continue;
-        if (abs(dot(d, gsScreenAxis[s].xyz)) > gsScreenInward[s].w) continue;
-        if (abs(dot(d, gsScreenBitangent[s].xyz)) > gsScreenAxis[s].w) continue;
-        sDistNorm = clamp(sd / gsVoxDist, -1.0, 1.0);
-        return true;
+        if (abs(sd) <= gsScreenCenter[s].w
+            && abs(dot(d, gsScreenAxis[s].xyz)) <= gsScreenInward[s].w
+            && abs(dot(d, gsScreenBitangent[s].xyz)) <= gsScreenAxis[s].w)
+        {
+            sDistNorm = clamp(sd / gsVoxDist, -1.0, 1.0);
+            hit = true;
+        }
     }
-    return false;
+    return hit;
 }
