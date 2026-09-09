@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
@@ -642,22 +643,35 @@ namespace Genesis.RoomScan
                 // is clean, so PCA can win the handshake and MRUK keeps
                 // pulling frames steadily.
                 ICameraProvider provider = GetActiveCameraProvider();
-                Logger.Info("StartScanning stage 4a — enabling passthrough camera");
-                provider?.StartCapture();
 
-                // PCA and AROcclusionManager are two heavy native subsystems,
-                // and this method's own rule is that nothing heavy may land in
-                // the frame either of them enables. The staging above only
-                // separated our allocations from PCA; PCA and depth still
-                // enabled back to back. The original logcat put the Vulkan
-                // corruption "the moment provider.StartCapture() returned",
-                // which is this line. Give PCA its own frames to finish the
-                // MRUK hardware-buffer-queue handshake before the depth
-                // sensor and its inference pipeline come up.
-                await Task.Yield();
-                await Task.Yield();
+                // Start PCA from *after* a frame has been presented, not from
+                // the middle of one.
+                //
+                // `Task.Yield()` resumes inside the player loop, so every
+                // stage above still runs mid-frame with the render thread
+                // busy. PCA's `Play` has to create an OpenXR swapchain for the
+                // camera image, and doing that against in-flight GPU work
+                // deadlocks: measured on a Quest 3 (2026-09-09), the camera
+                // opened in 22 ms and then `SwapchainData created` did not
+                // arrive for **70 s** — the app stopped submitting frames, its
+                // FenceChecker timed out every ~10 s, capture requests failed
+                // with `Device error code 3` every 8 s, and what finally broke
+                // it was the runtime's own watchdog logging
+                // `VrRuntimeClient: Successful post-timeout fence reset`.
+                //
+                // This is the same shape as the lazy-alloc regression: PCA and
+                // depth used to enable at scene load, across idle boot frames,
+                // and were moved to the scan for power and privacy. The frame
+                // they now land in is the problem, not the work itself.
+                // `WaitForEndOfFrame` is the one hop that guarantees the frame
+                // is drawn before we touch them.
+                Logger.Info("StartScanning stage 4a — enabling passthrough camera");
+                await WaitForEndOfFrameAsync();
+                provider?.StartCapture();
+                await WaitForEndOfFrameAsync();
 
                 Logger.Info("StartScanning stage 4b — enabling depth capture");
+                await WaitForEndOfFrameAsync();
                 _depthCapture.StartDepthCapture();
                 await Task.Yield();
 
@@ -689,6 +703,25 @@ namespace Genesis.RoomScan
                 IsScanning = false;
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Resume after the current frame has been drawn, from an
+        /// <c>async Task</c>. <c>Task.Yield</c> cannot do this: it resumes
+        /// inside the player loop, still mid-frame. Anything that creates or
+        /// destroys a swapchain wants the frame finished first — see stage 4.
+        /// </summary>
+        private Task WaitForEndOfFrameAsync()
+        {
+            var done = new TaskCompletionSource<bool>();
+            StartCoroutine(EndOfFrameRoutine(done));
+            return done.Task;
+        }
+
+        private static IEnumerator EndOfFrameRoutine(TaskCompletionSource<bool> done)
+        {
+            yield return new WaitForEndOfFrame();
+            done.TrySetResult(true);
         }
 
         /// <summary>
