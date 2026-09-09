@@ -138,12 +138,13 @@ uint WithPackedAlpha(uint packedRgb, uint fade)
     return (packedRgb & 0x00FFFFFFu) | (fade << 24);
 }
 
+// Single exit on purpose: DXC flattens early returns into a function-named
+// temp and then warns it is "potentially uninitialized".
 float SampleSDF(int3 coord)
 {
     float2 s = _TsdfVolume[coord];
-    if (s.x <= -0.99) return 0.0;
-    if (abs(s.y) < _MinWeight) return 0.0;
-    return s.x;
+    bool empty = s.x <= -0.99 || abs(s.y) < _MinWeight;
+    return empty ? 0.0 : s.x;
 }
 
 // ══════════════════════════════════════════════════════════════════
