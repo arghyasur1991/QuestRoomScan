@@ -270,6 +270,9 @@ namespace Genesis.RoomScan
         private bool _serverTrainingInProgress;
         private bool _scanResourcesReleased;
 
+        /// <summary>Set in stage 3, consumed after stage 4. See StartScanningAsync.</summary>
+        private bool _wantScanAnchor;
+
         // Plateau detection state
         private int _prevVertexCount;
         private int _stableVertexCycles;
@@ -622,7 +625,9 @@ namespace Genesis.RoomScan
                         _keyframeCollector.ClearInMemory();
 
                     _persistence?.CreateTmpPackage();
-                    _ = CreateScanAnchorAsync();
+                    // Anchor creation is deferred to the end of this method —
+                    // see the call after stage 4.
+                    _wantScanAnchor = true;
                 }
 
                 _keyframeCollector?.SetExportDirectory(
@@ -689,6 +694,22 @@ namespace Genesis.RoomScan
                 SubscribeToAnchorsChanged();
                 ResolveScanRoomUuid();
                 BindScanPriors();
+
+                // Create the scan's spatial anchor only once the bring-up is
+                // done. It used to be fired from stage 3, in the middle of it,
+                // and that is where frames start costing ~10 s: the anchor
+                // framework recalculates its rigid scene on a 10.0277 s cycle
+                // ("New Rigid Scene calculated using 9 anchors … seconds since
+                // last update"), the app's FenceChecker then times out on the
+                // same ~10.03 s cadence, and a create issued into that window
+                // took a full cycle to come back. Still fire-and-forget: the
+                // anchor is only needed by the time the package is saved.
+                if (_wantScanAnchor)
+                {
+                    _wantScanAnchor = false;
+                    Logger.Info("StartScanning stage 5 — spatial anchor (deferred)");
+                    _ = CreateScanAnchorAsync();
+                }
 
                 Logger.Info($"StartScanning — resuming={resuming}, integrationCount={_volumeIntegrator.IntegrationCount}");
                 ScanStarted?.Invoke();
