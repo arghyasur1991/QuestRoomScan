@@ -86,7 +86,7 @@ This is the case the package was built for. Quest's built-in room mesh gives you
 |---------|---------|-------|
 | `com.unity.xr.arfoundation` | 6.1+ | Depth frame access |
 | `com.unity.render-pipelines.universal` | 17.0+ | URP rendering pipeline |
-| `com.meta.xr.mrutilitykit` | 85+ | Passthrough camera RGB access |
+| `com.meta.xr.mrutilitykit` | 205+ | Passthrough camera RGB access |
 | `com.unity.burst` | 1.8+ | Required by Collections/Mathematics |
 | `com.unity.collections` | 2.4+ | NativeArray for plane detection |
 | `com.unity.mathematics` | 1.3+ | Math types used throughout |
