@@ -40,11 +40,36 @@ namespace Genesis.RoomScan
 
         private PassthroughCameraAccess _pca;
 
+        [Tooltip("Bring PCA up at scene load instead of at scan start. This "
+                 + "was the behaviour before capture was gated on the scan, "
+                 + "and gating it regressed scan start badly: enabling PCA "
+                 + "cold, mid-frame, on top of the scan's ~600 MB of fresh "
+                 + "GPU allocations leaves the app's fence unsignalled for "
+                 + "over a minute (measured 70 s on a Quest 3, ended only by "
+                 + "the runtime's own post-timeout fence reset). Warming at "
+                 + "load costs the camera indicator and its power from boot; "
+                 + "the alternative is an unusable scan start.")]
+        [SerializeField] private bool warmAtLoad = true;
+
         private void Awake()
         {
             AdoptOrFindPca();
-            if (_pca != null)
+            if (_pca == null) return;
+
+            if (!warmAtLoad)
+            {
                 _pca.enabled = false;
+                return;
+            }
+
+            // Configure before enabling: PCA forbids MaxFramerate changes
+            // while running, and its OnEnable is what starts the session.
+            _pca.CameraPosition = cameraPosition;
+            _pca.RequestedResolution = requestedResolution;
+            _pca.MaxFramerate = maxFramerate;
+            _pca.enabled = true;
+            Logger.Info("PassthroughCameraProvider: warming PCA at load "
+                        + "(scan start will reuse the running session).");
         }
 
         /// <inheritdoc />
@@ -117,6 +142,15 @@ namespace Genesis.RoomScan
 
             AdoptOrFindPca();
             if (_pca == null) return;
+
+            // Already warm: leave it alone. Cycling enabled to rewrite
+            // properties would tear down a working session and re-open the
+            // camera cold, which is the whole problem this avoids.
+            if (_pca.enabled && _pca.IsPlaying)
+            {
+                Logger.Info("PassthroughCameraProvider: PCA already playing — reusing it.");
+                return;
+            }
 
             // PCA forbids MaxFramerate changes while running. Drive it disabled
             // for the property writes, then re-enable so OnEnable runs cleanly.
