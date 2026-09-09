@@ -650,12 +650,22 @@ namespace Genesis.RoomScan
             const MRUKAnchor.SceneLabels PinWallAvoidLabels =
                 MRUKAnchor.SceneLabels.WALL_ART;
 
+            // Hosts poll occupancy every frame (hide a look when the headset
+            // leaves the room), so the rig lookup is cached rather than a
+            // scene search per call. Re-resolved if the anchor is destroyed.
+            static Transform _centerEye;
+
             internal static Vector3 HeadsetWorldPosition()
             {
-                var rig = UnityEngine.Object.FindAnyObjectByType<OVRCameraRig>(
-                    FindObjectsInactive.Include);
-                if (rig != null && rig.centerEyeAnchor != null)
-                    return rig.centerEyeAnchor.position;
+                if (_centerEye == null)
+                {
+                    var rig = UnityEngine.Object.FindAnyObjectByType<OVRCameraRig>(
+                        FindObjectsInactive.Include);
+                    if (rig != null)
+                        _centerEye = rig.centerEyeAnchor;
+                }
+                if (_centerEye != null)
+                    return _centerEye.position;
                 var cam = Camera.main;
                 return cam != null ? cam.transform.position : Vector3.zero;
             }
@@ -820,8 +830,8 @@ namespace Genesis.RoomScan
                 return true;
             }
 
-            const int MaxRoomClipPlanes = 32;
-            const int MaxScreenStamps = 4;
+            const int MaxRoomClipPlanes = VolumeIntegrator.MaxRoomClipPlanes;
+            const int MaxScreenStamps = VolumeIntegrator.MaxScreenStamps;
 
             static void AddExpandedPlane(List<Vector4> dst, Vector3 inwardUnit, Vector3 pointOnPlane)
             {

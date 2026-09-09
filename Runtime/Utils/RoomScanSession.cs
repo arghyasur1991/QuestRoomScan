@@ -105,7 +105,8 @@ namespace Genesis.RoomScan
         /// does this on a non-resume start, but hosts usually want the old
         /// mesh gone <i>before</i> the user presses the scan button.
         /// Idempotent. Yields two frames after the spatial-anchor GameObject
-        /// is destroyed so the compositor can settle.
+        /// is destroyed so the deferred <c>Destroy</c> has run before the
+        /// caller creates a new one.
         /// </summary>
         public async Task UnloadActiveScanAsync()
         {
@@ -118,11 +119,10 @@ namespace Genesis.RoomScan
         /// <summary>
         /// Begins a new scan session. The room mesh builds in real-time as
         /// the user looks around. Async because <see cref="RoomScanner.StartScanningAsync"/>
-        /// stages the heavy GPU bring-up across a few frames before
-        /// enabling the passthrough camera (otherwise the PCA / MRUK
-        /// handshake races our compute dispatches and the compositor
-        /// freezes — see that method's docs for the full story). Total
-        /// wall-clock from await to first integrated frame is ~56 ms,
+        /// stages the ~600 MB GPU bring-up across a few frames before
+        /// enabling the passthrough camera and depth sensor (see that
+        /// method's docs). Total wall-clock from await to first integrated
+        /// frame is ~56 ms,
         /// imperceptible to the user but worth awaiting so callers can
         /// sequence UI feedback ("Scanning…") right after.
         /// <para>
@@ -271,7 +271,7 @@ namespace Genesis.RoomScan
 
             public string Id { get; }
             public string DisplayName { get; }
-            /// <summary>Unix milliseconds, newest-first in <see cref="ListSavedScans"/>.</summary>
+            /// <summary>Unix seconds (UTC); <see cref="ListSavedScans"/> is newest-first.</summary>
             public long Timestamp { get; }
             /// <summary>Scene API UUID of the MRUK room this package was
             /// scanned in. Empty until the package has been saved or loaded

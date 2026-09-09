@@ -459,10 +459,9 @@ namespace Genesis.RoomScan
         /// Drops the in-memory spatial-anchor GameObject without erasing its
         /// UUID from Horizon OS. Saved packages keep that uuid in
         /// <c>anchor.json</c> and can be loaded again later. Use this when
-        /// leaving a loaded scan to start a new one in the same session —
-        /// creating a second <see cref="OVRSpatialAnchor"/> while the previous
-        /// one is still bound races Meta's compositor (the scan-start hang
-        /// after <c>LoadAsync</c>).
+        /// leaving a loaded scan to start a new one in the same session, so
+        /// the new scan gets its own <see cref="OVRSpatialAnchor"/> rather
+        /// than a second one created beside a still-bound predecessor.
         /// <para>
         /// Direct children are detached with world pose preserved first so
         /// host content parented under the anchor (a room-space root, etc.)

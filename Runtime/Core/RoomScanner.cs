@@ -509,30 +509,27 @@ namespace Genesis.RoomScan
         ///
         /// <para>
         /// <b>Async by necessity, not by API preference.</b> The lazy GPU
-        /// bring-up (~150 MB TSDF + ~480 MB Surface Nets) and the
-        /// passthrough-camera handshake (PCA → MRUK) are both heavy work
-        /// for the render thread, and if they land in the same Unity frame
-        /// PCA's hardware-buffer-queue handshake loses the race against
-        /// our compute dispatches: MRUK then spams "Hardware buffer queue
-        /// is empty", Vulkan submit corrupts with
-        /// VK_ERROR_INITIALIZATION_FAILED, and the compositor never
-        /// recovers (perceived as a permanent hang on the user's first
-        /// A-press). The fix is to do the GPU allocations + first
-        /// dispatches first, yield twice between each step so the render
-        /// thread commits the new resources across separate frames, and
-        /// only then enable PCA + AROcclusionManager. Total wall-clock
-        /// cost on a Quest 3 is ~56 ms (4 frames at 72 fps) — below the
-        /// "press registered" threshold of human perception.
+        /// bring-up (~150 MB TSDF + ~480 MB Surface Nets) is staged across
+        /// frames: allocate the volumes, yield twice so the render thread
+        /// commits them and runs the first Clear, allocate the mesh
+        /// extractor, yield twice again, then switch to the live preview
+        /// and enable PCA + AROcclusionManager. Total wall-clock on a
+        /// Quest 3 is ~56 ms (4 frames at 72 fps), below the threshold at
+        /// which a press feels unregistered. Allocating 600 MB and opening
+        /// two camera pipelines in a single frame is a worst case for the
+        /// render thread that the staging avoids.
         /// </para>
         ///
         /// <para>
-        /// Eager allocation in <c>Awake</c>/<c>Start</c> avoided the bug
-        /// because the render thread had committed all VRAM and run the
-        /// first dispatches across multiple uneventful boot-splash frames
-        /// before the user could ever press A. The lazy-alloc landing
-        /// regressed that without realising the timing was load-bearing.
-        /// We keep lazy alloc (so the load-existing-scan path doesn't pay
-        /// the 600 MB cost) and add the inline staging instead.
+        /// History: a multi-second "hang on the first A-press" was once
+        /// attributed to this timing (PCA's MRUK handshake losing a race
+        /// to the compute dispatches). The measured cause was different —
+        /// <see cref="GPUSurfaceNets"/> drew from an indirect-args buffer
+        /// that nothing had written yet, and whether that garbage happened
+        /// to be zero depended on what the host had just freed. Eager
+        /// allocation at boot avoided it only because boot memory was
+        /// clean. The buffer is now zeroed at allocation; the staging is
+        /// kept because it is cheap and spreads the render-thread load.
         /// </para>
         /// </summary>
         public async Task StartScanningAsync()
@@ -548,9 +545,9 @@ namespace Genesis.RoomScan
 
             // A LoadAsync in this session leaves the refined mesh drawing and
             // a spatial anchor localized. Starting a new scan on top of that
-            // (a) keeps the old mesh on screen and (b) CreateAndSaveSpatialAnchorAsync
-            // races the live bound anchor and freezes the compositor. Drop the
-            // in-memory scan first; saved packages stay on disk.
+            // keeps the old mesh on screen and would create a second spatial
+            // anchor while the first is still bound. Drop the in-memory scan
+            // first; saved packages stay on disk.
             if (!resuming)
             {
                 UnloadActiveScan();
@@ -576,8 +573,8 @@ namespace Genesis.RoomScan
                 // Yield twice so the render thread can (a) actually commit
                 // the two 256³ 3D RT allocations to VRAM, and (b) run the
                 // first Clear compute dispatch. One yield is "next frame";
-                // two yields gives the compositor a clean frame in between
-                // before the much bigger Surface Nets alloc lands.
+                // two yields gives a clean frame in between before the
+                // much bigger Surface Nets alloc lands.
                 await Task.Yield();
                 await Task.Yield();
 
