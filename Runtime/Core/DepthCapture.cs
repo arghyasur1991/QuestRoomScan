@@ -89,7 +89,8 @@ namespace Genesis.RoomScan
         public static bool DepthAvailable { get; private set; }
 
         /// <summary>
-        /// True after USE_SCENE permission is observed (host asks at boot via
+        /// True after USE_SCENE permission is observed (requested by
+        /// <see cref="RoomScanner.StartScanningAsync"/>, or earlier by the host via
         /// <see cref="RoomScanSession.RequestScenePermissionAsync"/>). Does not
         /// start the depth sensor. <see cref="StartDepthCapture"/> queues until
         /// this is set, then <see cref="ApplyCaptureState"/> enables hardware.
@@ -257,7 +258,8 @@ namespace Genesis.RoomScan
         /// Observe <c>USE_SCENE</c> without starting capture. Does <b>not</b>
         /// call <c>RequestUserPermission</c> — a second request while the host
         /// (or <c>OVRManager</c>) already has a dialog up is dropped by Android
-        /// with no UI. Hosts ask via <see cref="RoomScanSession.RequestScenePermissionAsync"/>.
+        /// with no UI. The one requester is <c>AndroidRuntimePermission</c>, driven by
+        /// <see cref="RoomScanner.StartScanningAsync"/> (and optionally the host at boot).
         /// </summary>
         private void CheckPermissionAndMarkReady()
         {
@@ -269,7 +271,7 @@ namespace Genesis.RoomScan
             else if (!_permissionReady)
             {
                 Logger.Info(
-                    "USE_SCENE not granted yet — waiting (host requests via RoomScanSession)");
+                    "USE_SCENE not granted yet — waiting (RoomScanner requests it at scan start)");
             }
 #else
             MarkScenePermissionReady();

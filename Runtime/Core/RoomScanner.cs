@@ -508,6 +508,16 @@ namespace Genesis.RoomScan
         /// clears in-memory keyframes, and starts the active camera provider.
         ///
         /// <para>
+        /// <b>Permissions are requested here</b>, in sequence, for whatever is
+        /// still missing: <c>USE_SCENE</c> (required — a denial aborts the
+        /// start), then <c>HEADSET_CAMERA</c> and <c>USE_ANCHOR_API</c> (a
+        /// denial degrades). Hosts that want the dialogs at boot for UX call
+        /// <see cref="RoomScanSession.RequestScenePermissionAsync"/> and
+        /// friends first; the requests here are then no-ops. Nothing else in
+        /// the package calls <c>RequestUserPermission</c>.
+        /// </para>
+        ///
+        /// <para>
         /// <b>Async by necessity, not by API preference.</b> The lazy GPU
         /// bring-up (~150 MB TSDF + ~480 MB Surface Nets) is staged across
         /// frames: allocate the volumes, yield twice so the render thread
@@ -534,8 +544,50 @@ namespace Genesis.RoomScan
         /// </summary>
         public async Task StartScanningAsync()
         {
-            if (IsScanning) return;
+            if (IsScanning || _startingScan) return;
 
+            // Permissions first, before anything is torn down or allocated:
+            // the user may take a while on the dialogs, and a denied USE_SCENE
+            // means there is no scan to start. Requests are serialised inside
+            // AndroidRuntimePermission and free once granted, so a host that
+            // already asked at boot pays nothing here.
+            _startingScan = true;
+            try
+            {
+                if (!await EnsureScanPermissionsAsync())
+                    return;
+                await StartScanningCoreAsync();
+            }
+            finally
+            {
+                _startingScan = false;
+            }
+        }
+
+        private bool _startingScan;
+
+        /// <summary>
+        /// USE_SCENE is required (no depth, no scan). HEADSET_CAMERA and
+        /// USE_ANCHOR_API are requested too but a denial only degrades:
+        /// depth-only colour from normals, and a save without a spatial
+        /// anchor (floor-anchor relocation fallback).
+        /// </summary>
+        private async Task<bool> EnsureScanPermissionsAsync()
+        {
+            if (!await AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Scene))
+            {
+                Logger.Error("USE_SCENE denied — the depth sensor is required to scan. Not starting.");
+                return false;
+            }
+            if (!await AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Camera))
+                Logger.Warning("HEADSET_CAMERA denied — scanning depth-only; vertex colour falls back to normals.");
+            if (!await AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Anchors))
+                Logger.Warning("USE_ANCHOR_API denied — this scan will save without a spatial anchor.");
+            return true;
+        }
+
+        private async Task StartScanningCoreAsync()
+        {
             // Resume is "same-session pause of an in-progress _tmp scan".
             // Compute it before UnloadActiveScan, which zeros IntegrationCount.
             bool resuming = _persistence != null

@@ -92,13 +92,14 @@ namespace Genesis.RoomScan.Editor
             }
 
             // Only flag as "not ready" when the Passthrough block is present —
-            // the warning is gated on that. The startup-permission flag is
-            // separately gated on the PassthroughCameraAccess block (it lives
-            // on OVRManager but is only meaningful when PCA is in use).
+            // the warning is gated on that. The OVRManager startup-permission
+            // flag must be OFF: the package requests HEADSET_CAMERA itself at
+            // scan start through one serialised queue, and a startup dialog
+            // from OVRManager races whatever the host asks at boot (Android
+            // drops the second request with no UI).
             bool passthroughBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH, out var p) && p;
-            bool pcaBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH_CAMERA_ACCESS, out var c) && c;
             _ovrPassthroughReady = (!passthroughBlockPresent || (_ovrPassthroughEnabled && _ovrCameraBackgroundClear))
-                                && (!pcaBlockPresent       || _ovrCameraPermissionOnStartup);
+                                && !_ovrCameraPermissionOnStartup;
         }
 
         // OVRManager.requestPassthroughCameraAccessPermissionOnStartup is
@@ -283,21 +284,20 @@ namespace Genesis.RoomScan.Editor
                 Debug.Log("[RoomScan Setup] Enabled OVRManager.isInsightPassthroughEnabled.");
             }
 
-            // Have OVRManager request HEADSET_CAMERA at app startup. Without
-            // this, PCA's permission dialog only appears once the user
-            // triggers a scan — by which point the scanner has already kicked
-            // off in degraded depth-only mode. Game code that wants a
-            // deterministic "asking for permission" UI state should still
-            // call RoomScanSession.RequestCameraPermissionAsync() before
-            // StartScan() as defense-in-depth (covers the user dismissing
-            // the startup dialog). Mirrors Meta's
-            // PassthroughCameraAccessProjectSetup Optional task.
-            bool pcaBlockPresent = _bbPresent.TryGetValue(BB_PASSTHROUGH_CAMERA_ACCESS, out var pp) && pp;
-            if (ovrManager != null && pcaBlockPresent
-                && WriteOvrManagerStartupPermFlag(ovrManager, true))
+            // OVRManager must NOT request HEADSET_CAMERA at startup. The
+            // package asks for scene / camera / anchor permissions itself in
+            // RoomScanner.StartScanningAsync through one serialised queue
+            // (AndroidRuntimePermission), and hosts may front-load the same
+            // calls at boot. An OVRManager startup dialog is a third
+            // requester outside that queue; Android drops whichever request
+            // arrives second, with no UI. (Meta's own project-setup task
+            // suggests turning this on — that advice predates a package that
+            // owns the request.)
+            if (ovrManager != null && WriteOvrManagerStartupPermFlag(ovrManager, false))
             {
                 changed++;
-                Debug.Log("[RoomScan Setup] Enabled OVRManager.requestPassthroughCameraAccessPermissionOnStartup.");
+                Debug.Log("[RoomScan Setup] Disabled OVRManager.requestPassthroughCameraAccessPermissionOnStartup " +
+                          "(RoomScanner requests HEADSET_CAMERA at scan start).");
             }
 
             var rig = FindAny<OVRCameraRig>();

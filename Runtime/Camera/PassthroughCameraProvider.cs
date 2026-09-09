@@ -31,7 +31,7 @@ namespace Genesis.RoomScan
     public class PassthroughCameraProvider : MonoBehaviour, ICameraProvider
     {
         /// <summary>The Horizon OS permission required by PCA on Quest 3+.</summary>
-        public const string CameraPermissionId = "horizonos.permission.HEADSET_CAMERA";
+        public const string CameraPermissionId = AndroidRuntimePermission.Camera;
 
         [SerializeField] private PassthroughCameraAccess.CameraPositionType cameraPosition =
             PassthroughCameraAccess.CameraPositionType.Left;
@@ -103,17 +103,11 @@ namespace Genesis.RoomScan
         /// <inheritdoc />
         public void StartCapture()
         {
-#if UNITY_ANDROID && !UNITY_EDITOR
-            if (!Permission.HasUserAuthorizedPermission(CameraPermissionId))
-            {
-                // Defensive: if the caller hasn't already gone through
-                // RequestCameraPermissionAsync, kick the dialog now. PCA's
-                // own OnEnable also coroutine-polls until granted, so this
-                // is layered safety, not a single source of truth.
-                Logger.Info("Requesting HEADSET_CAMERA permission");
-                Permission.RequestUserPermission(CameraPermissionId);
-            }
-#endif
+            // No permission request here: RoomScanner.StartScanningAsync asks
+            // through AndroidRuntimePermission (serialised) before bring-up. A
+            // bare RequestUserPermission from this spot raced that queue.
+            if (!AndroidRuntimePermission.Has(CameraPermissionId))
+                Logger.Warning("HEADSET_CAMERA not granted — PCA will not deliver frames; scanning depth-only.");
 
             AdoptOrFindPca();
             if (_pca == null) return;

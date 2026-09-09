@@ -70,11 +70,23 @@ August 2026 (PRs #2–#19), the rest is this release's `develop` → `main`.
   `DeleteScanAsync(id)`, `UnloadActiveScanAsync()` (drops the in-memory mesh
   and spatial-anchor bind without touching saved packages). A non-resume
   `StartScanAsync` unloads first.
-- **Permissions owned by the host.** `RequestScenePermissionAsync`,
-  `RequestAnchorPermissionAsync`, `HasScenePermission`, `HasAnchorPermission`
-  (via a shared `AndroidRuntimePermission`). `DepthCapture` observes
-  `USE_SCENE` but no longer requests it — a second `RequestUserPermission`
-  while another dialog is in flight is dropped by Android with no UI.
+- **One serialised permission queue.** Android drops a second
+  `RequestUserPermission` while another dialog is in flight — no UI, no
+  callback — and the package used to have three independent requesters
+  (`OVRManager` at startup, `DepthCapture` at `Start`, the host). Every
+  request now goes through `AndroidRuntimePermission`, which opens one
+  dialog at a time and shares a pending task between callers asking for
+  the same permission. `RoomScanner.StartScanningAsync` requests whatever
+  is still missing before any GPU bring-up — `USE_SCENE` (required; a
+  denial aborts the start), then `HEADSET_CAMERA` and `USE_ANCHOR_API`
+  (a denial degrades) — so a bare `StartScanAsync()` always gets its
+  dialogs. Hosts may front-load via `RequestScenePermissionAsync` /
+  `RequestCameraPermissionAsync` / `RequestAnchorPermissionAsync`
+  (+ `HasScenePermission` / `HasAnchorPermission`) for their own UX; those
+  join the same queue and make the scan-start requests free. `DepthCapture`
+  observes `USE_SCENE` and never requests. The setup wizard now turns
+  `OVRManager.requestPassthroughCameraAccessPermissionOnStartup` **off**
+  (it requested outside the queue).
 - **Scene-room occupancy** (`RoomUnderstanding`, surfaced on the session):
   `IsHeadsetInsideASceneRoom`, `IsHeadsetInsideBoundSceneRoom`,
   `HeadsetSceneRoomUuid`, `BoundSceneRoomUuid`,
@@ -131,7 +143,8 @@ August 2026 (PRs #2–#19), the rest is this release's `develop` → `main`.
 
 ### Removed
 
-- `DepthCapture` no longer calls `RequestUserPermission`.
+- `DepthCapture` and `PassthroughCameraProvider.StartCapture` no longer call
+  `RequestUserPermission` directly.
 - `RoomUnderstanding` no longer falls back to `Rooms[0]` when the headset is
   in no captured room.
 

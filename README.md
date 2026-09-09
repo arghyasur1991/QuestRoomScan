@@ -171,7 +171,7 @@ Both optional dependencies can be combined. The `Genesis.RoomScan.AIDetection` a
 |---------|-------------|-----|
 | Black screen / no passthrough | Meta XR feature group not enabled | Re-run `Apply Game-Ready Setup` until the `XR Plug-in Management (OpenXR + Meta XR feature group)` row goes green |
 | Black screen / no passthrough | Camera background not transparent | Re-run `Apply Game-Ready Setup` until `Passthrough scene config (OVRManager + transparent center camera + HEADSET_CAMERA on startup)` is green |
-| App launches but no permission dialog appears | A second `RequestUserPermission` while another is in flight (OVRManager startup + `DepthCapture` + host) is dropped by Android with no UI | Ask from **one** place: `RoomScanSession.RequestScenePermissionAsync` / `RequestCameraPermissionAsync` / `RequestAnchorPermissionAsync`, one after another. Leave `OVRManager.request*PermissionOnStartup` off if the host owns boot. `DepthCapture` waits for `USE_SCENE`; it does not request. |
+| App launches but no permission dialog appears | A second `RequestUserPermission` while another is in flight is dropped by Android with no UI | Every request in this package goes through one serialised queue (`StartScanAsync` asks for scene → camera → anchors; `RoomScanSession.Request*PermissionAsync` joins the same queue). Keep `OVRManager.request*PermissionOnStartup` **off** — it requests outside that queue; `Apply Game-Ready Setup` turns it off. Do not call `Permission.RequestUserPermission` yourself for these three. |
 | Controller ray visible but no UI | Debug menu not opened | Press **left thumbstick click** to toggle the debug menu (debug-tools build only) |
 | Scanning stays at "Discovering" | Depth frames not arriving | Verify the wizard's `VR PROJECT BOOTSTRAP` panel is fully green; check that `com.oculus.permission.USE_SCENE` is in `AndroidManifest.xml` |
 | Refine shows "--" / does nothing | xatlas native plugin not built | Open the wizard and click **Build xatlas Plugin** in the NATIVE PLUGINS section. On Windows, requires Visual Studio C++ workload or clang++ on PATH |
@@ -487,17 +487,16 @@ The simplest integration uses `RoomScanSession` — a high-level facade that wra
 ```csharp
 var session = RoomScanSession.Instance;
 
-// 0. (Recommended) Make sure HEADSET_CAMERA permission is granted before
-//    StartScan, so the scan doesn't run in degraded depth-only mode while
-//    the system dialog is up. Returns true immediately if already granted
-//    or off-Android. If you used the Game-Ready preset, OVRManager already
-//    requests this on app startup, so this is just a defense-in-depth gate
-//    for users who dismissed the startup dialog.
-if (!session.HasCameraPermission)
-{
-    bool granted = await session.RequestCameraPermissionAsync();
-    if (!granted) { /* tell the user to grant in System Settings */ return; }
-}
+// 0. (Optional) Ask for permissions up front so you control when the OS
+//    sheets appear and can show your own "asking" state. StartScanAsync
+//    requests anything still missing (scene, then camera, then anchors)
+//    through the same serialised queue, so this is UX, not correctness:
+//    a scan started without this still gets its dialogs. Returns true
+//    immediately if already granted or off-Android.
+if (!session.HasScenePermission && !await session.RequestScenePermissionAsync())
+    { /* spatial data is required to scan; tell the user, offer Settings */ return; }
+if (!session.HasCameraPermission && !await session.RequestCameraPermissionAsync())
+    { /* optional: scanning proceeds depth-only without textures */ }
 
 // 1. (Optional) Single-scan games: wipe any previous saved scan so the
 //    on-device scan store doesn't grow ~100 MB per finalize.
@@ -538,7 +537,7 @@ if (session.HasSavedScan)
 
 `FinalizeScanAsync()` handles everything: stop scanning → texture refinement → save to disk → release GPU resources. The scan is also persisted as a self-contained package under `Application.persistentDataPath/RoomScans/pkg_<timestamp>/` with its own `OVRSpatialAnchor` for cross-session relocation.
 
-> **Why explicit permission gating matters.** PCA's own `OnEnable` waits for the user's permission decision in a coroutine, so the scan eventually transitions to RGB mode after the user accepts. But during the wait, `RoomScanner.StartScanningAsync()` has already kicked off integration in degraded depth-only mode, and there's no place for game UI to show an "asking for permission" state. Calling `await session.RequestCameraPermissionAsync()` *before* `StartScanAsync()` lets you surface a deterministic UI state and only kick off integration once you actually have the camera.
+> **Who asks for permissions.** Every runtime-permission request in this package goes through one serialised queue: `StartScanAsync` asks for `USE_SCENE` (required — a denial aborts the start), then `HEADSET_CAMERA` and `USE_ANCHOR_API` (a denial degrades), *before* any GPU bring-up, so a scan never starts half-permitted and no two dialogs race. `RoomScanSession.Request*PermissionAsync` joins that same queue, which is how a host front-loads the sheets at boot and shows its own "asking" state; once granted, the requests inside `StartScanAsync` are free. Android drops a second `RequestUserPermission` while one is up — with no UI — so do not add your own `Permission.RequestUserPermission` for these three, and keep `OVRManager.request*PermissionOnStartup` off (the Game-Ready preset does).
 
 > **Why `ClearAllScansAsync` and not save-then-purge.** `ClearAllScansAsync` deliberately wipes only saved packages (`pkg_*/` and `manifest.json`), never the active `_tmp/` working directory — that one is owned by `StartScan` / `FinalizeScanAsync`'s lifecycle. Safe to call at any point: if nothing is saved it returns immediately. The trade-off is that a finalize crash after a `ClearAllScansAsync` loses the previous scan; if your game wants the old scan to outlive a finalize failure, save first and purge after.
 
@@ -769,7 +768,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 1. Add QuestRoomScan to your `Packages/manifest.json` (see [Installation](#installation)).
 2. Open **`RoomScan > Setup Scene`** and click **`Apply Game-Ready Setup`**. Re-click after the build-target / domain reload to finish.
 3. Build to Quest 3 (or attach Quest Link).
-4. Game code: `await RoomScanSession.Instance.RequestCameraPermissionAsync();` then `await RoomScanSession.Instance.StartScanAsync();`.
+4. Game code: `await RoomScanSession.Instance.StartScanAsync();` — it requests scene / camera / anchor permissions itself if they are missing. Call `Request*PermissionAsync` earlier only if you want the OS sheets at a moment of your choosing.
 5. Bind a controller button to `FreezeInView` and another to `UnfreezeInView` (the QRS DebugMenu uses Y/B + X/A by default).
 6. When the user commits: `var result = await RoomScanSession.Instance.FinalizeScanAsync();` → use `result.Mesh` + `result.Atlas` to render with a standard `MeshRenderer`.
 7. On subsequent launches: `if (session.HasSavedScan) await session.LoadLatestAsync();` — skip scanning entirely.

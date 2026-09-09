@@ -506,8 +506,10 @@ sensor and neural depth pipeline run **only while a scan is active**:
 - **Boot / idle:** `Awake` disables `AROcclusionManager` before its `OnEnable`
   (all Awakes run first). Scene YAML and the setup wizard leave the component
   disabled. Observing `USE_SCENE` sets `_permissionReady` only — it does **not**
-  start the subsystem. Hosts still request that permission at boot via
-  `RoomScanSession.RequestScenePermissionAsync`.
+  start the subsystem. `RoomScanner.StartScanningAsync` requests it (then
+  `HEADSET_CAMERA`, then `USE_ANCHOR_API`) through the package's single
+  serialised queue before bring-up; hosts may ask earlier via
+  `RoomScanSession.Request*PermissionAsync` for their own UX.
 - **`StartDepthCapture()`:** Sets `_captureActive`. When permission is ready,
   enables `AROcclusionManager` and subscribes to `frameReceived`. Called by
   `RoomScanner.StartScanningAsync()`.
