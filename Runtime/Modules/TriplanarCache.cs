@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
@@ -91,8 +90,7 @@ namespace Genesis.RoomScan
         {
             if (_scanner == null || _scanner.VolumeIntegrator == null) return;
             DispatchBake(frame, pose.position, pose.rotation, focal, principal, sensor, current,
-                _scanner.VolumeIntegrator.CameraExposure,
-                _scanner.VolumeIntegrator.ExclusionZones);
+                _scanner.VolumeIntegrator.CameraExposure);
         }
 
         private void Start()
@@ -349,7 +347,7 @@ namespace Genesis.RoomScan
         /// </summary>
         public void DispatchBake(Texture camFrame, Vector3 camPos, Quaternion camRot,
             Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes,
-            float exposure, List<Transform> exclusionZones)
+            float exposure)
         {
             if (!enableTriplanar || !_kernelsReady || camFrame == null)
             {
@@ -390,15 +388,8 @@ namespace Genesis.RoomScan
                     vi.VoxelCount.x, vi.VoxelCount.y, vi.VoxelCount.z);
                 bakeCompute.SetFloat(Shader.PropertyToID("gsVoxSize"), vi.VoxelSize);
                 bakeCompute.SetFloat(MaxUpdateDistID, 5f);
+                vi.BindExclusionUniforms(bakeCompute);
             }
-
-            var excPositions = new Vector4[64];
-            int numExc = exclusionZones != null ? Mathf.Min(exclusionZones.Count, 64) : 0;
-            for (int i = 0; i < numExc; i++)
-                if (exclusionZones[i] != null)
-                    excPositions[i] = exclusionZones[i].position;
-            bakeCompute.SetInt(Shader.PropertyToID("gsNumExclusions"), numExc);
-            bakeCompute.SetVectorArray(Shader.PropertyToID("gsExclusionHeads"), excPositions);
 
             VolumeIntegrator.Instance?.BindScanPriors(bakeCompute);
 

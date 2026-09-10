@@ -71,7 +71,10 @@ namespace Genesis.RoomScan
         private static readonly int FrustumVolumeID = Shader.PropertyToID("gsFrustumVolume");
         private static readonly int DepthDispThreshID = Shader.PropertyToID("gsDepthDispThresh");
         private static readonly int NumExclusionsID = Shader.PropertyToID("gsNumExclusions");
-        private static readonly int ExclusionHeadsID = Shader.PropertyToID("gsExclusionHeads");
+        private static readonly int ExclusionP0ID = Shader.PropertyToID("gsExclusionP0");
+        private static readonly int ExclusionP1ID = Shader.PropertyToID("gsExclusionP1");
+        private static readonly int EraseBodyID = Shader.PropertyToID("gsEraseBody");
+        private static readonly int EraseMaxWeightID = Shader.PropertyToID("gsEraseMaxWeight");
         private static readonly int MaxUpdateDistID = Shader.PropertyToID("gsMaxUpdateDist");
         private static readonly int BlendRateID = Shader.PropertyToID("gsBlendRate");
         private static readonly int StabilityID = Shader.PropertyToID("gsStability");
@@ -106,6 +109,20 @@ namespace Genesis.RoomScan
         [Tooltip("Clear the volume after this many integrations to discard sensor startup noise. 0 = disabled.")]
         [SerializeField] private int warmupIntegrations = 3;
 
+        [Header("Body exclusion")]
+        [Tooltip("Torso capsule radius around the head, world-up. Smaller than 0.6 so leaning into a corner is not carved.")]
+        [SerializeField] private float torsoRadius = 0.35f;
+        [SerializeField] private float torsoAbove = 0.25f;
+        [SerializeField] private float torsoBelow = 1.7f;
+        [SerializeField] private float handRadius = 0.14f;
+        [SerializeField] private float handHalfLength = 0.08f;
+        [SerializeField] private float forearmRadius = 0.08f;
+        [SerializeField] private float forearmLength = 0.28f;
+        [SerializeField] private float shoulderDrop = 0.2f;
+        [SerializeField] private float shoulderLateral = 0.2f;
+        [Tooltip("After Integrate, zero non-frozen voxels inside hand/forearm capsules whose weight is below MinMeshWeight. Off by default — exclusion already skips those voxels.")]
+        [SerializeField] private bool eraseBodyBlobs = false;
+
         [Header("Pruning")]
         [SerializeField] private float pruneIntervalSeconds = 3f;
 
@@ -115,6 +132,7 @@ namespace Genesis.RoomScan
         private ComputeKernelHelper _pruneKernel;
         private ComputeKernelHelper _freezeKernel;
         private ComputeKernelHelper _unfreezeKernel;
+        private ComputeKernelHelper _eraseKernel;
 
         private ComputeBuffer _frustumVolume;
         private bool _frustumReady;
@@ -140,10 +158,37 @@ namespace Genesis.RoomScan
         public int ColoredSurfaceCount { get; private set; }
 
         /// <summary>
-        /// Transforms whose positions define spherical exclusion zones; voxels near these are skipped during integration.
+        /// Extra torso capsules (legacy <see cref="RoomScanner.AddExclusionZone"/>).
+        /// Head / hands are <see cref="HeadAnchor"/> / hand anchors, not this list.
         /// </summary>
         public readonly List<Transform> ExclusionZones = new();
-        private readonly Vector4[] _exclusionPositions = new Vector4[64];
+        private readonly Vector4[] _exclusionP0 = new Vector4[BodyExclusion.Max];
+        private readonly Vector4[] _exclusionP1 = new Vector4[BodyExclusion.Max];
+
+        /// <summary>Head (or center-eye) used to build the torso capsule. World up, not head.up.</summary>
+        public Transform HeadAnchor { get; set; }
+        /// <summary>Left wrist or controller. Null skips that side's hand/forearm capsules.</summary>
+        public Transform LeftHandAnchor { get; set; }
+        /// <summary>Right wrist or controller. Null skips that side's hand/forearm capsules.</summary>
+        public Transform RightHandAnchor { get; set; }
+        /// <summary>
+        /// When true, <see cref="RoomScanner"/> will not overwrite the three
+        /// anchors from the camera rig each frame (host already wired them).
+        /// </summary>
+        public bool BodyAnchorsHostOwned { get; set; }
+
+        /// <summary>
+        /// Pin head and wrist transforms used to pack exclusion capsules.
+        /// Pass <paramref name="hostOwned"/> true when the host refreshes
+        /// Capsense / controller wrists itself.
+        /// </summary>
+        public void SetBodyExclusionAnchors(Transform head, Transform leftHand, Transform rightHand, bool hostOwned)
+        {
+            HeadAnchor = head;
+            LeftHandAnchor = leftHand;
+            RightHandAnchor = rightHand;
+            BodyAnchorsHostOwned = hostOwned;
+        }
 
         public const int MaxRoomClipPlanes = 32;
         public const int MaxScreenStamps = 4;
@@ -229,6 +274,10 @@ namespace Genesis.RoomScan
 
             _unfreezeKernel = new ComputeKernelHelper(compute, "UnfreezeInFrustum");
             _unfreezeKernel.Set(VolumeRWID, _volume);
+
+            _eraseKernel = new ComputeKernelHelper(compute, "EraseInsideExclusions");
+            _eraseKernel.Set(VolumeRWID, _volume);
+            _eraseKernel.Set(ColorVolumeRWID, _colorVolume);
 
             _coverageKernel = new ComputeKernelHelper(compute, "CountSurfaceCoverage");
             _coverageKernel.Set(VolumeRWID, _volume);
@@ -322,6 +371,8 @@ namespace Genesis.RoomScan
             _pruneKernel.Set(ColorVolumeRWID, _colorVolume);
             _freezeKernel.Set(VolumeRWID, _volume);
             _unfreezeKernel.Set(VolumeRWID, _volume);
+            _eraseKernel.Set(VolumeRWID, _volume);
+            _eraseKernel.Set(ColorVolumeRWID, _colorVolume);
             _coverageKernel.Set(VolumeRWID, _volume);
             compute.SetTexture(_coverageKernel.KernelIndex, ColorVolumeReadID, _colorVolume);
         }
@@ -501,6 +552,7 @@ namespace Genesis.RoomScan
             }
             SetFrustumCameraUniforms(_freezeKernel, camPos, camRot,
                 focalLen, principalPt, sensorRes, currentRes);
+            BindExclusionUniforms(compute);
             _freezeKernel.Set(VolumeRWID, _volume);
             _freezeKernel.DispatchFit(_volume);
             Logger.Info("FreezeInView dispatched");
@@ -656,15 +708,7 @@ namespace Genesis.RoomScan
             compute.SetMatrixArray(DepthCapture.ViewInvID, dc.ViewInv);
             compute.SetMatrixArray(DepthCapture.ProjInvID, dc.ProjInv);
 
-            int numExclusions = Mathf.Min(ExclusionZones.Count, 64);
-            for (int i = 0; i < numExclusions; i++)
-            {
-                if (ExclusionZones[i] != null)
-                    _exclusionPositions[i] = ExclusionZones[i].position;
-            }
-            compute.SetInt(NumExclusionsID, numExclusions);
-            compute.SetVectorArray(ExclusionHeadsID, _exclusionPositions);
-
+            BindExclusionUniforms(compute);
             BindScanPriors(compute);
 
             compute.SetFloat(BlendRateID, blendRate);
@@ -680,6 +724,7 @@ namespace Genesis.RoomScan
 
             _integrateKernel.DispatchFit(_frustumVolume.count, 1);
             DispatchScreenStamps();
+            DispatchEraseBodyBlobs();
 
             IntegrationCount++;
             _pendingCamFrame = null;
@@ -896,6 +941,35 @@ namespace Genesis.RoomScan
             target.SetInt(UseRoomAabbID, _useRoomAabb ? 1 : 0);
             target.SetVector(RoomAabbMinID, _roomAabbMin);
             target.SetVector(RoomAabbMaxID, _roomAabbMax);
+        }
+
+        /// <summary>
+        /// Pack current head / hand / extra-zone capsules and upload to any
+        /// compute shader that includes <c>VolumeHelpers.hlsl</c>.
+        /// </summary>
+        public void BindExclusionUniforms(ComputeShader target)
+        {
+            if (target == null) return;
+            int n = BodyExclusion.Pack(
+                _exclusionP0, _exclusionP1,
+                HeadAnchor, LeftHandAnchor, RightHandAnchor, ExclusionZones,
+                torsoRadius, torsoAbove, torsoBelow,
+                handRadius, handHalfLength,
+                forearmRadius, forearmLength,
+                shoulderDrop, shoulderLateral);
+            target.SetInt(NumExclusionsID, n);
+            target.SetVectorArray(ExclusionP0ID, _exclusionP0);
+            target.SetVectorArray(ExclusionP1ID, _exclusionP1);
+            target.SetInt(EraseBodyID, eraseBodyBlobs ? 1 : 0);
+            target.SetFloat(EraseMaxWeightID, minMeshWeight);
+        }
+
+        void DispatchEraseBodyBlobs()
+        {
+            if (!eraseBodyBlobs || _volume == null || _eraseKernel.Shader == null) return;
+            _eraseKernel.Set(VolumeRWID, _volume);
+            _eraseKernel.Set(ColorVolumeRWID, _colorVolume);
+            _eraseKernel.DispatchFit(_volume);
         }
 
         /// <summary>

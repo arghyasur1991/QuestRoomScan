@@ -14,9 +14,6 @@ RWTexture3D<float4> gsColorVolumeRW;
 float gsDepthDispThresh;
 float gsMaxUpdateDist;
 
-#define EXCLUSION_TOP 0.25
-#define EXCLUSION_BOTTOM 1.7
-#define EXCLUSION_RADIUS 0.6
 #define MIN_DOT 0.3
 
 #define MIN_QUALITY_SEED 0.25
@@ -134,18 +131,7 @@ void Integrate(uint id : SV_DispatchThreadID)
     bool unoccludedByDilation = abs(voxView.z) < dilatedDepthLinear || acceptableDepthDisparity;
     bool validSurfaceNormal = empty || normDot > MIN_DOT;
 
-    bool outsideExclusions = true;
-    for (int p = 0; p < gsNumExclusions; p++)
-    {
-        float3 headPos = gsExclusionHeads[p];
-        float2 diff = vWorldPos.xz - headPos.xz;
-        if (dot(diff, diff) < EXCLUSION_RADIUS * EXCLUSION_RADIUS &&
-            vWorldPos.y < headPos.y + EXCLUSION_TOP &&
-            vWorldPos.y > headPos.y - EXCLUSION_BOTTOM)
-        {
-            outsideExclusions = false;
-        }
-    }
+    bool outsideExclusions = !gsInsideAnyExclusion(vWorldPos);
 
     bool valid = withinBand & outsideExclusions & validSurfaceNormal & unoccludedByDilation;
     if (!valid) return;
@@ -255,6 +241,7 @@ void FreezeInFrustum(uint3 id : SV_DispatchThreadID)
     if (vol.y <= 0) return; // empty or already frozen
 
     float3 worldPos = gsVoxelToWorld(id);
+    if (gsInsideAnyExclusion(worldPos)) return;
     float2 uv = ProjectToCameraUV(worldPos);
     if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99)
         return;
@@ -275,6 +262,22 @@ void UnfreezeInFrustum(uint3 id : SV_DispatchThreadID)
         return;
 
     gsVolumeRW[id] = float2(vol.x, -vol.y);
+}
+
+#pragma kernel EraseInsideExclusions
+
+[numthreads(4, 4, 4)]
+void EraseInsideExclusions(uint3 id : SV_DispatchThreadID)
+{
+    if (gsEraseBody == 0) return;
+    if (any(id >= gsVoxCount)) return;
+    float2 vol = gsVolumeRW[id];
+    if (vol.y <= 0) return;
+    if (vol.y >= gsEraseMaxWeight) return;
+    float3 worldPos = gsVoxelToWorld(id);
+    if (!gsInsideErasableExclusion(worldPos)) return;
+    gsVolumeRW[id] = float2(GS_EMPTY_VOXEL, 0);
+    gsColorVolumeRW[id] = float4(0, 0, 0, 0);
 }
 
 // ──────────────────────────────────────────────────────────────────

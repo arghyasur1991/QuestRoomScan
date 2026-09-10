@@ -54,9 +54,6 @@ float2 SignedTriUV(float2 baseUV, float normalComponent)
     return float2(baseUV.x, normalComponent > 0 ? baseUV.y * 0.5 + 0.5 : baseUV.y * 0.5);
 }
 
-#define EXCLUSION_TOP 0.25
-#define EXCLUSION_BOTTOM 1.7
-#define EXCLUSION_RADIUS 0.6
 #define MIN_DOT 0.5
 #define MIN_QUALITY 0.2
 #define HARD_FREEZE_ALPHA 0.8
@@ -111,19 +108,7 @@ void BakeTriplanar(uint3 id : SV_DispatchThreadID)
     float normDot = -dot(normalize(toVox), normal);
     if (normDot < MIN_DOT) return;
 
-    bool outsideExclusions = true;
-    for (int p = 0; p < gsNumExclusions; p++)
-    {
-        float3 headPos = gsExclusionHeads[p];
-        float2 diff = worldPos.xz - headPos.xz;
-        if (dot(diff, diff) < EXCLUSION_RADIUS * EXCLUSION_RADIUS &&
-            worldPos.y < headPos.y + EXCLUSION_TOP &&
-            worldPos.y > headPos.y - EXCLUSION_BOTTOM)
-        {
-            outsideExclusions = false;
-        }
-    }
-    if (!outsideExclusions) return;
+    if (gsInsideAnyExclusion(worldPos)) return;
 
     float2 camUV = ProjectToCameraUV(worldPos);
     if (camUV.x < 0.02 || camUV.x > 0.98 || camUV.y < 0.02 || camUV.y > 0.98)

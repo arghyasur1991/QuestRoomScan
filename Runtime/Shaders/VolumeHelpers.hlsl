@@ -13,7 +13,10 @@ StructuredBuffer<float3> gsFrustumVolume;
 Texture2D<float4> gsDilatedDepth;
 
 int gsNumExclusions;
-float3 gsExclusionHeads[64];
+float4 gsExclusionP0[64];
+float4 gsExclusionP1[64];
+int gsEraseBody;
+float gsEraseMaxWeight;
 
 int gsConfineToRoom;
 int gsNumRoomClipPlanes;
@@ -99,4 +102,43 @@ bool gsTryScreenStamp(float3 worldPos, out float sDistNorm)
         }
     }
     return hit;
+}
+
+// Capsule: segment p0.xyz–p1.xyz, radius p0.w. p1.w >= 0.5 marks
+// hand/forearm capsules the optional eraser may clear. Single exit
+// for the Vulkan DXC path (no early return).
+bool gsInsideExclusionCapsule(float3 p, float4 a, float4 b)
+{
+    bool inside = false;
+    float3 ab = b.xyz - a.xyz;
+    float abLen2 = max(dot(ab, ab), 1e-8);
+    float t = saturate(dot(p - a.xyz, ab) / abLen2);
+    float3 c = a.xyz + t * ab;
+    float3 d = p - c;
+    if (dot(d, d) < a.w * a.w)
+        inside = true;
+    return inside;
+}
+
+bool gsInsideAnyExclusion(float3 p)
+{
+    bool inside = false;
+    for (int i = 0; i < gsNumExclusions; i++)
+    {
+        if (gsInsideExclusionCapsule(p, gsExclusionP0[i], gsExclusionP1[i]))
+            inside = true;
+    }
+    return inside;
+}
+
+bool gsInsideErasableExclusion(float3 p)
+{
+    bool inside = false;
+    for (int i = 0; i < gsNumExclusions; i++)
+    {
+        if (gsExclusionP1[i].w >= 0.5
+            && gsInsideExclusionCapsule(p, gsExclusionP0[i], gsExclusionP1[i]))
+            inside = true;
+    }
+    return inside;
 }

@@ -6,6 +6,18 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
+### Live scan
+
+- Body exclusion is capsules, not a 0.6 m head cylinder: torso (0.35 m,
+  world-up), hands (0.14 m), and short forearms. Tests voxel position so a
+  wall behind a hand still fills. `FreezeInView` skips capsules; unfreeze
+  does not. Optional `eraseBodyBlobs` (off) can clear leftover hand voxels.
+- `DepthCapture.removeHandsFromDepth` requests Meta occlusion hand removal
+  (inpaints depth). Needs hand tracking; the runtime turns it off while
+  holding controllers. Capsules cover that case.
+- `RoomScanSession.SetBodyExclusionAnchors` lets a host pin Capsense /
+  controller wrists. Default: `OVRCameraRig` each integrate.
+
 ## [1.0.0] - 2026-09-09
 
 First stable release. `RoomScanSession` is API-stable from here; breaking

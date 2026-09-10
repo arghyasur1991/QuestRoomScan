@@ -68,6 +68,22 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>
+        /// Pin head and wrist transforms used to skip TSDF voxels around the
+        /// operator (torso + hand/forearm capsules). Host-owned — the scanner
+        /// will not overwrite them from the camera rig. Call before
+        /// <see cref="StartScanAsync"/>. Null wrists skip that side.
+        /// </summary>
+        public void SetBodyExclusionAnchors(Transform head, Transform leftHand, Transform rightHand)
+        {
+            if (_scanner == null)
+            {
+                Logger.Error("RoomScanSession: RoomScanner not found");
+                return;
+            }
+            _scanner.SetBodyExclusionAnchors(head, leftHand, rightHand);
+        }
+
         private RoomScanner _scanner;
         private RoomScanPersistence _persistence;
 

@@ -97,7 +97,7 @@ withinBand = sDistNorm >= -voxelMin / voxelSize
 **Step 4: Validity checks**
 - Depth disparity: raw depth vs dilated depth within `depthDisparityThreshold`
 - Surface normal: `normDot > MIN_DOT` (0.3) for occupied voxels
-- Exclusion zones: cylinder rejection around tracked heads
+- Exclusion zones: capsule rejection around the operator (torso + hands/forearms)
 
 **Step 5: Quality computation**
 ```
@@ -470,12 +470,35 @@ MRUK's world-lock can reposition the `TrackingSpace` transform each frame. `Dept
 
 ## 11. Exclusion Zones
 
-Cylindrical exclusion zones around tracked transforms (typically the user's head):
-- **Radius:** 0.6m (XZ plane)
-- **Top:** 0.25m above head
-- **Bottom:** 1.7m below head
+Capsules around the operator, tested on **voxel world position** (not by
+editing the depth texture). A wall behind a hand still fills when the hand
+moves. Up to 64 capsules.
 
-Voxels inside any exclusion cylinder are skipped during integration, preventing the user's body from being reconstructed.
+| Capsule | Segment | Radius | Erasable |
+|---|---|---|---|
+| Torso | head + 0.25 m world-up → head − 1.7 m | 0.35 m | no |
+| Hand / controller ×2 | wrist ± 0.08 m along forward | 0.14 m | yes |
+| Forearm ×2 | wrist toward estimated shoulder, 0.28 m | 0.08 m | yes |
+
+Torso uses world up so looking down does not swing a 0.6 m cylinder into the
+floor. Extra `AddExclusionZone` transforms are extra torso capsules.
+
+`FreezeInFrustum` skips voxels inside any capsule (so a freeze paint cannot
+lock a body blob). Unfreeze does not skip — old blobs can be unlocked.
+
+Optional `eraseBodyBlobs` (off by default) runs after Integrate and zeros
+non-frozen voxels inside **hand/forearm** capsules whose weight is below
+`minMeshWeight`. Torso is never erased.
+
+`DepthCapture.removeHandsFromDepth` (default on) asks the Meta occlusion
+subsystem to inpaint hands out of the depth texture via
+`TrySetHandRemovalEnabled`. That path needs hand tracking and is disabled by
+the runtime while holding controllers — capsules cover that case.
+
+Hosts may pin anchors with `RoomScanSession.SetBodyExclusionAnchors` before
+`StartScanAsync`. Otherwise `RoomScanner` refreshes from `OVRCameraRig`
+(controller tracked → `HandOnControllerAnchor` / controller; else tracked
+`OVRHand`).
 
 ## 12. Coverage Metrics & Scan Progress
 
@@ -512,7 +535,9 @@ sensor and neural depth pipeline run **only while a scan is active**:
   `RoomScanSession.Request*PermissionAsync` for their own UX.
 - **`StartDepthCapture()`:** Sets `_captureActive`. When permission is ready,
   enables `AROcclusionManager` and subscribes to `frameReceived`. Called by
-  `RoomScanner.StartScanningAsync()`.
+  `RoomScanner.StartScanningAsync()`. After enable, `removeHandsFromDepth`
+  requests Meta hand removal on the occlusion subsystem (reflection; the
+  Meta OpenXR assembly is not a package.json dependency).
 - **`StopDepthCapture()`:** Unsubscribes and disables the manager (stops the
   sensor). Called by `RoomScanner.StopScanning()`.
 - **`_captureActive`:** Persists across app pause/resume. `OnApplicationPause(false)`
@@ -542,6 +567,16 @@ Passthrough **visualization** (`OVRPassthroughLayer`) is unrelated and stays on.
 | `maxUpdateDist` | 5.0m | Far plane for integration |
 | `minUpdateDist` | 0.5m | Near plane (rejects close noise) |
 | `maxFrustumPositions` | 1,000,000 | Cap on frustum grid cells |
+
+### Body exclusion
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `torsoRadius` | 0.35 m | Torso capsule radius (world-up); was a 0.6 m cylinder |
+| `torsoAbove` / `torsoBelow` | 0.25 / 1.7 m | Torso segment from head |
+| `handRadius` / `handHalfLength` | 0.14 / 0.08 m | Wrist capsule along forward |
+| `forearmRadius` / `forearmLength` | 0.08 / 0.28 m | Wrist toward estimated shoulder |
+| `eraseBodyBlobs` | false | Optional post-Integrate clear of unfrozen hand/forearm voxels below `minMeshWeight` |
+| `removeHandsFromDepth` | true | Meta occlusion inpaint (hand tracking; off while holding controllers) |
 
 ### Convergence
 | Parameter | Default | Description |

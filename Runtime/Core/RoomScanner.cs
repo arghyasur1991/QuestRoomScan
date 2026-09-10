@@ -473,6 +473,7 @@ namespace Genesis.RoomScan
             {
                 _lastIntegrationTime = t;
 
+                RefreshBodyAnchors();
                 ProvideColorFrame();
                 _volumeIntegrator.Integrate();
                 Integrated?.Invoke();
@@ -1021,6 +1022,7 @@ namespace Genesis.RoomScan
             if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
                     out var sensor, out var current)) return;
 
+            RefreshBodyAnchors();
             _volumeIntegrator.FreezeInView(pose.position, pose.rotation,
                 focal, principal, sensor, current);
         }
@@ -1107,7 +1109,8 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Registers a transform as an exclusion zone; voxels near it are skipped during integration (e.g. the user's head).
+        /// Registers an extra torso exclusion capsule at <paramref name="t"/>.
+        /// Head and hands are <see cref="SetBodyExclusionAnchors"/>, not this list.
         /// </summary>
         public void AddExclusionZone(Transform t)
         {
@@ -1116,12 +1119,22 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Unregisters a previously added exclusion zone.
+        /// Unregisters a previously added extra exclusion zone.
         /// </summary>
         public void RemoveExclusionZone(Transform t)
         {
             if (_volumeIntegrator != null)
                 _volumeIntegrator.ExclusionZones.Remove(t);
+        }
+
+        /// <summary>
+        /// Pin head and wrist transforms for body-exclusion capsules.
+        /// Host-owned: the scanner will not overwrite them from the camera rig.
+        /// Call before <see cref="StartScanningAsync"/>.
+        /// </summary>
+        public void SetBodyExclusionAnchors(Transform head, Transform leftHand, Transform rightHand)
+        {
+            _volumeIntegrator?.SetBodyExclusionAnchors(head, leftHand, rightHand, hostOwned: true);
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -1795,17 +1808,51 @@ namespace Genesis.RoomScan
         private void SetupHeadExclusion()
         {
             if (_volumeIntegrator == null) return;
+            if (_volumeIntegrator.HeadAnchor != null) return;
 
             var cam = Camera.main;
             if (cam != null)
             {
-                AddExclusionZone(cam.transform);
-                Logger.Info($"Head exclusion zone added: {cam.gameObject.name}");
+                _volumeIntegrator.HeadAnchor = cam.transform;
+                Logger.Info($"Head exclusion anchor: {cam.gameObject.name}");
             }
             else
             {
-                Logger.Warning("No main camera found for head exclusion zone");
+                Logger.Warning("No main camera found for head exclusion");
             }
+        }
+
+        void RefreshBodyAnchors()
+        {
+            if (_volumeIntegrator == null || _volumeIntegrator.BodyAnchorsHostOwned)
+                return;
+
+            var rig = FindAnyObjectByType<OVRCameraRig>();
+            if (rig != null && rig.centerEyeAnchor != null)
+                _volumeIntegrator.HeadAnchor = rig.centerEyeAnchor;
+            else if (_volumeIntegrator.HeadAnchor == null && Camera.main != null)
+                _volumeIntegrator.HeadAnchor = Camera.main.transform;
+
+            if (rig == null) return;
+            _volumeIntegrator.LeftHandAnchor = PickWrist(rig, left: true);
+            _volumeIntegrator.RightHandAnchor = PickWrist(rig, left: false);
+        }
+
+        static Transform PickWrist(OVRCameraRig rig, bool left)
+        {
+            var controller = left ? OVRInput.Controller.LTouch : OVRInput.Controller.RTouch;
+            if (OVRInput.GetControllerPositionTracked(controller))
+            {
+                var onCtrl = left ? rig.leftHandOnControllerAnchor : rig.rightHandOnControllerAnchor;
+                if (onCtrl != null) return onCtrl;
+                return left ? rig.leftControllerAnchor : rig.rightControllerAnchor;
+            }
+
+            var handAnchor = left ? rig.leftHandAnchor : rig.rightHandAnchor;
+            if (handAnchor == null) return null;
+            var hand = handAnchor.GetComponentInChildren<OVRHand>();
+            if (hand != null && !hand.IsTracked) return null;
+            return handAnchor;
         }
 
         // ─────────────────────────────────────────────────────────────
