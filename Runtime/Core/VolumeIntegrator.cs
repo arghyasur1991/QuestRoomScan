@@ -286,14 +286,6 @@ namespace Genesis.RoomScan
         public Transform LeftHandAnchor { get; set; }
         /// <summary>Right wrist or controller. Null skips that side's hand/forearm capsules.</summary>
         public Transform RightHandAnchor { get; set; }
-        /// <summary>Capsules uploaded by the last <see cref="BindExclusionUniforms"/> (torso + hands + extras).</summary>
-        public int ExclusionCount { get; private set; }
-        /// <summary>Capsule <c>i</c> as uploaded: xyz end A, w radius / xyz end B, w erasable flag.</summary>
-        public void GetExclusionCapsule(int i, out Vector4 p0, out Vector4 p1)
-        {
-            p0 = i >= 0 && i < ExclusionCount ? _exclusionP0[i] : Vector4.zero;
-            p1 = i >= 0 && i < ExclusionCount ? _exclusionP1[i] : Vector4.zero;
-        }
         /// <summary>
         /// When true, <see cref="RoomScanner"/> will not overwrite the three
         /// anchors from the camera rig each frame (host already wired them).
@@ -1376,7 +1368,6 @@ namespace Genesis.RoomScan
                 handRadius, handHalfLength,
                 forearmRadius, forearmLength,
                 shoulderDrop, shoulderLateral);
-            ExclusionCount = n;
             target.SetInt(NumExclusionsID, n);
             target.SetVectorArray(ExclusionP0ID, _exclusionP0);
             target.SetVectorArray(ExclusionP1ID, _exclusionP1);

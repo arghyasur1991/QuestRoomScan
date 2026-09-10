@@ -14,8 +14,7 @@ All notable changes to this package are documented here. The format follows
   hand otherwise meshes as a hand-shaped shell) and the voxel (a wall behind
   a hand still fills). `FreezeInView` skips capsules; unfreeze does not.
   Optional `eraseBodyBlobs` (off) can clear leftover hand voxels below
-  `eraseMaxWeight` (0.2, above seed weight). A 2 s diagnostic line logs the
-  anchors and capsules while scanning.
+  `eraseMaxWeight` (0.2, above seed weight).
 - `DepthCapture.removeHandsFromDepth` requests Meta occlusion hand removal
   (inpaints depth). Needs hand tracking; the runtime turns it off while
   holding controllers. Capsules cover that case.
