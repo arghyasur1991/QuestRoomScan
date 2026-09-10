@@ -240,7 +240,8 @@ namespace Genesis.RoomScan
         private static readonly int CcHashSizeID = Shader.PropertyToID("gsCcHashSize");
         private static readonly int CcMinEdgesID = Shader.PropertyToID("gsCcMinEdges");
         private static readonly int CcCutTolID = Shader.PropertyToID("gsCcCutTol");
-        private static readonly int FreezeUvHalfID = Shader.PropertyToID("gsFreezeUvHalf");
+        private static readonly int FreezeOriginID = Shader.PropertyToID("gsFreezeOrigin");
+        private static readonly int FreezeDirID = Shader.PropertyToID("gsFreezeDir");
 
         enum AnalysisState { Idle, Link, Classify, Finalize, Readback, Disabled }
 
@@ -261,8 +262,8 @@ namespace Genesis.RoomScan
                  "Boundary length is ragged (voxel staircase, frontier fringe) so it runs 3-5× the ideal loop. " +
                  "Calibrated on device: 20 → a half-scanned 46 m² room with 76 m of boundary reads 64 %, an 82 m² room with 28 m in 20 holes (one ~1 m ceiling hole) reads 87 %, 92 % at ~17 m, 100 % at 1 m.")]
         [SerializeField, Range(0.5f, 40f)] private float closureReference = 20f;
-        [Tooltip("Fraction of the passthrough camera image, centred, that FreezeInView / UnfreezeInView act on. 0.35 ≈ a ±15° cone, so a press paints what the player is looking straight at and they turn their head to paint more.")]
-        [SerializeField, Range(0.1f, 1f)] private float freezeViewFraction = 0.35f;
+        [Tooltip("Half-angle, degrees, of the spotlight cone FreezeInView / UnfreezeInView paint from the eye along the gaze. 15° is a tight spot: a press paints what the player is looking straight at and they turn their head to paint more. Hosts draw a ring at this angle.")]
+        [SerializeField, Range(5f, 45f)] private float freezeConeHalfAngle = 15f;
         [Tooltip("Boundary edges within this many voxels of a clip plane, the room AABB or the volume edge are cuts, not holes.")]
         [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
         [Tooltip("Min-label link + pointer-jump rounds, one per frame. 12 converges loops of a few thousand edges.")]
@@ -991,56 +992,49 @@ namespace Genesis.RoomScan
             RebindKernelTextures();
         }
 
+        /// <summary>Half-angle, degrees, of the freeze / unfreeze spotlight cone. Hosts draw their ring at this.</summary>
+        public float FreezeConeHalfAngle => freezeConeHalfAngle;
+
         /// <summary>
-        /// Freeze all voxels currently visible in the camera frustum.
+        /// Freeze all voxels inside a spotlight cone from <paramref name="eye"/>
+        /// along <paramref name="gaze"/> (half-angle <see cref="FreezeConeHalfAngle"/>).
         /// Frozen voxels are encoded as negative weight and skip integration.
-        /// Requires camera data to have been provided via SetCameraData.
+        /// Body capsules are never frozen.
         /// </summary>
-        public void FreezeInView(Vector3 camPos, Quaternion camRot,
-            Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
+        public void FreezeInView(Vector3 eye, Vector3 gaze)
         {
             if (_volume == null || _freezeKernel.Shader == null)
             {
                 Logger.Warning("FreezeInView called before GPU resources allocated; ignored.");
                 return;
             }
-            SetFrustumCameraUniforms(_freezeKernel, camPos, camRot,
-                focalLen, principalPt, sensorRes, currentRes);
+            SetFreezeCone(eye, gaze);
             BindExclusionUniforms(compute);
             _freezeKernel.Set(VolumeRWID, _volume);
             _freezeKernel.DispatchFit(_volume);
-            Logger.Info($"FreezeInView dispatched (window ±{0.5f * Mathf.Clamp01(freezeViewFraction):F2} uv)");
+            Logger.Info($"FreezeInView dispatched (cone ±{freezeConeHalfAngle:F0}°)");
         }
 
-        /// <summary>
-        /// Unfreeze all frozen voxels currently visible in the camera frustum.
-        /// </summary>
-        public void UnfreezeInView(Vector3 camPos, Quaternion camRot,
-            Vector2 focalLen, Vector2 principalPt, Vector2 sensorRes, Vector2 currentRes)
+        /// <summary>Unfreeze all frozen voxels inside the same spotlight cone.</summary>
+        public void UnfreezeInView(Vector3 eye, Vector3 gaze)
         {
             if (_volume == null || _unfreezeKernel.Shader == null)
             {
                 Logger.Warning("UnfreezeInView called before GPU resources allocated; ignored.");
                 return;
             }
-            SetFrustumCameraUniforms(_unfreezeKernel, camPos, camRot,
-                focalLen, principalPt, sensorRes, currentRes);
+            SetFreezeCone(eye, gaze);
             _unfreezeKernel.Set(VolumeRWID, _volume);
             _unfreezeKernel.DispatchFit(_volume);
-            Logger.Info($"UnfreezeInView dispatched (window ±{0.5f * Mathf.Clamp01(freezeViewFraction):F2} uv)");
+            Logger.Info($"UnfreezeInView dispatched (cone ±{freezeConeHalfAngle:F0}°)");
         }
 
-        private void SetFrustumCameraUniforms(ComputeKernelHelper kernel, Vector3 camPos,
-            Quaternion camRot, Vector2 focalLen, Vector2 principalPt,
-            Vector2 sensorRes, Vector2 currentRes)
+        private void SetFreezeCone(Vector3 eye, Vector3 gaze)
         {
-            compute.SetVector(CamPosID, camPos);
-            compute.SetMatrix(CamInvRotID, Matrix4x4.Rotate(Quaternion.Inverse(camRot)));
-            compute.SetVector(CamFocalLenID, focalLen);
-            compute.SetVector(CamPrincipalPtID, principalPt);
-            compute.SetVector(CamSensorResID, sensorRes);
-            compute.SetVector(CamCurrentResID, currentRes);
-            compute.SetFloat(FreezeUvHalfID, 0.5f * Mathf.Clamp01(freezeViewFraction));
+            Vector3 dir = gaze.sqrMagnitude > 1e-6f ? gaze.normalized : Vector3.forward;
+            float cos = Mathf.Cos(freezeConeHalfAngle * Mathf.Deg2Rad);
+            compute.SetVector(FreezeOriginID, new Vector4(eye.x, eye.y, eye.z, cos));
+            compute.SetVector(FreezeDirID, new Vector4(dir.x, dir.y, dir.z, 0f));
         }
 
         /// <summary>

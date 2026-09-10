@@ -200,13 +200,13 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Paints the voxels currently visible in the camera frustum as
-        /// "frozen" — they stop receiving integration updates until the user
-        /// explicitly <see cref="UnfreezeInView"/>s them again. Use this as
-        /// the user sweeps the room: visible chunks they're satisfied with
-        /// get painted done, and the <see cref="ScanCoverage.FrozenFraction"/>
-        /// metric (which drives <see cref="ScanPhase.Complete"/>) grows.
-        /// Integration keeps running globally on un-painted regions.
+        /// Paints the voxels inside a spotlight cone from the head (half-angle
+        /// <see cref="FreezeConeHalfAngle"/>) as "frozen" — they stop receiving
+        /// integration updates until the user explicitly
+        /// <see cref="UnfreezeInView"/>s them. Frozen voxels count as refined,
+        /// so painting a settled region locks its share of progress. Hosts
+        /// should draw a ring at the cone angle so the player sees what a
+        /// press will paint. Integration keeps running on un-painted regions.
         /// </summary>
         public void FreezeInView()
         {
@@ -214,11 +214,13 @@ namespace Genesis.RoomScan
             _scanner.FreezeInView();
         }
 
+        /// <summary>Half-angle, degrees, of the freeze / unfreeze cone. Draw the ring at this.</summary>
+        public float FreezeConeHalfAngle => _scanner != null ? _scanner.FreezeConeHalfAngle : 15f;
+
         /// <summary>
-        /// Inverse of <see cref="FreezeInView"/>: unfreezes voxels in the
-        /// current camera frustum so depth integration can refine them again.
-        /// Useful when you painted too aggressively or part of the scan looks
-        /// bad and needs re-capturing.
+        /// Inverse of <see cref="FreezeInView"/>: unfreezes voxels in the same
+        /// cone so depth integration can refine them again. Useful when you
+        /// painted too aggressively or part of the scan needs re-capturing.
         /// </summary>
         public void UnfreezeInView()
         {

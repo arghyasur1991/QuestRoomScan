@@ -635,7 +635,7 @@ makes the analytic closure above reach 100 % in practice.
 ### ScanCoverage / ScanProgress (CPU)
 - `ScanCoverage` analytic: `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`, `OpenBoundaryMetres`, `HoleCount`, `LargestHole` (`MeshHole`: centre, perimeter, edges). Shell prior: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`. Raw: `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction` (the freeze tool's own metric), `MeshVertexCount`, `MeshTriangleCount`.
 - `ScanProgress.OverallProgress = Closure × (1 − refinementInfluence × (1 − Refinement))` (0 until the first cycle); phase `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. There is no plateau or frozen-fraction blend any more.
-- `FreezeInView` / `UnfreezeInView` act on the centred `freezeViewFraction` (0.5) of the passthrough image, not the whole frame, so a press paints what the player is looking straight at and they turn their head for more.
+- `FreezeInView` / `UnfreezeInView` paint a spotlight cone from the head — apex at the eye, axis along the gaze, half-angle `freezeConeHalfAngle` (15°) — so a press paints what the player is looking straight at and they turn their head for more. The head pose is always available; the earlier passthrough-camera frustum needed intrinsics that were not, and its wide window painted the whole view. Hosts read `RoomScanSession.FreezeConeHalfAngle` to draw a ring.
 - `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`
 
 ## 12b. Depth Subsystem Gating

@@ -1097,30 +1097,46 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Freezes voxels currently visible in the camera frustum, preventing further integration updates.
+        /// Freezes voxels inside the spotlight cone in front of the head
+        /// (see <see cref="FreezeConeHalfAngle"/>), preventing further
+        /// integration updates there. Uses the head pose, which is always
+        /// available — not the passthrough camera, whose intrinsics were not.
         /// </summary>
         public void FreezeInView()
         {
             if (_volumeIntegrator == null) return;
-            if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
-                    out var sensor, out var current)) return;
+            if (!TryGetGaze(out var eye, out var gaze)) return;
 
             RefreshBodyAnchors();
-            _volumeIntegrator.FreezeInView(pose.position, pose.rotation,
-                focal, principal, sensor, current);
+            _volumeIntegrator.FreezeInView(eye, gaze);
         }
 
-        /// <summary>
-        /// Unfreezes previously frozen voxels in the current camera frustum, allowing integration to resume.
-        /// </summary>
+        /// <summary>Unfreezes frozen voxels inside the same spotlight cone.</summary>
         public void UnfreezeInView()
         {
             if (_volumeIntegrator == null) return;
-            if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
-                    out var sensor, out var current)) return;
+            if (!TryGetGaze(out var eye, out var gaze)) return;
 
-            _volumeIntegrator.UnfreezeInView(pose.position, pose.rotation,
-                focal, principal, sensor, current);
+            _volumeIntegrator.UnfreezeInView(eye, gaze);
+        }
+
+        /// <summary>Half-angle, degrees, of the freeze / unfreeze cone. Hosts draw a ring at this.</summary>
+        public float FreezeConeHalfAngle => _volumeIntegrator != null ? _volumeIntegrator.FreezeConeHalfAngle : 15f;
+
+        bool TryGetGaze(out Vector3 eye, out Vector3 gaze)
+        {
+            RefreshBodyAnchors();
+            var head = _volumeIntegrator != null ? _volumeIntegrator.HeadAnchor : null;
+            if (head == null && Camera.main != null) head = Camera.main.transform;
+            if (head == null)
+            {
+                eye = default;
+                gaze = default;
+                return false;
+            }
+            eye = head.position;
+            gaze = head.forward;
+            return true;
         }
 
         /// <summary>
@@ -1903,42 +1919,6 @@ namespace Genesis.RoomScan
         // ─────────────────────────────────────────────────────────────
         //  Internal helpers
         // ─────────────────────────────────────────────────────────────
-
-        private bool TryGetCameraIntrinsics(out Pose pose, out Vector2 focal,
-            out Vector2 principal, out Vector2 sensor, out Vector2 current)
-        {
-            pose = default;
-            focal = principal = sensor = current = default;
-
-            ICameraProvider provider = GetActiveCameraProvider();
-            if (provider != null && provider.IsReady)
-            {
-                pose = provider.CameraPose;
-                if (_depthCapture != null)
-                    pose = _depthCapture.TrackingToWorld(pose);
-                focal = provider.FocalLength;
-                principal = provider.PrincipalPoint;
-                sensor = provider.SensorResolution;
-                current = provider.CurrentResolution;
-                return true;
-            }
-
-            // Fallback to main camera intrinsics when no provider is available
-            var cam = Camera.main;
-            if (cam == null) return false;
-
-            var ct = cam.transform;
-            pose = new Pose(ct.position, ct.rotation);
-            float w = cam.pixelWidth;
-            float h = cam.pixelHeight;
-            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
-            float fy = h / (2f * Mathf.Tan(vFovRad * 0.5f));
-            focal = new Vector2(fy, fy);
-            principal = new Vector2(w * 0.5f, h * 0.5f);
-            sensor = new Vector2(w, h);
-            current = new Vector2(w, h);
-            return true;
-        }
 
         private void SetupHeadExclusion()
         {

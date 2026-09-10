@@ -198,7 +198,7 @@ Call `await RoomScanner.Instance.StartScanningAsync()` to begin (or use the debu
 
 When a region of the mesh looks good and you don't want further integration to degrade it:
 
-- **Freeze In View** (Y/B button): Locks all voxels currently in your camera frustum. Frozen voxels are skipped during integration — their geometry and color are preserved exactly as-is.
+- **Freeze In View** (Y/B button): Locks the voxels inside a 15° spotlight cone from your eye along your gaze (`freezeConeHalfAngle`); turn your head to paint more. Hosts can draw a ring at `RoomScanSession.FreezeConeHalfAngle`. Frozen voxels are skipped during integration — their geometry and color are preserved exactly as-is.
 - **Unfreeze In View** (X/A button): Restores frozen voxels in your current frustum to normal integration.
 
 This lets you selectively protect good surfaces while continuing to refine other areas.
@@ -513,7 +513,7 @@ await session.StartScanAsync();
 session.ProgressUpdated += p => progressBar.value = p.OverallProgress;
 
 // 3. As the user sweeps the room, paint visible chunks as "done":
-//    FreezeInView locks all voxels currently in the camera frustum so they
+//    FreezeInView locks the voxels in a head-forward spotlight cone so they
 //    stop receiving updates. Frozen voxels count as refined, so painting a
 //    settled region also locks its share of OverallProgress. Use this as
 //    the natural "I'm satisfied with this region" gesture rather than a
@@ -754,7 +754,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `ReloadSceneFromDeviceAsync()` | `Task<bool>` | Re-run discovery with auto-capture **off** (no Space Setup). True if rooms exist. Use after spatial-data permission is granted — the first load often finished empty while `USE_SCENE` was still denied. |
 | `RequestSpaceSetupAndReloadAsync()` | `Task<bool>` | Horizon Space Setup, then reload with auto-capture **off**. True only if rooms exist afterwards (cancel is not success-with-rooms) |
 | `StartScanAsync()` | `Task` | Begin a new scan session (unloads a loaded package on a non-resume start, creates `_tmp/` package + spatial anchor; completes at the first integrated frame) |
-| `FreezeInView()` | `void` | Paint voxels in current camera frustum as done; integration continues globally |
+| `FreezeInView()` | `void` | Paint voxels inside the head cone (`FreezeConeHalfAngle`, 15°) as done; integration continues globally |
 | `UnfreezeInView()` | `void` | Inverse of `FreezeInView` for re-capture of bad regions |
 | `FinalizeScanAsync()` | `Task<ScanResult>` | Stop scanning → refine → save → release GPU; returns mesh + atlas + package id |
 | `LoadAsync(packageId)` | `Task<ScanResult>` | Load refined mesh + atlas from a specific package (< 1 s) |

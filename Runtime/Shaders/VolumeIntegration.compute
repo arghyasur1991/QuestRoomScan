@@ -239,16 +239,18 @@ void StampScreen(uint3 id : SV_DispatchThreadID)
 #pragma kernel FreezeInFrustum
 #pragma kernel UnfreezeInFrustum
 
-// Half-extent, in image UV, of the window a freeze / unfreeze press paints.
-// 0.49 is the whole frame; 0.25 the middle half of width and height, so a
-// press acts on what the player is looking straight at.
-float gsFreezeUvHalf;
+// Freeze / unfreeze paint a spotlight cone from the head: apex at the eye,
+// axis along the gaze, half-angle from the host. A cone needs only the head
+// pose, which is always available; the old passthrough-camera frustum needed
+// intrinsics that were not, and its wide window painted the whole view.
+float4 gsFreezeOrigin;   // xyz eye position, w = cos(half angle)
+float4 gsFreezeDir;      // xyz unit gaze direction
 
-bool gsInFreezeWindow(float3 worldPos)
+bool gsInFreezeCone(float3 worldPos)
 {
-    float2 uv = ProjectToCameraUV(worldPos);
-    float half = min(gsFreezeUvHalf, 0.49);
-    return all(abs(uv - 0.5) <= half);
+    float3 d = worldPos - gsFreezeOrigin.xyz;
+    float len = length(d);
+    return len > 0.05 && dot(d, gsFreezeDir.xyz) >= gsFreezeOrigin.w * len;
 }
 
 [numthreads(4, 4, 4)]
@@ -260,7 +262,7 @@ void FreezeInFrustum(uint3 id : SV_DispatchThreadID)
 
     float3 worldPos = gsVoxelToWorld(id);
     if (gsInsideAnyExclusion(worldPos)) return;
-    if (!gsInFreezeWindow(worldPos)) return;
+    if (!gsInFreezeCone(worldPos)) return;
 
     gsVolumeRW[id] = float2(vol.x, -vol.y);
 }
@@ -273,7 +275,7 @@ void UnfreezeInFrustum(uint3 id : SV_DispatchThreadID)
     if (vol.y >= 0) return; // not frozen
 
     float3 worldPos = gsVoxelToWorld(id);
-    if (!gsInFreezeWindow(worldPos)) return;
+    if (!gsInFreezeCone(worldPos)) return;
 
     gsVolumeRW[id] = float2(vol.x, -vol.y);
 }
