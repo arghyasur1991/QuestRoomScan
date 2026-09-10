@@ -479,6 +479,7 @@ namespace Genesis.RoomScan
         private ShellCoverageTracker _shellTracker;
         private float _lastShellLog;
         private OVRCameraRig _bodyRig;
+        private float _lastBodyLog;
         private OVRHand _leftOvrHand;
         private OVRHand _rightOvrHand;
 
@@ -517,6 +518,7 @@ namespace Genesis.RoomScan
                 _volumeIntegrator.Integrate();
                 Integrated?.Invoke();
                 _integrateCount++;
+                LogBodyExclusion(t);
 
                 MaybeRetryScanRoomBind();
 
@@ -1932,6 +1934,66 @@ namespace Genesis.RoomScan
             if (rig == null) return;
             _volumeIntegrator.LeftHandAnchor = PickWrist(rig, left: true);
             _volumeIntegrator.RightHandAnchor = PickWrist(rig, left: false);
+        }
+
+        /// <summary>
+        /// Every 2 s while scanning: which anchors feed the capsules, where
+        /// they are relative to the depth eye, and what was uploaded. This is
+        /// the line to read when a hand still fuses — if the wrist is null,
+        /// or metres from where the hand is in the depth image, the capsule is
+        /// simply not where the hand is.
+        /// </summary>
+        void LogBodyExclusion(float t)
+        {
+            if (t - _lastBodyLog < 2f || _volumeIntegrator == null) return;
+            _lastBodyLog = t;
+
+            var head = _volumeIntegrator.HeadAnchor;
+            var l = _volumeIntegrator.LeftHandAnchor;
+            var r = _volumeIntegrator.RightHandAnchor;
+            Vector3 eye = head != null ? head.position : Vector3.zero;
+            var dc = DepthCapture.Instance;
+            Vector3 depthEye = dc != null && dc.ViewInv != null && dc.ViewInv.Length > 0
+                ? (Vector3)dc.ViewInv[0].GetColumn(3)
+                : Vector3.zero;
+
+            var sb = new System.Text.StringBuilder(256);
+            sb.Append("[RoomScanner] Body exclusion: capsules=").Append(_volumeIntegrator.ExclusionCount)
+              .Append(" hostOwned=").Append(_volumeIntegrator.BodyAnchorsHostOwned)
+              .Append(" rig=").Append(_bodyRig != null)
+              .Append(" head=").Append(head != null ? head.name : "null")
+              .Append(' ').Append(F(eye))
+              .Append(" depthEye=").Append(F(depthEye))
+              .Append(" |head-depthEye|=").Append((eye - depthEye).magnitude.ToString("F2"));
+            AppendHand(sb, " L", l, eye, OVRInput.Controller.LTouch, OVRInput.Hand.HandLeft);
+            AppendHand(sb, " R", r, eye, OVRInput.Controller.RTouch, OVRInput.Hand.HandRight);
+            for (int i = 0; i < _volumeIntegrator.ExclusionCount && i < 5; i++)
+            {
+                _volumeIntegrator.GetExclusionCapsule(i, out var p0, out var p1);
+                sb.Append(" c").Append(i).Append('=').Append(F(p0)).Append("->").Append(F(p1))
+                  .Append(" r=").Append(p0.w.ToString("F2")).Append(p1.w >= 0.5f ? " erasable" : " torso");
+            }
+            Logger.Info(sb.ToString());
+
+            static string F(Vector3 v) => $"({v.x:F2},{v.y:F2},{v.z:F2})";
+        }
+
+        static void AppendHand(System.Text.StringBuilder sb, string tag, Transform anchor, Vector3 eye,
+            OVRInput.Controller controller, OVRInput.Hand hand)
+        {
+            sb.Append(tag).Append('=');
+            if (anchor == null)
+            {
+                sb.Append("null");
+            }
+            else
+            {
+                Vector3 p = anchor.position;
+                sb.Append(anchor.name).Append(' ').Append($"({p.x:F2},{p.y:F2},{p.z:F2})")
+                  .Append(" d=").Append((p - eye).magnitude.ToString("F2"));
+            }
+            sb.Append(" ctrlTracked=").Append(OVRInput.GetControllerPositionTracked(controller))
+              .Append(" inHand=").Append(OVRInput.GetControllerIsInHandState(hand));
         }
 
         Transform PickWrist(OVRCameraRig rig, bool left)
