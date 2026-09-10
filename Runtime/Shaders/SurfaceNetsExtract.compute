@@ -147,6 +147,12 @@ uint WithPackedAlpha(uint packedRgb, uint fade)
 
 // Single exit on purpose: DXC flattens early returns into a function-named
 // temp and then warns it is "potentially uninitialized".
+bool IsEmpty(int3 coord)
+{
+    float2 s = _TsdfVolume[coord];
+    return s.x <= -0.99 || abs(s.y) < _MinWeight;
+}
+
 float SampleSDF(int3 coord)
 {
     float2 s = _TsdfVolume[coord];
@@ -421,17 +427,33 @@ void TryEmitQuad(int3 coord, int3 axis, int3 d1, int3 d2)
     int d = _CoordVertMap[Flatten(coord - d2)];
     if (a < 0 || b < 0 || c < 0 || d < 0)
     {
-        // The surface crosses this edge but cannot be meshed here: a
-        // neighbouring cell is unobserved (scan frontier, hole, clip) or
-        // degenerate. That is a boundary edge of the mesh.
-        uint oi;
-        InterlockedAdd(_Counters[2], 1, oi);
-        if (oi < _MaxOpenEdges)
-            _OpenEdges[oi] = float4(VoxelCoordToWorld((float3)coord + 0.5 * (float3)axis), 0);
-        // Flag the owning vertex so the live shader can tint the boundary.
-        // Only this thread writes vertex `a` (GenerateIndices is per vertex).
-        if (a >= 0)
-            _Vertices[a]._pad = 1u;
+        // The surface crosses this edge but cannot be meshed here. A zero
+        // crossing between two *observed* voxels always gets its quad (all
+        // four cells share the edge), so this is almost always the negative
+        // band meeting an unobserved voxel. That is a hole only when the
+        // unobserved voxel lies beside or in front of the surface — where
+        // the surface should continue. Behind it is normal: Integrate rejects
+        // grazing samples, so an oblique surface has a thin or missing back
+        // band, and counting that painted closed walls red.
+        bool count = true;
+        bool emptyA = IsEmpty(coord);
+        bool emptyB = IsEmpty(coord + axis);
+        if (emptyA != emptyB && a >= 0)
+        {
+            float3 toEmpty = emptyB ? (float3)axis : -(float3)axis;
+            count = dot(toEmpty, _Vertices[a].norm) > -0.5;
+        }
+        if (count)
+        {
+            uint oi;
+            InterlockedAdd(_Counters[2], 1, oi);
+            if (oi < _MaxOpenEdges)
+                _OpenEdges[oi] = float4(VoxelCoordToWorld((float3)coord + 0.5 * (float3)axis), 0);
+            // Flag the owning vertex so the live shader can tint the boundary.
+            // Only this thread writes vertex `a` (GenerateIndices is per vertex).
+            if (a >= 0)
+                _Vertices[a]._pad = 1u;
+        }
         return;
     }
 
