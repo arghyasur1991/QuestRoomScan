@@ -718,10 +718,12 @@ void ClosureCentroid(uint id : SV_DispatchThreadID)
     uint packed = _AnalysisResult[AR_LARGEST];
     if (packed == 0) return;
     uint root = packed & 0xFFFFu;
-    int c = max(gsCcComp[root * 4], 1);
-    _AnalysisResult[AR_LCX] = asuint(gsCcComp[root * 4 + 1] / c);
-    _AnalysisResult[AR_LCY] = asuint(gsCcComp[root * 4 + 2] / c);
-    _AnalysisResult[AR_LCZ] = asuint(gsCcComp[root * 4 + 3] / c);
+    // Float divide: mm sums stay exact well past 2^24 for one room, and it
+    // avoids the Vulkan integer-divide warning on this single thread.
+    float inv = 1.0 / max((float)gsCcComp[root * 4], 1.0);
+    _AnalysisResult[AR_LCX] = asuint((int)round((float)gsCcComp[root * 4 + 1] * inv));
+    _AnalysisResult[AR_LCY] = asuint((int)round((float)gsCcComp[root * 4 + 2] * inv));
+    _AnalysisResult[AR_LCZ] = asuint((int)round((float)gsCcComp[root * 4 + 3] * inv));
 }
 
 // ──────────────────────────────────────────────────────────────────
