@@ -93,6 +93,8 @@ namespace Genesis.RoomScan
         public int HoleCount;
         /// <summary>Largest hole loop (the frontier while scanning), or default.</summary>
         public MeshHole LargestHole;
+        /// <summary>Hole edges stamped by the mesh-hole fill so far this scan.</summary>
+        public int MeshHoleFills;
 
         // ── Shell prior (optional; guidance and auto-fill, never the gate) ──
         /// <summary>
@@ -580,7 +582,9 @@ namespace Genesis.RoomScan
                         $"open={cl.OpenBoundaryMetres:F2}m holes={cl.HoleCount} largest={cl.LargestHole.PerimeterMetres:F2}m loop " +
                         $"(~{cl.LargestHole.ApproxWidthMetres:F2}m across) @({cl.LargestHole.Center.x:F2},{cl.LargestHole.Center.y:F2},{cl.LargestHole.Center.z:F2}) " +
                         $"area={cl.MeshAreaM2:F1}m2 edges: total={cl.OpenEdgesTotal} cut={cl.CutEdges} hole={cl.HoleEdges} " +
-                        $"surface={_volumeIntegrator.SurfaceVoxelCount} confident={_volumeIntegrator.ConfidentSurfaceCount}");
+                        $"surface={_volumeIntegrator.SurfaceVoxelCount} confident={_volumeIntegrator.ConfidentSurfaceCount} " +
+                        $"fills: mesh={_volumeIntegrator.MeshHoleFills} shell={(_shellTracker != null && _shellTracker.Available ? _shellTracker.FillsApplied : 0)}" +
+                        (_shellTracker != null && _shellTracker.Available ? $" shellCov={_shellTracker.Coverage:P0} shellGaps={_shellTracker.GapCount}" : ""));
                 }
             }
         }
@@ -2018,6 +2022,7 @@ namespace Genesis.RoomScan
                 cov.OpenBoundaryMetres = cl.OpenBoundaryMetres;
                 cov.HoleCount = cl.HoleCount;
                 cov.LargestHole = cl.LargestHole;
+                cov.MeshHoleFills = _volumeIntegrator.MeshHoleFills;
             }
 
             if (_shellTracker != null && _shellTracker.Available)

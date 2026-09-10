@@ -456,7 +456,7 @@ void CloseSmallHoles(uint3 id : SV_DispatchThreadID)
 //    4 open edges total   5 open edges analysed (<= cap)  6 cut edges (near clip / volume edge)
 //    7 hole edges (all)   8 hole edges in holes >= min    9 hole count (>= min)
 //   10 largest hole (count<<16 | root)   11..13 largest centre, int millimetres
-//   14 index count        15 vertex count
+//   14 index count        15 vertex count 16 hole edges stamped by FillMeshHoles
 // ──────────────────────────────────────────────────────────────────
 
 #define AR_SURFACE      0
@@ -704,6 +704,73 @@ void ClosureFinalize(uint id : SV_DispatchThreadID)
     InterlockedAdd(_AnalysisResult[AR_HOLES], 1);
     InterlockedAdd(_AnalysisResult[AR_SIG_EDGES], (uint)c);
     InterlockedMax(_AnalysisResult[AR_LARGEST], (min((uint)c, 65535u) << 16) | id);
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  FillMeshHoles: close small holes where the mesh itself says they
+//  are. Every boundary edge carries its surface normal; for edges in
+//  loops of <= gsFillMaxEdges, stamp a soft local plane disc around
+//  the edge (radius from the loop length) into voxels that hold no
+//  meshable data. Real depth overrides it; frozen voxels, body
+//  capsules and the room clip are never touched. Works on any surface
+//  — the shell stamp only knows the scene-model planes.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel FillMeshHoles
+
+uint  gsFillMaxEdges;     // loops longer than this are frontier, not holes
+float gsFillMaxRadius;    // metres, cap on the disc radius
+#define AR_FILLED_EDGES 16
+
+float3 UnpackNormal(uint p)
+{
+    float3 n = float3(p & 1023u, (p >> 10) & 1023u, (p >> 20) & 1023u);
+    n = (n - 512.0) / 511.0;
+    float len = length(n);
+    return len > 1e-4 ? n / len : float3(0, 1, 0);
+}
+
+[numthreads(64, 1, 1)]
+void FillMeshHoles(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    uint root = gsCcLabel[id];
+    int c = gsCcComp[root * 4];
+    if (c <= 0 || (uint)c > gsFillMaxEdges) return;   // cut-only loops have c == 0
+
+    float4 e = gsCcEdges[id];
+    float3 p = e.xyz;
+    float3 n = UnpackNormal(asuint(e.w));
+    // Ragged loop length runs ~2x the smooth perimeter; radius = smooth
+    // perimeter / 2pi, padded so neighbouring discs overlap the interior.
+    float r = min(gsFillMaxRadius, (float)c * gsVoxSize * 0.5 / 6.2832 + 1.5 * gsVoxSize);
+    int R = (int)ceil(r / gsVoxSize);
+
+    float3 vf = gsWorldToVoxelFloat(p);
+    int3 centre = (int3)floor(vf);
+    int wrote = 0;
+    for (int dz = -R; dz <= R; dz++)
+    for (int dy = -R; dy <= R; dy++)
+    for (int dx = -R; dx <= R; dx++)
+    {
+        int3 ci = centre + int3(dx, dy, dz);
+        if (any(ci < 0) || any(ci >= (int3)gsVoxCount)) continue;
+        uint3 coord = (uint3)ci;
+        float3 q = gsVoxelToWorld(coord);
+        float3 dq = q - p;
+        float sd = dot(dq, n);
+        if (abs(sd) > gsVoxDist) continue;
+        float3 tangential = dq - n * sd;
+        if (dot(tangential, tangential) > r * r) continue;
+        if (!gsInsideRoom(q) || gsInsideAnyExclusion(q)) continue;
+
+        float2 old = gsVolumeRW[coord];
+        if (old.y < 0 || old.y >= gsCoverMinWeight) continue;  // frozen, or real data
+        gsVolumeRW[coord] = float2(clamp(sd / gsVoxDist, -1.0, 1.0), gsFillWeight);
+        wrote = 1;
+    }
+    if (wrote != 0)
+        InterlockedAdd(_AnalysisResult[AR_FILLED_EDGES], 1u);
 }
 
 #pragma kernel ClosureCentroid

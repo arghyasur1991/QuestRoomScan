@@ -32,6 +32,13 @@ All notable changes to this package are documented here. The format follows
   128-byte readback per `analysisIntervalSeconds`. `ScanCoverage` gains
   `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`,
   `OpenBoundaryMetres`, `HoleCount`, `LargestHole`. Needs no scene model.
+- Mesh-hole fill (`fillMeshHoles`, on): after each closure analysis, every
+  boundary edge in a loop up to `fillMeshHoleMaxPerimeter` gets a soft local
+  plane disc stamped into voxels with no meshable data. Closes small holes on
+  any surface, not only scene-model planes.
+- Multi-view bake: `blendMinFraction` 0.3 → 0.75 and new `maxViewsPerTexel`
+  (3) so a long scan no longer averages dozens of misregistered views into
+  mush. Keyframe capture thresholds 0.4 m / 20° → 0.5 m / 25°.
 - Removed: the frozen-fraction / colour / plateau progress blend,
   `ScanCoverage.IsStabilized`, `coverageUpdateInterval`. `FrozenFraction`
   and `ColorCoverage` stay as raw fields.

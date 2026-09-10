@@ -210,6 +210,7 @@ namespace Genesis.RoomScan
         private ComputeKernelHelper _ccClassifyKernel;
         private ComputeKernelHelper _ccFinalizeKernel;
         private ComputeKernelHelper _ccCentroidKernel;
+        private ComputeKernelHelper _ccFillKernel;
         private ComputeBuffer _analysisResult;
         private GraphicsBuffer _ccEdgesSnap;
         private GraphicsBuffer _ccCountersSnap;
@@ -240,6 +241,8 @@ namespace Genesis.RoomScan
         private static readonly int CcHashSizeID = Shader.PropertyToID("gsCcHashSize");
         private static readonly int CcMinEdgesID = Shader.PropertyToID("gsCcMinEdges");
         private static readonly int CcCutTolID = Shader.PropertyToID("gsCcCutTol");
+        private static readonly int FillMaxEdgesID = Shader.PropertyToID("gsFillMaxEdges");
+        private static readonly int FillMaxRadiusID = Shader.PropertyToID("gsFillMaxRadius");
         private static readonly int FreezeOriginID = Shader.PropertyToID("gsFreezeOrigin");
         private static readonly int FreezeDirID = Shader.PropertyToID("gsFreezeDir");
 
@@ -264,6 +267,12 @@ namespace Genesis.RoomScan
         [SerializeField, Range(0.5f, 40f)] private float closureReference = 20f;
         [Tooltip("Half-angle, degrees, of the spotlight cone FreezeInView / UnfreezeInView paint from the eye along the gaze. 15° is a tight spot: a press paints what the player is looking straight at and they turn their head to paint more. Hosts draw a ring at this angle.")]
         [SerializeField, Range(5f, 45f)] private float freezeConeHalfAngle = 15f;
+        [Tooltip("Close small holes where the mesh itself reports them: a soft local plane disc around every boundary edge of a small loop, into voxels with no meshable data. Any surface, not just scene-model planes.")]
+        [SerializeField] private bool fillMeshHoles = true;
+        [Tooltip("Loops longer than this (metres, ragged voxel-edge length) are frontier, not holes, and are left alone.")]
+        [SerializeField, Range(0.2f, 3f)] private float fillMeshHoleMaxPerimeter = 1f;
+        [Tooltip("Cap on the disc radius stamped around each hole edge, metres.")]
+        [SerializeField, Range(0.05f, 0.3f)] private float fillMeshHoleMaxRadius = 0.15f;
         [Tooltip("Boundary edges within this many voxels of a clip plane, the room AABB or the volume edge are cuts, not holes.")]
         [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
         [Tooltip("Min-label link + pointer-jump rounds, one per frame. 12 converges loops of a few thousand edges.")]
@@ -285,6 +294,8 @@ namespace Genesis.RoomScan
         public MeshClosure Closure { get; private set; }
         /// <summary>closure × (1 − refinementInfluence × (1 − refinement)). The number a host gates on.</summary>
         public float Progress { get; private set; }
+        /// <summary>Hole edges stamped by the mesh-hole fill so far this scan.</summary>
+        public int MeshHoleFills { get; private set; }
         /// <summary>True once a cycle has completed for the current scan.</summary>
         public bool AnalysisAvailable { get; private set; }
 
@@ -524,6 +535,7 @@ namespace Genesis.RoomScan
             _shellMarchKernel.Set(VolumeRWID, _volume);
             _fillPatchKernel.Set(VolumeRWID, _volume);
             _closeHolesKernel.Set(VolumeRWID, _volume);
+            _ccFillKernel.Set(VolumeRWID, _volume);
         }
 
         // ── Scan analysis cycle ─────────────────────────────────────────
@@ -549,10 +561,12 @@ namespace Genesis.RoomScan
             _ccClassifyKernel = new ComputeKernelHelper(compute, "ClosureClassify");
             _ccFinalizeKernel = new ComputeKernelHelper(compute, "ClosureFinalize");
             _ccCentroidKernel = new ComputeKernelHelper(compute, "ClosureCentroid");
+            _ccFillKernel = new ComputeKernelHelper(compute, "FillMeshHoles");
+            _ccFillKernel.Set(VolumeRWID, _volume);
 
             _coverageKernel.Set(AnalysisResultID, _analysisResult);
             foreach (var k in new[] { _ccResetKernel, _ccInsertKernel, _ccLinkKernel, _ccJumpKernel,
-                         _ccClassifyKernel, _ccFinalizeKernel, _ccCentroidKernel })
+                         _ccClassifyKernel, _ccFinalizeKernel, _ccCentroidKernel, _ccFillKernel })
             {
                 k.Set(AnalysisResultID, _analysisResult);
                 k.Set(CcEdgesID, _ccEdgesSnap);
@@ -590,6 +604,7 @@ namespace Genesis.RoomScan
             _lastAnalysisTime = 0f;
             SurfaceVoxelCount = FrozenSurfaceCount = ColoredSurfaceCount = ConfidentSurfaceCount = 0;
             ConfidentFraction = Refinement = Progress = 0f;
+            MeshHoleFills = 0;
             Closure = default;
         }
 
@@ -663,6 +678,17 @@ namespace Genesis.RoomScan
                 {
                     _ccFinalizeKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
                     _ccCentroidKernel.DispatchFit(1, 1);
+                    if (fillMeshHoles)
+                    {
+                        // Loop counts are final now; stamp the small ones.
+                        compute.SetInt(FillMaxEdgesID, Mathf.Max(1, Mathf.RoundToInt(fillMeshHoleMaxPerimeter / voxelSize)));
+                        compute.SetFloat(FillMaxRadiusID, fillMeshHoleMaxRadius);
+                        compute.SetFloat(FillWeightID, fillWeight);
+                        compute.SetFloat(CoverMinWeightID, minMeshWeight);
+                        BindExclusionUniforms(compute);
+                        _ccFillKernel.Set(VolumeRWID, _volume);
+                        _ccFillKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    }
                     AsyncGPUReadback.Request(_analysisResult, OnAnalysisReadback);
                     _analysisState = AnalysisState.Readback;
                     break;
@@ -713,6 +739,7 @@ namespace Genesis.RoomScan
                 closure, openMetres, area, (int)r[9], (int)r[7], (int)r[6], openTotal,
                 new MeshHole(largestCenter, largestEdges * voxelSize, largestEdges));
             Progress = Mathf.Clamp01(closure * (1f - refinementInfluence * (1f - Refinement)));
+            MeshHoleFills += (int)r[16];
             AnalysisAvailable = true;
         }
 

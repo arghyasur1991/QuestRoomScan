@@ -65,9 +65,12 @@ namespace Genesis.RoomScan
         [Tooltip("Seam blending pixel radius")]
         [Range(1, 8)]
         [SerializeField] internal int seamBlendRadius = 3;
-        [Tooltip("Minimum score fraction for multi-view blend inclusion")]
-        [Range(0.1f, 0.9f)]
-        [SerializeField] internal float blendMinFraction = 0.3f;
+        [Tooltip("Minimum score fraction of the texel's best view for multi-view blend inclusion. 0.75 keeps only near-frontal, near-distance views; lower values average in oblique / far views and the atlas turns to mush.")]
+        [Range(0.1f, 0.95f)]
+        [SerializeField] internal float blendMinFraction = 0.75f;
+        [Tooltip("At most this many views blended per texel. 2-3 averages sensor noise without stacking registration error from a long scan.")]
+        [Range(1, 8)]
+        [SerializeField] internal int maxViewsPerTexel = 3;
         [Tooltip("Sobel normal map strength (0 = skip normal map generation)")]
         [Range(0f, 20f)]
         [SerializeField] internal float normalStrength = 8f;
@@ -641,10 +644,13 @@ namespace Genesis.RoomScan
                 var accumG = new ComputeBuffer(texelCount, 4);
                 var accumB = new ComputeBuffer(texelCount, 4);
                 var accumW = new ComputeBuffer(texelCount, 4);
-                accumR.SetData(new uint[texelCount]);
-                accumG.SetData(new uint[texelCount]);
-                accumB.SetData(new uint[texelCount]);
-                accumW.SetData(new uint[texelCount]);
+                var accumN = new ComputeBuffer(texelCount, 4);
+                var zeros = new uint[texelCount];
+                accumR.SetData(zeros);
+                accumG.SetData(zeros);
+                accumB.SetData(zeros);
+                accumW.SetData(zeros);
+                accumN.SetData(zeros);
 
                 compute.SetBuffer(kAccum, "_OutPos", outPosBuf);
                 compute.SetBuffer(kAccum, "_OutNorm", outNormBuf);
@@ -654,8 +660,10 @@ namespace Genesis.RoomScan
                 compute.SetBuffer(kAccum, "_AccumG", accumG);
                 compute.SetBuffer(kAccum, "_AccumB", accumB);
                 compute.SetBuffer(kAccum, "_AccumW", accumW);
+                compute.SetBuffer(kAccum, "_AccumN", accumN);
                 compute.SetBuffer(kAccum, "_BestScore", scoreBuf);
                 compute.SetFloat("_BlendMinFraction", blendMinFraction);
+                compute.SetInt("_MaxViews", Mathf.Max(1, maxViewsPerTexel));
 
                 ReportStatus("Multi-view blending (pass 2)...");
                 int blendCount = 0;
@@ -740,8 +748,8 @@ namespace Genesis.RoomScan
                 compute.Dispatch(kResolve, (texelCount + 255) / 256, 1, 1);
 
                 accumR.Release(); accumG.Release();
-                accumB.Release(); accumW.Release();
-                Logger.Info("[TextureRefine] Multi-view blend resolved");
+                accumB.Release(); accumW.Release(); accumN.Release();
+                Logger.Info($"[TextureRefine] Multi-view blend resolved (minFraction={blendMinFraction:F2}, maxViews={maxViewsPerTexel})");
             }
 
             // ── Sharpening pass (GPU unsharp mask) ──

@@ -531,10 +531,18 @@ kernels; the CPU sees a 32-word result once per `analysisIntervalSeconds`.
    (`alpha > 0.1`), **confident** (`|w| ≥ confidentWeight`, 0.3).
 3. **Snapshot** the Surface Nets boundary edges: `Graphics.CopyBuffer` of
    `_OpenEdges` and `_Counters` into buffers the next extract cannot touch.
-   `TryEmitQuad` appended every crossing edge whose quad was dropped because a
-   neighbouring cell had no vertex — that *is* a boundary edge of the mesh.
-   One atomic per open edge inside the pass that already runs; ≤ 16 384 kept,
-   the counter keeps the true total.
+   `MarkBoundary` (per vertex in `GenerateIndices`) appends one sample per
+   open direction: the surface is open at a vertex when a *tangent*
+   face-neighbour cell has no vertex **and** holds an unobserved voxel at or
+   ahead of the surface plane. A continuing surface always puts a vertex in
+   its tangent neighbours; a surface curving away leaves a fully observed
+   neighbour. Dropped quads are *not* the signal — they are the TSDF band
+   meeting unobserved voxels, which happens behind every surface. Each sample
+   carries the vertex normal (3 × 10 bit in `.w`). ≤ 16 384 kept, the counter
+   keeps the true total.
+   After finalize, **`FillMeshHoles`** stamps a soft local plane disc around
+   every sample whose loop is ≤ `fillMeshHoleMaxPerimeter` (1 m) into voxels
+   below `minMeshWeight` — hole closing on any surface, driven by the mesh.
 4. **Connected components** over those edges, the 2-D "connected paths" idea on
    the surface boundary. Edges sit on voxel-grid positions, so adjacency is a
    26-neighbour lookup in a voxel hash (`ClosureInsert`, open addressing,

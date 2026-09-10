@@ -425,37 +425,13 @@ void TryEmitQuad(int3 coord, int3 axis, int3 d1, int3 d2)
     int b = _CoordVertMap[Flatten(coord - d1)];
     int c = _CoordVertMap[Flatten(coord - (d1 + d2))];
     int d = _CoordVertMap[Flatten(coord - d2)];
-    if (a < 0 || b < 0 || c < 0 || d < 0)
-    {
-        // The surface crosses this edge but cannot be meshed here. A zero
-        // crossing between two *observed* voxels always gets its quad (all
-        // four cells share the edge), so this is almost always the negative
-        // band meeting an unobserved voxel. That is a hole only when the
-        // unobserved voxel lies beside or in front of the surface — where
-        // the surface should continue. Behind it is normal: Integrate rejects
-        // grazing samples, so an oblique surface has a thin or missing back
-        // band, and counting that painted closed walls red.
-        bool count = true;
-        bool emptyA = IsEmpty(coord);
-        bool emptyB = IsEmpty(coord + axis);
-        if (emptyA != emptyB && a >= 0)
-        {
-            float3 toEmpty = emptyB ? (float3)axis : -(float3)axis;
-            count = dot(toEmpty, _Vertices[a].norm) > -0.5;
-        }
-        if (count)
-        {
-            uint oi;
-            InterlockedAdd(_Counters[2], 1, oi);
-            if (oi < _MaxOpenEdges)
-                _OpenEdges[oi] = float4(VoxelCoordToWorld((float3)coord + 0.5 * (float3)axis), 0);
-            // Flag the owning vertex so the live shader can tint the boundary.
-            // Only this thread writes vertex `a` (GenerateIndices is per vertex).
-            if (a >= 0)
-                _Vertices[a]._pad = 1u;
-        }
-        return;
-    }
+    // A missing neighbour vertex drops the quad silently. The surface
+    // boundary is measured in MarkBoundary from the vertex graph, not from
+    // dropped quads: a zero crossing between two observed voxels always gets
+    // its quad, so dropped quads are the TSDF band meeting unobserved voxels
+    // — which happens behind every surface and in front of grazing ones,
+    // not only at holes.
+    if (a < 0 || b < 0 || c < 0 || d < 0) return;
 
     uint baseIdx;
     InterlockedAdd(_Counters[1], 6, baseIdx);
@@ -480,6 +456,80 @@ void TryEmitQuad(int3 coord, int3 axis, int3 d1, int3 d2)
     }
 }
 
+static const int3 kFaceDirs[6] =
+{
+    int3(1,0,0), int3(-1,0,0), int3(0,1,0), int3(0,-1,0), int3(0,0,1), int3(0,0,-1)
+};
+
+// 3 x 10-bit signed normal in a uint, carried in _OpenEdges.w so the closure
+// analysis can stamp a local plane at each hole edge without a second buffer.
+uint PackNormal(float3 n)
+{
+    uint3 q = (uint3)clamp(n * 511.0 + 512.0, 0.0, 1023.0);
+    return q.x | (q.y << 10) | (q.z << 20);
+}
+
+// Does this cell (no vertex) contain an unobserved voxel at or in front of
+// the surface plane through `origin` with normal `n`? Unobserved voxels
+// behind the plane are the band ending inside the solid — normal for every
+// surface. Unobserved at or ahead of it means nothing was ever seen where
+// the surface should continue.
+bool HasUnobservedAhead(int3 cell, float3 origin, float3 n)
+{
+    bool found = false;
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        int3 c = cell + kCornerOffs[i];
+        if (!IsEmpty(c)) continue;
+        // Corner coords map through VoxelCoordToWorld exactly as vertex
+        // positions do (ClassifyAndEmit interpolates corner coords), so this
+        // is the same frame as `origin`.
+        float3 p = VoxelCoordToWorld((float3)c);
+        if (dot(p - origin, n) >= -0.5 * _VoxSize)
+            found = true;
+    }
+    return found;
+}
+
+// The visible surface stops at this vertex if a tangent face-neighbour cell
+// has no vertex and is unobserved ahead of the surface. A continuing surface
+// always puts a vertex in its tangent neighbours (the zero crossing passes
+// through them); a surface curving away leaves a fully observed neighbour
+// with no crossing. Records one boundary sample per open direction and flags
+// the vertex so the live shader can tint it.
+void MarkBoundary(uint vi, int3 coord)
+{
+    float3 n = _Vertices[vi].norm;
+    float3 origin = _Vertices[vi].pos;
+    bool open = false;
+    int3 maxCell = (int3)_VoxCount - 2;
+
+    [unroll]
+    for (uint k = 0; k < 6; k++)
+    {
+        int3 d = kFaceDirs[k];
+        // Along the normal is front / back, never surface continuation.
+        if (abs(dot((float3)d, n)) > 0.8) continue;
+        int3 nb = coord + d;
+        bool isOpen = false;
+        if (any(nb < 0) || any(nb > maxCell))
+            isOpen = true; // volume edge — the analysis classifies it as a cut
+        else if (_CoordVertMap[Flatten(nb)] < 0)
+            isOpen = HasUnobservedAhead(nb, origin, n); // no vertex: hole only if unobserved ahead
+        if (!isOpen) continue;
+
+        open = true;
+        uint oi;
+        InterlockedAdd(_Counters[2], 1, oi);
+        // Midpoint between the two cell centres (cells span coord..coord+1).
+        if (oi < _MaxOpenEdges)
+            _OpenEdges[oi] = float4(VoxelCoordToWorld((float3)coord + 0.5 + 0.5 * (float3)d), asfloat(PackNormal(n)));
+    }
+    if (open)
+        _Vertices[vi]._pad = 1u;
+}
+
 [numthreads(64, 1, 1)]
 void GenerateIndices(uint3 id : SV_DispatchThreadID)
 {
@@ -491,6 +541,7 @@ void GenerateIndices(uint3 id : SV_DispatchThreadID)
     TryEmitQuad(coord, int3(1,0,0), int3(0,0,1), int3(0,1,0));
     TryEmitQuad(coord, int3(0,1,0), int3(1,0,0), int3(0,0,1));
     TryEmitQuad(coord, int3(0,0,1), int3(0,1,0), int3(1,0,0));
+    MarkBoundary(id.x, coord);
 }
 
 // ══════════════════════════════════════════════════════════════════

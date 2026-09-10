@@ -306,8 +306,10 @@ RWStructuredBuffer<uint> _AccumR;   // fixed-point R sum (×65536)
 RWStructuredBuffer<uint> _AccumG;   // fixed-point G sum (×65536)
 RWStructuredBuffer<uint> _AccumB;   // fixed-point B sum (×65536)
 RWStructuredBuffer<uint> _AccumW;   // fixed-point weight sum (×65536)
+RWStructuredBuffer<uint> _AccumN;   // views accumulated so far per texel
 StructuredBuffer<uint>   _BestScore; // best score from pass 1 (read-only)
-float _BlendMinFraction;            // threshold: 0.3 = top ~30% of best score
+float _BlendMinFraction;            // threshold: 0.75 = only views near the best
+int   _MaxViews;                    // at most this many views per texel; more views blur misregistration into mush
 
 [numthreads(64, 1, 1)]
 void BlendAccum(uint3 id : SV_DispatchThreadID)
@@ -399,6 +401,14 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
             float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
             float closestZ = asfloat(_DepthBuf[py * _ImgW + px]);
             if (camPt.z > closestZ + 0.05) continue;
+
+            // Cap the observations per texel. Views arrive in capture order,
+            // all already within _BlendMinFraction of the best, so the first
+            // _MaxViews are near-best; beyond that each extra view only adds
+            // registration error.
+            uint seen;
+            InterlockedAdd(_AccumN[texelIdx], 1, seen);
+            if ((int)seen >= _MaxViews) continue;
 
             uint kfColor = _KfPixels[py * _ImgW + px];
             float r = (float)(kfColor & 0xFF);
