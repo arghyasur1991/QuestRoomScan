@@ -54,13 +54,16 @@ Shader "Genesis/ScanMeshVertexColor"
             SAMPLER(sampler_gsVolume);
             float4 gsVoxCount;
             float gsVoxSize;
+            // ── Analysis labels (R8: label / 5). 4 = free voxel on a leak face. ──
+            TEXTURE3D(gsLabelVolume);
+            SAMPLER(sampler_gsLabelVolume);
 
             // ── Globals set by RoomScanner ──
             float _RSNoFreezeTint;
             float _RSNormalFallback;
             float _RSWireframe;
             float _RSWireThickness;
-            // 1 = tint boundary vertices (the surface is open next to them).
+            // 1 = tint the surface where the analysis found a leak face.
             float _RSShowHoles;
 
             #define DEPTH_TOLERANCE 0.015
@@ -126,6 +129,18 @@ Shader "Genesis/ScanMeshVertexColor"
                 return color;
             }
 
+            // The leak-marked voxel is the free one just in front of the
+            // surface, so look one voxel out along the normal (and at the
+            // surface itself) — whichever lands in it.
+            bool NearLeak(float3 worldPos, float3 normal)
+            {
+                float a = SAMPLE_TEXTURE3D_LOD(gsLabelVolume, sampler_gsLabelVolume,
+                    WorldToVoxelUVW(worldPos + normal * gsVoxSize), 0).r;
+                float b = SAMPLE_TEXTURE3D_LOD(gsLabelVolume, sampler_gsLabelVolume,
+                    WorldToVoxelUVW(worldPos), 0).r;
+                return round(a * 5.0) == 4.0 || round(b * 5.0) == 4.0;
+            }
+
             struct Varyings
             {
                 float4 positionHCS : SV_POSITION;
@@ -133,7 +148,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 float3 positionWS : TEXCOORD0;
                 float3 normalWS : TEXCOORD1;
                 float3 barycentric : TEXCOORD2;
-                float hole : TEXCOORD3;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -152,7 +166,6 @@ Shader "Genesis/ScanMeshVertexColor"
                 OUT.positionHCS = TransformWorldToHClip(pos);
                 OUT.normalWS    = gv.norm;
                 OUT.color       = half4(unpacked.rgb, fade);
-                OUT.hole        = gv._pad != 0u ? 1.0 : 0.0;
 
                 // Barycentric coords for wireframe: each triangle vertex gets one axis
                 uint triVert = vertID % 3;
@@ -188,10 +201,10 @@ Shader "Genesis/ScanMeshVertexColor"
                 baseColor = ApplyFreezeTint(baseColor, IN.positionWS);
                 baseColor = ApplyBirthFade(baseColor, IN.color.a);
 
-                // 2b. Open-boundary tint: the surface stops next to this vertex.
-                // Interpolated, so the fringe fades in over one triangle.
-                if (_RSShowHoles > 0.5)
-                    baseColor = lerp(baseColor, half3(1.0, 0.25, 0.1), saturate(IN.hole) * 0.85);
+                // 2b. Leak tint: the free voxel in front of this surface point
+                // touches exterior unknown — passthrough shows through here.
+                if (_RSShowHoles > 0.5 && NearLeak(IN.positionWS, normal))
+                    baseColor = lerp(baseColor, half3(1.0, 0.25, 0.1), 0.85);
 
                 // 3. Wireframe: discard interior, white edges blending to vertex color at vertices
                 if (_RSWireframe > 0.5)

@@ -31,14 +31,7 @@ namespace Genesis.RoomScan
         private GraphicsBuffer _drawIndirectArgs;
         private GraphicsBuffer _smoothPosA;
         private GraphicsBuffer _smoothPosB;
-        private GraphicsBuffer _openEdges;
 
-        /// <summary>
-        /// Boundary-edge capacity. A half-scanned room's ragged frontier is a
-        /// few thousand edges; a nearly closed room a few hundred. The counter
-        /// keeps the true total when the buffer overflows.
-        /// </summary>
-        public const int MaxOpenEdges = 16384;
         public const int CounterCount = 4;
 
         // Temporal state as 3D texture (avoids 128MB structured buffer limit on Quest)
@@ -64,10 +57,8 @@ namespace Genesis.RoomScan
         public GraphicsBuffer VertexBuffer => _vertices;
         public GraphicsBuffer IndexBuffer => _indices;
         public GraphicsBuffer DrawIndirectArgs => _drawIndirectArgs;
-        /// <summary>[0] vertices, [1] indices, [2] open (boundary) edges, [3] reserved.</summary>
+        /// <summary>[0] vertices, [1] indices, [2..3] reserved.</summary>
         public GraphicsBuffer CountersBuffer => _counters;
-        /// <summary>Boundary-edge midpoints written by the last extract (see <see cref="MaxOpenEdges"/>).</summary>
-        public GraphicsBuffer OpenEdgeBuffer => _openEdges;
 
         private static readonly int ID_TsdfVolume = Shader.PropertyToID("_TsdfVolume");
         private static readonly int ID_ColorVolume = Shader.PropertyToID("_ColorVolume");
@@ -93,8 +84,6 @@ namespace Genesis.RoomScan
         private static readonly int ID_SmoothPosA = Shader.PropertyToID("_SmoothPosA");
         private static readonly int ID_SmoothPosB = Shader.PropertyToID("_SmoothPosB");
         private static readonly int ID_TemporalState = Shader.PropertyToID("_TemporalState");
-        private static readonly int ID_OpenEdges = Shader.PropertyToID("_OpenEdges");
-        private static readonly int ID_MaxOpenEdges = Shader.PropertyToID("_MaxOpenEdges");
 
         /// <summary>
         /// Tightly packed <c>GPUVertex</c> (compute + live shader + CPU readback).
@@ -143,15 +132,10 @@ namespace Genesis.RoomScan
             _coordVertMap = new GraphicsBuffer(GraphicsBuffer.Target.Structured, totalVoxels, 4);
             _vertices = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, VertexStride);
             _indices = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxIndices, 4);
-            // Counters and open edges are snapshotted by Graphics.CopyBuffer
-            // at the analysis tick, which requires the CopySource target.
-            const GraphicsBuffer.Target structuredCopySource =
-                GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.CopySource;
-            _counters = new GraphicsBuffer(structuredCopySource, CounterCount, 4);
+            _counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, CounterCount, 4);
             _counters.SetData(new uint[CounterCount]);
             _dispatchArgs = new GraphicsBuffer(structuredIndirect, 3, 4);
             _drawIndirectArgs = new GraphicsBuffer(structuredIndirect, 5, 4);
-            _openEdges = new GraphicsBuffer(structuredCopySource, MaxOpenEdges, 16);
 
             // GraphicsBuffer contents are not zero-initialised: a fresh buffer
             // holds whatever last occupied that memory. Nothing writes these
@@ -191,7 +175,6 @@ namespace Genesis.RoomScan
                             + (long)_maxIndices * 4
                             + CounterCount * 4 + 3 * 4 + 5 * 4
                             + (long)_maxVertices * Float3Stride * 2
-                            + (long)MaxOpenEdges * 16
                             + (long)totalVoxels * 16;
             Logger.Info($"[GPUSurfaceNets] Allocated buffers: vox={voxCount}, " +
                       $"maxVerts={_maxVertices}, maxIdx={_maxIndices}, " +
@@ -290,7 +273,6 @@ namespace Genesis.RoomScan
             _compute.SetFloat(ID_MinWeight, MinMeshWeight);
             _compute.SetInt(ID_TotalVoxels, _totalVoxels);
             _compute.SetInt(ID_MaxVertices, _maxVertices);
-            _compute.SetInt(ID_MaxOpenEdges, MaxOpenEdges);
             _compute.SetFloat(ID_SmoothLambda, SmoothLambda);
             _compute.SetFloat(ID_SmoothBeta, SmoothBeta);
             _compute.SetFloat(ID_TemporalAlphaMax, TemporalAlphaMax);
@@ -332,7 +314,6 @@ namespace Genesis.RoomScan
             BindBuffer(_kGenerateIndices, ID_CoordVertMap, _coordVertMap);
             BindBuffer(_kGenerateIndices, ID_Indices, _indices);
             BindBuffer(_kGenerateIndices, ID_Counters, _counters);
-            BindBuffer(_kGenerateIndices, ID_OpenEdges, _openEdges);
 
             BindBuffer(_kBuildIndirectArgs, ID_Counters, _counters);
             BindBuffer(_kBuildIndirectArgs, ID_DrawIndirectArgs, _drawIndirectArgs);
@@ -353,7 +334,6 @@ namespace Genesis.RoomScan
             _drawIndirectArgs?.Release();
             _smoothPosA?.Release();
             _smoothPosB?.Release();
-            _openEdges?.Release();
 
             if (_temporalState != null)
             {
@@ -369,7 +349,6 @@ namespace Genesis.RoomScan
             _drawIndirectArgs = null;
             _smoothPosA = null;
             _smoothPosB = null;
-            _openEdges = null;
             _temporalState = null;
 
             _totalVoxels = 0;

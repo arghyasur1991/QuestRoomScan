@@ -12,70 +12,63 @@ namespace Genesis.RoomScan
     }
 
     /// <summary>
-    /// One boundary loop of the live mesh: a connected run of edges the
-    /// surface crosses but that could not be meshed. The scan frontier is the
-    /// largest one; a leak in a finished room is a small one.
+    /// One connected patch of leak faces: places where observed free space
+    /// meets unknown that is connected to the outside of the scan — where
+    /// passthrough shows through the mesh. The scan frontier is the largest
+    /// one; a gap in a finished room is a small one.
     /// </summary>
     public readonly struct MeshHole
     {
-        /// <summary>World-space centroid of the loop's edge midpoints.</summary>
+        /// <summary>World-space centroid of the patch.</summary>
         public readonly Vector3 Center;
-        /// <summary>
-        /// Loop length in metres as counted (edges × voxel size). Voxel-edge
-        /// loops are ragged, so this runs ~2× the smooth perimeter; use
-        /// <see cref="ApproxWidthMetres"/> to picture the hole.
-        /// </summary>
-        public readonly float PerimeterMetres;
-        /// <summary>Boundary edges in the loop.</summary>
-        public readonly int Edges;
-        /// <summary>Rough across-size of the hole: smooth perimeter ÷ π, with the ragged count halved.</summary>
-        public float ApproxWidthMetres => PerimeterMetres * 0.5f / Mathf.PI;
+        /// <summary>Area in square metres (faces × voxel²).</summary>
+        public readonly float AreaM2;
+        /// <summary>Leak faces in the patch.</summary>
+        public readonly int Faces;
+        /// <summary>Rough across-size: the side of a square of the same area.</summary>
+        public float ApproxWidthMetres => Mathf.Sqrt(Mathf.Max(AreaM2, 0f));
 
-        public MeshHole(Vector3 center, float perimeterMetres, int edges)
+        public MeshHole(Vector3 center, float areaM2, int faces)
         {
             Center = center;
-            PerimeterMetres = perimeterMetres;
-            Edges = edges;
+            AreaM2 = areaM2;
+            Faces = faces;
         }
     }
 
     /// <summary>
-    /// Analytic closure of the live mesh, from its boundary edges. Independent
-    /// of any scene model: a watertight surface has no boundary; every
-    /// boundary edge not sitting on a clip plane or the volume edge is a hole.
+    /// Closure of the scan from the boundary of observed free space. Every
+    /// voxel is free, solid or unknown; unknown connected to the outside of
+    /// the volume is exterior. Free–solid faces are the surface, free–exterior
+    /// faces are leaks. A sealed room has no leaks; behind a wall never counts.
+    /// Independent of any camera or scene model.
     /// </summary>
     public readonly struct MeshClosure
     {
-        /// <summary>
-        /// 1 / (1 + OpenBoundaryMetres / (ref × √MeshAreaM2)). 1 for a closed
-        /// surface; loops shorter than the hole minimum do not count.
-        /// </summary>
+        /// <summary>SurfaceAreaM2 / (SurfaceAreaM2 + LeakAreaM2). 1 for a sealed scan.</summary>
         public readonly float Closure;
-        /// <summary>Total length of counted hole loops, metres.</summary>
-        public readonly float OpenBoundaryMetres;
-        /// <summary>Mesh area estimate (quads × voxel²), m².</summary>
-        public readonly float MeshAreaM2;
-        /// <summary>Hole loops at or above the minimum perimeter.</summary>
+        /// <summary>Total leak area, m² (all leak faces, including patches below the hole minimum).</summary>
+        public readonly float LeakAreaM2;
+        /// <summary>Surface area estimate (free–solid faces × voxel²), m².</summary>
+        public readonly float SurfaceAreaM2;
+        /// <summary>Leak patches at or above the minimum area.</summary>
         public readonly int HoleCount;
-        /// <summary>All boundary edges that are not cuts, including tiny loops.</summary>
-        public readonly int HoleEdges;
-        /// <summary>Boundary edges on a clip plane / room AABB / volume edge.</summary>
-        public readonly int CutEdges;
-        /// <summary>Boundary edges the extract recorded (may exceed the analysed capacity).</summary>
-        public readonly int OpenEdgesTotal;
-        /// <summary>Largest hole loop, or default when none.</summary>
+        /// <summary>All leak faces.</summary>
+        public readonly int LeakFaces;
+        /// <summary>Free–exterior faces on a clip plane / room AABB / volume edge; not leaks.</summary>
+        public readonly int CutFaces;
+        /// <summary>Largest leak patch, or default when none.</summary>
         public readonly MeshHole LargestHole;
 
-        public MeshClosure(float closure, float openBoundaryMetres, float meshAreaM2, int holeCount,
-            int holeEdges, int cutEdges, int openEdgesTotal, MeshHole largestHole)
+        public MeshClosure(float closure, float leakAreaM2, float surfaceAreaM2, int holeCount,
+            int leakFaces, int cutFaces, MeshHole largestHole)
         {
             Closure = closure;
-            OpenBoundaryMetres = openBoundaryMetres;
-            MeshAreaM2 = meshAreaM2;
+            LeakAreaM2 = leakAreaM2;
+            SurfaceAreaM2 = surfaceAreaM2;
             HoleCount = holeCount;
-            HoleEdges = holeEdges;
-            CutEdges = cutEdges;
-            OpenEdgesTotal = openEdgesTotal;
+            LeakFaces = leakFaces;
+            CutFaces = cutFaces;
             LargestHole = largestHole;
         }
     }

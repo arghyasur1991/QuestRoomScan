@@ -522,64 +522,89 @@ never defines it.
 
 ### Scan analysis cycle (one 128-byte readback per second)
 
-Everything heavy stays on the GPU and is spread over ~16 frames of small
-kernels; the CPU sees a 32-word result once per `analysisIntervalSeconds`.
+The question is not "does the mesh have a boundary" — every TSDF surface has a
+ragged band edge behind it and in front of grazing walls — but **where does
+observed free space stop at something unknown that connects to the outside?**
+That is exactly where passthrough shows through the mesh, and it is a property
+of the volume alone: no camera pose, no ray, no scene model.
 
-1. **Reset** the scratch (hash, labels, component stats, result words).
-2. **`CountSurfaceCoverage`** — one full-volume read: surface voxels
-   (`|tsdf| < 0.3 && |w| > PRUNE_WEIGHT`), frozen (`w < 0`), coloured
-   (`alpha > 0.1`), **confident** (`|w| ≥ confidentWeight`, 0.3).
-3. **Snapshot** the Surface Nets boundary edges: `Graphics.CopyBuffer` of
-   `_OpenEdges` and `_Counters` into buffers the next extract cannot touch.
-   `MarkBoundary` (per vertex in `GenerateIndices`) appends one sample per
-   open direction: the surface is open at a vertex when a *tangent*
-   face-neighbour cell has no vertex **and** holds an unobserved voxel at or
-   ahead of the surface plane. A continuing surface always puts a vertex in
-   its tangent neighbours; a surface curving away leaves a fully observed
-   neighbour. Dropped quads are *not* the signal — they are the TSDF band
-   meeting unobserved voxels, which happens behind every surface. Each sample
-   carries the vertex normal (3 × 10 bit in `.w`). ≤ 16 384 kept, the counter
-   keeps the true total.
-   After finalize, **`FillMeshHoles`** stamps a soft local plane disc around
-   every sample whose loop is ≤ `fillMeshHoleMaxPerimeter` (1 m) into voxels
-   below `minMeshWeight` — hole closing on any surface, driven by the mesh.
-4. **Connected components** over those edges, the 2-D "connected paths" idea on
-   the surface boundary. Edges sit on voxel-grid positions, so adjacency is a
-   26-neighbour lookup in a voxel hash (`ClosureInsert`, open addressing,
-   `InterlockedMin` for the slot's edge index). Then `closureLinkRounds` (12)
-   frames of min-label link + pointer jump (`ClosureLink`, `ClosureJump`) —
-   O(log n) rounds for loops of thousands of edges.
-5. **Classify** (`ClosureClassify`): an edge within `cutToleranceVoxels` (2) of
-   a room clip plane, the room AABB or the volume edge is a **cut**, not a
-   hole (the doorway invisible wall is a clip plane; so is the 0.5 m expand).
-   Every other edge adds to its component's count and centroid (int mm).
-6. **Finalize** (`ClosureFinalize`, `ClosureCentroid`): components with
-   ≥ `holeMinPerimeter / voxelSize` edges (0.35 m → 7) are holes; the largest
-   is packed `count<<16 | root` with `InterlockedMax`, its centroid resolved.
-   The scan frontier is simply the largest hole.
-7. **Readback** of the 32 words. CPU derives
-   `Closure = 1 / (1 + max(0, open − closedBoundaryMetres) / (closureReference × √meshArea))`
-   with `open = holeEdges × voxelSize` (edges past the snapshot capacity count
-   as open), `meshArea ≈ quads × voxel²`; `Refinement = clamp01(confident ÷
-   surface ÷ refinementSaturation)`; and
+Every voxel is one of three classes: **F** observed free (`|w| ≥ minMeshWeight`,
+`tsdf > 0`), **S** observed solid (`|w| ≥ minMeshWeight`, `tsdf ≤ 0`), **U**
+unobserved. The surface is the set of F–S faces. Not every F–U face is a leak:
+un-seeded air in front of a grazing wall is a U pocket sealed by F and S and
+leaks nothing. So U is flooded from the outside of the volume into **E**
+(exterior unknown), and the **leak surface is the set of F–E faces**. A single
+missing solid voxel lets E through — that is the hole. Behind a wall is S–E
+and never counts.
+
+Everything heavy stays on the GPU, spread over ~25 frames of small kernels;
+the CPU sees a 32-word result once per `analysisIntervalSeconds`.
+
+1. **`AnalysisReset`** / **`ClosureReset`** — zero block flags / states, the
+   result words, the component hash and stats.
+2. **`ClassifyVoxels`** — the one full-volume pass. Writes each voxel's label
+   into an `R8_UNorm` 3-D texture (`gsLabelVolume`, label ÷ 5; also the source
+   of the mesh's red leak tint), ORs the class into its 8³ block's flags
+   (hasF / hasS / hasU), and folds in the old coverage counters: surface voxels
+   (`|tsdf| < 0.3 && |w| > PRUNE_WEIGHT`), frozen (`w < 0`), coloured, and
+   **confident** (`|w| ≥ confidentWeight`).
+3. **Block flood** (`BlockFloodInit`, `BlockFloodStep` × 64) over the 32³
+   blocks: pure-U blocks on the volume edge seed E; E spreads through any
+   block holding U. Everything outside the room clip is never written, so it
+   is pure U and joins the exterior on round one. Passing through mixed
+   blocks is a block-level over-approximation; only **pure-U** reached blocks
+   act as exterior seeds for the next step, and the fine flood decides per
+   voxel inside mixed blocks.
+4. **`BuildMixedList`** — blocks holding U *and* F or S: the shell of the
+   scan, typically ~10 % of the blocks. Their count becomes the indirect
+   dispatch argument; nothing below touches the other 90 %.
+5. **`FineFloodStep`** × (4 per frame × 6 frames) over the mixed blocks: a U
+   voxel with a 6-neighbour that is E (by label, or by lying in a reached
+   pure-U block, or beyond the volume) becomes E. The label texture is read
+   and written in place; the update is monotonic so races are harmless.
+6. **`LeakFaces`** over the mixed blocks: for each F voxel, each 6-neighbour
+   that is S counts one **surface face**; each neighbour that is E is a
+   **leak face** unless it lies within `cutToleranceVoxels` (2) of a clip
+   plane, the room AABB or the volume edge — those are **cuts** (the doorway
+   invisible wall, the 0.5 m expand). Leak faces are appended (F voxel
+   centre + packed direction, ≤ 65 536; the counter keeps the true total) and
+   the F voxel is relabelled **LEAK** so the mesh shader can tint it.
+7. **Connected components** over the leak faces (`ClosureInsert`,
+   `ClosureLink` × `closureLinkRounds`, `ClosureJump`, `ClosureClassify`,
+   `ClosureFinalize`, `ClosureCentroid`). Faces are keyed by their F voxel, so
+   the several faces of one voxel merge in the hash and a 26-neighbour lookup
+   joins adjacent voxels. Each component gets a face count and centroid;
+   components with ≥ `holeMinAreaM2 / voxel²` faces are **holes**, the largest
+   is packed `faces<<16 | root` with `InterlockedMax`. The scan frontier is
+   simply the largest hole.
+8. **`FillLeaks`** (`fillLeaks`, on): for every leak face whose component is
+   ≤ `fillLeakMaxAreaM2` (0.25 m²), the E voxel behind the face becomes solid
+   (`tsdf −0.5`, `fillWeight`) and the one behind it `−1`; the F voxel in
+   front stays positive, so the next extract puts a zero crossing exactly on
+   the face. Where the air in front of a small hole was observed, the F–E
+   interface *is* the missing surface. Frontier-sized components are never
+   capped; real depth (weight ≥ minMeshWeight) is never overwritten; body
+   capsules and outside-room voxels are skipped.
+9. **Readback** of the 32 words. CPU derives
+   `Closure = surfaceArea / (surfaceArea + leakArea)` with both areas =
+   faces × voxel² (the staircase inflates both alike, so the ratio is fair),
+   `Refinement = clamp01(confident ÷ surface ÷ refinementSaturation)`, and
    `OverallProgress = Closure × (1 − refinementInfluence × (1 − Refinement))`.
-   `closureReference` (6.0) is the excess boundary per √area that reads 50 % —
-   boundary length is ragged (voxel staircase, frontier fringe) and runs 3–5×
-   the ideal loop, so a half-scanned room with ~75 m of boundary reads ~35 %.
-   `closedBoundaryMetres` (1.0) lets a room with a few unreachable 10 cm holes
-   read 100 %. `confidentWeight` 0.2, `refinementSaturation` 0.85 (the band
-   always carries fresh voxels; 100 % confident never happens),
-   `refinementInfluence` 0.4 (an unsettled but closed room reads 60 %; freezing
-   helps but cannot mask a hole).
+   `ScanCoverage.LeakAreaM2` is the absolute number a host gates on
+   ("under 0.3 m² still open"); `HoleCount`, `LargestHole` (area, centroid)
+   list the holes; the tint, the count, the list and the fill all read the same
+   label texture, so they agree by construction.
 
-Why these two: a boundary edge is a place passthrough leaks through the
-finished mesh, and a voxel below the confident weight is a surface that is
-still moving (blend rate falls as weight grows). "No holes, nothing moving"
-is what a finished scan means; neither depends on MRUK being right.
+Why this and not the mesh boundary: a Surface Nets boundary edge appears
+wherever the ±0.15 m band meets unobserved voxels — behind every surface and in
+front of every grazing one — so counting edges over-reports holes everywhere.
+A free–exterior face appears only where the player could look *through* the
+scan. The two agree at a real hole and disagree exactly at the false positives.
 
-Cost per cycle: the volume count (already existed), ≤ 16k × 27 hash probes per
-link round over ~12 frames, a few hundred KB of buffer traffic, one 128-byte
-readback. Nothing per frame, nothing over the volume beyond step 2.
+Cost per cycle: one full-volume read (2 bytes/voxel, was already there), 64
+rounds over 32k block words, ~24 rounds over ~10 % of the voxels, ≤ 65k × 27
+hash probes per link round, one 128-byte readback. Nothing per frame, nothing
+over the volume beyond step 2. Memory: 16 MB label texture + ~4 MB of buffers.
 
 ### Shell coverage (compute kernel `MarchShellCells`, requires `RoomUnderstanding`)
 
@@ -641,7 +666,7 @@ makes the analytic closure above reach 100 % in practice.
   finalize; the host reads `ScanProgress.OverallProgress` and decides.
 
 ### ScanCoverage / ScanProgress (CPU)
-- `ScanCoverage` analytic: `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`, `OpenBoundaryMetres`, `HoleCount`, `LargestHole` (`MeshHole`: centre, perimeter, edges). Shell prior: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`. Raw: `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction` (the freeze tool's own metric), `MeshVertexCount`, `MeshTriangleCount`.
+- `ScanCoverage` analytic: `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`, `LeakAreaM2`, `SurfaceAreaM2`, `HoleCount`, `LargestHole` (`MeshHole`: centre, area, faces), `LeakFills`. Shell prior: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`. Raw: `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction` (the freeze tool's own metric), `MeshVertexCount`, `MeshTriangleCount`.
 - `ScanProgress.OverallProgress = Closure × (1 − refinementInfluence × (1 − Refinement))` (0 until the first cycle); phase `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. There is no plateau or frozen-fraction blend any more.
 - `FreezeInView` / `UnfreezeInView` paint a spotlight cone from the head — apex at the eye, axis along the gaze, half-angle `freezeConeHalfAngle` (15°) — so a press paints what the player is looking straight at and they turn their head for more. The head pose is always available; the earlier passthrough-camera frustum needed intrinsics that were not, and its wide window painted the whole view. Hosts read `RoomScanSession.FreezeConeHalfAngle` to draw a ring.
 - `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`

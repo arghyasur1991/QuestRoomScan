@@ -199,10 +199,17 @@ namespace Genesis.RoomScan
         private bool _frustumReady;
         private float _lastPruneTime;
 
-        // ── Scan analysis (coverage counters + mesh closure) ───────────
+        // ── Scan analysis: the boundary of observed free space ─────────
         // One time-sliced GPU cycle per analysisIntervalSeconds, one 128-byte
-        // readback at its end. See ScanAnalysis / StepAnalysis.
-        private ComputeKernelHelper _coverageKernel;
+        // readback at its end. See StepAnalysis and the compute file header.
+        private ComputeKernelHelper _anResetKernel;
+        private ComputeKernelHelper _anClearLabelsKernel;
+        private ComputeKernelHelper _anClassifyKernel;
+        private ComputeKernelHelper _anBlockInitKernel;
+        private ComputeKernelHelper _anBlockStepKernel;
+        private ComputeKernelHelper _anMixedListKernel;
+        private ComputeKernelHelper _anFineStepKernel;
+        private ComputeKernelHelper _anLeakKernel;
         private ComputeKernelHelper _ccResetKernel;
         private ComputeKernelHelper _ccInsertKernel;
         private ComputeKernelHelper _ccLinkKernel;
@@ -212,24 +219,43 @@ namespace Genesis.RoomScan
         private ComputeKernelHelper _ccCentroidKernel;
         private ComputeKernelHelper _ccFillKernel;
         private ComputeBuffer _analysisResult;
-        private GraphicsBuffer _ccEdgesSnap;
-        private GraphicsBuffer _ccCountersSnap;
+        private RenderTexture _labelVolume;
+        private ComputeBuffer _blockFlags;
+        private ComputeBuffer _blockState;
+        private ComputeBuffer _mixedList;
+        private GraphicsBuffer _mixedArgs;
+        private ComputeBuffer _leakFaces;
+        private ComputeBuffer _leakCounters;
         private ComputeBuffer _ccHashKey;
         private ComputeBuffer _ccHashVal;
         private ComputeBuffer _ccLabel;
         private ComputeBuffer _ccComp;
+        private Vector3Int _blockCount;
+        private int _blockTotal;
         private AnalysisState _analysisState;
         private int _analysisRound;
-        private int _analysisExtractSeen = -1;
         private float _lastAnalysisTime;
         private readonly uint[] _analysisCpu = new uint[AnalysisWords];
 
         private const int AnalysisWords = 32;
-        private const int CcHashSize = GPUSurfaceNets.MaxOpenEdges * 2;
+        private const int BlockSize = 8;
+        /// <summary>Leak-face capacity; a half-scanned room's frontier is a few thousand faces.</summary>
+        public const int LeakFaceCap = 65536;
+        private const int CcHashSize = LeakFaceCap * 2;
 
         private static readonly int AnalysisResultID = Shader.PropertyToID("_AnalysisResult");
         private static readonly int ConfidentWeightID = Shader.PropertyToID("gsConfidentWeight");
         private static readonly int ColorVolumeReadID = Shader.PropertyToID("gsColorVolumeRead");
+        private static readonly int LabelRWID = Shader.PropertyToID("gsLabelRW");
+        private static readonly int LabelVolumeID = Shader.PropertyToID("gsLabelVolume");
+        private static readonly int BlockCountID = Shader.PropertyToID("gsBlockCount");
+        private static readonly int BlockFlagsID = Shader.PropertyToID("gsBlockFlags");
+        private static readonly int BlockStateID = Shader.PropertyToID("gsBlockState");
+        private static readonly int MixedListID = Shader.PropertyToID("gsMixedList");
+        private static readonly int MixedArgsID = Shader.PropertyToID("gsMixedArgs");
+        private static readonly int LeakFacesID = Shader.PropertyToID("gsLeakFaces");
+        private static readonly int LeakCountersID = Shader.PropertyToID("gsLeakCounters");
+        private static readonly int LeakCapID = Shader.PropertyToID("gsLeakCap");
         private static readonly int CcEdgesID = Shader.PropertyToID("gsCcEdges");
         private static readonly int CcCountersID = Shader.PropertyToID("gsCcCounters");
         private static readonly int CcHashKeyID = Shader.PropertyToID("gsCcHashKey");
@@ -239,44 +265,39 @@ namespace Genesis.RoomScan
         private static readonly int CcCapID = Shader.PropertyToID("gsCcCap");
         private static readonly int CcHashMaskID = Shader.PropertyToID("gsCcHashMask");
         private static readonly int CcHashSizeID = Shader.PropertyToID("gsCcHashSize");
-        private static readonly int CcMinEdgesID = Shader.PropertyToID("gsCcMinEdges");
+        private static readonly int CcMinFacesID = Shader.PropertyToID("gsCcMinFaces");
         private static readonly int CcCutTolID = Shader.PropertyToID("gsCcCutTol");
-        private static readonly int FillMaxEdgesID = Shader.PropertyToID("gsFillMaxEdges");
-        private static readonly int FillMaxRadiusID = Shader.PropertyToID("gsFillMaxRadius");
+        private static readonly int FillMaxFacesID = Shader.PropertyToID("gsFillMaxFaces");
         private static readonly int FreezeOriginID = Shader.PropertyToID("gsFreezeOrigin");
         private static readonly int FreezeDirID = Shader.PropertyToID("gsFreezeDir");
 
-        enum AnalysisState { Idle, Link, Classify, Finalize, Readback, Disabled }
+        enum AnalysisState { Idle, BlockFlood, FineFlood, LeakFaces, Link, Classify, Finalize, Readback, Disabled }
 
         [Header("Scan analysis")]
-        [Tooltip("Seconds between analysis cycles. Each cycle is ~16 frames of small kernels and one 128-byte readback.")]
+        [Tooltip("Seconds between analysis cycles. Each cycle is ~25 frames of small kernels (one full-volume classify, then shell-only floods) and one 128-byte readback.")]
         [SerializeField, Range(0.25f, 5f)] private float analysisIntervalSeconds = 1f;
         [Tooltip("Surface voxels at or above this |weight| count as refined. Weight only grows with good observations (max 0.5) and the blend rate falls with it, so this is 'the surface has stopped moving'. 0.2 is about half a second of good frames.")]
         [SerializeField, Range(0.1f, 0.5f)] private float confidentWeight = 0.2f;
         [Tooltip("Confident fraction at which refinement reads 1. The band around every surface always carries some fresh low-weight voxels, so 100 % confident never happens; 0.85 is 'everything the eye can see has settled'.")]
         [SerializeField, Range(0.5f, 1f)] private float refinementSaturation = 0.85f;
-        [Tooltip("How much an unsettled surface can hold progress back: progress = closure × (1 − influence × (1 − refinement)). 0.4 → a closed room whose surface has not settled at all reads 60 %; freezing a settled area still helps, but cannot mask a hole.")]
+        [Tooltip("How much an unsettled surface can hold progress back: progress = closure × (1 − influence × (1 − refinement)). Freezing a settled area still helps, but cannot mask a leak.")]
         [SerializeField, Range(0f, 1f)] private float refinementInfluence = 0.4f;
-        [Tooltip("Boundary loops shorter than this (metres) are ignored: a pit a few centimetres across is not a leak. 0.35 m is ~7 voxel edges, ~11 cm across.")]
-        [SerializeField, Range(0.05f, 1f)] private float holeMinPerimeter = 0.35f;
-        [Tooltip("Open boundary up to this many metres counts as fully closed (a few 10 cm holes in nooks no one can reach). Above it the curve below applies.")]
-        [SerializeField, Range(0f, 5f)] private float closedBoundaryMetres = 1f;
-        [Tooltip("Open boundary beyond closedBoundaryMetres, in metres per √meshArea, at which closure reads 50 %: closure = 1 / (1 + (open − closed) / (ref × √area)). " +
-                 "Boundary length is ragged (voxel staircase, frontier fringe) so it runs 3-5× the ideal loop. " +
-                 "Calibrated on device: 20 → a half-scanned 46 m² room with 76 m of boundary reads 64 %, an 82 m² room with 28 m in 20 holes (one ~1 m ceiling hole) reads 87 %, 92 % at ~17 m, 100 % at 1 m.")]
-        [SerializeField, Range(0.5f, 40f)] private float closureReference = 20f;
+        [Tooltip("Leak components smaller than this (m²) are not listed as holes. They still count in the leak area. 0.01 m² is four 5 cm faces.")]
+        [SerializeField, Range(0f, 0.2f)] private float holeMinAreaM2 = 0.01f;
+        [Tooltip("Cap leaks up to this area (m²) by turning the unknown voxel behind each leak face solid; the mesh closes along the free/unknown interface next extract. Frontier-sized components are never capped.")]
+        [SerializeField] private bool fillLeaks = true;
+        [SerializeField, Range(0.01f, 2f)] private float fillLeakMaxAreaM2 = 0.25f;
+        [Tooltip("Leak faces within this many voxels of a clip plane, the room AABB or the volume edge are cuts (doorway, expand), not holes.")]
+        [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
+        [Tooltip("Block-flood rounds per frame (32³ blocks; trivial per round).")]
+        [SerializeField, Range(8, 128)] private int blockFloodRoundsPerFrame = 64;
+        [Tooltip("Fine-flood rounds over the shell voxels per frame, and how many frames. U next to E becomes E; a 1-voxel gap in the surface lets E through.")]
+        [SerializeField, Range(1, 16)] private int fineFloodRoundsPerFrame = 4;
+        [SerializeField, Range(1, 16)] private int fineFloodFrames = 6;
+        [Tooltip("Min-label link + pointer-jump rounds for hole components, one per frame.")]
+        [SerializeField, Range(4, 32)] private int closureLinkRounds = 12;
         [Tooltip("Half-angle, degrees, of the spotlight cone FreezeInView / UnfreezeInView paint from the eye along the gaze. 15° is a tight spot: a press paints what the player is looking straight at and they turn their head to paint more. Hosts draw a ring at this angle.")]
         [SerializeField, Range(5f, 45f)] private float freezeConeHalfAngle = 15f;
-        [Tooltip("Close small holes where the mesh itself reports them: a soft local plane disc around every boundary edge of a small loop, into voxels with no meshable data. Any surface, not just scene-model planes.")]
-        [SerializeField] private bool fillMeshHoles = true;
-        [Tooltip("Loops longer than this (metres, ragged voxel-edge length) are frontier, not holes, and are left alone.")]
-        [SerializeField, Range(0.2f, 3f)] private float fillMeshHoleMaxPerimeter = 1f;
-        [Tooltip("Cap on the disc radius stamped around each hole edge, metres.")]
-        [SerializeField, Range(0.05f, 0.3f)] private float fillMeshHoleMaxRadius = 0.15f;
-        [Tooltip("Boundary edges within this many voxels of a clip plane, the room AABB or the volume edge are cuts, not holes.")]
-        [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
-        [Tooltip("Min-label link + pointer-jump rounds, one per frame. 12 converges loops of a few thousand edges.")]
-        [SerializeField, Range(4, 32)] private int closureLinkRounds = 12;
 
         /// <summary>Number of voxels near the zero-crossing with sufficient weight (surface voxels).</summary>
         public int SurfaceVoxelCount { get; private set; }
@@ -290,12 +311,12 @@ namespace Genesis.RoomScan
         public float ConfidentFraction { get; private set; }
         /// <summary>Refinement 0–1: <see cref="ConfidentFraction"/> scaled so <c>refinementSaturation</c> reads 1.</summary>
         public float Refinement { get; private set; }
-        /// <summary>Mesh closure from the last analysis cycle.</summary>
+        /// <summary>Leak analysis from the last cycle.</summary>
         public MeshClosure Closure { get; private set; }
-        /// <summary>closure × (1 − refinementInfluence × (1 − refinement)). The number a host gates on.</summary>
+        /// <summary>closure × (1 − refinementInfluence × (1 − refinement)).</summary>
         public float Progress { get; private set; }
-        /// <summary>Hole edges stamped by the mesh-hole fill so far this scan.</summary>
-        public int MeshHoleFills { get; private set; }
+        /// <summary>Leak faces capped by the fill so far this scan.</summary>
+        public int LeakFills { get; private set; }
         /// <summary>True once a cycle has completed for the current scan.</summary>
         public bool AnalysisAvailable { get; private set; }
 
@@ -421,9 +442,6 @@ namespace Genesis.RoomScan
             _eraseKernel.Set(VolumeRWID, _volume);
             _eraseKernel.Set(ColorVolumeRWID, _colorVolume);
 
-            _coverageKernel = new ComputeKernelHelper(compute, "CountSurfaceCoverage");
-            _coverageKernel.Set(VolumeRWID, _volume);
-            compute.SetTexture(_coverageKernel.KernelIndex, ColorVolumeReadID, _colorVolume);
             InitAnalysisBuffers();
 
             _shellMarchKernel = new ComputeKernelHelper(compute, "MarchShellCells");
@@ -530,69 +548,137 @@ namespace Genesis.RoomScan
             _unfreezeKernel.Set(VolumeRWID, _volume);
             _eraseKernel.Set(VolumeRWID, _volume);
             _eraseKernel.Set(ColorVolumeRWID, _colorVolume);
-            _coverageKernel.Set(VolumeRWID, _volume);
-            compute.SetTexture(_coverageKernel.KernelIndex, ColorVolumeReadID, _colorVolume);
             _shellMarchKernel.Set(VolumeRWID, _volume);
             _fillPatchKernel.Set(VolumeRWID, _volume);
             _closeHolesKernel.Set(VolumeRWID, _volume);
-            _ccFillKernel.Set(VolumeRWID, _volume);
+            BindAnalysisVolumes();
         }
 
         // ── Scan analysis cycle ─────────────────────────────────────────
 
         void InitAnalysisBuffers()
         {
-            const int cap = GPUSurfaceNets.MaxOpenEdges;
-            const GraphicsBuffer.Target structuredCopyDest =
-                GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.CopyDestination;
+            _blockCount = new Vector3Int(
+                Mathf.CeilToInt(voxelCount.x / (float)BlockSize),
+                Mathf.CeilToInt(voxelCount.y / (float)BlockSize),
+                Mathf.CeilToInt(voxelCount.z / (float)BlockSize));
+            _blockTotal = _blockCount.x * _blockCount.y * _blockCount.z;
+
             _analysisResult ??= new ComputeBuffer(AnalysisWords, sizeof(uint));
-            _ccEdgesSnap ??= new GraphicsBuffer(structuredCopyDest, cap, 16);
-            _ccCountersSnap ??= new GraphicsBuffer(structuredCopyDest, GPUSurfaceNets.CounterCount, 4);
+            _blockFlags ??= new ComputeBuffer(_blockTotal, sizeof(uint));
+            _blockState ??= new ComputeBuffer(_blockTotal, sizeof(uint));
+            _mixedList ??= new ComputeBuffer(_blockTotal, sizeof(uint));
+            _mixedArgs ??= new GraphicsBuffer(GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.IndirectArguments, 3, sizeof(uint));
+            _leakFaces ??= new ComputeBuffer(LeakFaceCap, sizeof(float) * 4);
+            _leakCounters ??= new ComputeBuffer(4, sizeof(uint));
             _ccHashKey ??= new ComputeBuffer(CcHashSize, sizeof(uint));
             _ccHashVal ??= new ComputeBuffer(CcHashSize, sizeof(uint));
-            _ccLabel ??= new ComputeBuffer(cap, sizeof(uint));
-            _ccComp ??= new ComputeBuffer(cap * 4, sizeof(int));
-            _ccCountersSnap.SetData(new uint[GPUSurfaceNets.CounterCount]);
+            _ccLabel ??= new ComputeBuffer(LeakFaceCap, sizeof(uint));
+            _ccComp ??= new ComputeBuffer(LeakFaceCap * 4, sizeof(int));
+            _mixedArgs.SetData(new uint[] { 0u, 1u, 1u });
+            _leakCounters.SetData(new uint[4]);
+            EnsureLabelVolume();
 
+            _anResetKernel = new ComputeKernelHelper(compute, "AnalysisReset");
+            _anClearLabelsKernel = new ComputeKernelHelper(compute, "ClearLabels");
+            _anClassifyKernel = new ComputeKernelHelper(compute, "ClassifyVoxels");
+            _anBlockInitKernel = new ComputeKernelHelper(compute, "BlockFloodInit");
+            _anBlockStepKernel = new ComputeKernelHelper(compute, "BlockFloodStep");
+            _anMixedListKernel = new ComputeKernelHelper(compute, "BuildMixedList");
+            _anFineStepKernel = new ComputeKernelHelper(compute, "FineFloodStep");
+            _anLeakKernel = new ComputeKernelHelper(compute, "LeakFaces");
             _ccResetKernel = new ComputeKernelHelper(compute, "ClosureReset");
             _ccInsertKernel = new ComputeKernelHelper(compute, "ClosureInsert");
             _ccLinkKernel = new ComputeKernelHelper(compute, "ClosureLink");
             _ccJumpKernel = new ComputeKernelHelper(compute, "ClosureJump");
             _ccClassifyKernel = new ComputeKernelHelper(compute, "ClosureClassify");
             _ccFinalizeKernel = new ComputeKernelHelper(compute, "ClosureFinalize");
+            _ccFillKernel = new ComputeKernelHelper(compute, "FillLeaks");
             _ccCentroidKernel = new ComputeKernelHelper(compute, "ClosureCentroid");
-            _ccFillKernel = new ComputeKernelHelper(compute, "FillMeshHoles");
-            _ccFillKernel.Set(VolumeRWID, _volume);
 
-            _coverageKernel.Set(AnalysisResultID, _analysisResult);
-            foreach (var k in new[] { _ccResetKernel, _ccInsertKernel, _ccLinkKernel, _ccJumpKernel,
-                         _ccClassifyKernel, _ccFinalizeKernel, _ccCentroidKernel, _ccFillKernel })
+            foreach (var k in new[] { _anResetKernel, _anClearLabelsKernel, _anClassifyKernel, _anBlockInitKernel, _anBlockStepKernel,
+                         _anMixedListKernel, _anFineStepKernel, _anLeakKernel, _ccResetKernel, _ccInsertKernel,
+                         _ccLinkKernel, _ccJumpKernel, _ccClassifyKernel, _ccFinalizeKernel, _ccFillKernel,
+                         _ccCentroidKernel })
             {
                 k.Set(AnalysisResultID, _analysisResult);
-                k.Set(CcEdgesID, _ccEdgesSnap);
-                k.Set(CcCountersID, _ccCountersSnap);
+                k.Set(BlockFlagsID, _blockFlags);
+                k.Set(BlockStateID, _blockState);
+                k.Set(MixedListID, _mixedList);
+                k.Set(MixedArgsID, _mixedArgs);
+                k.Set(LeakFacesID, _leakFaces);
+                k.Set(LeakCountersID, _leakCounters);
+                k.Set(CcEdgesID, _leakFaces);
+                k.Set(CcCountersID, _leakCounters);
                 k.Set(CcHashKeyID, _ccHashKey);
                 k.Set(CcHashValID, _ccHashVal);
                 k.Set(CcLabelID, _ccLabel);
                 k.Set(CcCompID, _ccComp);
             }
-            compute.SetInt(CcCapID, cap);
+            BindAnalysisVolumes();
+            compute.SetInts(BlockCountID, _blockCount.x, _blockCount.y, _blockCount.z);
+            compute.SetInt(LeakCapID, LeakFaceCap);
+            compute.SetInt(CcCapID, LeakFaceCap);
             compute.SetInt(CcHashSizeID, CcHashSize);
             compute.SetInt(CcHashMaskID, CcHashSize - 1);
+            ClearLabels();
+        }
+
+        /// <summary>Everything unknown: no tint, no stale leaks from a previous scan until the first cycle lands.</summary>
+        void ClearLabels()
+        {
+            if (_anClearLabelsKernel.Shader == null || _labelVolume == null) return;
+            _anClearLabelsKernel.Set(LabelRWID, _labelVolume);
+            _anClearLabelsKernel.DispatchFit(_labelVolume);
+        }
+
+        void EnsureLabelVolume()
+        {
+            if (_labelVolume != null && _labelVolume.width == voxelCount.x
+                && _labelVolume.height == voxelCount.y && _labelVolume.volumeDepth == voxelCount.z)
+                return;
+            if (_labelVolume != null) { _labelVolume.Release(); Destroy(_labelVolume); }
+            _labelVolume = new RenderTexture(voxelCount.x, voxelCount.y, 0, GraphicsFormat.R8_UNorm)
+            {
+                dimension = TextureDimension.Tex3D,
+                volumeDepth = voxelCount.z,
+                enableRandomWrite = true,
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp,
+                name = "RoomScan Labels"
+            };
+            _labelVolume.Create();
+            Shader.SetGlobalTexture(LabelVolumeID, _labelVolume);
+        }
+
+        /// <summary>Volume-dependent bindings for the analysis kernels; call after (re)allocating volumes.</summary>
+        void BindAnalysisVolumes()
+        {
+            if (_anClassifyKernel.Shader == null || _volume == null) return;
+            _anClassifyKernel.Set(VolumeRWID, _volume);
+            compute.SetTexture(_anClassifyKernel.KernelIndex, ColorVolumeReadID, _colorVolume);
+            _ccFillKernel.Set(VolumeRWID, _volume);
+            foreach (var k in new[] { _anClearLabelsKernel, _anClassifyKernel, _anFineStepKernel, _anLeakKernel })
+                k.Set(LabelRWID, _labelVolume);
         }
 
         void ReleaseAnalysisBuffers()
         {
             _analysisResult?.Release();
-            _ccEdgesSnap?.Release();
-            _ccCountersSnap?.Release();
+            _blockFlags?.Release();
+            _blockState?.Release();
+            _mixedList?.Release();
+            _mixedArgs?.Release();
+            _leakFaces?.Release();
+            _leakCounters?.Release();
             _ccHashKey?.Release();
             _ccHashVal?.Release();
             _ccLabel?.Release();
             _ccComp?.Release();
-            _analysisResult = null;
-            _ccEdgesSnap = _ccCountersSnap = null;
-            _ccHashKey = _ccHashVal = _ccLabel = _ccComp = null;
+            _analysisResult = _blockFlags = _blockState = _mixedList = null;
+            _mixedArgs = null;
+            _leakFaces = _leakCounters = _ccHashKey = _ccHashVal = _ccLabel = _ccComp = null;
+            if (_labelVolume != null) { _labelVolume.Release(); Destroy(_labelVolume); _labelVolume = null; }
         }
 
         /// <summary>Forget the last cycle's numbers (scan start).</summary>
@@ -600,26 +686,23 @@ namespace Genesis.RoomScan
         {
             AnalysisAvailable = false;
             _analysisState = AnalysisState.Idle;
-            _analysisExtractSeen = -1;
             _lastAnalysisTime = 0f;
             SurfaceVoxelCount = FrozenSurfaceCount = ColoredSurfaceCount = ConfidentSurfaceCount = 0;
             ConfidentFraction = Refinement = Progress = 0f;
-            MeshHoleFills = 0;
+            LeakFills = 0;
             Closure = default;
+            ClearLabels();
         }
 
         /// <summary>
         /// Advance the analysis cycle by one frame. Call once per frame while
-        /// scanning, after the extract for that frame has been issued.
-        /// <para>
-        /// Idle → (tick due, fresh extract) reset scratch, count surface voxels,
-        /// GPU-copy the Surface Nets boundary edges + counters into the
-        /// snapshot, hash-insert → <c>closureLinkRounds</c> frames of link +
-        /// jump → classify → finalize + centroid → one readback of the 32-word
-        /// result. The shell march rides the same tick.
-        /// </para>
+        /// scanning. Idle → (tick due) reset, classify the volume, seed the
+        /// block flood → block flood → mixed list + fine flood over the shell →
+        /// leak faces → component link/jump rounds → classify → finalize + fill
+        /// + one readback of the 32-word result. The shell march rides the
+        /// first frame.
         /// </summary>
-        internal void StepAnalysis(GPUSurfaceNets surfaceNets, int extractCount)
+        internal void StepAnalysis()
         {
             if (_volume == null || _analysisResult == null) return;
 
@@ -628,74 +711,84 @@ namespace Genesis.RoomScan
                 case AnalysisState.Idle:
                 {
                     if (Time.time - _lastAnalysisTime < analysisIntervalSeconds) return;
-                    if (surfaceNets == null || surfaceNets.OpenEdgeBuffer == null) return;
-                    if (extractCount == _analysisExtractSeen) return; // no new mesh since last cycle
-                    _analysisExtractSeen = extractCount;
 
                     compute.SetFloat(ConfidentWeightID, confidentWeight);
-                    compute.SetInt(CcMinEdgesID, Mathf.Max(1, Mathf.RoundToInt(holeMinPerimeter / voxelSize)));
+                    compute.SetFloat(CoverMinWeightID, minMeshWeight);
                     compute.SetFloat(CcCutTolID, cutToleranceVoxels * voxelSize);
+                    float faceArea = voxelSize * voxelSize;
+                    compute.SetInt(CcMinFacesID, Mathf.Max(1, Mathf.RoundToInt(holeMinAreaM2 / faceArea)));
+                    compute.SetInt(FillMaxFacesID, Mathf.Max(1, Mathf.RoundToInt(fillLeakMaxAreaM2 / faceArea)));
                     BindScanPriors(compute);
+                    BindAnalysisVolumes();
 
+                    _anResetKernel.DispatchFit(Mathf.Max(_blockTotal, AnalysisWords), 1);
                     _ccResetKernel.DispatchFit(CcHashSize, 1);
-                    _coverageKernel.Set(VolumeRWID, _volume);
-                    _coverageKernel.DispatchFit(_volume);
-                    try
-                    {
-                        Graphics.CopyBuffer(surfaceNets.OpenEdgeBuffer, _ccEdgesSnap);
-                        Graphics.CopyBuffer(surfaceNets.CountersBuffer, _ccCountersSnap);
-                    }
-                    catch (Exception e)
-                    {
-                        // Never retry per frame: log once and stand down for this scan.
-                        Logger.Warning($"[VolumeIntegrator] Scan analysis disabled: {e.Message}");
-                        _analysisState = AnalysisState.Disabled;
-                        return;
-                    }
-                    _ccInsertKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    _anClassifyKernel.DispatchFit(_volume);
+                    _anBlockInitKernel.DispatchFit(_blockTotal, 1);
                     DispatchShellMarch();
 
+                    _analysisRound = 0;
+                    _analysisState = AnalysisState.BlockFlood;
+                    break;
+                }
+                case AnalysisState.BlockFlood:
+                {
+                    for (int i = 0; i < blockFloodRoundsPerFrame; i++)
+                        _anBlockStepKernel.DispatchFit(_blockTotal, 1);
+                    _anMixedListKernel.DispatchFit(_blockTotal, 1);
+                    _analysisRound = 0;
+                    _analysisState = AnalysisState.FineFlood;
+                    break;
+                }
+                case AnalysisState.FineFlood:
+                {
+                    for (int i = 0; i < fineFloodRoundsPerFrame; i++)
+                        compute.DispatchIndirect(_anFineStepKernel.KernelIndex, _mixedArgs);
+                    if (++_analysisRound >= fineFloodFrames)
+                        _analysisState = AnalysisState.LeakFaces;
+                    break;
+                }
+                case AnalysisState.LeakFaces:
+                {
+                    compute.DispatchIndirect(_anLeakKernel.KernelIndex, _mixedArgs);
+                    _ccInsertKernel.DispatchFit(LeakFaceCap, 1);
                     _analysisRound = 0;
                     _analysisState = AnalysisState.Link;
                     break;
                 }
                 case AnalysisState.Link:
                 {
-                    _ccLinkKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
-                    _ccJumpKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    _ccLinkKernel.DispatchFit(LeakFaceCap, 1);
+                    _ccJumpKernel.DispatchFit(LeakFaceCap, 1);
                     if (++_analysisRound >= closureLinkRounds)
                         _analysisState = AnalysisState.Classify;
                     break;
                 }
                 case AnalysisState.Classify:
                 {
-                    _ccJumpKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
-                    _ccClassifyKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    _ccJumpKernel.DispatchFit(LeakFaceCap, 1);
+                    _ccClassifyKernel.DispatchFit(LeakFaceCap, 1);
                     _analysisState = AnalysisState.Finalize;
                     break;
                 }
                 case AnalysisState.Finalize:
                 {
-                    _ccFinalizeKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
-                    _ccCentroidKernel.DispatchFit(1, 1);
-                    if (fillMeshHoles)
+                    _ccFinalizeKernel.DispatchFit(LeakFaceCap, 1);
+                    if (fillLeaks)
                     {
-                        // Loop counts are final now; stamp the small ones.
-                        compute.SetInt(FillMaxEdgesID, Mathf.Max(1, Mathf.RoundToInt(fillMeshHoleMaxPerimeter / voxelSize)));
-                        compute.SetFloat(FillMaxRadiusID, fillMeshHoleMaxRadius);
                         compute.SetFloat(FillWeightID, fillWeight);
-                        compute.SetFloat(CoverMinWeightID, minMeshWeight);
                         BindExclusionUniforms(compute);
                         _ccFillKernel.Set(VolumeRWID, _volume);
-                        _ccFillKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                        _ccFillKernel.DispatchFit(LeakFaceCap, 1);
                     }
+                    _ccCentroidKernel.DispatchFit(1, 1);
                     AsyncGPUReadback.Request(_analysisResult, OnAnalysisReadback);
                     _analysisState = AnalysisState.Readback;
                     break;
                 }
                 case AnalysisState.Readback:
                 case AnalysisState.Disabled:
-                    break; // waiting on the GPU / stood down until ResetAnalysis
+                    break;
             }
         }
 
@@ -716,30 +809,24 @@ namespace Genesis.RoomScan
             ConfidentFraction = SurfaceVoxelCount > 0 ? (float)ConfidentSurfaceCount / SurfaceVoxelCount : 0f;
             Refinement = Mathf.Clamp01(ConfidentFraction / Mathf.Max(0.01f, refinementSaturation));
 
-            int openTotal = (int)r[4];
-            int openUsed = (int)r[5];
-            int sigEdges = (int)r[8];
-            // Edges past the snapshot capacity were never analysed; count
-            // them as open boundary so an overflowing frontier reads low.
-            sigEdges += Mathf.Max(0, openTotal - openUsed);
+            float faceArea = voxelSize * voxelSize;
+            int leakTotal = (int)r[4];
+            int cutFaces = (int)r[6];
+            int surfaceFaces = (int)r[14];
             uint packed = r[10];
-            int largestEdges = (int)(packed >> 16);
+            int largestFaces = (int)(packed >> 16);
             Vector3 largestCenter = new Vector3(
                 (int)r[11] * 0.001f, (int)r[12] * 0.001f, (int)r[13] * 0.001f);
-            int quads = (int)r[14] / 6;
-            float area = quads * voxelSize * voxelSize;
-            float openMetres = sigEdges * voxelSize;
-            float reference = Mathf.Max(closureReference * Mathf.Sqrt(Mathf.Max(area, 0f)), 4f * voxelSize);
-            // Up to closedBoundaryMetres is "closed": a few 10 cm holes in nooks
-            // nobody can reach must still let the number reach 100 %.
-            float excess = Mathf.Max(0f, openMetres - closedBoundaryMetres);
-            float closure = area > 0f ? 1f / (1f + excess / reference) : 0f;
+
+            float leakArea = leakTotal * faceArea;
+            float surfaceArea = surfaceFaces * faceArea;
+            float closure = surfaceArea + leakArea > 0f ? surfaceArea / (surfaceArea + leakArea) : 0f;
 
             Closure = new MeshClosure(
-                closure, openMetres, area, (int)r[9], (int)r[7], (int)r[6], openTotal,
-                new MeshHole(largestCenter, largestEdges * voxelSize, largestEdges));
+                closure, leakArea, surfaceArea, (int)r[9], leakTotal, cutFaces,
+                new MeshHole(largestCenter, largestFaces * faceArea, largestFaces));
             Progress = Mathf.Clamp01(closure * (1f - refinementInfluence * (1f - Refinement)));
-            MeshHoleFills += (int)r[16];
+            LeakFills += (int)r[15];
             AnalysisAvailable = true;
         }
 

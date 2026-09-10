@@ -22,20 +22,33 @@ All notable changes to this package are documented here. The format follows
   integrate (controller → `HandOnControllerAnchor`; else tracked `OVRHand`).
   `RoomScanSession.SetBodyExclusionAnchors` is for hosts with a non-OVR
   rig; it marks anchors host-owned so the scanner will not overwrite them.
-- Scan progress is analytic. `ScanProgress.OverallProgress =
-  min(Closure, Refinement)`: closure from the live mesh's own boundary
-  edges (Surface Nets records every crossing edge whose quad could not be
-  emitted; a GPU connected-components pass over a snapshot clusters them
-  into loops, drops loops on clip planes / the volume edge as cuts, ignores
-  loops under `holeMinPerimeter`), refinement from the fraction of surface
-  voxels at or above `confidentWeight`. Time-sliced over ~16 frames, one
-  128-byte readback per `analysisIntervalSeconds`. `ScanCoverage` gains
-  `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`,
-  `OpenBoundaryMetres`, `HoleCount`, `LargestHole`. Needs no scene model.
-- Mesh-hole fill (`fillMeshHoles`, on): after each closure analysis, every
-  boundary edge in a loop up to `fillMeshHoleMaxPerimeter` gets a soft local
-  plane disc stamped into voxels with no meshable data. Closes small holes on
-  any surface, not only scene-model planes.
+- Scan progress is analytic, from the boundary of observed free space. Each
+  voxel is observed-free, observed-solid or unknown; unknown connected to the
+  outside of the volume (a block flood over 8³ blocks, then a fine flood over
+  the shell blocks only) is exterior. Free–solid faces are the surface,
+  free–exterior faces are leaks — where passthrough shows through. Faces
+  within `cutToleranceVoxels` of a clip plane / the volume edge are cuts.
+  `Closure = surface / (surface + leak)`; `ScanProgress.OverallProgress =
+  Closure × (1 − refinementInfluence × (1 − Refinement))`, refinement being
+  the fraction of surface voxels at or above `confidentWeight`. One
+  full-volume classify per cycle, the rest over ~10 % of the voxels,
+  time-sliced over ~25 frames, one 128-byte readback per
+  `analysisIntervalSeconds`. `ScanCoverage` gains `AnalysisAvailable`,
+  `Closure`, `Refinement`, `ConfidentSurfaceCount`, `LeakAreaM2`,
+  `SurfaceAreaM2`, `HoleCount`, `LargestHole` (area, centroid), `LeakFills`.
+  Needs no camera pose, no rays, no scene model. The labels live in an
+  `R8_UNorm` 3-D texture (`gsLabelVolume`) that the scan mesh shader samples
+  for the red leak tint (`ShowHoles`), so tint, count, list and fill agree.
+- Leak fill (`fillLeaks`, on): leak patches up to `fillLeakMaxAreaM2`
+  (0.25 m²) are capped by turning the unknown voxel behind each leak face
+  solid; the mesh closes along the free/unknown interface at the next
+  extract. Frontier-sized patches are never capped; real depth is never
+  overwritten. Replaces the mesh-boundary disc stamp.
+- Removed: Surface Nets `_OpenEdges` / `MarkBoundary` boundary emission and
+  the vertex `_pad` tint; `holeMinPerimeter`, `closedBoundaryMetres`,
+  `closureReference`, `fillMeshHoles*`; `MeshClosure.OpenBoundaryMetres` /
+  `HoleEdges` / `CutEdges` / `OpenEdgesTotal`, `MeshHole.PerimeterMetres` /
+  `Edges`, `ScanCoverage.MeshHoleFills`.
 - Multi-view bake: `blendMinFraction` 0.3 → 0.75 and new `maxViewsPerTexel`
   (3) so a long scan no longer averages dozens of misregistered views into
   mush. Keyframe capture thresholds 0.4 m / 20° → 0.5 m / 25°.

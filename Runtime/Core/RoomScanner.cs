@@ -73,9 +73,10 @@ namespace Genesis.RoomScan
         /// <summary>True once the first analysis cycle of this scan has completed.</summary>
         public bool AnalysisAvailable;
         /// <summary>
-        /// Mesh closure 0–1 from the live mesh's own boundary: 1 when every
-        /// surface edge has two faces. Holes shorter than the minimum loop do
-        /// not count; edges on a clip plane or the volume edge are cuts.
+        /// Closure 0–1 = surface area / (surface area + leak area). Leak area
+        /// is where observed free space meets unknown connected to the outside
+        /// of the scan — where passthrough shows through. 1 for a sealed scan.
+        /// Faces on a clip plane or the volume edge are cuts, not leaks.
         /// </summary>
         public float Closure;
         /// <summary>
@@ -87,14 +88,16 @@ namespace Genesis.RoomScan
         public float ConfidentFraction;
         /// <summary>Surface voxels at or above the confident weight.</summary>
         public int ConfidentSurfaceCount;
-        /// <summary>Length of counted hole loops, metres.</summary>
-        public float OpenBoundaryMetres;
-        /// <summary>Hole loops at or above the minimum perimeter.</summary>
+        /// <summary>Total leak area, m². The number a host gates on ("under 0.3 m² still open").</summary>
+        public float LeakAreaM2;
+        /// <summary>Surface area estimate, m².</summary>
+        public float SurfaceAreaM2;
+        /// <summary>Leak patches at or above the minimum area.</summary>
         public int HoleCount;
-        /// <summary>Largest hole loop (the frontier while scanning), or default.</summary>
+        /// <summary>Largest leak patch (the frontier while scanning), or default.</summary>
         public MeshHole LargestHole;
-        /// <summary>Hole edges stamped by the mesh-hole fill so far this scan.</summary>
-        public int MeshHoleFills;
+        /// <summary>Leak faces capped by the auto-fill so far this scan.</summary>
+        public int LeakFills;
 
         // ── Shell prior (optional; guidance and auto-fill, never the gate) ──
         /// <summary>
@@ -563,10 +566,7 @@ namespace Genesis.RoomScan
                 }
             }
 
-            // After this frame's extract (if any): the analysis cycle only
-            // snapshots a mesh newer than the one it last measured.
-            if (_meshExtractor != null)
-                _volumeIntegrator.StepAnalysis(_meshExtractor.GpuSurfaceNets, _meshExtractor.ExtractCount);
+            _volumeIntegrator.StepAnalysis();
 
             if (t - _lastScannerLog >= 5f)
             {
@@ -579,11 +579,12 @@ namespace Genesis.RoomScan
                     Logger.Info(
                         $"[RoomScanner] Analysis: progress={_volumeIntegrator.Progress:P0} closure={cl.Closure:P0} " +
                         $"refinement={_volumeIntegrator.Refinement:P0} (confident {_volumeIntegrator.ConfidentFraction:P0}) " +
-                        $"open={cl.OpenBoundaryMetres:F2}m holes={cl.HoleCount} largest={cl.LargestHole.PerimeterMetres:F2}m loop " +
-                        $"(~{cl.LargestHole.ApproxWidthMetres:F2}m across) @({cl.LargestHole.Center.x:F2},{cl.LargestHole.Center.y:F2},{cl.LargestHole.Center.z:F2}) " +
-                        $"area={cl.MeshAreaM2:F1}m2 edges: total={cl.OpenEdgesTotal} cut={cl.CutEdges} hole={cl.HoleEdges} " +
-                        $"surface={_volumeIntegrator.SurfaceVoxelCount} confident={_volumeIntegrator.ConfidentSurfaceCount} " +
-                        $"fills: mesh={_volumeIntegrator.MeshHoleFills} shell={(_shellTracker != null && _shellTracker.Available ? _shellTracker.FillsApplied : 0)}" +
+                        $"leak={cl.LeakAreaM2:F2}m2 surface={cl.SurfaceAreaM2:F1}m2 holes={cl.HoleCount} " +
+                        $"largest={cl.LargestHole.AreaM2:F2}m2 (~{cl.LargestHole.ApproxWidthMetres:F2}m across) " +
+                        $"@({cl.LargestHole.Center.x:F2},{cl.LargestHole.Center.y:F2},{cl.LargestHole.Center.z:F2}) " +
+                        $"faces: leak={cl.LeakFaces} cut={cl.CutFaces} " +
+                        $"voxels: surface={_volumeIntegrator.SurfaceVoxelCount} confident={_volumeIntegrator.ConfidentSurfaceCount} " +
+                        $"fills: leak={_volumeIntegrator.LeakFills} shell={(_shellTracker != null && _shellTracker.Available ? _shellTracker.FillsApplied : 0)}" +
                         (_shellTracker != null && _shellTracker.Available ? $" shellCov={_shellTracker.Coverage:P0} shellGaps={_shellTracker.GapCount}" : ""));
                 }
             }
@@ -2019,10 +2020,11 @@ namespace Genesis.RoomScan
                 cov.Refinement = _volumeIntegrator.Refinement;
                 cov.ConfidentFraction = _volumeIntegrator.ConfidentFraction;
                 cov.ConfidentSurfaceCount = _volumeIntegrator.ConfidentSurfaceCount;
-                cov.OpenBoundaryMetres = cl.OpenBoundaryMetres;
+                cov.LeakAreaM2 = cl.LeakAreaM2;
+                cov.SurfaceAreaM2 = cl.SurfaceAreaM2;
                 cov.HoleCount = cl.HoleCount;
                 cov.LargestHole = cl.LargestHole;
-                cov.MeshHoleFills = _volumeIntegrator.MeshHoleFills;
+                cov.LeakFills = _volumeIntegrator.LeakFills;
             }
 
             if (_shellTracker != null && _shellTracker.Available)
