@@ -546,7 +546,7 @@ kernels; the CPU sees a 32-word result once per `analysisIntervalSeconds`.
    hole (the doorway invisible wall is a clip plane; so is the 0.5 m expand).
    Every other edge adds to its component's count and centroid (int mm).
 6. **Finalize** (`ClosureFinalize`, `ClosureCentroid`): components with
-   ≥ `holeMinPerimeter / voxelSize` edges (0.2 m → 4) are holes; the largest
+   ≥ `holeMinPerimeter / voxelSize` edges (0.35 m → 7) are holes; the largest
    is packed `count<<16 | root` with `InterlockedMax`, its centroid resolved.
    The scan frontier is simply the largest hole.
 7. **Readback** of the 32 words. CPU derives
@@ -554,6 +554,10 @@ kernels; the CPU sees a 32-word result once per `analysisIntervalSeconds`.
    `openBoundary = holeEdges × voxelSize` (edges past the snapshot capacity
    count as open), `meshArea ≈ quads × voxel²`, `Refinement = confident ÷
    surface`, and `OverallProgress = min(Closure, Refinement)`.
+   `closureReference` is the open boundary per √area that reads 50 %; boundary
+   length is ragged (voxel staircase, frontier fringe) and runs 3–5× the ideal
+   loop, so the default is 6.0: a half-scanned room with ~75 m of boundary
+   reads ~36 %, a finished 90 m² room 92 % at 5 m open, 100 % closed.
 
 Why these two: a boundary edge is a place passthrough leaks through the
 finished mesh, and a voxel below the confident weight is a surface that is

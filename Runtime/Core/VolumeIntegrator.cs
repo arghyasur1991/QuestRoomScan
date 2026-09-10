@@ -248,10 +248,12 @@ namespace Genesis.RoomScan
         [SerializeField, Range(0.25f, 5f)] private float analysisIntervalSeconds = 1f;
         [Tooltip("Surface voxels at or above this |weight| count as refined. Weight only grows with good observations (max 0.5) and the blend rate falls with it, so this is 'the surface has stopped moving'.")]
         [SerializeField, Range(0.1f, 0.5f)] private float confidentWeight = 0.3f;
-        [Tooltip("Boundary loops shorter than this (metres) are ignored: a few-centimetre pit is not a leak.")]
-        [SerializeField, Range(0.05f, 1f)] private float holeMinPerimeter = 0.2f;
-        [Tooltip("Closure = 1 / (1 + openBoundary / (ref × √meshArea)). 0.3 puts 50 % at an open boundary of 0.3·√A metres (2.8 m for a 90 m² room) and 92 % at about one 8 cm hole.")]
-        [SerializeField, Range(0.05f, 1f)] private float closureReference = 0.3f;
+        [Tooltip("Boundary loops shorter than this (metres) are ignored: a pit a few centimetres across is not a leak. 0.35 m is ~7 voxel edges, ~11 cm across.")]
+        [SerializeField, Range(0.05f, 1f)] private float holeMinPerimeter = 0.35f;
+        [Tooltip("Open boundary, in metres per √meshArea, at which closure reads 50 %: closure = 1 / (1 + open / (ref × √area)). " +
+                 "Boundary length is ragged (voxel staircase, frontier fringe) so it runs 3-5× the ideal loop. " +
+                 "6.0 → a half-scanned 50 m² room with 76 m of boundary reads ~36 %; a 90 m² room reads 88 % at 8 m open, 92 % at 5 m, 95 % at 3 m.")]
+        [SerializeField, Range(0.5f, 20f)] private float closureReference = 6f;
         [Tooltip("Boundary edges within this many voxels of a clip plane, the room AABB or the volume edge are cuts, not holes.")]
         [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
         [Tooltip("Min-label link + pointer-jump rounds, one per frame. 12 converges loops of a few thousand edges.")]
