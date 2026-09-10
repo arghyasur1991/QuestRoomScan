@@ -11,12 +11,15 @@ All notable changes to this package are documented here. The format follows
 - Body exclusion is capsules, not a 0.6 m head cylinder: torso (0.35 m,
   world-up), hands (0.14 m), and short forearms. Tests voxel position so a
   wall behind a hand still fills. `FreezeInView` skips capsules; unfreeze
-  does not. Optional `eraseBodyBlobs` (off) can clear leftover hand voxels.
+  does not. Optional `eraseBodyBlobs` (off) can clear leftover hand voxels
+  below `eraseMaxWeight` (0.2, above seed weight).
 - `DepthCapture.removeHandsFromDepth` requests Meta occlusion hand removal
   (inpaints depth). Needs hand tracking; the runtime turns it off while
   holding controllers. Capsules cover that case.
-- `RoomScanSession.SetBodyExclusionAnchors` lets a host pin Capsense /
-  controller wrists. Default: `OVRCameraRig` each integrate.
+- Default: `RoomScanner` refreshes head / wrists from `OVRCameraRig` each
+  integrate (controller → `HandOnControllerAnchor`; else tracked `OVRHand`).
+  `RoomScanSession.SetBodyExclusionAnchors` is for hosts with a non-OVR
+  rig; it marks anchors host-owned so the scanner will not overwrite them.
 
 ## [1.0.0] - 2026-09-09
 

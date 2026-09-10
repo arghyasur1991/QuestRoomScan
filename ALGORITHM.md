@@ -488,7 +488,9 @@ lock a body blob). Unfreeze does not skip — old blobs can be unlocked.
 
 Optional `eraseBodyBlobs` (off by default) runs after Integrate and zeros
 non-frozen voxels inside **hand/forearm** capsules whose weight is below
-`minMeshWeight`. Torso is never erased.
+`eraseMaxWeight` (default 0.2, above `SEED_WEIGHT` 0.10). Torso is never
+erased. Do not key this on `minMeshWeight` (0.08) — a freshly seeded voxel
+is already 0.10 and would never clear.
 
 `DepthCapture.removeHandsFromDepth` (default on) asks the Meta occlusion
 subsystem to inpaint hands out of the depth texture via
@@ -496,7 +498,8 @@ subsystem to inpaint hands out of the depth texture via
 the runtime while holding controllers — capsules cover that case.
 
 Hosts may pin anchors with `RoomScanSession.SetBodyExclusionAnchors` before
-`StartScanAsync`. Otherwise `RoomScanner` refreshes from `OVRCameraRig`
+`StartScanAsync` (non-OVR rigs; marks them host-owned). Otherwise
+`RoomScanner` refreshes from a cached `OVRCameraRig` each integrate
 (controller tracked → `HandOnControllerAnchor` / controller; else tracked
 `OVRHand`).
 
@@ -575,7 +578,8 @@ Passthrough **visualization** (`OVRPassthroughLayer`) is unrelated and stays on.
 | `torsoAbove` / `torsoBelow` | 0.25 / 1.7 m | Torso segment from head |
 | `handRadius` / `handHalfLength` | 0.14 / 0.08 m | Wrist capsule along forward |
 | `forearmRadius` / `forearmLength` | 0.08 / 0.28 m | Wrist toward estimated shoulder |
-| `eraseBodyBlobs` | false | Optional post-Integrate clear of unfrozen hand/forearm voxels below `minMeshWeight` |
+| `eraseBodyBlobs` | false | Optional post-Integrate clear of unfrozen hand/forearm voxels below `eraseMaxWeight` |
+| `eraseMaxWeight` | 0.2 | Eraser weight ceiling. Must be above `SEED_WEIGHT` (0.10) |
 | `removeHandsFromDepth` | true | Meta occlusion inpaint (hand tracking; off while holding controllers) |
 
 ### Convergence

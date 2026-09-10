@@ -120,8 +120,10 @@ namespace Genesis.RoomScan
         [SerializeField] private float forearmLength = 0.28f;
         [SerializeField] private float shoulderDrop = 0.2f;
         [SerializeField] private float shoulderLateral = 0.2f;
-        [Tooltip("After Integrate, zero non-frozen voxels inside hand/forearm capsules whose weight is below MinMeshWeight. Off by default — exclusion already skips those voxels.")]
+        [Tooltip("After Integrate, zero non-frozen voxels inside hand/forearm capsules whose weight is below eraseMaxWeight. Off by default — exclusion already skips those voxels.")]
         [SerializeField] private bool eraseBodyBlobs = false;
+        [Tooltip("Weight ceiling for the optional eraser. Must sit above SEED_WEIGHT (0.10) or a freshly seeded hand voxel is never cleared. Independent of MinMeshWeight.")]
+        [SerializeField, Range(0.1f, 0.5f)] private float eraseMaxWeight = 0.2f;
 
         [Header("Pruning")]
         [SerializeField] private float pruneIntervalSeconds = 3f;
@@ -961,7 +963,7 @@ namespace Genesis.RoomScan
             target.SetVectorArray(ExclusionP0ID, _exclusionP0);
             target.SetVectorArray(ExclusionP1ID, _exclusionP1);
             target.SetInt(EraseBodyID, eraseBodyBlobs ? 1 : 0);
-            target.SetFloat(EraseMaxWeightID, minMeshWeight);
+            target.SetFloat(EraseMaxWeightID, eraseMaxWeight);
         }
 
         void DispatchEraseBodyBlobs()

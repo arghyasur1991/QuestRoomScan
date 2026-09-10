@@ -442,6 +442,9 @@ namespace Genesis.RoomScan
         private float _lastEmptyRoomBindAttempt;
         private readonly List<Vector4> _clipScratch = new(32);
         private readonly List<ScanScreenStamp> _stampScratch = new(4);
+        private OVRCameraRig _bodyRig;
+        private OVRHand _leftOvrHand;
+        private OVRHand _rightOvrHand;
 
         private void Update()
         {
@@ -1827,7 +1830,10 @@ namespace Genesis.RoomScan
             if (_volumeIntegrator == null || _volumeIntegrator.BodyAnchorsHostOwned)
                 return;
 
-            var rig = FindAnyObjectByType<OVRCameraRig>();
+            if (_bodyRig == null)
+                _bodyRig = FindAnyObjectByType<OVRCameraRig>();
+
+            var rig = _bodyRig;
             if (rig != null && rig.centerEyeAnchor != null)
                 _volumeIntegrator.HeadAnchor = rig.centerEyeAnchor;
             else if (_volumeIntegrator.HeadAnchor == null && Camera.main != null)
@@ -1838,7 +1844,7 @@ namespace Genesis.RoomScan
             _volumeIntegrator.RightHandAnchor = PickWrist(rig, left: false);
         }
 
-        static Transform PickWrist(OVRCameraRig rig, bool left)
+        Transform PickWrist(OVRCameraRig rig, bool left)
         {
             var controller = left ? OVRInput.Controller.LTouch : OVRInput.Controller.RTouch;
             if (OVRInput.GetControllerPositionTracked(controller))
@@ -1850,7 +1856,13 @@ namespace Genesis.RoomScan
 
             var handAnchor = left ? rig.leftHandAnchor : rig.rightHandAnchor;
             if (handAnchor == null) return null;
-            var hand = handAnchor.GetComponentInChildren<OVRHand>();
+            var hand = left ? _leftOvrHand : _rightOvrHand;
+            if (hand == null)
+            {
+                hand = handAnchor.GetComponentInChildren<OVRHand>();
+                if (left) _leftOvrHand = hand;
+                else _rightOvrHand = hand;
+            }
             if (hand != null && !hand.IsTracked) return null;
             return handAnchor;
         }
