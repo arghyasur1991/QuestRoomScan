@@ -69,6 +69,17 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Tint the live scan mesh red where the surface is open — the same
+        /// boundary the closure metric counts, so the player can see what is
+        /// holding <c>ScanProgress.OverallProgress</c> down. Off by default.
+        /// </summary>
+        public bool ShowHoles
+        {
+            get => _scanner != null && _scanner.ShowHoles;
+            set { if (_scanner != null) _scanner.ShowHoles = value; }
+        }
+
+        /// <summary>
         /// Soft-stamp the captured plane over small uncovered wall / floor /
         /// ceiling patches while scanning (see <c>ScanCoverage.ShellFillsApplied</c>).
         /// Default on. Furniture close is a separate inspector toggle.

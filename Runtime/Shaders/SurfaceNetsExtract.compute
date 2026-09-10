@@ -56,7 +56,7 @@ struct GPUVertex
     float3 norm;
     uint   packedColor;
     uint   voxelFlatIdx;
-    uint   _pad;
+    uint   _pad;          // 1 = boundary vertex (owns a dropped quad); ClassifyAndEmit resets to 0
 };
 
 // ──────────────────────────────────────────────────────────────────
@@ -428,6 +428,10 @@ void TryEmitQuad(int3 coord, int3 axis, int3 d1, int3 d2)
         InterlockedAdd(_Counters[2], 1, oi);
         if (oi < _MaxOpenEdges)
             _OpenEdges[oi] = float4(VoxelCoordToWorld((float3)coord + 0.5 * (float3)axis), 0);
+        // Flag the owning vertex so the live shader can tint the boundary.
+        // Only this thread writes vertex `a` (GenerateIndices is per vertex).
+        if (a >= 0)
+            _Vertices[a]._pad = 1u;
         return;
     }
 

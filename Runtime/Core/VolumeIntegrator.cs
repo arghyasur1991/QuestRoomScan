@@ -259,10 +259,10 @@ namespace Genesis.RoomScan
         [SerializeField, Range(0f, 5f)] private float closedBoundaryMetres = 1f;
         [Tooltip("Open boundary beyond closedBoundaryMetres, in metres per √meshArea, at which closure reads 50 %: closure = 1 / (1 + (open − closed) / (ref × √area)). " +
                  "Boundary length is ragged (voxel staircase, frontier fringe) so it runs 3-5× the ideal loop. " +
-                 "6.0 → a half-scanned 50 m² room with 76 m of boundary reads ~35 %; a 90 m² room reads 93 % at 5 m open, 97 % at 3 m, 100 % at 1 m.")]
-        [SerializeField, Range(0.5f, 20f)] private float closureReference = 6f;
-        [Tooltip("Fraction of the passthrough camera image, centred, that FreezeInView / UnfreezeInView act on. 0.5 = the middle half of the width and height, so a press paints roughly what the player is looking straight at and they turn their head to paint more.")]
-        [SerializeField, Range(0.1f, 1f)] private float freezeViewFraction = 0.5f;
+                 "Calibrated on device: 20 → a half-scanned 46 m² room with 76 m of boundary reads 64 %, an 82 m² room with 28 m in 20 holes (one ~1 m ceiling hole) reads 87 %, 92 % at ~17 m, 100 % at 1 m.")]
+        [SerializeField, Range(0.5f, 40f)] private float closureReference = 20f;
+        [Tooltip("Fraction of the passthrough camera image, centred, that FreezeInView / UnfreezeInView act on. 0.35 ≈ a ±15° cone, so a press paints what the player is looking straight at and they turn their head to paint more.")]
+        [SerializeField, Range(0.1f, 1f)] private float freezeViewFraction = 0.35f;
         [Tooltip("Boundary edges within this many voxels of a clip plane, the room AABB or the volume edge are cuts, not holes.")]
         [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
         [Tooltip("Min-label link + pointer-jump rounds, one per frame. 12 converges loops of a few thousand edges.")]
@@ -1009,7 +1009,7 @@ namespace Genesis.RoomScan
             BindExclusionUniforms(compute);
             _freezeKernel.Set(VolumeRWID, _volume);
             _freezeKernel.DispatchFit(_volume);
-            Logger.Info("FreezeInView dispatched");
+            Logger.Info($"FreezeInView dispatched (window ±{0.5f * Mathf.Clamp01(freezeViewFraction):F2} uv)");
         }
 
         /// <summary>
@@ -1027,7 +1027,7 @@ namespace Genesis.RoomScan
                 focalLen, principalPt, sensorRes, currentRes);
             _unfreezeKernel.Set(VolumeRWID, _volume);
             _unfreezeKernel.DispatchFit(_volume);
-            Logger.Info("UnfreezeInView dispatched");
+            Logger.Info($"UnfreezeInView dispatched (window ±{0.5f * Mathf.Clamp01(freezeViewFraction):F2} uv)");
         }
 
         private void SetFrustumCameraUniforms(ComputeKernelHelper kernel, Vector3 camPos,

@@ -241,6 +241,18 @@ namespace Genesis.RoomScan
             set { showFreezeTint = value; Shader.SetGlobalFloat(NoFreezeTintID, value ? 0f : 1f); }
         }
 
+        /// <summary>
+        /// Tint the live mesh red where the surface is open — the boundary
+        /// edges the closure metric counts. The same data the analysis uses,
+        /// so what is red is what is holding the number down.
+        /// </summary>
+        public bool ShowHoles
+        {
+            get => _showHoles;
+            set { _showHoles = value; Shader.SetGlobalFloat(ShowHolesID, value ? 1f : 0f); }
+        }
+        private bool _showHoles;
+
         /// <summary>The unified scene object registry (MRUK + AI detections).</summary>
         public SceneObjectRegistry SceneObjectRegistry => _sceneObjectRegistry;
 
@@ -565,8 +577,8 @@ namespace Genesis.RoomScan
                     Logger.Info(
                         $"[RoomScanner] Analysis: progress={_volumeIntegrator.Progress:P0} closure={cl.Closure:P0} " +
                         $"refinement={_volumeIntegrator.Refinement:P0} (confident {_volumeIntegrator.ConfidentFraction:P0}) " +
-                        $"open={cl.OpenBoundaryMetres:F2}m holes={cl.HoleCount} largest={cl.LargestHole.PerimeterMetres:F2}m " +
-                        $"@({cl.LargestHole.Center.x:F2},{cl.LargestHole.Center.y:F2},{cl.LargestHole.Center.z:F2}) " +
+                        $"open={cl.OpenBoundaryMetres:F2}m holes={cl.HoleCount} largest={cl.LargestHole.PerimeterMetres:F2}m loop " +
+                        $"(~{cl.LargestHole.ApproxWidthMetres:F2}m across) @({cl.LargestHole.Center.x:F2},{cl.LargestHole.Center.y:F2},{cl.LargestHole.Center.z:F2}) " +
                         $"area={cl.MeshAreaM2:F1}m2 edges: total={cl.OpenEdgesTotal} cut={cl.CutEdges} hole={cl.HoleEdges} " +
                         $"surface={_volumeIntegrator.SurfaceVoxelCount} confident={_volumeIntegrator.ConfidentSurfaceCount}");
                 }
@@ -2079,6 +2091,7 @@ namespace Genesis.RoomScan
             Shader.SetGlobalFloat(WireframeID, 0f);
             Shader.SetGlobalFloat(WireThicknessID, wireThickness);
             Shader.SetGlobalFloat(NoFreezeTintID, showFreezeTint ? 0f : 1f);
+            Shader.SetGlobalFloat(ShowHolesID, _showHoles ? 1f : 0f);
         }
 
         private int _colorFrameLog;
@@ -2146,6 +2159,7 @@ namespace Genesis.RoomScan
         }
 
         private static readonly int NoFreezeTintID = Shader.PropertyToID("_RSNoFreezeTint");
+        private static readonly int ShowHolesID = Shader.PropertyToID("_RSShowHoles");
         private static readonly int TriAvailableID = Shader.PropertyToID("_RSTriAvailable");
         private static readonly int WireframeID = Shader.PropertyToID("_RSWireframe");
         private static readonly int WireThicknessID = Shader.PropertyToID("_RSWireThickness");

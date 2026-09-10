@@ -20,10 +20,16 @@ namespace Genesis.RoomScan
     {
         /// <summary>World-space centroid of the loop's edge midpoints.</summary>
         public readonly Vector3 Center;
-        /// <summary>Approximate loop length in metres (edges × voxel size).</summary>
+        /// <summary>
+        /// Loop length in metres as counted (edges × voxel size). Voxel-edge
+        /// loops are ragged, so this runs ~2× the smooth perimeter; use
+        /// <see cref="ApproxWidthMetres"/> to picture the hole.
+        /// </summary>
         public readonly float PerimeterMetres;
         /// <summary>Boundary edges in the loop.</summary>
         public readonly int Edges;
+        /// <summary>Rough across-size of the hole: smooth perimeter ÷ π, with the ragged count halved.</summary>
+        public float ApproxWidthMetres => PerimeterMetres * 0.5f / Mathf.PI;
 
         public MeshHole(Vector3 center, float perimeterMetres, int edges)
         {
