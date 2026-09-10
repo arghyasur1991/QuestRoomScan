@@ -37,13 +37,13 @@ namespace Genesis.RoomScan
     {
         /// <summary>Before <see cref="RoomScanner.StartScanningAsync"/> is called.</summary>
         NotStarted,
-        /// <summary>New geometry appearing rapidly — early scan.</summary>
+        /// <summary>Progress below 0.30 — the mesh is mostly frontier.</summary>
         Discovering,
-        /// <summary>Geometry mostly stable, color/frozen coverage still filling in.</summary>
+        /// <summary>Progress 0.30–0.90 — closing holes, surfaces still settling.</summary>
         Refining,
-        /// <summary>Both geometry and color have plateaued.</summary>
+        /// <summary>Progress 0.90–0.95.</summary>
         Stabilized,
-        /// <summary>Plateaued long enough to consider the scan ready for refinement.</summary>
+        /// <summary>Progress at or above 0.95: closed and refined.</summary>
         Complete
     }
 
@@ -64,17 +64,37 @@ namespace Genesis.RoomScan
         public int ColoredSurfaceCount;
         /// <summary>Colored / Surface ratio (0–1).</summary>
         public float ColorCoverage;
-        /// <summary>Frozen / Surface ratio (0–1). Strongest "done" signal.</summary>
+        /// <summary>Frozen / Surface ratio (0–1). The freeze tool's own metric; not part of progress.</summary>
         public float FrozenFraction;
         /// <summary>Number of captured keyframes so far.</summary>
         public int KeyframeCount;
-        /// <summary>True when mesh vertex count has plateaued for several cycles.</summary>
-        public bool IsStabilized;
 
+        // ── Analytic (always available; the gate) ─────────────────────
+        /// <summary>True once the first analysis cycle of this scan has completed.</summary>
+        public bool AnalysisAvailable;
+        /// <summary>
+        /// Mesh closure 0–1 from the live mesh's own boundary: 1 when every
+        /// surface edge has two faces. Holes shorter than the minimum loop do
+        /// not count; edges on a clip plane or the volume edge are cuts.
+        /// </summary>
+        public float Closure;
+        /// <summary>Confident ÷ surface voxels (0–1): how much of the surface has stopped moving.</summary>
+        public float Refinement;
+        /// <summary>Surface voxels at or above the confident weight.</summary>
+        public int ConfidentSurfaceCount;
+        /// <summary>Length of counted hole loops, metres.</summary>
+        public float OpenBoundaryMetres;
+        /// <summary>Hole loops at or above the minimum perimeter.</summary>
+        public int HoleCount;
+        /// <summary>Largest hole loop (the frontier while scanning), or default.</summary>
+        public MeshHole LargestHole;
+
+        // ── Shell prior (optional; guidance and auto-fill, never the gate) ──
         /// <summary>
         /// True when the captured room shell (MRUK walls / floor / ceiling /
         /// furniture) is being marched. False without <see cref="RoomUnderstanding"/>
-        /// or a resolved room — fall back to <see cref="FrozenFraction"/>.
+        /// or a resolved room. Guidance only — progress is <see cref="Closure"/>
+        /// and <see cref="Refinement"/>.
         /// </summary>
         public bool ShellCoverageAvailable;
         /// <summary>
@@ -101,7 +121,11 @@ namespace Genesis.RoomScan
     {
         /// <summary>The underlying raw coverage metrics.</summary>
         public ScanCoverage Coverage;
-        /// <summary>Blended 0–1 overall progress (frozen fraction weighted heaviest).</summary>
+        /// <summary>
+        /// min(<see cref="ScanCoverage.Closure"/>, <see cref="ScanCoverage.Refinement"/>):
+        /// the mesh has no holes and has stopped moving. 0 until the first
+        /// analysis cycle. Nothing from the scene model feeds this.
+        /// </summary>
         public float OverallProgress;
         /// <summary>Current high-level scan phase.</summary>
         public ScanPhase Phase;
@@ -292,17 +316,6 @@ namespace Genesis.RoomScan
         private bool _started;
         private bool _serverTrainingInProgress;
         private bool _scanResourcesReleased;
-
-        // Plateau detection state
-        private int _prevVertexCount;
-        private int _stableVertexCycles;
-        private int _stableColorCycles;
-        private float _prevColorCoverage;
-        private float _stabilizedTime;
-        private const int StableThresholdCycles = 5;
-        private const float StabilizedHoldSeconds = 3f;
-        private const float VertexGrowthThreshold = 0.02f; // 2% change considered growth
-        private const float ColorGrowthThreshold = 0.01f;  // 1% change
 
         // ─────────────────────────────────────────────────────────────
         //  Texture refinement state
@@ -527,17 +540,31 @@ namespace Genesis.RoomScan
                     if (_meshExtractor != null && _meshExtractor.TryExtract())
                     {
                         _lastMeshTime = t;
-                        UpdatePlateauDetection();
                         MeshExtracted?.Invoke();
                     }
                 }
             }
+
+            // After this frame's extract (if any): the analysis cycle only
+            // snapshots a mesh newer than the one it last measured.
+            if (_meshExtractor != null)
+                _volumeIntegrator.StepAnalysis(_meshExtractor.GpuSurfaceNets, _meshExtractor.ExtractCount);
 
             if (t - _lastScannerLog >= 5f)
             {
                 _lastScannerLog = t;
                 Logger.Verbose($"Scanner: integrations={_integrateCount}, " +
                     $"depthAvail={DepthCapture.DepthAvailable}");
+                if (_volumeIntegrator.AnalysisAvailable)
+                {
+                    var cl = _volumeIntegrator.Closure;
+                    Logger.Info(
+                        $"[RoomScanner] Analysis: closure={cl.Closure:P0} refinement={_volumeIntegrator.Refinement:P0} " +
+                        $"open={cl.OpenBoundaryMetres:F2}m holes={cl.HoleCount} largest={cl.LargestHole.PerimeterMetres:F2}m " +
+                        $"@({cl.LargestHole.Center.x:F2},{cl.LargestHole.Center.y:F2},{cl.LargestHole.Center.z:F2}) " +
+                        $"area={cl.MeshAreaM2:F1}m2 edges: total={cl.OpenEdgesTotal} cut={cl.CutEdges} hole={cl.HoleEdges} " +
+                        $"surface={_volumeIntegrator.SurfaceVoxelCount} confident={_volumeIntegrator.ConfidentSurfaceCount}");
+                }
             }
         }
 
@@ -697,11 +724,7 @@ namespace Genesis.RoomScan
                 // vertex preview and open a fresh _tmp package + anchor.
                 if (!resuming)
                 {
-                    _prevVertexCount = 0;
-                    _stableVertexCycles = 0;
-                    _stableColorCycles = 0;
-                    _prevColorCoverage = 0f;
-                    _stabilizedTime = 0f;
+                    _volumeIntegrator.ResetAnalysis();
 
                     SetRenderMode(ScanRenderMode.Vertex);
 
@@ -2044,9 +2067,20 @@ namespace Genesis.RoomScan
                 ColoredSurfaceCount = coloredVoxels,
                 ColorCoverage = colorCov,
                 FrozenFraction = frozenFrac,
-                KeyframeCount = _keyframeCollector != null ? _keyframeCollector.SavedCount : 0,
-                IsStabilized = _stableVertexCycles >= StableThresholdCycles
+                KeyframeCount = _keyframeCollector != null ? _keyframeCollector.SavedCount : 0
             };
+
+            if (_volumeIntegrator != null && _volumeIntegrator.AnalysisAvailable)
+            {
+                var cl = _volumeIntegrator.Closure;
+                cov.AnalysisAvailable = true;
+                cov.Closure = cl.Closure;
+                cov.Refinement = _volumeIntegrator.Refinement;
+                cov.ConfidentSurfaceCount = _volumeIntegrator.ConfidentSurfaceCount;
+                cov.OpenBoundaryMetres = cl.OpenBoundaryMetres;
+                cov.HoleCount = cl.HoleCount;
+                cov.LargestHole = cl.LargestHole;
+            }
 
             if (_shellTracker != null && _shellTracker.Available)
             {
@@ -2063,33 +2097,24 @@ namespace Genesis.RoomScan
             return cov;
         }
 
+        /// <summary>
+        /// Progress is analytic only: the mesh's own closure and how much of
+        /// the surface has stopped moving. The shell prior is reported beside
+        /// it for guidance and drives auto-fill, but never this number.
+        /// </summary>
         private ScanProgress BuildProgress()
         {
             var cov = BuildCoverage();
-            float geometryStability = cov.IsStabilized ? 1f : Mathf.Clamp01(_stableVertexCycles / (float)StableThresholdCycles);
-            float progress = cov.FrozenFraction * 0.5f + cov.ColorCoverage * 0.3f + geometryStability * 0.2f;
+            float progress = cov.AnalysisAvailable ? Mathf.Min(cov.Closure, cov.Refinement) : 0f;
 
             ScanPhase phase;
             if (!IsScanning && _volumeIntegrator != null && _volumeIntegrator.IntegrationCount == 0)
                 phase = ScanPhase.NotStarted;
-            else if (cov.ShellCoverageAvailable)
-            {
-                // Shell coverage knows what is missing; plateau does not.
-                progress = cov.ShellCoverage;
-                float c = cov.ShellCoverage;
-                phase = c < 0.30f ? ScanPhase.Discovering
-                    : c < 0.90f ? ScanPhase.Refining
-                    : c < 0.95f ? ScanPhase.Stabilized
-                    : ScanPhase.Complete;
-            }
-            else if (_stableVertexCycles < 2)
-                phase = ScanPhase.Discovering;
-            else if (_stableColorCycles < StableThresholdCycles)
-                phase = ScanPhase.Refining;
-            else if (_stabilizedTime > 0f && Time.time - _stabilizedTime < StabilizedHoldSeconds)
-                phase = ScanPhase.Stabilized;
             else
-                phase = ScanPhase.Complete;
+                phase = progress < 0.30f ? ScanPhase.Discovering
+                    : progress < 0.90f ? ScanPhase.Refining
+                    : progress < 0.95f ? ScanPhase.Stabilized
+                    : ScanPhase.Complete;
 
             return new ScanProgress
             {
@@ -2097,37 +2122,6 @@ namespace Genesis.RoomScan
                 OverallProgress = Mathf.Clamp01(progress),
                 Phase = phase
             };
-        }
-
-        private void UpdatePlateauDetection()
-        {
-            int curVerts = _meshExtractor != null ? _meshExtractor.LastVertexCount : 0;
-            if (_prevVertexCount > 0 && curVerts > 0)
-            {
-                float growth = Mathf.Abs(curVerts - _prevVertexCount) / (float)_prevVertexCount;
-                if (growth < VertexGrowthThreshold)
-                    _stableVertexCycles++;
-                else
-                    _stableVertexCycles = 0;
-            }
-            _prevVertexCount = curVerts;
-
-            float curColor = _volumeIntegrator != null && _volumeIntegrator.SurfaceVoxelCount > 0
-                ? (float)_volumeIntegrator.ColoredSurfaceCount / _volumeIntegrator.SurfaceVoxelCount
-                : 0f;
-            if (_prevColorCoverage > 0f)
-            {
-                float colorGrowth = Mathf.Abs(curColor - _prevColorCoverage);
-                if (colorGrowth < ColorGrowthThreshold)
-                    _stableColorCycles++;
-                else
-                    _stableColorCycles = 0;
-            }
-            _prevColorCoverage = curColor;
-
-            if (_stableVertexCycles >= StableThresholdCycles && _stableColorCycles >= StableThresholdCycles
-                && _stabilizedTime == 0f)
-                _stabilizedTime = Time.time;
         }
 
         private static readonly int NormalFallbackID = Shader.PropertyToID("_RSNormalFallback");

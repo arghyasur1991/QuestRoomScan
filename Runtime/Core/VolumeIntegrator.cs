@@ -199,17 +199,63 @@ namespace Genesis.RoomScan
         private bool _frustumReady;
         private float _lastPruneTime;
 
-        // Coverage metrics
+        // ── Scan analysis (coverage counters + mesh closure) ───────────
+        // One time-sliced GPU cycle per analysisIntervalSeconds, one 128-byte
+        // readback at its end. See ScanAnalysis / StepAnalysis.
         private ComputeKernelHelper _coverageKernel;
-        private ComputeBuffer _coverageCounters;
-        private int _integrationsSinceCoverage;
-        private bool _coverageReadbackPending;
-        private static readonly int CoverageCountersID = Shader.PropertyToID("_CoverageCounters");
-        private static readonly int ColorVolumeReadID = Shader.PropertyToID("gsColorVolumeRead");
+        private ComputeKernelHelper _ccResetKernel;
+        private ComputeKernelHelper _ccInsertKernel;
+        private ComputeKernelHelper _ccLinkKernel;
+        private ComputeKernelHelper _ccJumpKernel;
+        private ComputeKernelHelper _ccClassifyKernel;
+        private ComputeKernelHelper _ccFinalizeKernel;
+        private ComputeKernelHelper _ccCentroidKernel;
+        private ComputeBuffer _analysisResult;
+        private GraphicsBuffer _ccEdgesSnap;
+        private GraphicsBuffer _ccCountersSnap;
+        private ComputeBuffer _ccHashKey;
+        private ComputeBuffer _ccHashVal;
+        private ComputeBuffer _ccLabel;
+        private ComputeBuffer _ccComp;
+        private AnalysisState _analysisState;
+        private int _analysisRound;
+        private int _analysisExtractSeen = -1;
+        private float _lastAnalysisTime;
+        private readonly uint[] _analysisCpu = new uint[AnalysisWords];
 
-        [Header("Coverage Metrics")]
-        [Tooltip("Dispatch coverage count every N integrations (0 = disabled). Higher = less GPU overhead.")]
-        [SerializeField] private int coverageUpdateInterval = 30;
+        private const int AnalysisWords = 32;
+        private const int CcHashSize = GPUSurfaceNets.MaxOpenEdges * 2;
+
+        private static readonly int AnalysisResultID = Shader.PropertyToID("_AnalysisResult");
+        private static readonly int ConfidentWeightID = Shader.PropertyToID("gsConfidentWeight");
+        private static readonly int ColorVolumeReadID = Shader.PropertyToID("gsColorVolumeRead");
+        private static readonly int CcEdgesID = Shader.PropertyToID("gsCcEdges");
+        private static readonly int CcCountersID = Shader.PropertyToID("gsCcCounters");
+        private static readonly int CcHashKeyID = Shader.PropertyToID("gsCcHashKey");
+        private static readonly int CcHashValID = Shader.PropertyToID("gsCcHashVal");
+        private static readonly int CcLabelID = Shader.PropertyToID("gsCcLabel");
+        private static readonly int CcCompID = Shader.PropertyToID("gsCcComp");
+        private static readonly int CcCapID = Shader.PropertyToID("gsCcCap");
+        private static readonly int CcHashMaskID = Shader.PropertyToID("gsCcHashMask");
+        private static readonly int CcHashSizeID = Shader.PropertyToID("gsCcHashSize");
+        private static readonly int CcMinEdgesID = Shader.PropertyToID("gsCcMinEdges");
+        private static readonly int CcCutTolID = Shader.PropertyToID("gsCcCutTol");
+
+        enum AnalysisState { Idle, Link, Classify, Finalize, Readback }
+
+        [Header("Scan analysis")]
+        [Tooltip("Seconds between analysis cycles. Each cycle is ~16 frames of small kernels and one 128-byte readback.")]
+        [SerializeField, Range(0.25f, 5f)] private float analysisIntervalSeconds = 1f;
+        [Tooltip("Surface voxels at or above this |weight| count as refined. Weight only grows with good observations (max 0.5) and the blend rate falls with it, so this is 'the surface has stopped moving'.")]
+        [SerializeField, Range(0.1f, 0.5f)] private float confidentWeight = 0.3f;
+        [Tooltip("Boundary loops shorter than this (metres) are ignored: a few-centimetre pit is not a leak.")]
+        [SerializeField, Range(0.05f, 1f)] private float holeMinPerimeter = 0.2f;
+        [Tooltip("Closure = 1 / (1 + openBoundary / (ref × √meshArea)). 0.3 puts 50 % at an open boundary of 0.3·√A metres (2.8 m for a 90 m² room) and 92 % at about one 8 cm hole.")]
+        [SerializeField, Range(0.05f, 1f)] private float closureReference = 0.3f;
+        [Tooltip("Boundary edges within this many voxels of a clip plane, the room AABB or the volume edge are cuts, not holes.")]
+        [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
+        [Tooltip("Min-label link + pointer-jump rounds, one per frame. 12 converges loops of a few thousand edges.")]
+        [SerializeField, Range(4, 32)] private int closureLinkRounds = 12;
 
         /// <summary>Number of voxels near the zero-crossing with sufficient weight (surface voxels).</summary>
         public int SurfaceVoxelCount { get; private set; }
@@ -217,6 +263,14 @@ namespace Genesis.RoomScan
         public int FrozenSurfaceCount { get; private set; }
         /// <summary>Number of surface voxels with camera color data (alpha &gt; 0.1).</summary>
         public int ColoredSurfaceCount { get; private set; }
+        /// <summary>Surface voxels at or above <c>confidentWeight</c>.</summary>
+        public int ConfidentSurfaceCount { get; private set; }
+        /// <summary>Confident ÷ surface (0–1): how much of the surface has stopped moving.</summary>
+        public float Refinement { get; private set; }
+        /// <summary>Mesh closure from the last analysis cycle.</summary>
+        public MeshClosure Closure { get; private set; }
+        /// <summary>True once a cycle has completed for the current scan.</summary>
+        public bool AnalysisAvailable { get; private set; }
 
         /// <summary>
         /// Extra torso capsules (legacy <see cref="RoomScanner.AddExclusionZone"/>).
@@ -350,9 +404,8 @@ namespace Genesis.RoomScan
 
             _coverageKernel = new ComputeKernelHelper(compute, "CountSurfaceCoverage");
             _coverageKernel.Set(VolumeRWID, _volume);
-            _coverageCounters = new ComputeBuffer(3, sizeof(uint));
-            _coverageKernel.Set(CoverageCountersID, _coverageCounters);
             compute.SetTexture(_coverageKernel.KernelIndex, ColorVolumeReadID, _colorVolume);
+            InitAnalysisBuffers();
 
             _shellMarchKernel = new ComputeKernelHelper(compute, "MarchShellCells");
             _shellMarchKernel.Set(VolumeRWID, _volume);
@@ -375,8 +428,7 @@ namespace Genesis.RoomScan
         private void OnDestroy()
         {
             ReleaseVolumes();
-            _coverageCounters?.Release();
-            _coverageCounters = null;
+            ReleaseAnalysisBuffers();
             _shellPos?.Release();
             _shellNrm?.Release();
             _shellResult?.Release();
@@ -466,17 +518,176 @@ namespace Genesis.RoomScan
             _closeHolesKernel.Set(VolumeRWID, _volume);
         }
 
-        private void DispatchCoverageCount()
+        // ── Scan analysis cycle ─────────────────────────────────────────
+
+        void InitAnalysisBuffers()
         {
-            if (_volume == null || _coverageCounters == null) return;
-            _coverageReadbackPending = true;
+            const int cap = GPUSurfaceNets.MaxOpenEdges;
+            _analysisResult ??= new ComputeBuffer(AnalysisWords, sizeof(uint));
+            _ccEdgesSnap ??= new GraphicsBuffer(GraphicsBuffer.Target.Structured, cap, 16);
+            _ccCountersSnap ??= new GraphicsBuffer(GraphicsBuffer.Target.Structured, GPUSurfaceNets.CounterCount, 4);
+            _ccHashKey ??= new ComputeBuffer(CcHashSize, sizeof(uint));
+            _ccHashVal ??= new ComputeBuffer(CcHashSize, sizeof(uint));
+            _ccLabel ??= new ComputeBuffer(cap, sizeof(uint));
+            _ccComp ??= new ComputeBuffer(cap * 4, sizeof(int));
+            _ccCountersSnap.SetData(new uint[GPUSurfaceNets.CounterCount]);
 
-            uint[] zeros = { 0, 0, 0 };
-            _coverageCounters.SetData(zeros);
-            _coverageKernel.DispatchFit(_volume);
+            _ccResetKernel = new ComputeKernelHelper(compute, "ClosureReset");
+            _ccInsertKernel = new ComputeKernelHelper(compute, "ClosureInsert");
+            _ccLinkKernel = new ComputeKernelHelper(compute, "ClosureLink");
+            _ccJumpKernel = new ComputeKernelHelper(compute, "ClosureJump");
+            _ccClassifyKernel = new ComputeKernelHelper(compute, "ClosureClassify");
+            _ccFinalizeKernel = new ComputeKernelHelper(compute, "ClosureFinalize");
+            _ccCentroidKernel = new ComputeKernelHelper(compute, "ClosureCentroid");
 
-            AsyncGPUReadback.Request(_coverageCounters, OnCoverageReadback);
-            DispatchShellMarch();
+            _coverageKernel.Set(AnalysisResultID, _analysisResult);
+            foreach (var k in new[] { _ccResetKernel, _ccInsertKernel, _ccLinkKernel, _ccJumpKernel,
+                         _ccClassifyKernel, _ccFinalizeKernel, _ccCentroidKernel })
+            {
+                k.Set(AnalysisResultID, _analysisResult);
+                k.Set(CcEdgesID, _ccEdgesSnap);
+                k.Set(CcCountersID, _ccCountersSnap);
+                k.Set(CcHashKeyID, _ccHashKey);
+                k.Set(CcHashValID, _ccHashVal);
+                k.Set(CcLabelID, _ccLabel);
+                k.Set(CcCompID, _ccComp);
+            }
+            compute.SetInt(CcCapID, cap);
+            compute.SetInt(CcHashSizeID, CcHashSize);
+            compute.SetInt(CcHashMaskID, CcHashSize - 1);
+        }
+
+        void ReleaseAnalysisBuffers()
+        {
+            _analysisResult?.Release();
+            _ccEdgesSnap?.Release();
+            _ccCountersSnap?.Release();
+            _ccHashKey?.Release();
+            _ccHashVal?.Release();
+            _ccLabel?.Release();
+            _ccComp?.Release();
+            _analysisResult = null;
+            _ccEdgesSnap = _ccCountersSnap = null;
+            _ccHashKey = _ccHashVal = _ccLabel = _ccComp = null;
+        }
+
+        /// <summary>Forget the last cycle's numbers (scan start).</summary>
+        public void ResetAnalysis()
+        {
+            AnalysisAvailable = false;
+            _analysisState = AnalysisState.Idle;
+            _analysisExtractSeen = -1;
+            _lastAnalysisTime = 0f;
+            SurfaceVoxelCount = FrozenSurfaceCount = ColoredSurfaceCount = ConfidentSurfaceCount = 0;
+            Refinement = 0f;
+            Closure = default;
+        }
+
+        /// <summary>
+        /// Advance the analysis cycle by one frame. Call once per frame while
+        /// scanning, after the extract for that frame has been issued.
+        /// <para>
+        /// Idle → (tick due, fresh extract) reset scratch, count surface voxels,
+        /// GPU-copy the Surface Nets boundary edges + counters into the
+        /// snapshot, hash-insert → <c>closureLinkRounds</c> frames of link +
+        /// jump → classify → finalize + centroid → one readback of the 32-word
+        /// result. The shell march rides the same tick.
+        /// </para>
+        /// </summary>
+        internal void StepAnalysis(GPUSurfaceNets surfaceNets, int extractCount)
+        {
+            if (_volume == null || _analysisResult == null) return;
+
+            switch (_analysisState)
+            {
+                case AnalysisState.Idle:
+                {
+                    if (Time.time - _lastAnalysisTime < analysisIntervalSeconds) return;
+                    if (surfaceNets == null || surfaceNets.OpenEdgeBuffer == null) return;
+                    if (extractCount == _analysisExtractSeen) return; // no new mesh since last cycle
+                    _analysisExtractSeen = extractCount;
+
+                    compute.SetFloat(ConfidentWeightID, confidentWeight);
+                    compute.SetInt(CcMinEdgesID, Mathf.Max(1, Mathf.RoundToInt(holeMinPerimeter / voxelSize)));
+                    compute.SetFloat(CcCutTolID, cutToleranceVoxels * voxelSize);
+                    BindScanPriors(compute);
+
+                    _ccResetKernel.DispatchFit(CcHashSize, 1);
+                    _coverageKernel.Set(VolumeRWID, _volume);
+                    _coverageKernel.DispatchFit(_volume);
+                    Graphics.CopyBuffer(surfaceNets.OpenEdgeBuffer, _ccEdgesSnap);
+                    Graphics.CopyBuffer(surfaceNets.CountersBuffer, _ccCountersSnap);
+                    _ccInsertKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    DispatchShellMarch();
+
+                    _analysisRound = 0;
+                    _analysisState = AnalysisState.Link;
+                    break;
+                }
+                case AnalysisState.Link:
+                {
+                    _ccLinkKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    _ccJumpKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    if (++_analysisRound >= closureLinkRounds)
+                        _analysisState = AnalysisState.Classify;
+                    break;
+                }
+                case AnalysisState.Classify:
+                {
+                    _ccJumpKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    _ccClassifyKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    _analysisState = AnalysisState.Finalize;
+                    break;
+                }
+                case AnalysisState.Finalize:
+                {
+                    _ccFinalizeKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
+                    _ccCentroidKernel.DispatchFit(1, 1);
+                    AsyncGPUReadback.Request(_analysisResult, OnAnalysisReadback);
+                    _analysisState = AnalysisState.Readback;
+                    break;
+                }
+                case AnalysisState.Readback:
+                    break; // waiting on the GPU
+            }
+        }
+
+        private void OnAnalysisReadback(AsyncGPUReadbackRequest request)
+        {
+            _analysisState = AnalysisState.Idle;
+            _lastAnalysisTime = Time.time;
+            if (request.hasError || _analysisResult == null) return;
+            var data = request.GetData<uint>();
+            if (data.Length < AnalysisWords) return;
+            NativeArray<uint>.Copy(data, 0, _analysisCpu, 0, AnalysisWords);
+            var r = _analysisCpu;
+
+            SurfaceVoxelCount = (int)r[0];
+            FrozenSurfaceCount = (int)r[1];
+            ColoredSurfaceCount = (int)r[2];
+            ConfidentSurfaceCount = (int)r[3];
+            Refinement = SurfaceVoxelCount > 0 ? (float)ConfidentSurfaceCount / SurfaceVoxelCount : 0f;
+
+            int openTotal = (int)r[4];
+            int openUsed = (int)r[5];
+            int sigEdges = (int)r[8];
+            // Edges past the snapshot capacity were never analysed; count
+            // them as open boundary so an overflowing frontier reads low.
+            sigEdges += Mathf.Max(0, openTotal - openUsed);
+            uint packed = r[10];
+            int largestEdges = (int)(packed >> 16);
+            Vector3 largestCenter = new Vector3(
+                (int)r[11] * 0.001f, (int)r[12] * 0.001f, (int)r[13] * 0.001f);
+            int quads = (int)r[14] / 6;
+            float area = quads * voxelSize * voxelSize;
+            float openMetres = sigEdges * voxelSize;
+            float reference = Mathf.Max(closureReference * Mathf.Sqrt(Mathf.Max(area, 0f)), 4f * voxelSize);
+            float closure = area > 0f ? 1f / (1f + openMetres / reference) : 0f;
+
+            Closure = new MeshClosure(
+                closure, openMetres, area, (int)r[9], (int)r[7], (int)r[6], openTotal,
+                new MeshHole(largestCenter, largestEdges * voxelSize, largestEdges));
+            AnalysisAvailable = true;
         }
 
         // ── Shell coverage ──────────────────────────────────────────────
@@ -616,17 +827,6 @@ namespace Genesis.RoomScan
             sy = maxY - minY;
             sz = maxZ - minZ;
             return sx > 0 && sy > 0 && sz > 0;
-        }
-
-        private void OnCoverageReadback(AsyncGPUReadbackRequest request)
-        {
-            _coverageReadbackPending = false;
-            if (request.hasError) return;
-            var data = request.GetData<uint>();
-            if (data.Length < 3) return;
-            SurfaceVoxelCount = (int)data[0];
-            FrozenSurfaceCount = (int)data[1];
-            ColoredSurfaceCount = (int)data[2];
         }
 
         private void CreateVolume()
@@ -971,16 +1171,6 @@ namespace Genesis.RoomScan
                 _pruneKernel.Set(VolumeRWID, _volume);
                 _pruneKernel.Set(ColorVolumeRWID, _colorVolume);
                 _pruneKernel.DispatchFit(_volume);
-            }
-
-            if (coverageUpdateInterval > 0 && !_coverageReadbackPending)
-            {
-                _integrationsSinceCoverage++;
-                if (_integrationsSinceCoverage >= coverageUpdateInterval)
-                {
-                    _integrationsSinceCoverage = 0;
-                    DispatchCoverageCount();
-                }
             }
 
             Integrated?.Invoke();

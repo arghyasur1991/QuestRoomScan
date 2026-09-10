@@ -84,6 +84,30 @@ bool gsInsideRoom(float3 worldPos)
     return inside;
 }
 
+// True when worldPos lies within tol of something that cuts the surface by
+// construction rather than by a hole: a room clip plane, the room AABB, or
+// the edge of the voxel volume. Boundary edges here are cuts, not holes.
+bool gsNearSurfaceCut(float3 worldPos, float tol)
+{
+    bool near = false;
+    float3 half = (float3)gsVoxCount * 0.5 * gsVoxSize;
+    if (any(abs(worldPos) > half - tol))
+        near = true;
+    if (!near && gsConfineToRoom != 0 && gsNumRoomClipPlanes > 0)
+    {
+        if (gsUseRoomAabb != 0
+            && (any(worldPos < gsRoomAabbMin + tol) || any(worldPos > gsRoomAabbMax - tol)))
+            near = true;
+        for (int i = 0; !near && i < gsNumRoomClipPlanes; i++)
+        {
+            float4 pl = gsRoomClipPlanes[i];
+            if (dot(worldPos, pl.xyz) - pl.w < tol)
+                near = true;
+        }
+    }
+    return near;
+}
+
 bool gsTryScreenStamp(float3 worldPos, out float sDistNorm)
 {
     sDistNorm = 0;

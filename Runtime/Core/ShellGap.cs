@@ -12,6 +12,69 @@ namespace Genesis.RoomScan
     }
 
     /// <summary>
+    /// One boundary loop of the live mesh: a connected run of edges the
+    /// surface crosses but that could not be meshed. The scan frontier is the
+    /// largest one; a leak in a finished room is a small one.
+    /// </summary>
+    public readonly struct MeshHole
+    {
+        /// <summary>World-space centroid of the loop's edge midpoints.</summary>
+        public readonly Vector3 Center;
+        /// <summary>Approximate loop length in metres (edges × voxel size).</summary>
+        public readonly float PerimeterMetres;
+        /// <summary>Boundary edges in the loop.</summary>
+        public readonly int Edges;
+
+        public MeshHole(Vector3 center, float perimeterMetres, int edges)
+        {
+            Center = center;
+            PerimeterMetres = perimeterMetres;
+            Edges = edges;
+        }
+    }
+
+    /// <summary>
+    /// Analytic closure of the live mesh, from its boundary edges. Independent
+    /// of any scene model: a watertight surface has no boundary; every
+    /// boundary edge not sitting on a clip plane or the volume edge is a hole.
+    /// </summary>
+    public readonly struct MeshClosure
+    {
+        /// <summary>
+        /// 1 / (1 + OpenBoundaryMetres / (ref × √MeshAreaM2)). 1 for a closed
+        /// surface; loops shorter than the hole minimum do not count.
+        /// </summary>
+        public readonly float Closure;
+        /// <summary>Total length of counted hole loops, metres.</summary>
+        public readonly float OpenBoundaryMetres;
+        /// <summary>Mesh area estimate (quads × voxel²), m².</summary>
+        public readonly float MeshAreaM2;
+        /// <summary>Hole loops at or above the minimum perimeter.</summary>
+        public readonly int HoleCount;
+        /// <summary>All boundary edges that are not cuts, including tiny loops.</summary>
+        public readonly int HoleEdges;
+        /// <summary>Boundary edges on a clip plane / room AABB / volume edge.</summary>
+        public readonly int CutEdges;
+        /// <summary>Boundary edges the extract recorded (may exceed the analysed capacity).</summary>
+        public readonly int OpenEdgesTotal;
+        /// <summary>Largest hole loop, or default when none.</summary>
+        public readonly MeshHole LargestHole;
+
+        public MeshClosure(float closure, float openBoundaryMetres, float meshAreaM2, int holeCount,
+            int holeEdges, int cutEdges, int openEdgesTotal, MeshHole largestHole)
+        {
+            Closure = closure;
+            OpenBoundaryMetres = openBoundaryMetres;
+            MeshAreaM2 = meshAreaM2;
+            HoleCount = holeCount;
+            HoleEdges = holeEdges;
+            CutEdges = cutEdges;
+            OpenEdgesTotal = openEdgesTotal;
+            LargestHole = largestHole;
+        }
+    }
+
+    /// <summary>
     /// A connected patch of shell cells with no scanned surface in front of
     /// them — a place passthrough would leak through the finished mesh.
     /// Reported largest first by <see cref="RoomScanSession.CopyShellGaps"/>.

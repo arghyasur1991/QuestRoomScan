@@ -515,18 +515,61 @@ Hosts may pin anchors with `RoomScanSession.SetBodyExclusionAnchors` before
 
 ## 12. Coverage Metrics & Scan Progress
 
-### CountSurfaceCoverage (compute kernel)
-Dispatched every ~30 integrations (1× per second) to count surface statistics via `InterlockedAdd`:
-- **Surface voxels**: `abs(tsdf) < 0.3 && absWeight > PRUNE_WEIGHT`
-- **Frozen voxels**: Surface voxels with `weight < 0` (frozen encoding)
-- **Colored voxels**: Surface voxels with `colorAlpha > 0.05`
+Progress is **analytic**: it is read off the live mesh and the TSDF alone,
+needs no scene model, and is the number a host should gate on. The shell
+prior below is optional guidance plus auto-fill — it accelerates closure, it
+never defines it.
 
-Results read back via `AsyncGPUReadback` to avoid GPU stalls.
+### Scan analysis cycle (one 128-byte readback per second)
+
+Everything heavy stays on the GPU and is spread over ~16 frames of small
+kernels; the CPU sees a 32-word result once per `analysisIntervalSeconds`.
+
+1. **Reset** the scratch (hash, labels, component stats, result words).
+2. **`CountSurfaceCoverage`** — one full-volume read: surface voxels
+   (`|tsdf| < 0.3 && |w| > PRUNE_WEIGHT`), frozen (`w < 0`), coloured
+   (`alpha > 0.1`), **confident** (`|w| ≥ confidentWeight`, 0.3).
+3. **Snapshot** the Surface Nets boundary edges: `Graphics.CopyBuffer` of
+   `_OpenEdges` and `_Counters` into buffers the next extract cannot touch.
+   `TryEmitQuad` appended every crossing edge whose quad was dropped because a
+   neighbouring cell had no vertex — that *is* a boundary edge of the mesh.
+   One atomic per open edge inside the pass that already runs; ≤ 16 384 kept,
+   the counter keeps the true total.
+4. **Connected components** over those edges, the 2-D "connected paths" idea on
+   the surface boundary. Edges sit on voxel-grid positions, so adjacency is a
+   26-neighbour lookup in a voxel hash (`ClosureInsert`, open addressing,
+   `InterlockedMin` for the slot's edge index). Then `closureLinkRounds` (12)
+   frames of min-label link + pointer jump (`ClosureLink`, `ClosureJump`) —
+   O(log n) rounds for loops of thousands of edges.
+5. **Classify** (`ClosureClassify`): an edge within `cutToleranceVoxels` (2) of
+   a room clip plane, the room AABB or the volume edge is a **cut**, not a
+   hole (the doorway invisible wall is a clip plane; so is the 0.5 m expand).
+   Every other edge adds to its component's count and centroid (int mm).
+6. **Finalize** (`ClosureFinalize`, `ClosureCentroid`): components with
+   ≥ `holeMinPerimeter / voxelSize` edges (0.2 m → 4) are holes; the largest
+   is packed `count<<16 | root` with `InterlockedMax`, its centroid resolved.
+   The scan frontier is simply the largest hole.
+7. **Readback** of the 32 words. CPU derives
+   `Closure = 1 / (1 + openBoundary / (closureReference × √meshArea))` with
+   `openBoundary = holeEdges × voxelSize` (edges past the snapshot capacity
+   count as open), `meshArea ≈ quads × voxel²`, `Refinement = confident ÷
+   surface`, and `OverallProgress = min(Closure, Refinement)`.
+
+Why these two: a boundary edge is a place passthrough leaks through the
+finished mesh, and a voxel below the confident weight is a surface that is
+still moving (blend rate falls as weight grows). "No holes, nothing moving"
+is what a finished scan means; neither depends on MRUK being right.
+
+Cost per cycle: the volume count (already existed), ≤ 16k × 27 hash probes per
+link round over ~12 frames, a few hundred KB of buffer traffic, one 128-byte
+readback. Nothing per frame, nothing over the volume beyond step 2.
 
 ### Shell coverage (compute kernel `MarchShellCells`, requires `RoomUnderstanding`)
 
-`FrozenFraction` is frozen ÷ scanned — it cannot see what was never scanned.
-Shell coverage measures the room against the captured Scene API hull instead.
+An **accelerator**, not the gate. It measures the room against the captured
+Scene API hull so it can name the largest unscanned patch for guidance and
+stamp small planar gaps before the player has to hunt them — which is what
+makes the analytic closure above reach 100 % in practice.
 
 - **Cells.** `RoomUnderstanding.CopyShellCells` samples every outer `WALL_FACE`
   rect, the floor and ceiling polygons (`PlaneBoundary2D`), and the top + side
@@ -577,19 +620,13 @@ Shell coverage measures the room against the captured Scene API hull instead.
   real seat, not the scene-box face): an empty voxel with ≥ 4 neighbours at
   `|weight| ≥ 0.2` takes their mean tsdf at `fillWeight`. Filled voxels are
   below 0.2 so they never seed further fills. Never a volume pass.
-- The package does **not** gate finalize on coverage; the host reads
-  `ScanCoverage.ShellCoverage` and decides.
+- Shell coverage never feeds `OverallProgress`. The package does **not** gate
+  finalize; the host reads `ScanProgress.OverallProgress` and decides.
 
 ### ScanCoverage / ScanProgress (CPU)
-- `ScanCoverage`: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`; legacy `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction`, `MeshVertexCount`, `MeshIndexCount`, `IsStabilized`
-- `ScanProgress`: when shell coverage is available `OverallProgress = ShellCoverage` and phase is `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. Otherwise the legacy blend `FrozenFraction×0.5 + ColorCoverage×0.3 + GeometryStability×0.2` and plateau phases below.
+- `ScanCoverage` analytic: `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`, `OpenBoundaryMetres`, `HoleCount`, `LargestHole` (`MeshHole`: centre, perimeter, edges). Shell prior: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`. Raw: `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction` (the freeze tool's own metric), `MeshVertexCount`, `MeshTriangleCount`.
+- `ScanProgress.OverallProgress = min(Closure, Refinement)` (0 until the first cycle); phase `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. There is no plateau or frozen-fraction blend any more.
 - `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`
-
-### Plateau Detection (fallback without `RoomUnderstanding`)
-Per mesh extraction cycle, `UpdatePlateauDetection` tracks:
-- **Vertex stability**: `abs(growth) < 1%` increments `_stableVertexCycles`
-- **Color stability**: `abs(colorGrowth) < 0.5%` increments `_stableColorCycles`
-- `IsStabilized` when vertex cycles ≥ threshold (5). `Stabilized` phase entered when both vertex and color cycles reach the threshold. After `StabilizedHoldSeconds` (3s), phase transitions to `Complete`.
 
 ## 12b. Depth Subsystem Gating
 

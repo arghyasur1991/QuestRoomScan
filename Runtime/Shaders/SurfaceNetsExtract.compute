@@ -66,7 +66,14 @@ RWStructuredBuffer<int>       _CoordVertMap;     // [totalVoxels] flat idx -> co
 RWStructuredBuffer<GPUVertex> _Vertices;         // [maxVertices] compact vertex output
 RWStructuredBuffer<uint>      _Indices;          // [maxIndices]  triangle index output
 
-RWStructuredBuffer<uint>      _Counters;         // [0] = vertex count, [1] = index count
+RWStructuredBuffer<uint>      _Counters;         // [0] vertex count, [1] index count, [2] open edges, [3] reserved
+
+// Boundary of the extracted surface: a crossing edge whose quad could not
+// be emitted because a neighbouring cell has no vertex. Each entry is the
+// edge midpoint in world space. Read only by the closure analysis, which
+// snapshots it with a GPU copy — never read back per extract.
+RWStructuredBuffer<float4>    _OpenEdges;        // [_MaxOpenEdges] xyz midpoint, w unused
+uint                          _MaxOpenEdges;
 RWStructuredBuffer<uint>      _DispatchArgs;     // [0,1,2] = indirect dispatch group counts
 RWStructuredBuffer<uint>      _DrawIndirectArgs; // [0..4]  = DrawProceduralIndirect args
 
@@ -155,6 +162,8 @@ void ClearCounters(uint3 id : SV_DispatchThreadID)
 {
     _Counters[0] = 0;
     _Counters[1] = 0;
+    _Counters[2] = 0;
+    _Counters[3] = 0;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -410,7 +419,17 @@ void TryEmitQuad(int3 coord, int3 axis, int3 d1, int3 d2)
     int b = _CoordVertMap[Flatten(coord - d1)];
     int c = _CoordVertMap[Flatten(coord - (d1 + d2))];
     int d = _CoordVertMap[Flatten(coord - d2)];
-    if (a < 0 || b < 0 || c < 0 || d < 0) return;
+    if (a < 0 || b < 0 || c < 0 || d < 0)
+    {
+        // The surface crosses this edge but cannot be meshed here: a
+        // neighbouring cell is unobserved (scan frontier, hole, clip) or
+        // degenerate. That is a boundary edge of the mesh.
+        uint oi;
+        InterlockedAdd(_Counters[2], 1, oi);
+        if (oi < _MaxOpenEdges)
+            _OpenEdges[oi] = float4(VoxelCoordToWorld((float3)coord + 0.5 * (float3)axis), 0);
+        return;
+    }
 
     uint baseIdx;
     InterlockedAdd(_Counters[1], 6, baseIdx);

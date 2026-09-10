@@ -439,13 +439,46 @@ void CloseSmallHoles(uint3 id : SV_DispatchThreadID)
 }
 
 // ──────────────────────────────────────────────────────────────────
-//  CountSurfaceCoverage: periodically count surface/frozen/colored
-//  voxels for scan progress metrics. NOT dispatched every frame.
+//  Scan analysis — one 32-word result scratch, one readback per tick.
+//
+//  Layout (uint unless noted):
+//    0 surface voxels     1 frozen        2 coloured      3 confident (|w| >= gsConfidentWeight)
+//    4 open edges total   5 open edges analysed (<= cap)  6 cut edges (near clip / volume edge)
+//    7 hole edges (all)   8 hole edges in holes >= min    9 hole count (>= min)
+//   10 largest hole (count<<16 | root)   11..13 largest centre, int millimetres
+//   14 index count        15 vertex count
+// ──────────────────────────────────────────────────────────────────
+
+#define AR_SURFACE      0
+#define AR_FROZEN       1
+#define AR_COLORED      2
+#define AR_CONFIDENT    3
+#define AR_OPEN_TOTAL   4
+#define AR_OPEN_USED    5
+#define AR_CUT_EDGES    6
+#define AR_HOLE_EDGES   7
+#define AR_SIG_EDGES    8
+#define AR_HOLES        9
+#define AR_LARGEST      10
+#define AR_LCX          11
+#define AR_LCY          12
+#define AR_LCZ          13
+#define AR_INDEX_COUNT  14
+#define AR_VERTEX_COUNT 15
+#define AR_WORDS        32
+
+RWStructuredBuffer<uint> _AnalysisResult;   // [AR_WORDS]
+float gsConfidentWeight;
+
+// ──────────────────────────────────────────────────────────────────
+//  CountSurfaceCoverage: surface / frozen / coloured / confident voxel
+//  counts. One full-volume read at the analysis tick, never per frame.
+//  "Confident" is the refinement signal: a voxel's weight only grows
+//  with good observations and the blend rate falls as it grows, so a
+//  surface at gsConfidentWeight has stopped moving.
 // ──────────────────────────────────────────────────────────────────
 
 #pragma kernel CountSurfaceCoverage
-
-RWStructuredBuffer<uint> _CoverageCounters; // [0]=surface, [1]=frozen, [2]=colored
 
 Texture3D<float4> gsColorVolumeRead;
 
@@ -461,13 +494,224 @@ void CountSurfaceCoverage(uint3 id : SV_DispatchThreadID)
 
     if (isSurface)
     {
-        InterlockedAdd(_CoverageCounters[0], 1);
+        InterlockedAdd(_AnalysisResult[AR_SURFACE], 1);
         if (isFrozen)
-            InterlockedAdd(_CoverageCounters[1], 1);
+            InterlockedAdd(_AnalysisResult[AR_FROZEN], 1);
+        if (absWeight >= gsConfidentWeight)
+            InterlockedAdd(_AnalysisResult[AR_CONFIDENT], 1);
         float4 color = gsColorVolumeRead[id];
         if (color.a > 0.1)
-            InterlockedAdd(_CoverageCounters[2], 1);
+            InterlockedAdd(_AnalysisResult[AR_COLORED], 1);
     }
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  Mesh closure: connected components over the boundary edges the
+//  Surface Nets pass recorded (see SurfaceNetsExtract _OpenEdges).
+//  Every boundary edge sits on a voxel-grid position, so adjacency is
+//  a 26-neighbour lookup in a voxel hash — the 2-D "connected paths"
+//  idea on the surface boundary. Min-label linking with pointer
+//  jumping converges in O(log n) rounds; the host runs one round per
+//  frame against a GPU-copied snapshot, so the extract can keep
+//  overwriting the live buffer. Nothing here touches the volume.
+//
+//  gsCcEdges / gsCcCounters are the snapshot. All per-edge kernels are
+//  dispatched over the capacity and early-out past the live count.
+// ──────────────────────────────────────────────────────────────────
+
+StructuredBuffer<float4>  gsCcEdges;      // snapshot of _OpenEdges
+StructuredBuffer<uint>    gsCcCounters;   // snapshot of Surface Nets _Counters
+RWStructuredBuffer<uint>  gsCcHashKey;    // [hash size] voxel key or CC_EMPTY
+RWStructuredBuffer<uint>  gsCcHashVal;    // [hash size] min edge index at that voxel
+RWStructuredBuffer<uint>  gsCcLabel;      // [cap] component label (min edge index)
+RWStructuredBuffer<int>   gsCcComp;       // [cap * 4] count, sum x/y/z in mm (roots only)
+uint  gsCcCap;
+uint  gsCcHashMask;
+uint  gsCcHashSize;
+uint  gsCcMinEdges;
+float gsCcCutTol;
+
+#define CC_EMPTY 0xFFFFFFFFu
+#define CC_PROBES 64
+
+uint CcCount() { return min(gsCcCounters[2], gsCcCap); }
+
+// 10 bits per axis around the volume centre; never equals CC_EMPTY.
+uint CcKey(float3 p)
+{
+    int3 q = (int3)floor(p / gsVoxSize + 0.5) + 512;
+    q = clamp(q, 0, 1023);
+    return (uint)q.x | ((uint)q.y << 10) | ((uint)q.z << 20);
+}
+
+uint CcHash(uint key)
+{
+    key ^= key >> 16;
+    key *= 0x7feb352du;
+    key ^= key >> 15;
+    key *= 0x846ca68bu;
+    key ^= key >> 16;
+    return key & gsCcHashMask;
+}
+
+// Single exit on purpose (DXC Vulkan warning on early returns).
+uint CcFind(uint key)
+{
+    uint found = CC_EMPTY;
+    bool done = false;
+    uint slot = CcHash(key);
+    for (int n = 0; n < CC_PROBES && !done; n++)
+    {
+        uint k = gsCcHashKey[slot];
+        if (k == key)
+        {
+            found = gsCcHashVal[slot];
+            done = true;
+        }
+        else if (k == CC_EMPTY)
+        {
+            done = true;
+        }
+        slot = (slot + 1) & gsCcHashMask;
+    }
+    return found;
+}
+
+#pragma kernel ClosureReset
+
+[numthreads(64, 1, 1)]
+void ClosureReset(uint id : SV_DispatchThreadID)
+{
+    if (id < gsCcHashSize)
+    {
+        gsCcHashKey[id] = CC_EMPTY;
+        gsCcHashVal[id] = CC_EMPTY;
+    }
+    if (id < gsCcCap)
+    {
+        gsCcLabel[id] = id;
+        gsCcComp[id * 4 + 0] = 0;
+        gsCcComp[id * 4 + 1] = 0;
+        gsCcComp[id * 4 + 2] = 0;
+        gsCcComp[id * 4 + 3] = 0;
+    }
+    if (id < AR_WORDS)
+        _AnalysisResult[id] = 0;
+}
+
+#pragma kernel ClosureInsert
+
+[numthreads(64, 1, 1)]
+void ClosureInsert(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    uint key = CcKey(gsCcEdges[id].xyz);
+    uint slot = CcHash(key);
+    bool done = false;
+    for (int n = 0; n < CC_PROBES && !done; n++)
+    {
+        uint old;
+        InterlockedCompareExchange(gsCcHashKey[slot], CC_EMPTY, key, old);
+        if (old == CC_EMPTY || old == key)
+        {
+            InterlockedMin(gsCcHashVal[slot], id);
+            done = true;
+        }
+        slot = (slot + 1) & gsCcHashMask;
+    }
+}
+
+#pragma kernel ClosureLink
+
+[numthreads(64, 1, 1)]
+void ClosureLink(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    float3 p = gsCcEdges[id].xyz;
+    uint li = gsCcLabel[id];
+    for (int dz = -1; dz <= 1; dz++)
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        uint j = CcFind(CcKey(p + float3(dx, dy, dz) * gsVoxSize));
+        if (j == CC_EMPTY || j == id) continue;
+        uint lj = gsCcLabel[j];
+        uint m = min(li, lj);
+        InterlockedMin(gsCcLabel[id], m);
+        InterlockedMin(gsCcLabel[j], m);
+        InterlockedMin(gsCcLabel[li], m);
+        InterlockedMin(gsCcLabel[lj], m);
+        li = m;
+    }
+}
+
+#pragma kernel ClosureJump
+
+[numthreads(64, 1, 1)]
+void ClosureJump(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    uint l = gsCcLabel[id];
+    for (int n = 0; n < 8; n++)
+    {
+        uint l2 = gsCcLabel[l];
+        if (l2 == l) break;
+        l = l2;
+    }
+    gsCcLabel[id] = l;
+}
+
+#pragma kernel ClosureClassify
+
+[numthreads(64, 1, 1)]
+void ClosureClassify(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    float3 p = gsCcEdges[id].xyz;
+    if (gsNearSurfaceCut(p, gsCcCutTol))
+    {
+        InterlockedAdd(_AnalysisResult[AR_CUT_EDGES], 1);
+        return;
+    }
+    uint root = gsCcLabel[id];
+    int3 mm = (int3)round(p * 1000.0);
+    InterlockedAdd(gsCcComp[root * 4 + 0], 1);
+    InterlockedAdd(gsCcComp[root * 4 + 1], mm.x);
+    InterlockedAdd(gsCcComp[root * 4 + 2], mm.y);
+    InterlockedAdd(gsCcComp[root * 4 + 3], mm.z);
+}
+
+#pragma kernel ClosureFinalize
+
+[numthreads(64, 1, 1)]
+void ClosureFinalize(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    int c = gsCcComp[id * 4];
+    if (c <= 0) return;
+    InterlockedAdd(_AnalysisResult[AR_HOLE_EDGES], (uint)c);
+    if ((uint)c < gsCcMinEdges) return;
+    InterlockedAdd(_AnalysisResult[AR_HOLES], 1);
+    InterlockedAdd(_AnalysisResult[AR_SIG_EDGES], (uint)c);
+    InterlockedMax(_AnalysisResult[AR_LARGEST], (min((uint)c, 65535u) << 16) | id);
+}
+
+#pragma kernel ClosureCentroid
+
+[numthreads(1, 1, 1)]
+void ClosureCentroid(uint id : SV_DispatchThreadID)
+{
+    _AnalysisResult[AR_OPEN_TOTAL] = gsCcCounters[2];
+    _AnalysisResult[AR_OPEN_USED] = CcCount();
+    _AnalysisResult[AR_INDEX_COUNT] = gsCcCounters[1];
+    _AnalysisResult[AR_VERTEX_COUNT] = gsCcCounters[0];
+    uint packed = _AnalysisResult[AR_LARGEST];
+    if (packed == 0) return;
+    uint root = packed & 0xFFFFu;
+    int c = max(gsCcComp[root * 4], 1);
+    _AnalysisResult[AR_LCX] = asuint(gsCcComp[root * 4 + 1] / c);
+    _AnalysisResult[AR_LCY] = asuint(gsCcComp[root * 4 + 2] / c);
+    _AnalysisResult[AR_LCZ] = asuint(gsCcComp[root * 4 + 3] / c);
 }
 
 // ──────────────────────────────────────────────────────────────────

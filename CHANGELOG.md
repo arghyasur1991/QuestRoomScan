@@ -23,13 +23,26 @@ All notable changes to this package are documented here. The format follows
   integrate (controller → `HandOnControllerAnchor`; else tracked `OVRHand`).
   `RoomScanSession.SetBodyExclusionAnchors` is for hosts with a non-OVR
   rig; it marks anchors host-owned so the scanner will not overwrite them.
+- Scan progress is analytic. `ScanProgress.OverallProgress =
+  min(Closure, Refinement)`: closure from the live mesh's own boundary
+  edges (Surface Nets records every crossing edge whose quad could not be
+  emitted; a GPU connected-components pass over a snapshot clusters them
+  into loops, drops loops on clip planes / the volume edge as cuts, ignores
+  loops under `holeMinPerimeter`), refinement from the fraction of surface
+  voxels at or above `confidentWeight`. Time-sliced over ~16 frames, one
+  128-byte readback per `analysisIntervalSeconds`. `ScanCoverage` gains
+  `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`,
+  `OpenBoundaryMetres`, `HoleCount`, `LargestHole`. Needs no scene model.
+- Removed: the frozen-fraction / colour / plateau progress blend,
+  `ScanCoverage.IsStabilized`, `coverageUpdateInterval`. `FrozenFraction`
+  and `ColorCoverage` stay as raw fields.
 - Shell coverage (needs `RoomUnderstanding`): the captured hull — outer
   walls, floor, ceiling, furniture faces — is sampled into ≤ 16k cells and
-  marched against the TSDF at the 1 Hz coverage tick. `ScanCoverage` gains
+  marched against the TSDF at the analysis tick. `ScanCoverage` gains
   `ShellCoverage` (openings excluded from the denominator), `ShellGapCount`,
-  `LargestGap`, `ShellFillsApplied`; `ScanProgress.OverallProgress` and the
-  phase follow it when available. `RoomScanSession.CopyShellGaps` lists the
-  largest holes. `FrozenFraction` stays as the freeze tool's metric.
+  `LargestGap`, `ShellFillsApplied`. Guidance and auto-fill only; it never
+  feeds `OverallProgress`. `RoomScanSession.CopyShellGaps` lists the
+  largest unscanned patches.
   Furniture faces march through the whole scene box, and a segment the
   sensor has seen straight through (observed free space) is reported empty
   and leaves the denominator (`ShellCellsEmpty`) — air inside a loose couch,
