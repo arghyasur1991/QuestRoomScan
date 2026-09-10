@@ -241,7 +241,7 @@ namespace Genesis.RoomScan
         private static readonly int CcMinEdgesID = Shader.PropertyToID("gsCcMinEdges");
         private static readonly int CcCutTolID = Shader.PropertyToID("gsCcCutTol");
 
-        enum AnalysisState { Idle, Link, Classify, Finalize, Readback }
+        enum AnalysisState { Idle, Link, Classify, Finalize, Readback, Disabled }
 
         [Header("Scan analysis")]
         [Tooltip("Seconds between analysis cycles. Each cycle is ~16 frames of small kernels and one 128-byte readback.")]
@@ -515,9 +515,11 @@ namespace Genesis.RoomScan
         void InitAnalysisBuffers()
         {
             const int cap = GPUSurfaceNets.MaxOpenEdges;
+            const GraphicsBuffer.Target structuredCopyDest =
+                GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.CopyDestination;
             _analysisResult ??= new ComputeBuffer(AnalysisWords, sizeof(uint));
-            _ccEdgesSnap ??= new GraphicsBuffer(GraphicsBuffer.Target.Structured, cap, 16);
-            _ccCountersSnap ??= new GraphicsBuffer(GraphicsBuffer.Target.Structured, GPUSurfaceNets.CounterCount, 4);
+            _ccEdgesSnap ??= new GraphicsBuffer(structuredCopyDest, cap, 16);
+            _ccCountersSnap ??= new GraphicsBuffer(structuredCopyDest, GPUSurfaceNets.CounterCount, 4);
             _ccHashKey ??= new ComputeBuffer(CcHashSize, sizeof(uint));
             _ccHashVal ??= new ComputeBuffer(CcHashSize, sizeof(uint));
             _ccLabel ??= new ComputeBuffer(cap, sizeof(uint));
@@ -607,8 +609,18 @@ namespace Genesis.RoomScan
                     _ccResetKernel.DispatchFit(CcHashSize, 1);
                     _coverageKernel.Set(VolumeRWID, _volume);
                     _coverageKernel.DispatchFit(_volume);
-                    Graphics.CopyBuffer(surfaceNets.OpenEdgeBuffer, _ccEdgesSnap);
-                    Graphics.CopyBuffer(surfaceNets.CountersBuffer, _ccCountersSnap);
+                    try
+                    {
+                        Graphics.CopyBuffer(surfaceNets.OpenEdgeBuffer, _ccEdgesSnap);
+                        Graphics.CopyBuffer(surfaceNets.CountersBuffer, _ccCountersSnap);
+                    }
+                    catch (Exception e)
+                    {
+                        // Never retry per frame: log once and stand down for this scan.
+                        Logger.Warning($"[VolumeIntegrator] Scan analysis disabled: {e.Message}");
+                        _analysisState = AnalysisState.Disabled;
+                        return;
+                    }
                     _ccInsertKernel.DispatchFit(GPUSurfaceNets.MaxOpenEdges, 1);
                     DispatchShellMarch();
 
@@ -640,7 +652,8 @@ namespace Genesis.RoomScan
                     break;
                 }
                 case AnalysisState.Readback:
-                    break; // waiting on the GPU
+                case AnalysisState.Disabled:
+                    break; // waiting on the GPU / stood down until ResetAnalysis
             }
         }
 

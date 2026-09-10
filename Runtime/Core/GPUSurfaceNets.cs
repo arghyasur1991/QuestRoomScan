@@ -143,11 +143,15 @@ namespace Genesis.RoomScan
             _coordVertMap = new GraphicsBuffer(GraphicsBuffer.Target.Structured, totalVoxels, 4);
             _vertices = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, VertexStride);
             _indices = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxIndices, 4);
-            _counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, CounterCount, 4);
+            // Counters and open edges are snapshotted by Graphics.CopyBuffer
+            // at the analysis tick, which requires the CopySource target.
+            const GraphicsBuffer.Target structuredCopySource =
+                GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.CopySource;
+            _counters = new GraphicsBuffer(structuredCopySource, CounterCount, 4);
             _counters.SetData(new uint[CounterCount]);
             _dispatchArgs = new GraphicsBuffer(structuredIndirect, 3, 4);
             _drawIndirectArgs = new GraphicsBuffer(structuredIndirect, 5, 4);
-            _openEdges = new GraphicsBuffer(GraphicsBuffer.Target.Structured, MaxOpenEdges, 16);
+            _openEdges = new GraphicsBuffer(structuredCopySource, MaxOpenEdges, 16);
 
             // GraphicsBuffer contents are not zero-initialised: a fresh buffer
             // holds whatever last occupied that memory. Nothing writes these
