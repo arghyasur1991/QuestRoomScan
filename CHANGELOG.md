@@ -9,10 +9,13 @@ All notable changes to this package are documented here. The format follows
 ### Live scan
 
 - Body exclusion is capsules, not a 0.6 m head cylinder: torso (0.35 m,
-  world-up), hands (0.14 m), and short forearms. Tests voxel position so a
-  wall behind a hand still fills. `FreezeInView` skips capsules; unfreeze
-  does not. Optional `eraseBodyBlobs` (off) can clear leftover hand voxels
-  below `eraseMaxWeight` (0.2, above seed weight).
+  world-up), hands (0.14 m), and short forearms. Tests both the depth sample
+  (a body pixel integrates nothing along its ray — the negative band behind a
+  hand otherwise meshes as a hand-shaped shell) and the voxel (a wall behind
+  a hand still fills). `FreezeInView` skips capsules; unfreeze does not.
+  Optional `eraseBodyBlobs` (off) can clear leftover hand voxels below
+  `eraseMaxWeight` (0.2, above seed weight). A 2 s diagnostic line logs the
+  anchors and capsules while scanning.
 - `DepthCapture.removeHandsFromDepth` requests Meta occlusion hand removal
   (inpaints depth). Needs hand tracking; the runtime turns it off while
   holding controllers. Capsules cover that case.

@@ -112,6 +112,12 @@ void Integrate(uint id : SV_DispatchThreadID)
     float3 depthNorm = gsDepthNormalSample(voxNDC.xy).xyz;
     float3 depthPos = gsDepthNDCtoWorld(float3(voxNDC.xy, depthNDC));
     if (!gsInsideRoom(depthPos)) return;
+    // The depth pixel itself is on the body: nothing along this ray may
+    // integrate. Testing only the voxel is not enough — a hand pixel still
+    // writes the negative band up to gsVoxDist behind the hand surface,
+    // which reaches past the capsule and meshes as a hand-shaped shell
+    // against the free space carved around it.
+    if (gsInsideAnyExclusion(depthPos)) return;
 
     float3 eyeToDepth = depthPos - eyePos;
     float depthEyeDist = length(eyeToDepth);

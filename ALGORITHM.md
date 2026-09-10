@@ -470,9 +470,19 @@ MRUK's world-lock can reposition the `TrackingSpace` transform each frame. `Dept
 
 ## 11. Exclusion Zones
 
-Capsules around the operator, tested on **voxel world position** (not by
-editing the depth texture). A wall behind a hand still fills when the hand
-moves. Up to 64 capsules.
+Capsules around the operator, tested twice per voxel in `Integrate` (not by
+editing the depth texture). Up to 64 capsules.
+
+1. **The depth sample.** If the world point the depth pixel hit is inside a
+   capsule, the pixel is body and nothing along that ray integrates — no
+   surface band, no free-space carve. This is the test that actually keeps a
+   hand out: a hand pixel otherwise still writes the negative band up to
+   `voxelDistance` (15 cm) *behind* the hand surface, which reaches past the
+   14 cm capsule and meshes as a hand-shaped shell against the free space
+   carved around the silhouette. Seen on device before this test existed.
+2. **The voxel.** A voxel inside a capsule is never written, whatever the
+   depth says, so a wall behind a hand still fills when the hand moves and a
+   stale frame during fast motion cannot seed the arm.
 
 | Capsule | Segment | Radius | Erasable |
 |---|---|---|---|
