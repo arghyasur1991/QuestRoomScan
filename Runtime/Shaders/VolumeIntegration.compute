@@ -455,29 +455,35 @@ void CloseSmallHoles(uint3 id : SV_DispatchThreadID)
 //  solid (|w| >= min, tsdf <= 0), U unobserved. The surface the player sees
 //  is the set of F–S faces. The only other faces on the boundary of F are
 //  F–U: standing in scanned air, the next thing is unknown — that is where
-//  passthrough leaks. Not every U counts: a pocket sealed off by F and S
-//  (un-seeded air in front of a grazing wall) leaks nothing. So U is flooded
-//  from the outside of the volume into E (exterior unknown), and the leak
-//  surface is exactly the F–E faces. A 1-voxel gap in S lets E through — that
-//  is the hole. Behind a wall is S–E and never counts. No camera, no scene
+//  passthrough leaks. Not every U counts: a sliver sealed off by F and S
+//  (un-seeded air in front of a grazing wall) leaks nothing. What does count
+//  is unknown that is *void*: connected to a full 8³ block (a 40 cm cube) of
+//  unknown — the unscanned outside, the far side of a hole, the inside of a
+//  couch, an unswept corner. Those blocks seed E (exterior/void unknown), a
+//  fine flood carries E through the shell blocks, and the leak surface is
+//  exactly the F–E faces. A 1-voxel gap in S lets E through — that is the
+//  hole. Behind a closed wall is S–E and never counts. No camera, no scene
 //  model, no rays.
 //
 //  Pipeline (host time-slices it, one readback per cycle):
-//    ClassifyVoxels   full volume once: label texture + per-block flags
-//    BlockFloodInit/Step   32³ blocks: E-blocks = pure-U reachable from the edge
-//    BuildMixedList / MixedArgs   blocks holding U and (F or S): the shell
-//    FineFloodStep    shell voxels only: U next to E becomes E
-//    LeakFaces        shell voxels: F next to E → leak face (cuts skipped);
+//    ClassifyVoxels   full volume once, one group per block: label texture,
+//                     per-block flags, coverage counters
+//    BuildBlockLists  flood list (blocks with U and F/S) and face list
+//                     (blocks with F and S/U); indirect dispatch args
+//    FineFloodStep    flood blocks only, 8 LDS rounds per dispatch: U next
+//                     to E (label, pure-U block, or outside) becomes E
+//    LeakFaces        face blocks: F next to E → leak face (cuts skipped);
 //                     F next to S counted as surface. F voxel marked LEAK.
 //    Closure*         connected components over leak faces → holes with area
-//    FillLeaks        cap small holes: E voxel on a leak face becomes solid
+//    FillLeaks        cap small holes: E voxels behind a leak face become
+//                     solid, continuous with the F voxel's own value
 //
 //  Result words (uint unless noted):
 //    0 surface voxels    1 frozen      2 coloured     3 confident
 //    4 leak faces total  5 leak faces analysed (<= cap)  6 cut faces
 //    7 hole faces        8 faces in holes >= min  9 hole count (>= min)
 //   10 largest hole (faces<<16 | root)  11..13 largest centre, int mm
-//   14 surface faces (F–S)  15 filled faces  16 mixed blocks  17 E blocks
+//   14 surface faces (F–S)  15 filled faces  16 flood blocks  17 void blocks
 // ──────────────────────────────────────────────────────────────────
 
 #define AR_SURFACE      0
@@ -496,8 +502,8 @@ void CloseSmallHoles(uint3 id : SV_DispatchThreadID)
 #define AR_LCZ          13
 #define AR_SURF_FACES   14
 #define AR_FILLED       15
-#define AR_MIXED_BLOCKS 16
-#define AR_E_BLOCKS     17
+#define AR_FLOOD_BLOCKS 16
+#define AR_VOID_BLOCKS  17
 #define AR_WORDS        32
 
 // Labels, stored in an R8_UNorm 3D texture as label / 5.
@@ -517,9 +523,10 @@ Texture3D<float4>  gsColorVolumeRead;
 #define BLOCK 8
 uint3 gsBlockCount;                          // ceil(gsVoxCount / 8)
 RWStructuredBuffer<uint> gsBlockFlags;       // bit0 hasF, bit1 hasS, bit2 hasU
-RWStructuredBuffer<uint> gsBlockState;       // 1 = exterior (E) block
-RWStructuredBuffer<uint> gsMixedList;        // block indices holding U and (F or S)
-RWStructuredBuffer<uint> gsMixedArgs;        // [0] mixed count (also indirect groups X), [1] 1, [2] 1
+RWStructuredBuffer<uint> gsFloodList;        // block indices holding U and (F or S)
+RWStructuredBuffer<uint> gsFloodArgs;        // [0] count (indirect groups X), [1] 1, [2] 1
+RWStructuredBuffer<uint> gsFaceList;         // block indices holding F and (S or U)
+RWStructuredBuffer<uint> gsFaceArgs;         // [0] count (indirect groups X), [1] 1, [2] 1
 
 uint LabelOf(uint3 c)   { return (uint)round(gsLabelRW[c] * 5.0); }
 void SetLabel(uint3 c, uint l) { gsLabelRW[c] = (float)l / 5.0; }
@@ -537,28 +544,23 @@ uint3 UnflattenBlock(uint i)
 
 bool IsPureU(uint flags) { return flags == 4u; }
 
-// A voxel counts as exterior-unknown if its own label says E, or it lies in
-// a pure-U block the block flood reached (those blocks are never visited by
-// the fine flood, so their voxels keep label U).
+// A voxel counts as void-unknown if its own label says E, or it lies in a
+// pure-U block (those blocks are never visited by the fine flood, so their
+// voxels keep label U), or it is beyond the volume.
 bool IsExterior(uint3 c)
 {
     bool e = false;
     if (any(c >= gsVoxCount))
     {
-        e = true;   // beyond the volume is the outside
+        e = true;
     }
     else
     {
         uint l = LabelOf(c);
         if (l == LBL_E)
-        {
             e = true;
-        }
         else if (l == LBL_U)
-        {
-            uint bi = BlockIndexOf(BlockOfVoxel(c));
-            e = gsBlockState[bi] != 0u && IsPureU(gsBlockFlags[bi]);
-        }
+            e = IsPureU(gsBlockFlags[BlockIndexOf(BlockOfVoxel(c))]);
     }
     return e;
 }
@@ -570,13 +572,11 @@ bool IsExterior(uint3 c)
 [numthreads(64, 1, 1)]
 void AnalysisReset(uint id : SV_DispatchThreadID)
 {
-    uint blocks = gsBlockCount.x * gsBlockCount.y * gsBlockCount.z;
-    if (id < blocks)
+    if (id < 3u)
     {
-        gsBlockFlags[id] = 0u;
-        gsBlockState[id] = 0u;
+        gsFloodArgs[id] = id == 0u ? 0u : 1u;
+        gsFaceArgs[id] = id == 0u ? 0u : 1u;
     }
-    if (id < 3u) gsMixedArgs[id] = id == 0u ? 0u : 1u;
     if (id < AR_WORDS) _AnalysisResult[id] = 0u;
 }
 
@@ -593,110 +593,138 @@ void ClearLabels(uint3 id : SV_DispatchThreadID)
 
 #pragma kernel ClassifyVoxels
 
-[numthreads(4, 4, 4)]
-void ClassifyVoxels(uint3 id : SV_DispatchThreadID)
+// One group per 8³ block: flags and counters reduce in LDS and each group
+// writes its block word and adds four counters once — no per-voxel atomics.
+groupshared uint gsClsFlags;
+groupshared uint gsClsCount[4];
+
+[numthreads(8, 8, 8)]
+void ClassifyVoxels(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex)
 {
-    if (any(id >= gsVoxCount)) return;
-    float2 v = gsVolumeRW[id];
-    float w = abs(v.y);
-    bool observed = w >= gsCoverMinWeight;
-    uint label = !observed ? LBL_U : (v.x > 0.0 ? LBL_F : LBL_S);
-    SetLabel(id, label);
-
-    uint bi = BlockIndexOf(BlockOfVoxel(id));
-    InterlockedOr(gsBlockFlags[bi], 1u << label);
-
-    // Coverage counters (was CountSurfaceCoverage).
-    bool isSurface = w > PRUNE_WEIGHT && abs(v.x) < 0.3;
-    if (isSurface)
+    if (gi == 0u)
     {
-        InterlockedAdd(_AnalysisResult[AR_SURFACE], 1u);
-        if (v.y < 0) InterlockedAdd(_AnalysisResult[AR_FROZEN], 1u);
-        if (w >= gsConfidentWeight) InterlockedAdd(_AnalysisResult[AR_CONFIDENT], 1u);
-        if (gsColorVolumeRead[id].a > 0.1) InterlockedAdd(_AnalysisResult[AR_COLORED], 1u);
+        gsClsFlags = 0u;
+        gsClsCount[0] = gsClsCount[1] = gsClsCount[2] = gsClsCount[3] = 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint3 id = gid * BLOCK + tid;
+    if (all(id < gsVoxCount))
+    {
+        float2 v = gsVolumeRW[id];
+        float w = abs(v.y);
+        bool observed = w >= gsCoverMinWeight;
+        uint label = !observed ? LBL_U : (v.x > 0.0 ? LBL_F : LBL_S);
+        SetLabel(id, label);
+        InterlockedOr(gsClsFlags, 1u << label);
+
+        // Coverage counters (was CountSurfaceCoverage).
+        bool isSurface = w > PRUNE_WEIGHT && abs(v.x) < 0.3;
+        if (isSurface)
+        {
+            InterlockedAdd(gsClsCount[AR_SURFACE], 1u);
+            if (v.y < 0) InterlockedAdd(gsClsCount[AR_FROZEN], 1u);
+            if (gsColorVolumeRead[id].a > 0.1) InterlockedAdd(gsClsCount[AR_COLORED], 1u);
+            if (w >= gsConfidentWeight) InterlockedAdd(gsClsCount[AR_CONFIDENT], 1u);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gi == 0u)
+    {
+        gsBlockFlags[BlockIndexOf(gid)] = gsClsFlags;
+        if (gsClsCount[0] != 0u) InterlockedAdd(_AnalysisResult[AR_SURFACE], gsClsCount[0]);
+        if (gsClsCount[1] != 0u) InterlockedAdd(_AnalysisResult[AR_FROZEN], gsClsCount[1]);
+        if (gsClsCount[2] != 0u) InterlockedAdd(_AnalysisResult[AR_COLORED], gsClsCount[2]);
+        if (gsClsCount[3] != 0u) InterlockedAdd(_AnalysisResult[AR_CONFIDENT], gsClsCount[3]);
     }
 }
 
-// ── Block flood: exterior unknown at block resolution ───────────────
+// ── Block lists ──────────────────────────────────────────────────────
 
-#pragma kernel BlockFloodInit
-
-[numthreads(64, 1, 1)]
-void BlockFloodInit(uint id : SV_DispatchThreadID)
-{
-    uint blocks = gsBlockCount.x * gsBlockCount.y * gsBlockCount.z;
-    if (id >= blocks) return;
-    uint3 b = UnflattenBlock(id);
-    bool edge = any(b == 0u) || any(b == gsBlockCount - 1u);
-    uint flags = gsBlockFlags[id];
-    // Seed: unknown blocks touching the volume edge. Anything outside the
-    // room clip is never written, so it is pure U and joins here.
-    gsBlockState[id] = (edge && (flags & 4u) != 0u && (flags & 3u) == 0u) ? 1u : 0u;
-}
-
-#pragma kernel BlockFloodStep
-
-// Passable = holds any U. Letting E pass through mixed blocks is an
-// over-approximation at block level; the fine flood decides per voxel
-// inside them, and only pure-U E-blocks act as seeds.
-[numthreads(64, 1, 1)]
-void BlockFloodStep(uint id : SV_DispatchThreadID)
-{
-    uint blocks = gsBlockCount.x * gsBlockCount.y * gsBlockCount.z;
-    if (id >= blocks) return;
-    if (gsBlockState[id] != 0u) return;
-    uint flags = gsBlockFlags[id];
-    if ((flags & 4u) == 0u) return;
-    uint3 b = UnflattenBlock(id);
-    bool reach = false;
-    if (b.x > 0u                  && gsBlockState[BlockIndexOf(b - uint3(1,0,0))] != 0u) reach = true;
-    if (b.x + 1u < gsBlockCount.x && gsBlockState[BlockIndexOf(b + uint3(1,0,0))] != 0u) reach = true;
-    if (b.y > 0u                  && gsBlockState[BlockIndexOf(b - uint3(0,1,0))] != 0u) reach = true;
-    if (b.y + 1u < gsBlockCount.y && gsBlockState[BlockIndexOf(b + uint3(0,1,0))] != 0u) reach = true;
-    if (b.z > 0u                  && gsBlockState[BlockIndexOf(b - uint3(0,0,1))] != 0u) reach = true;
-    if (b.z + 1u < gsBlockCount.z && gsBlockState[BlockIndexOf(b + uint3(0,0,1))] != 0u) reach = true;
-    if (reach) gsBlockState[id] = 1u;
-}
-
-#pragma kernel BuildMixedList
+#pragma kernel BuildBlockLists
 
 [numthreads(64, 1, 1)]
-void BuildMixedList(uint id : SV_DispatchThreadID)
+void BuildBlockLists(uint id : SV_DispatchThreadID)
 {
     uint blocks = gsBlockCount.x * gsBlockCount.y * gsBlockCount.z;
     if (id >= blocks) return;
     uint flags = gsBlockFlags[id];
-    if (gsBlockState[id] != 0u && IsPureU(flags))
-        InterlockedAdd(_AnalysisResult[AR_E_BLOCKS], 1u);
-    if ((flags & 4u) == 0u || (flags & 3u) == 0u) return;
-    uint slot;
-    InterlockedAdd(gsMixedArgs[0], 1u, slot);
-    gsMixedList[slot] = id;
-    InterlockedAdd(_AnalysisResult[AR_MIXED_BLOCKS], 1u);
+    bool hasF = (flags & 1u) != 0u;
+    bool hasS = (flags & 2u) != 0u;
+    bool hasU = (flags & 4u) != 0u;
+    if (IsPureU(flags))
+        InterlockedAdd(_AnalysisResult[AR_VOID_BLOCKS], 1u);
+    if (hasU && (hasF || hasS))
+    {
+        uint slot;
+        InterlockedAdd(gsFloodArgs[0], 1u, slot);
+        gsFloodList[slot] = id;
+        InterlockedAdd(_AnalysisResult[AR_FLOOD_BLOCKS], 1u);
+    }
+    if (hasF && (hasS || hasU))
+    {
+        uint slot;
+        InterlockedAdd(gsFaceArgs[0], 1u, slot);
+        gsFaceList[slot] = id;
+    }
 }
 
-// ── Fine flood, shell voxels only (indirect over the mixed list) ─────
+// ── Fine flood, flood blocks only (indirect over the flood list) ─────
+//  The block's labels live in LDS for 8 rounds; the halo (neighbours in
+//  other blocks) is read once from the texture. E only ever grows, so a
+//  stale halo read costs a round, never correctness.
 
 #pragma kernel FineFloodStep
 
-[numthreads(8, 8, 8)]
-void FineFloodStep(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
-{
-    uint bi = gsMixedList[gid.x];
-    uint3 c = UnflattenBlock(bi) * BLOCK + tid;
-    if (any(c >= gsVoxCount)) return;
-    if (LabelOf(c) != LBL_U) return;
+groupshared uint gsFlood[BLOCK * BLOCK * BLOCK];
 
-    bool e = false;
-    e = e || IsExterior(c + uint3(1,0,0));
-    e = e || (c.x > 0u && IsExterior(c - uint3(1,0,0)));
-    e = e || IsExterior(c + uint3(0,1,0));
-    e = e || (c.y > 0u && IsExterior(c - uint3(0,1,0)));
-    e = e || IsExterior(c + uint3(0,0,1));
-    e = e || (c.z > 0u && IsExterior(c - uint3(0,0,1)));
-    // c on the volume edge (x == 0 etc.) is outside-adjacent by definition.
-    e = e || any(c == 0u);
-    if (e) SetLabel(c, LBL_E);
+uint FloodIdx(uint3 t) { return t.x + t.y * BLOCK + t.z * BLOCK * BLOCK; }
+
+[numthreads(8, 8, 8)]
+void FineFloodStep(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex)
+{
+    uint bi = gsFloodList[gid.x];
+    uint3 origin = UnflattenBlock(bi) * BLOCK;
+    uint3 c = origin + tid;
+    bool inVol = all(c < gsVoxCount);
+    uint label = inVol ? LabelOf(c) : LBL_E;
+
+    // Halo: a U voxel on a block face looks across once.
+    bool haloE = false;
+    if (inVol && label == LBL_U)
+    {
+        if (tid.x == BLOCK - 1u) haloE = haloE || IsExterior(c + uint3(1,0,0));
+        if (tid.x == 0u)         haloE = haloE || (c.x == 0u || IsExterior(c - uint3(1,0,0)));
+        if (tid.y == BLOCK - 1u) haloE = haloE || IsExterior(c + uint3(0,1,0));
+        if (tid.y == 0u)         haloE = haloE || (c.y == 0u || IsExterior(c - uint3(0,1,0)));
+        if (tid.z == BLOCK - 1u) haloE = haloE || IsExterior(c + uint3(0,0,1));
+        if (tid.z == 0u)         haloE = haloE || (c.z == 0u || IsExterior(c - uint3(0,0,1)));
+        if (haloE) label = LBL_E;
+    }
+    uint startLabel = inVol ? LabelOf(c) : LBL_E;
+    gsFlood[gi] = label;
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint round = 0u; round < 8u; round++)
+    {
+        bool grow = false;
+        if (gsFlood[gi] == LBL_U)
+        {
+            if (tid.x + 1u < BLOCK && gsFlood[FloodIdx(tid + uint3(1,0,0))] == LBL_E) grow = true;
+            if (tid.x > 0u         && gsFlood[FloodIdx(tid - uint3(1,0,0))] == LBL_E) grow = true;
+            if (tid.y + 1u < BLOCK && gsFlood[FloodIdx(tid + uint3(0,1,0))] == LBL_E) grow = true;
+            if (tid.y > 0u         && gsFlood[FloodIdx(tid - uint3(0,1,0))] == LBL_E) grow = true;
+            if (tid.z + 1u < BLOCK && gsFlood[FloodIdx(tid + uint3(0,0,1))] == LBL_E) grow = true;
+            if (tid.z > 0u         && gsFlood[FloodIdx(tid - uint3(0,0,1))] == LBL_E) grow = true;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (grow) gsFlood[gi] = LBL_E;
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (inVol && gsFlood[gi] == LBL_E && startLabel == LBL_U)
+        SetLabel(c, LBL_E);
 }
 
 // ── Leak faces ───────────────────────────────────────────────────────
@@ -745,7 +773,7 @@ void TryFace(uint3 c, float3 cw, uint dirIndex, inout bool leak, inout uint surf
 [numthreads(8, 8, 8)]
 void LeakFaces(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
 {
-    uint bi = gsMixedList[gid.x];
+    uint bi = gsFaceList[gid.x];
     uint3 c = UnflattenBlock(bi) * BLOCK + tid;
     if (any(c >= gsVoxCount)) return;
     if (LabelOf(c) != LBL_F) return;
@@ -934,15 +962,29 @@ void ClosureFinalize(uint id : SV_DispatchThreadID)
 }
 
 // ── Fill: cap small holes along the F–E interface ────────────────────
-//  The E voxel behind each leak face becomes solid (and the next one
-//  behind it too, so the band has depth); the F voxel in front stays
-//  positive, so the zero crossing lands exactly on the face. Where the air
-//  in front of a small hole was observed, that interface is the missing
-//  surface itself. Frontier-sized components are never capped.
+//  The two E voxels behind each leak face become solid, continued from the
+//  F voxel's own TSDF value at the band slope (one voxel = gsVoxSize /
+//  gsVoxDist in normalised units), so the zero crossing lands where the
+//  neighbouring real surface puts it — a hole in a wall closes on the wall,
+//  not half a voxel off it. Where the air in front of a small hole was
+//  observed, that interface is the missing surface itself. Frontier-sized
+//  components are never capped.
 
 #pragma kernel FillLeaks
 
 uint gsFillMaxFaces;
+
+void CapVoxel(int3 v, float tsdf, inout bool wrote)
+{
+    if (any(v < 0) || any(v >= (int3)gsVoxCount)) return;
+    uint3 c = (uint3)v;
+    float3 q = gsVoxelToWorld(c);
+    if (!gsInsideRoom(q) || gsInsideAnyExclusion(q)) return;
+    float2 old = gsVolumeRW[c];
+    if (old.y < 0 || old.y >= gsCoverMinWeight) return;
+    gsVolumeRW[c] = float2(tsdf, gsFillWeight);
+    wrote = true;
+}
 
 [numthreads(64, 1, 1)]
 void FillLeaks(uint id : SV_DispatchThreadID)
@@ -957,35 +999,17 @@ void FillLeaks(uint id : SV_DispatchThreadID)
     int3 step = kLeakDirs[dirIndex];
 
     int3 fv = (int3)floor(gsWorldToVoxelFloat(f.xyz));
-    int3 e1 = fv + step;
-    int3 e2 = fv + step * 2;
-    bool wrote = false;
+    float front = 0.5;
+    if (all(fv >= 0) && all(fv < (int3)gsVoxCount))
+        front = max(gsVolumeRW[(uint3)fv].x, 0.0);
+    float slope = gsVoxSize / gsVoxDist;
+    float t1 = clamp(front - slope, -1.0, -0.05);
+    float t2 = clamp(front - 2.0 * slope, -1.0, -0.1);
 
-    if (all(e1 >= 0) && all(e1 < (int3)gsVoxCount))
-    {
-        uint3 c1 = (uint3)e1;
-        float3 q = gsVoxelToWorld(c1);
-        if (gsInsideRoom(q) && !gsInsideAnyExclusion(q))
-        {
-            float2 old = gsVolumeRW[c1];
-            if (old.y >= 0 && old.y < gsCoverMinWeight)
-            {
-                gsVolumeRW[c1] = float2(-0.5, gsFillWeight);
-                wrote = true;
-            }
-        }
-    }
-    if (all(e2 >= 0) && all(e2 < (int3)gsVoxCount))
-    {
-        uint3 c2 = (uint3)e2;
-        float3 q = gsVoxelToWorld(c2);
-        if (gsInsideRoom(q) && !gsInsideAnyExclusion(q))
-        {
-            float2 old = gsVolumeRW[c2];
-            if (old.y >= 0 && old.y < gsCoverMinWeight)
-                gsVolumeRW[c2] = float2(-1.0, gsFillWeight);
-        }
-    }
+    bool wrote = false;
+    CapVoxel(fv + step, t1, wrote);
+    bool wrote2 = false;
+    CapVoxel(fv + step * 2, t2, wrote2);
     if (wrote) InterlockedAdd(_AnalysisResult[AR_FILLED], 1u);
 }
 

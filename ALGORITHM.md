@@ -531,45 +531,48 @@ of the volume alone: no camera pose, no ray, no scene model.
 Every voxel is one of three classes: **F** observed free (`|w| ≥ minMeshWeight`,
 `tsdf > 0`), **S** observed solid (`|w| ≥ minMeshWeight`, `tsdf ≤ 0`), **U**
 unobserved. The surface is the set of F–S faces. Not every F–U face is a leak:
-un-seeded air in front of a grazing wall is a U pocket sealed by F and S and
-leaks nothing. So U is flooded from the outside of the volume into **E**
-(exterior unknown), and the **leak surface is the set of F–E faces**. A single
-missing solid voxel lets E through — that is the hole. Behind a wall is S–E
-and never counts.
+un-seeded air in front of a grazing wall is a thin U sliver sealed by F and S
+and leaks nothing. What does count is unknown that is **void** — connected to
+a full 8³ block (a 40 cm cube) of unknown: the unscanned outside, the far side
+of a hole, the unobserved inside of a couch, an unswept corner. Those blocks
+seed **E**, a fine flood carries E through the shell blocks, and the **leak
+surface is the set of F–E faces**. A single missing solid voxel lets E through
+— that is the hole. Behind a closed wall is S–E and never counts. (An earlier
+cut seeded E only from the volume edge; holes into enclosed unobserved
+pockets — under a bed, inside a closet — then read as sealed and were missed.)
 
-Everything heavy stays on the GPU, spread over ~25 frames of small kernels;
+Everything heavy stays on the GPU, spread over ~20 frames of small kernels;
 the CPU sees a 32-word result once per `analysisIntervalSeconds`.
 
-1. **`AnalysisReset`** / **`ClosureReset`** — zero block flags / states, the
-   result words, the component hash and stats.
-2. **`ClassifyVoxels`** — the one full-volume pass. Writes each voxel's label
-   into an `R8_UNorm` 3-D texture (`gsLabelVolume`, label ÷ 5; also the source
-   of the mesh's red leak tint), ORs the class into its 8³ block's flags
-   (hasF / hasS / hasU), and folds in the old coverage counters: surface voxels
+1. **`AnalysisReset`** / **`ClosureReset`** — zero the result words, the
+   list counters, the component hash and stats.
+2. **`ClassifyVoxels`** — the one full-volume pass, one 8³ group per block.
+   Writes each voxel's label into an `R8_UNorm` 3-D texture (`gsLabelVolume`,
+   label ÷ 5; also the source of the mesh's red leak tint), reduces the
+   block's class flags (hasF / hasS / hasU) and the coverage counters in LDS
+   and writes them once per group (no per-voxel atomics): surface voxels
    (`|tsdf| < 0.3 && |w| > PRUNE_WEIGHT`), frozen (`w < 0`), coloured, and
    **confident** (`|w| ≥ confidentWeight`).
-3. **Block flood** (`BlockFloodInit`, `BlockFloodStep` × 64) over the 32³
-   blocks: pure-U blocks on the volume edge seed E; E spreads through any
-   block holding U. Everything outside the room clip is never written, so it
-   is pure U and joins the exterior on round one. Passing through mixed
-   blocks is a block-level over-approximation; only **pure-U** reached blocks
-   act as exterior seeds for the next step, and the fine flood decides per
-   voxel inside mixed blocks.
-4. **`BuildMixedList`** — blocks holding U *and* F or S: the shell of the
-   scan, typically ~10 % of the blocks. Their count becomes the indirect
-   dispatch argument; nothing below touches the other 90 %.
-5. **`FineFloodStep`** × (4 per frame × 6 frames) over the mixed blocks: a U
-   voxel with a 6-neighbour that is E (by label, or by lying in a reached
-   pure-U block, or beyond the volume) becomes E. The label texture is read
-   and written in place; the update is monotonic so races are harmless.
-6. **`LeakFaces`** over the mixed blocks: for each F voxel, each 6-neighbour
+3. **`BuildBlockLists`** — two indirect-dispatch lists: the *flood* list
+   (blocks holding U and F or S — the shell, ~10 %) and the *face* list
+   (blocks holding F and S or U — everywhere a surface or a leak can be).
+   Pure-U blocks are counted as void.
+4. **`FineFloodStep`** × (2 per frame × 3 frames) over the flood list. The
+   block's 512 labels are loaded into LDS; voxels on the block's faces look
+   across once (a neighbour is void if its label is E, or it lies in a pure-U
+   block, or it is beyond the volume); then 8 in-block rounds of "U next to
+   E becomes E" run in LDS and changed voxels are written back. Cross-block
+   travel costs one dispatch per block; void reaches a hole through a few
+   voxels of shell, so six dispatches are generous. E only grows, so a stale
+   halo read costs a round, never correctness.
+5. **`LeakFaces`** over the face list: for each F voxel, each 6-neighbour
    that is S counts one **surface face**; each neighbour that is E is a
    **leak face** unless it lies within `cutToleranceVoxels` (2) of a clip
    plane, the room AABB or the volume edge — those are **cuts** (the doorway
    invisible wall, the 0.5 m expand). Leak faces are appended (F voxel
    centre + packed direction, ≤ 65 536; the counter keeps the true total) and
    the F voxel is relabelled **LEAK** so the mesh shader can tint it.
-7. **Connected components** over the leak faces (`ClosureInsert`,
+6. **Connected components** over the leak faces (`ClosureInsert`,
    `ClosureLink` × `closureLinkRounds`, `ClosureJump`, `ClosureClassify`,
    `ClosureFinalize`, `ClosureCentroid`). Faces are keyed by their F voxel, so
    the several faces of one voxel merge in the hash and a 26-neighbour lookup
@@ -577,15 +580,17 @@ the CPU sees a 32-word result once per `analysisIntervalSeconds`.
    components with ≥ `holeMinAreaM2 / voxel²` faces are **holes**, the largest
    is packed `faces<<16 | root` with `InterlockedMax`. The scan frontier is
    simply the largest hole.
-8. **`FillLeaks`** (`fillLeaks`, on): for every leak face whose component is
-   ≤ `fillLeakMaxAreaM2` (0.25 m²), the E voxel behind the face becomes solid
-   (`tsdf −0.5`, `fillWeight`) and the one behind it `−1`; the F voxel in
-   front stays positive, so the next extract puts a zero crossing exactly on
-   the face. Where the air in front of a small hole was observed, the F–E
-   interface *is* the missing surface. Frontier-sized components are never
-   capped; real depth (weight ≥ minMeshWeight) is never overwritten; body
-   capsules and outside-room voxels are skipped.
-9. **Readback** of the 32 words. CPU derives
+7. **`FillLeaks`** (`fillLeaks`, on): for every leak face whose component is
+   ≤ `fillLeakMaxAreaM2` (0.25 m²), the two E voxels behind the face become
+   solid at `fillWeight`, with TSDF values continued from the F voxel's own
+   value at the band slope (`f − voxel/truncation`, `f − 2·voxel/truncation`,
+   clamped negative). The zero crossing therefore lands where the
+   neighbouring real surface puts it — a hole in a wall closes *on* the wall,
+   not half a voxel off it. Where the air in front of a small hole was
+   observed, the F–E interface *is* the missing surface. Frontier-sized
+   components are never capped; real depth (weight ≥ minMeshWeight) is never
+   overwritten; body capsules and outside-room voxels are skipped.
+8. **Readback** of the 32 words. CPU derives
    `Closure = surfaceArea / (surfaceArea + leakArea)` with both areas =
    faces × voxel² (the staircase inflates both alike, so the ratio is fair),
    `Refinement = clamp01(confident ÷ surface ÷ refinementSaturation)`, and
@@ -601,10 +606,14 @@ front of every grazing one — so counting edges over-reports holes everywhere.
 A free–exterior face appears only where the player could look *through* the
 scan. The two agree at a real hole and disagree exactly at the false positives.
 
-Cost per cycle: one full-volume read (2 bytes/voxel, was already there), 64
-rounds over 32k block words, ~24 rounds over ~10 % of the voxels, ≤ 65k × 27
-hash probes per link round, one 128-byte readback. Nothing per frame, nothing
-over the volume beyond step 2. Memory: 16 MB label texture + ~4 MB of buffers.
+Cost per cycle: one full-volume read (2 bytes/voxel, was already there) with
+one block word and four counter adds per 512 voxels, six LDS dispatches over
+~10 % of the voxels, one face pass over the surface blocks, ≤ 65k × 27 hash
+probes per link round, one 128-byte readback. Nothing per frame, nothing over
+the volume beyond step 2. The mesh shader samples the label volume **per
+vertex** (two fetches), never per fragment — two dependent 3-D fetches per
+stereo pixel on a 16 MB texture cost ~10 fps on Quest 3. Memory: 16 MB label
+texture + ~4 MB of buffers.
 
 ### Shell coverage (compute kernel `MarchShellCells`, requires `RoomUnderstanding`)
 

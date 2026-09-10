@@ -205,9 +205,7 @@ namespace Genesis.RoomScan
         private ComputeKernelHelper _anResetKernel;
         private ComputeKernelHelper _anClearLabelsKernel;
         private ComputeKernelHelper _anClassifyKernel;
-        private ComputeKernelHelper _anBlockInitKernel;
-        private ComputeKernelHelper _anBlockStepKernel;
-        private ComputeKernelHelper _anMixedListKernel;
+        private ComputeKernelHelper _anBlockListsKernel;
         private ComputeKernelHelper _anFineStepKernel;
         private ComputeKernelHelper _anLeakKernel;
         private ComputeKernelHelper _ccResetKernel;
@@ -221,9 +219,10 @@ namespace Genesis.RoomScan
         private ComputeBuffer _analysisResult;
         private RenderTexture _labelVolume;
         private ComputeBuffer _blockFlags;
-        private ComputeBuffer _blockState;
-        private ComputeBuffer _mixedList;
-        private GraphicsBuffer _mixedArgs;
+        private ComputeBuffer _floodList;
+        private GraphicsBuffer _floodArgs;
+        private ComputeBuffer _faceList;
+        private GraphicsBuffer _faceArgs;
         private ComputeBuffer _leakFaces;
         private ComputeBuffer _leakCounters;
         private ComputeBuffer _ccHashKey;
@@ -250,9 +249,10 @@ namespace Genesis.RoomScan
         private static readonly int LabelVolumeID = Shader.PropertyToID("gsLabelVolume");
         private static readonly int BlockCountID = Shader.PropertyToID("gsBlockCount");
         private static readonly int BlockFlagsID = Shader.PropertyToID("gsBlockFlags");
-        private static readonly int BlockStateID = Shader.PropertyToID("gsBlockState");
-        private static readonly int MixedListID = Shader.PropertyToID("gsMixedList");
-        private static readonly int MixedArgsID = Shader.PropertyToID("gsMixedArgs");
+        private static readonly int FloodListID = Shader.PropertyToID("gsFloodList");
+        private static readonly int FloodArgsID = Shader.PropertyToID("gsFloodArgs");
+        private static readonly int FaceListID = Shader.PropertyToID("gsFaceList");
+        private static readonly int FaceArgsID = Shader.PropertyToID("gsFaceArgs");
         private static readonly int LeakFacesID = Shader.PropertyToID("gsLeakFaces");
         private static readonly int LeakCountersID = Shader.PropertyToID("gsLeakCounters");
         private static readonly int LeakCapID = Shader.PropertyToID("gsLeakCap");
@@ -271,10 +271,10 @@ namespace Genesis.RoomScan
         private static readonly int FreezeOriginID = Shader.PropertyToID("gsFreezeOrigin");
         private static readonly int FreezeDirID = Shader.PropertyToID("gsFreezeDir");
 
-        enum AnalysisState { Idle, BlockFlood, FineFlood, LeakFaces, Link, Classify, Finalize, Readback, Disabled }
+        enum AnalysisState { Idle, FineFlood, LeakFaces, Link, Classify, Finalize, Readback, Disabled }
 
         [Header("Scan analysis")]
-        [Tooltip("Seconds between analysis cycles. Each cycle is ~25 frames of small kernels (one full-volume classify, then shell-only floods) and one 128-byte readback.")]
+        [Tooltip("Seconds between analysis cycles. Each cycle is ~20 frames of small kernels (one full-volume classify, then shell-only floods) and one 128-byte readback.")]
         [SerializeField, Range(0.25f, 5f)] private float analysisIntervalSeconds = 1f;
         [Tooltip("Surface voxels at or above this |weight| count as refined. Weight only grows with good observations (max 0.5) and the blend rate falls with it, so this is 'the surface has stopped moving'. 0.2 is about half a second of good frames.")]
         [SerializeField, Range(0.1f, 0.5f)] private float confidentWeight = 0.2f;
@@ -284,16 +284,14 @@ namespace Genesis.RoomScan
         [SerializeField, Range(0f, 1f)] private float refinementInfluence = 0.4f;
         [Tooltip("Leak components smaller than this (m²) are not listed as holes. They still count in the leak area. 0.01 m² is four 5 cm faces.")]
         [SerializeField, Range(0f, 0.2f)] private float holeMinAreaM2 = 0.01f;
-        [Tooltip("Cap leaks up to this area (m²) by turning the unknown voxel behind each leak face solid; the mesh closes along the free/unknown interface next extract. Frontier-sized components are never capped.")]
+        [Tooltip("Cap leaks up to this area (m²) by turning the two unknown voxels behind each leak face solid, continued from the free voxel's own TSDF value so the cap lands on the neighbouring surface. Frontier-sized components are never capped.")]
         [SerializeField] private bool fillLeaks = true;
         [SerializeField, Range(0.01f, 2f)] private float fillLeakMaxAreaM2 = 0.25f;
         [Tooltip("Leak faces within this many voxels of a clip plane, the room AABB or the volume edge are cuts (doorway, expand), not holes.")]
         [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
-        [Tooltip("Block-flood rounds per frame (32³ blocks; trivial per round).")]
-        [SerializeField, Range(8, 128)] private int blockFloodRoundsPerFrame = 64;
-        [Tooltip("Fine-flood rounds over the shell voxels per frame, and how many frames. U next to E becomes E; a 1-voxel gap in the surface lets E through.")]
-        [SerializeField, Range(1, 16)] private int fineFloodRoundsPerFrame = 4;
-        [SerializeField, Range(1, 16)] private int fineFloodFrames = 6;
+        [Tooltip("Fine-flood dispatches per frame over the shell blocks, and how many frames. Each dispatch runs 8 rounds inside the block in LDS; cross-block travel is one dispatch per block. Void reaches a hole through a few voxels of shell, so 2 × 3 is generous.")]
+        [SerializeField, Range(1, 8)] private int fineFloodDispatchesPerFrame = 2;
+        [SerializeField, Range(1, 16)] private int fineFloodFrames = 3;
         [Tooltip("Min-label link + pointer-jump rounds for hole components, one per frame.")]
         [SerializeField, Range(4, 32)] private int closureLinkRounds = 12;
         [Tooltip("Half-angle, degrees, of the spotlight cone FreezeInView / UnfreezeInView paint from the eye along the gaze. 15° is a tight spot: a press paints what the player is looking straight at and they turn their head to paint more. Hosts draw a ring at this angle.")]
@@ -565,26 +563,28 @@ namespace Genesis.RoomScan
             _blockTotal = _blockCount.x * _blockCount.y * _blockCount.z;
 
             _analysisResult ??= new ComputeBuffer(AnalysisWords, sizeof(uint));
+            const GraphicsBuffer.Target indirect =
+                GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.IndirectArguments;
             _blockFlags ??= new ComputeBuffer(_blockTotal, sizeof(uint));
-            _blockState ??= new ComputeBuffer(_blockTotal, sizeof(uint));
-            _mixedList ??= new ComputeBuffer(_blockTotal, sizeof(uint));
-            _mixedArgs ??= new GraphicsBuffer(GraphicsBuffer.Target.Structured | GraphicsBuffer.Target.IndirectArguments, 3, sizeof(uint));
+            _floodList ??= new ComputeBuffer(_blockTotal, sizeof(uint));
+            _floodArgs ??= new GraphicsBuffer(indirect, 3, sizeof(uint));
+            _faceList ??= new ComputeBuffer(_blockTotal, sizeof(uint));
+            _faceArgs ??= new GraphicsBuffer(indirect, 3, sizeof(uint));
             _leakFaces ??= new ComputeBuffer(LeakFaceCap, sizeof(float) * 4);
             _leakCounters ??= new ComputeBuffer(4, sizeof(uint));
             _ccHashKey ??= new ComputeBuffer(CcHashSize, sizeof(uint));
             _ccHashVal ??= new ComputeBuffer(CcHashSize, sizeof(uint));
             _ccLabel ??= new ComputeBuffer(LeakFaceCap, sizeof(uint));
             _ccComp ??= new ComputeBuffer(LeakFaceCap * 4, sizeof(int));
-            _mixedArgs.SetData(new uint[] { 0u, 1u, 1u });
+            _floodArgs.SetData(new uint[] { 0u, 1u, 1u });
+            _faceArgs.SetData(new uint[] { 0u, 1u, 1u });
             _leakCounters.SetData(new uint[4]);
             EnsureLabelVolume();
 
             _anResetKernel = new ComputeKernelHelper(compute, "AnalysisReset");
             _anClearLabelsKernel = new ComputeKernelHelper(compute, "ClearLabels");
             _anClassifyKernel = new ComputeKernelHelper(compute, "ClassifyVoxels");
-            _anBlockInitKernel = new ComputeKernelHelper(compute, "BlockFloodInit");
-            _anBlockStepKernel = new ComputeKernelHelper(compute, "BlockFloodStep");
-            _anMixedListKernel = new ComputeKernelHelper(compute, "BuildMixedList");
+            _anBlockListsKernel = new ComputeKernelHelper(compute, "BuildBlockLists");
             _anFineStepKernel = new ComputeKernelHelper(compute, "FineFloodStep");
             _anLeakKernel = new ComputeKernelHelper(compute, "LeakFaces");
             _ccResetKernel = new ComputeKernelHelper(compute, "ClosureReset");
@@ -596,16 +596,17 @@ namespace Genesis.RoomScan
             _ccFillKernel = new ComputeKernelHelper(compute, "FillLeaks");
             _ccCentroidKernel = new ComputeKernelHelper(compute, "ClosureCentroid");
 
-            foreach (var k in new[] { _anResetKernel, _anClearLabelsKernel, _anClassifyKernel, _anBlockInitKernel, _anBlockStepKernel,
-                         _anMixedListKernel, _anFineStepKernel, _anLeakKernel, _ccResetKernel, _ccInsertKernel,
+            foreach (var k in new[] { _anResetKernel, _anClearLabelsKernel, _anClassifyKernel, _anBlockListsKernel,
+                         _anFineStepKernel, _anLeakKernel, _ccResetKernel, _ccInsertKernel,
                          _ccLinkKernel, _ccJumpKernel, _ccClassifyKernel, _ccFinalizeKernel, _ccFillKernel,
                          _ccCentroidKernel })
             {
                 k.Set(AnalysisResultID, _analysisResult);
                 k.Set(BlockFlagsID, _blockFlags);
-                k.Set(BlockStateID, _blockState);
-                k.Set(MixedListID, _mixedList);
-                k.Set(MixedArgsID, _mixedArgs);
+                k.Set(FloodListID, _floodList);
+                k.Set(FloodArgsID, _floodArgs);
+                k.Set(FaceListID, _faceList);
+                k.Set(FaceArgsID, _faceArgs);
                 k.Set(LeakFacesID, _leakFaces);
                 k.Set(LeakCountersID, _leakCounters);
                 k.Set(CcEdgesID, _leakFaces);
@@ -666,17 +667,18 @@ namespace Genesis.RoomScan
         {
             _analysisResult?.Release();
             _blockFlags?.Release();
-            _blockState?.Release();
-            _mixedList?.Release();
-            _mixedArgs?.Release();
+            _floodList?.Release();
+            _floodArgs?.Release();
+            _faceList?.Release();
+            _faceArgs?.Release();
             _leakFaces?.Release();
             _leakCounters?.Release();
             _ccHashKey?.Release();
             _ccHashVal?.Release();
             _ccLabel?.Release();
             _ccComp?.Release();
-            _analysisResult = _blockFlags = _blockState = _mixedList = null;
-            _mixedArgs = null;
+            _analysisResult = _blockFlags = _floodList = _faceList = null;
+            _floodArgs = _faceArgs = null;
             _leakFaces = _leakCounters = _ccHashKey = _ccHashVal = _ccLabel = _ccComp = null;
             if (_labelVolume != null) { _labelVolume.Release(); Destroy(_labelVolume); _labelVolume = null; }
         }
@@ -696,11 +698,11 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Advance the analysis cycle by one frame. Call once per frame while
-        /// scanning. Idle → (tick due) reset, classify the volume, seed the
-        /// block flood → block flood → mixed list + fine flood over the shell →
-        /// leak faces → component link/jump rounds → classify → finalize + fill
-        /// + one readback of the 32-word result. The shell march rides the
-        /// first frame.
+        /// scanning. Idle → (tick due) reset, classify the volume, build the
+        /// block lists → fine flood over the shell blocks → leak faces →
+        /// component link/jump rounds → classify → finalize + fill + one
+        /// readback of the 32-word result. The shell march rides the first
+        /// frame.
         /// </summary>
         internal void StepAnalysis()
         {
@@ -721,36 +723,27 @@ namespace Genesis.RoomScan
                     BindScanPriors(compute);
                     BindAnalysisVolumes();
 
-                    _anResetKernel.DispatchFit(Mathf.Max(_blockTotal, AnalysisWords), 1);
+                    _anResetKernel.DispatchFit(AnalysisWords, 1);
                     _ccResetKernel.DispatchFit(CcHashSize, 1);
                     _anClassifyKernel.DispatchFit(_volume);
-                    _anBlockInitKernel.DispatchFit(_blockTotal, 1);
+                    _anBlockListsKernel.DispatchFit(_blockTotal, 1);
                     DispatchShellMarch();
 
-                    _analysisRound = 0;
-                    _analysisState = AnalysisState.BlockFlood;
-                    break;
-                }
-                case AnalysisState.BlockFlood:
-                {
-                    for (int i = 0; i < blockFloodRoundsPerFrame; i++)
-                        _anBlockStepKernel.DispatchFit(_blockTotal, 1);
-                    _anMixedListKernel.DispatchFit(_blockTotal, 1);
                     _analysisRound = 0;
                     _analysisState = AnalysisState.FineFlood;
                     break;
                 }
                 case AnalysisState.FineFlood:
                 {
-                    for (int i = 0; i < fineFloodRoundsPerFrame; i++)
-                        compute.DispatchIndirect(_anFineStepKernel.KernelIndex, _mixedArgs);
+                    for (int i = 0; i < fineFloodDispatchesPerFrame; i++)
+                        compute.DispatchIndirect(_anFineStepKernel.KernelIndex, _floodArgs);
                     if (++_analysisRound >= fineFloodFrames)
                         _analysisState = AnalysisState.LeakFaces;
                     break;
                 }
                 case AnalysisState.LeakFaces:
                 {
-                    compute.DispatchIndirect(_anLeakKernel.KernelIndex, _mixedArgs);
+                    compute.DispatchIndirect(_anLeakKernel.KernelIndex, _faceArgs);
                     _ccInsertKernel.DispatchFit(LeakFaceCap, 1);
                     _analysisRound = 0;
                     _analysisState = AnalysisState.Link;

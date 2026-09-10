@@ -23,10 +23,11 @@ All notable changes to this package are documented here. The format follows
   `RoomScanSession.SetBodyExclusionAnchors` is for hosts with a non-OVR
   rig; it marks anchors host-owned so the scanner will not overwrite them.
 - Scan progress is analytic, from the boundary of observed free space. Each
-  voxel is observed-free, observed-solid or unknown; unknown connected to the
-  outside of the volume (a block flood over 8³ blocks, then a fine flood over
-  the shell blocks only) is exterior. Free–solid faces are the surface,
-  free–exterior faces are leaks — where passthrough shows through. Faces
+  voxel is observed-free, observed-solid or unknown; unknown that touches a
+  full 8³ block of unknown (a 40 cm cube of nothing: the outside, the far
+  side of a hole, the inside of a couch) is void, carried through the shell
+  blocks by an LDS fine flood. Free–solid faces are the surface,
+  free–void faces are leaks — where passthrough shows through. Faces
   within `cutToleranceVoxels` of a clip plane / the volume edge are cuts.
   `Closure = surface / (surface + leak)`; `ScanProgress.OverallProgress =
   Closure × (1 − refinementInfluence × (1 − Refinement))`, refinement being
@@ -40,10 +41,11 @@ All notable changes to this package are documented here. The format follows
   `R8_UNorm` 3-D texture (`gsLabelVolume`) that the scan mesh shader samples
   for the red leak tint (`ShowHoles`), so tint, count, list and fill agree.
 - Leak fill (`fillLeaks`, on): leak patches up to `fillLeakMaxAreaM2`
-  (0.25 m²) are capped by turning the unknown voxel behind each leak face
-  solid; the mesh closes along the free/unknown interface at the next
-  extract. Frontier-sized patches are never capped; real depth is never
-  overwritten. Replaces the mesh-boundary disc stamp.
+  (0.25 m²) are capped by turning the two unknown voxels behind each leak
+  face solid, continued from the free voxel's own TSDF value at the band
+  slope, so a hole in a wall closes on the wall. Frontier-sized patches are
+  never capped; real depth is never overwritten. Replaces the mesh-boundary
+  disc stamp.
 - Removed: Surface Nets `_OpenEdges` / `MarkBoundary` boundary emission and
   the vertex `_pad` tint; `holeMinPerimeter`, `closedBoundaryMetres`,
   `closureReference`, `fillMeshHoles*`; `MeshClosure.OpenBoundaryMetres` /

@@ -131,14 +131,16 @@ Shader "Genesis/ScanMeshVertexColor"
 
             // The leak-marked voxel is the free one just in front of the
             // surface, so look one voxel out along the normal (and at the
-            // surface itself) — whichever lands in it.
-            bool NearLeak(float3 worldPos, float3 normal)
+            // surface itself) — whichever lands in it. Sampled per vertex,
+            // not per fragment: two dependent 3-D fetches on a 16 MB volume
+            // per stereo pixel cost frames; per vertex they are free.
+            float NearLeak(float3 worldPos, float3 normal)
             {
                 float a = SAMPLE_TEXTURE3D_LOD(gsLabelVolume, sampler_gsLabelVolume,
                     WorldToVoxelUVW(worldPos + normal * gsVoxSize), 0).r;
                 float b = SAMPLE_TEXTURE3D_LOD(gsLabelVolume, sampler_gsLabelVolume,
                     WorldToVoxelUVW(worldPos), 0).r;
-                return round(a * 5.0) == 4.0 || round(b * 5.0) == 4.0;
+                return (round(a * 5.0) == 4.0 || round(b * 5.0) == 4.0) ? 1.0 : 0.0;
             }
 
             struct Varyings
@@ -148,6 +150,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 float3 positionWS : TEXCOORD0;
                 float3 normalWS : TEXCOORD1;
                 float3 barycentric : TEXCOORD2;
+                float hole : TEXCOORD3;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -166,6 +169,7 @@ Shader "Genesis/ScanMeshVertexColor"
                 OUT.positionHCS = TransformWorldToHClip(pos);
                 OUT.normalWS    = gv.norm;
                 OUT.color       = half4(unpacked.rgb, fade);
+                OUT.hole        = _RSShowHoles > 0.5 ? NearLeak(gv.pos, gv.norm) : 0.0;
 
                 // Barycentric coords for wireframe: each triangle vertex gets one axis
                 uint triVert = vertID % 3;
@@ -202,9 +206,9 @@ Shader "Genesis/ScanMeshVertexColor"
                 baseColor = ApplyBirthFade(baseColor, IN.color.a);
 
                 // 2b. Leak tint: the free voxel in front of this surface point
-                // touches exterior unknown — passthrough shows through here.
-                if (_RSShowHoles > 0.5 && NearLeak(IN.positionWS, normal))
-                    baseColor = lerp(baseColor, half3(1.0, 0.25, 0.1), 0.85);
+                // touches void unknown — passthrough shows through here.
+                if (_RSShowHoles > 0.5)
+                    baseColor = lerp(baseColor, half3(1.0, 0.25, 0.1), saturate(IN.hole) * 0.85);
 
                 // 3. Wireframe: discard interior, white edges blending to vertex color at vertices
                 if (_RSWireframe > 0.5)
