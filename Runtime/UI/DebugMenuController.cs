@@ -522,7 +522,9 @@ namespace Genesis.RoomScan.UI
 
             var progress = scanner.CurrentProgress;
             var cov = progress.Coverage;
-            SetLabel(_valProgress, $"{progress.OverallProgress:P0}");
+            SetLabel(_valProgress, cov.ShellCoverageAvailable
+                ? $"{cov.ShellCoverage:P0} shell · gaps {cov.ShellGapCount} · fills {cov.ShellFillsApplied}"
+                : $"{progress.OverallProgress:P0}");
             SetLabel(_valPhase, progress.Phase.ToString());
             SetLabel(_valColorCoverage, $"{cov.ColorCoverage:P0}");
             SetLabel(_valFrozen, $"{cov.FrozenFraction:P0}");

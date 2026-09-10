@@ -513,12 +513,48 @@ Dispatched every ~30 integrations (1× per second) to count surface statistics v
 
 Results read back via `AsyncGPUReadback` to avoid GPU stalls.
 
+### Shell coverage (compute kernel `MarchShellCells`, requires `RoomUnderstanding`)
+
+`FrozenFraction` is frozen ÷ scanned — it cannot see what was never scanned.
+Shell coverage measures the room against the captured Scene API hull instead.
+
+- **Cells.** `RoomUnderstanding.CopyShellCells` samples every outer `WALL_FACE`
+  rect, the floor and ceiling polygons (`PlaneBoundary2D`), and the top + side
+  faces of `TABLE` / `COUCH` / `BED` / `STORAGE` volumes at `cellSize =
+  clamp(sqrt(area / 14000), 0.10, 0.20)` m (≤ 16 384 cells). Doorway
+  `INVISIBLE_WALL_FACE` anchors get no cells; wall cells inside a
+  `DOOR_FRAME` / `WINDOW_FRAME` rect (+5 cm) are **excluded** from the
+  denominator. Furniture faces against a wall or under 10 cm are skipped.
+- **March.** One thread per cell walks along the inward normal from 0.50 m
+  outside the plane (the TSDF clip expand — a false ceiling is inside this
+  range) to 0.60 m inside (furniture: −0.15 → +0.25), one voxel per step.
+  Covered when a voxel with `|weight| ≥ minMeshWeight` and `|tsdf| ≤ 0.5` is
+  on the segment. Frozen counts. Dispatched with the 1 Hz `CountSurfaceCoverage`
+  tick; ≤ 16k threads × ≤ 22 reads — about 1 % of that pass.
+- **Readback.** One `uint` per cell (bit 0 covered, bits 8–15 hit step). On the
+  main thread `ShellCoverageTracker` flood-fills uncovered cells (4-neighbour,
+  per surface grid) into gaps: `ShellGapCount`, `LargestGap`,
+  `RoomScanSession.CopyShellGaps` (top 8). Preallocated; no GC.
+- **Auto-fill A (`autoFillShellGaps`, default on).** A wall / floor / ceiling
+  gap of ≤ `fillMaxCells` (6) cells, uncovered for ≥ 2 ticks, not touching an
+  opening, whose ≥ 4 covered neighbours hit within `fillNeighborSpreadMax`
+  (6 cm) of one plane, is stamped with that plane (`FillShellPatch`, box
+  dispatch like `StampScreen`) at `fillWeight` 0.15 — above `minMeshWeight`
+  so it meshes, below what real depth accumulates so real depth overrides it.
+  The plane is the captured plane shifted by the neighbours' mean hit offset.
+- **Auto-fill B (`closeFurnitureHoles`, default on).** Furniture gaps get a
+  cluster-local 6-neighbour close (`CloseSmallHoles`): an empty voxel with ≥ 4
+  neighbours at `|weight| ≥ 0.2` takes their mean tsdf at `fillWeight`. Filled
+  voxels are below 0.2 so they never seed further fills. Never a volume pass.
+- The package does **not** gate finalize on coverage; the host reads
+  `ScanCoverage.ShellCoverage` and decides.
+
 ### ScanCoverage / ScanProgress (CPU)
-- `ScanCoverage`: Raw metrics — `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction`, `MeshVertexCount`, `MeshIndexCount`, `IsStabilized`
-- `ScanProgress`: Blended progress — `OverallProgress = FrozenFraction×0.5 + ColorCoverage×0.3 + GeometryStability×0.2`
+- `ScanCoverage`: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`; legacy `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction`, `MeshVertexCount`, `MeshIndexCount`, `IsStabilized`
+- `ScanProgress`: when shell coverage is available `OverallProgress = ShellCoverage` and phase is `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. Otherwise the legacy blend `FrozenFraction×0.5 + ColorCoverage×0.3 + GeometryStability×0.2` and plateau phases below.
 - `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`
 
-### Plateau Detection
+### Plateau Detection (fallback without `RoomUnderstanding`)
 Per mesh extraction cycle, `UpdatePlateauDetection` tracks:
 - **Vertex stability**: `abs(growth) < 1%` increments `_stableVertexCycles`
 - **Color stability**: `abs(colorGrowth) < 0.5%` increments `_stableColorCycles`

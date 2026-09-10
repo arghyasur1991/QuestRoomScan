@@ -318,6 +318,24 @@ namespace Genesis.RoomScan
                 Query.FindByUuid(_mruk.Rooms, sceneRoomUuid), out min, out max);
         }
 
+        /// <summary>
+        /// Sample the room shell (outer walls, floor, ceiling, furniture
+        /// faces) into <paramref name="dest"/> for the GPU coverage march.
+        /// Doorway <c>INVISIBLE_WALL_FACE</c> anchors get no cells; wall
+        /// cells inside a <c>DOOR_FRAME</c> / <c>WINDOW_FRAME</c> rect are
+        /// excluded from the denominator. Clears <paramref name="dest"/>.
+        /// Returns the number of uploadable cells (0 when the room is missing).
+        /// </summary>
+        public int CopyShellCells(Guid sceneRoomUuid, ShellCellSet dest)
+        {
+            if (dest == null) return 0;
+            dest.Clear();
+            if (sceneRoomUuid == Guid.Empty) return 0;
+            EnsureMruk();
+            if (_mruk == null || _mruk.Rooms == null) return 0;
+            return Query.CopyShellCells(Query.FindByUuid(_mruk.Rooms, sceneRoomUuid), dest);
+        }
+
         // ─────────────────────────────────────────────────────────────
         //  Scene Object Registry population
         // ─────────────────────────────────────────────────────────────
@@ -951,6 +969,234 @@ namespace Genesis.RoomScan
                 {
                     b.Encapsulate(p);
                 }
+            }
+
+            // ── Shell cells for the coverage march ──────────────────────
+
+            /// <summary>Shell cells target ~14k so a 16k cap leaves headroom.</summary>
+            const float ShellTargetCells = 14000f;
+            const float ShellCellMin = 0.10f;
+            const float ShellCellMax = 0.20f;
+            /// <summary>March from the 50 cm clip expand outside the plane to 60 cm inside.</summary>
+            const float ShellMarchStart = -TsdfClipExpandMetres;
+            const float ShellMarchLength = TsdfClipExpandMetres + 0.60f;
+            const float FurnitureMarchStart = -0.15f;
+            const float FurnitureMarchLength = 0.40f;
+            const float OpeningMargin = 0.05f;
+            const float OpeningDepth = 0.15f;
+            const float FurnitureWallSkip = 0.35f;
+            const float FurnitureFloorSkip = 0.10f;
+
+            const MRUKAnchor.SceneLabels ShellFurnitureLabels =
+                MRUKAnchor.SceneLabels.TABLE
+                | MRUKAnchor.SceneLabels.COUCH
+                | MRUKAnchor.SceneLabels.BED
+                | MRUKAnchor.SceneLabels.STORAGE;
+
+            const MRUKAnchor.SceneLabels OpeningLabels =
+                MRUKAnchor.SceneLabels.DOOR_FRAME
+                | MRUKAnchor.SceneLabels.WINDOW_FRAME;
+
+            static readonly List<MRUKAnchor> s_openings = new(8);
+            static readonly List<MRUKAnchor> s_walls = new(16);
+
+            static bool IsShellWall(MRUKAnchor a)
+                => a.HasAnyLabel(MRUKAnchor.SceneLabels.WALL_FACE)
+                   && !a.HasAnyLabel(MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE)
+                   && !a.HasAnyLabel(MRUKAnchor.SceneLabels.INNER_WALL_FACE)
+                   && a.PlaneRect.HasValue;
+
+            internal static int CopyShellCells(MRUKRoom room, ShellCellSet dst)
+            {
+                if (dst == null) return 0;
+                dst.Clear();
+                if (room == null || room.Anchors == null) return 0;
+
+                s_openings.Clear();
+                s_walls.Clear();
+                float area = 0f;
+                for (int i = 0; i < room.Anchors.Count; i++)
+                {
+                    var a = room.Anchors[i];
+                    if (a == null) continue;
+                    if (a.HasAnyLabel(OpeningLabels) && a.PlaneRect.HasValue)
+                        s_openings.Add(a);
+                    if (a.HasAnyLabel(OuterWallLabels))
+                        s_walls.Add(a);
+                    if (IsShellWall(a))
+                    {
+                        var r = a.PlaneRect.Value;
+                        area += r.width * r.height;
+                    }
+                }
+                var floor = room.FloorAnchor;
+                var ceiling = room.CeilingAnchor;
+                if (floor != null && floor.PlaneRect.HasValue)
+                    area += floor.PlaneRect.Value.width * floor.PlaneRect.Value.height;
+                if (ceiling != null && ceiling.PlaneRect.HasValue)
+                    area += ceiling.PlaneRect.Value.width * ceiling.PlaneRect.Value.height;
+
+                float cell = Mathf.Clamp(Mathf.Sqrt(area / ShellTargetCells), ShellCellMin, ShellCellMax);
+                dst.CellSize = cell;
+                float floorY = FloorY(room);
+
+                for (int i = 0; i < s_walls.Count; i++)
+                {
+                    var a = s_walls[i];
+                    if (!IsShellWall(a)) continue;
+                    AddWallCells(room, a, cell, dst);
+                }
+                if (floor != null)
+                    AddPolygonCells(floor, Vector3.up, ShellSurfaceKind.Floor, cell, dst);
+                if (ceiling != null)
+                    AddPolygonCells(ceiling, Vector3.down, ShellSurfaceKind.Ceiling, cell, dst);
+
+                for (int i = 0; i < room.Anchors.Count; i++)
+                {
+                    var a = room.Anchors[i];
+                    if (a == null || !a.HasAnyLabel(ShellFurnitureLabels) || !a.VolumeBounds.HasValue)
+                        continue;
+                    AddFurnitureCells(room, a, cell, floorY, dst);
+                }
+
+                return dst.UploadCount;
+            }
+
+            static void AddWallCells(MRUKRoom room, MRUKAnchor a, float cell, ShellCellSet dst)
+            {
+                var r = a.PlaneRect.Value;
+                int nu = Mathf.CeilToInt(r.width / cell);
+                int nv = Mathf.CeilToInt(r.height / cell);
+                var t = a.transform;
+                Vector3 inward = Inward(room, a);
+                int s = dst.BeginSurface(ShellSurfaceKind.Wall, t.right, t.up, inward, nu, nv);
+                if (s < 0) return;
+
+                for (int v = 0; v < nv; v++)
+                for (int u = 0; u < nu; u++)
+                {
+                    float lx = r.xMin + (u + 0.5f) * cell;
+                    float ly = r.yMin + (v + 0.5f) * cell;
+                    Vector3 p = t.TransformPoint(new Vector3(lx, ly, 0f));
+                    bool excluded = InsideOpening(p);
+                    dst.AddCell(s, u, v, p, ShellMarchStart, ShellMarchLength, excluded);
+                }
+            }
+
+            static void AddPolygonCells(MRUKAnchor a, Vector3 normal, ShellSurfaceKind kind, float cell, ShellCellSet dst)
+            {
+                if (!a.PlaneRect.HasValue) return;
+                var r = a.PlaneRect.Value;
+                var poly = a.PlaneBoundary2D;
+                int nu = Mathf.CeilToInt(r.width / cell);
+                int nv = Mathf.CeilToInt(r.height / cell);
+                var t = a.transform;
+                int s = dst.BeginSurface(kind, t.right, t.up, normal, nu, nv);
+                if (s < 0) return;
+
+                bool usePoly = poly != null && poly.Count >= 3;
+                for (int v = 0; v < nv; v++)
+                for (int u = 0; u < nu; u++)
+                {
+                    var l = new Vector2(r.xMin + (u + 0.5f) * cell, r.yMin + (v + 0.5f) * cell);
+                    bool inside = !usePoly || PointInPolygon(poly, l);
+                    Vector3 p = t.TransformPoint(new Vector3(l.x, l.y, 0f));
+                    dst.AddCell(s, u, v, p, ShellMarchStart, ShellMarchLength, !inside);
+                }
+            }
+
+            static void AddFurnitureCells(MRUKRoom room, MRUKAnchor a, float cell, float floorY, ShellCellSet dst)
+            {
+                var vb = a.VolumeBounds.Value;
+                Vector3 c = vb.center;
+                Vector3 e = vb.extents;
+                var t = a.transform;
+
+                for (int axis = 0; axis < 3; axis++)
+                for (int sign = -1; sign <= 1; sign += 2)
+                {
+                    Vector3 ln = Vector3.zero;
+                    ln[axis] = sign;
+                    Vector3 wn = t.TransformDirection(ln).normalized;
+                    float upDot = Vector3.Dot(wn, Vector3.up);
+                    if (upDot < -0.7f) continue; // underside
+
+                    int ai = (axis + 1) % 3;
+                    int bi = (axis + 2) % 3;
+                    float ea = e[ai];
+                    float eb = e[bi];
+                    if (ea * 2f < cell || eb * 2f < cell) continue;
+
+                    Vector3 faceCenterLocal = c + ln * e[axis];
+                    Vector3 faceCenter = t.TransformPoint(faceCenterLocal);
+                    bool side = Mathf.Abs(upDot) < 0.7f;
+                    if (side)
+                    {
+                        if (FaceAgainstWall(room, faceCenter, wn)) continue;
+                        if (faceCenter.y - floorY < FurnitureFloorSkip) continue;
+                    }
+
+                    Vector3 la = Vector3.zero; la[ai] = 1f;
+                    Vector3 lb = Vector3.zero; lb[bi] = 1f;
+                    int nu = Mathf.CeilToInt(ea * 2f / cell);
+                    int nv = Mathf.CeilToInt(eb * 2f / cell);
+                    int s = dst.BeginSurface(ShellSurfaceKind.Furniture,
+                        t.TransformDirection(la).normalized, t.TransformDirection(lb).normalized, wn, nu, nv);
+                    if (s < 0) return;
+
+                    for (int v = 0; v < nv; v++)
+                    for (int u = 0; u < nu; u++)
+                    {
+                        Vector3 lp = faceCenterLocal
+                            + la * (-ea + (u + 0.5f) * cell)
+                            + lb * (-eb + (v + 0.5f) * cell);
+                        dst.AddCell(s, u, v, t.TransformPoint(lp), FurnitureMarchStart, FurnitureMarchLength, false);
+                    }
+                }
+            }
+
+            static bool FaceAgainstWall(MRUKRoom room, Vector3 faceCenter, Vector3 faceNormal)
+            {
+                for (int i = 0; i < s_walls.Count; i++)
+                {
+                    var w = s_walls[i];
+                    Vector3 inward = Inward(room, w);
+                    if (Vector3.Dot(faceNormal, inward) > -0.7f) continue;
+                    float d = Vector3.Dot(faceCenter - w.transform.position, inward);
+                    if (d >= -OpeningMargin && d < FurnitureWallSkip)
+                        return true;
+                }
+                return false;
+            }
+
+            static bool InsideOpening(Vector3 worldPos)
+            {
+                for (int i = 0; i < s_openings.Count; i++)
+                {
+                    var o = s_openings[i];
+                    var r = o.PlaneRect.Value;
+                    Vector3 l = o.transform.InverseTransformPoint(worldPos);
+                    if (Mathf.Abs(l.z) > OpeningDepth) continue;
+                    if (l.x < r.xMin - OpeningMargin || l.x > r.xMax + OpeningMargin) continue;
+                    if (l.y < r.yMin - OpeningMargin || l.y > r.yMax + OpeningMargin) continue;
+                    return true;
+                }
+                return false;
+            }
+
+            static bool PointInPolygon(List<Vector2> poly, Vector2 p)
+            {
+                bool inside = false;
+                int n = poly.Count;
+                for (int i = 0, j = n - 1; i < n; j = i++)
+                {
+                    Vector2 a = poly[i];
+                    Vector2 b = poly[j];
+                    if ((a.y > p.y) != (b.y > p.y)
+                        && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x)
+                        inside = !inside;
+                }
+                return inside;
             }
         }
     }

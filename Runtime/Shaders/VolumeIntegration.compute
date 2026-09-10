@@ -281,6 +281,131 @@ void EraseInsideExclusions(uint3 id : SV_DispatchThreadID)
 }
 
 // ──────────────────────────────────────────────────────────────────
+//  MarchShellCells: one thread per captured-shell cell. Walk from
+//  outside the plane into the room; covered when a confident voxel
+//  near its zero crossing lies on the segment. Runs with the 1 Hz
+//  coverage count — never per frame, never over the volume.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel MarchShellCells
+
+StructuredBuffer<float4> gsCoverCellPos;   // xyz world pos, w = march start (m, along normal)
+StructuredBuffer<float4> gsCoverCellNrm;   // xyz unit normal, w = march length (m)
+RWStructuredBuffer<uint> gsCoverResult;    // bit0 covered, bits 8..15 hit step (255 = none)
+uint gsCoverCellCount;
+float gsCoverMinWeight;
+
+[numthreads(64, 1, 1)]
+void MarchShellCells(uint id : SV_DispatchThreadID)
+{
+    if (id >= gsCoverCellCount) return;
+    float4 pc = gsCoverCellPos[id];
+    float4 nc = gsCoverCellNrm[id];
+    float3 p0 = pc.xyz + nc.xyz * pc.w;
+    int steps = min((int)ceil(nc.w / gsVoxSize), 64);
+
+    uint res = 255u << 8;
+    bool found = false;
+    for (int k = 0; k < steps && !found; k++)
+    {
+        float3 p = p0 + nc.xyz * ((float)k * gsVoxSize);
+        if (!gsInsideRoom(p)) continue;
+        float3 vf = gsWorldToVoxelFloat(p);
+        if (any(vf < 0.0) || any(vf >= (float3)gsVoxCount)) continue;
+        uint3 coord = (uint3)floor(vf);
+        float2 v = gsVolumeRW[coord];
+        if (abs(v.y) >= gsCoverMinWeight && abs(v.x) <= 0.5)
+        {
+            res = 1u | ((uint)k << 8);
+            found = true;
+        }
+    }
+    gsCoverResult[id] = res;
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  FillShellPatch: soft analytic-plane stamp over a small uncovered
+//  patch whose neighbours all lie on one plane. Weight stays low so
+//  real depth overrides it. Box dispatch via gsStampVoxMin/Max.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel FillShellPatch
+
+float4 gsFillCenter;     // xyz centre on the shifted plane, w = half width
+float4 gsFillInward;     // xyz unit inward normal,          w = half height
+float4 gsFillAxis;       // xyz unit tangent
+float4 gsFillBitangent;  // xyz unit bitangent
+float gsFillWeight;
+
+[numthreads(4, 4, 4)]
+void FillShellPatch(uint3 id : SV_DispatchThreadID)
+{
+    int3 coordI = gsStampVoxMin + (int3)id;
+    if (any(coordI >= gsStampVoxMax) || any(coordI < 0)) return;
+    uint3 coord = (uint3)coordI;
+    if (any(coord >= gsVoxCount)) return;
+
+    float3 p = gsVoxelToWorld(coord);
+    if (!gsInsideRoom(p)) return;
+
+    float2 old = gsVolumeRW[coord];
+    if (old.y < 0) return;                  // frozen
+    if (old.y >= gsFillWeight) return;      // real data wins
+
+    float3 d = p - gsFillCenter.xyz;
+    float du = dot(d, gsFillAxis.xyz);
+    float dv = dot(d, gsFillBitangent.xyz);
+    if (abs(du) > gsFillCenter.w + 0.5 * gsVoxSize) return;
+    if (abs(dv) > gsFillInward.w + 0.5 * gsVoxSize) return;
+    float sd = dot(d, gsFillInward.xyz);
+    if (abs(sd) > gsVoxDist) return;
+
+    gsVolumeRW[coord] = float2(clamp(sd / gsVoxDist, -1.0, 1.0), gsFillWeight);
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  CloseSmallHoles: cluster-local 6-neighbour close for furniture
+//  gaps. Filled voxels get gsFillWeight (< 0.2) so they never count
+//  as neighbours — no chain reaction. Box dispatch only.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel CloseSmallHoles
+
+[numthreads(4, 4, 4)]
+void CloseSmallHoles(uint3 id : SV_DispatchThreadID)
+{
+    int3 coordI = gsStampVoxMin + (int3)id;
+    if (any(coordI >= gsStampVoxMax) || any(coordI < 0)) return;
+    uint3 coord = (uint3)coordI;
+    if (any(coord >= gsVoxCount)) return;
+
+    float3 p = gsVoxelToWorld(coord);
+    if (!gsInsideRoom(p)) return;
+
+    float2 old = gsVolumeRW[coord];
+    if (abs(old.y) > 0.001) return;         // only empty voxels
+
+    int count = 0;
+    float sum = 0.0;
+    int3 maxC = (int3)gsVoxCount - 1;
+    for (int axis = 0; axis < 3; axis++)
+    for (int s = -1; s <= 1; s += 2)
+    {
+        int3 n = coordI;
+        n[axis] += s;
+        n = clamp(n, int3(0, 0, 0), maxC);
+        float2 nv = gsVolumeRW[(uint3)n];
+        if (abs(nv.y) >= 0.2 && abs(nv.x) < 0.75)
+        {
+            count++;
+            sum += nv.x;
+        }
+    }
+    if (count < 4) return;
+    gsVolumeRW[coord] = float2(sum / (float)count, gsFillWeight);
+}
+
+// ──────────────────────────────────────────────────────────────────
 //  CountSurfaceCoverage: periodically count surface/frozen/colored
 //  voxels for scan progress metrics. NOT dispatched every frame.
 // ──────────────────────────────────────────────────────────────────

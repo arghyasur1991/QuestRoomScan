@@ -20,6 +20,18 @@ All notable changes to this package are documented here. The format follows
   integrate (controller → `HandOnControllerAnchor`; else tracked `OVRHand`).
   `RoomScanSession.SetBodyExclusionAnchors` is for hosts with a non-OVR
   rig; it marks anchors host-owned so the scanner will not overwrite them.
+- Shell coverage (needs `RoomUnderstanding`): the captured hull — outer
+  walls, floor, ceiling, furniture faces — is sampled into ≤ 16k cells and
+  marched against the TSDF at the 1 Hz coverage tick. `ScanCoverage` gains
+  `ShellCoverage` (openings excluded from the denominator), `ShellGapCount`,
+  `LargestGap`, `ShellFillsApplied`; `ScanProgress.OverallProgress` and the
+  phase follow it when available. `RoomScanSession.CopyShellGaps` lists the
+  largest holes. `FrozenFraction` stays as the freeze tool's metric.
+- Auto-fill while scanning: small wall / floor / ceiling gaps whose covered
+  neighbours lie on one plane are stamped with that plane at a soft weight
+  (`autoFillShellGaps`, on); small furniture gaps get a cluster-local
+  6-neighbour close (`closeFurnitureHoles`, on). Real depth overrides both.
+  No volume-wide pass is added.
 
 ## [1.0.0] - 2026-09-09
 

@@ -70,6 +70,24 @@ namespace Genesis.RoomScan
         public int KeyframeCount;
         /// <summary>True when mesh vertex count has plateaued for several cycles.</summary>
         public bool IsStabilized;
+
+        /// <summary>
+        /// True when the captured room shell (MRUK walls / floor / ceiling /
+        /// furniture) is being marched. False without <see cref="RoomUnderstanding"/>
+        /// or a resolved room — fall back to <see cref="FrozenFraction"/>.
+        /// </summary>
+        public bool ShellCoverageAvailable;
+        /// <summary>Fraction of shell cells with scanned matter in front of them (0–1). Openings are excluded from the denominator.</summary>
+        public float ShellCoverage;
+        public int ShellCellsTotal;
+        public int ShellCellsCovered;
+        public int ShellCellsExcluded;
+        /// <summary>Connected uncovered patches of two or more cells.</summary>
+        public int ShellGapCount;
+        /// <summary>Largest uncovered patch, or default when none.</summary>
+        public ShellGap LargestGap;
+        /// <summary>Auto-fill dispatches so far this scan.</summary>
+        public int ShellFillsApplied;
     }
 
     /// <summary>High-level scan progress combining raw metrics into a single progress value and phase.</summary>
@@ -381,6 +399,9 @@ namespace Genesis.RoomScan
                 _persistence.LoadCompleted += ApplyRenderMode;
 
             SetupHeadExclusion();
+            _shellTracker = new ShellCoverageTracker(_shellCells);
+            if (_volumeIntegrator != null)
+                _volumeIntegrator.ShellResultReady += OnShellResult;
 
             if (_roomAnchor != null && _roomAnchor.enabled)
             {
@@ -435,6 +456,12 @@ namespace Genesis.RoomScan
             UnsubscribeFromAnchorsChanged();
         }
 
+        private void OnDestroy()
+        {
+            if (_volumeIntegrator != null)
+                _volumeIntegrator.ShellResultReady -= OnShellResult;
+        }
+
         private float _lastScannerLog;
         private int _integrateCount;
         private bool _subscribedToAnchorsChanged;
@@ -442,6 +469,9 @@ namespace Genesis.RoomScan
         private float _lastEmptyRoomBindAttempt;
         private readonly List<Vector4> _clipScratch = new(32);
         private readonly List<ScanScreenStamp> _stampScratch = new(4);
+        private readonly ShellCellSet _shellCells = new();
+        private ShellCoverageTracker _shellTracker;
+        private float _lastShellLog;
         private OVRCameraRig _bodyRig;
         private OVRHand _leftOvrHand;
         private OVRHand _rightOvrHand;
@@ -758,6 +788,8 @@ namespace Genesis.RoomScan
             _depthCapture.StopDepthCapture();
 
             _volumeIntegrator?.ClearScanPriors();
+            _volumeIntegrator?.ClearShellCells();
+            _shellTracker?.Disable();
             _scanRoomUuid = Guid.Empty;
 
             ScanStopped?.Invoke();
@@ -1633,6 +1665,56 @@ namespace Genesis.RoomScan
                     $"room={_scanRoomUuid} clipPlanes={_clipScratch.Count} " +
                     $"aabb={(useAabb ? 1 : 0)} screens={_stampScratch.Count}");
             }
+
+            BindShellCells();
+        }
+
+        void BindShellCells()
+        {
+            if (_volumeIntegrator == null || _shellTracker == null) return;
+            int uploaded = _roomUnderstanding != null
+                ? _roomUnderstanding.CopyShellCells(_scanRoomUuid, _shellCells)
+                : 0;
+            _volumeIntegrator.SetShellCells(_shellCells.GpuPos, _shellCells.GpuNrm, uploaded);
+            _shellTracker.Reset();
+            if (uploaded > 0)
+            {
+                Logger.Info(
+                    $"[RoomScanner] Shell cells: total={_shellCells.CellCount} uploaded={uploaded} " +
+                    $"excluded={_shellCells.ExcludedCount} cell={_shellCells.CellSize:F2}m " +
+                    $"surfaces={_shellCells.SurfaceCount} dropped={_shellCells.DroppedSurfaces}");
+            }
+        }
+
+        void OnShellResult(uint[] result, int count)
+        {
+            if (!IsScanning || _shellTracker == null || _volumeIntegrator == null) return;
+            _shellTracker.Update(result, count, _volumeIntegrator, _volumeIntegrator.VoxelSize);
+
+            float t = Time.time;
+            if (t - _lastShellLog >= 2f)
+            {
+                _lastShellLog = t;
+                var g = _shellTracker.LargestGap;
+                Logger.Verbose(
+                    $"[RoomScanner] Shell coverage {_shellTracker.Coverage:P0} " +
+                    $"({_shellTracker.Covered}/{_shellTracker.Uploaded}) gaps={_shellTracker.GapCount} " +
+                    $"largest={g.Cells} cells ({g.Kind}) fills={_shellTracker.FillsApplied}");
+            }
+        }
+
+        /// <summary>
+        /// Largest uncovered shell patches, largest first (at most 8). Zero
+        /// when shell coverage is unavailable.
+        /// </summary>
+        public int CopyShellGaps(List<ShellGap> dest)
+        {
+            if (_shellTracker == null)
+            {
+                dest?.Clear();
+                return 0;
+            }
+            return _shellTracker.CopyGaps(dest);
         }
 
         void MaybeRetryScanRoomBind()
@@ -1882,7 +1964,7 @@ namespace Genesis.RoomScan
             float colorCov = surfaceVoxels > 0 ? (float)coloredVoxels / surfaceVoxels : 0f;
             float frozenFrac = surfaceVoxels > 0 ? (float)frozenVoxels / surfaceVoxels : 0f;
 
-            return new ScanCoverage
+            var cov = new ScanCoverage
             {
                 IntegrationCount = _volumeIntegrator != null ? _volumeIntegrator.IntegrationCount : 0,
                 MeshVertexCount = vertCount,
@@ -1895,6 +1977,19 @@ namespace Genesis.RoomScan
                 KeyframeCount = _keyframeCollector != null ? _keyframeCollector.SavedCount : 0,
                 IsStabilized = _stableVertexCycles >= StableThresholdCycles
             };
+
+            if (_shellTracker != null && _shellTracker.Available)
+            {
+                cov.ShellCoverageAvailable = true;
+                cov.ShellCoverage = _shellTracker.Coverage;
+                cov.ShellCellsTotal = _shellTracker.Uploaded;
+                cov.ShellCellsCovered = _shellTracker.Covered;
+                cov.ShellCellsExcluded = _shellTracker.Excluded;
+                cov.ShellGapCount = _shellTracker.GapCount;
+                cov.LargestGap = _shellTracker.LargestGap;
+                cov.ShellFillsApplied = _shellTracker.FillsApplied;
+            }
+            return cov;
         }
 
         private ScanProgress BuildProgress()
@@ -1906,6 +2001,16 @@ namespace Genesis.RoomScan
             ScanPhase phase;
             if (!IsScanning && _volumeIntegrator != null && _volumeIntegrator.IntegrationCount == 0)
                 phase = ScanPhase.NotStarted;
+            else if (cov.ShellCoverageAvailable)
+            {
+                // Shell coverage knows what is missing; plateau does not.
+                progress = cov.ShellCoverage;
+                float c = cov.ShellCoverage;
+                phase = c < 0.30f ? ScanPhase.Discovering
+                    : c < 0.90f ? ScanPhase.Refining
+                    : c < 0.95f ? ScanPhase.Stabilized
+                    : ScanPhase.Complete;
+            }
             else if (_stableVertexCycles < 2)
                 phase = ScanPhase.Discovering;
             else if (_stableColorCycles < StableThresholdCycles)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Unity.Collections;
 using Unity.Mathematics;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
@@ -125,6 +126,26 @@ namespace Genesis.RoomScan
         [Tooltip("Weight ceiling for the optional eraser. Must sit above SEED_WEIGHT (0.10) or a freshly seeded hand voxel is never cleared. Independent of MinMeshWeight.")]
         [SerializeField, Range(0.1f, 0.5f)] private float eraseMaxWeight = 0.2f;
 
+        [Header("Shell coverage")]
+        [Tooltip("Soft-stamp the captured plane over small uncovered wall/floor/ceiling patches whose neighbours lie on one plane.")]
+        [SerializeField] private bool autoFillShellGaps = true;
+        [Tooltip("Largest gap (in shell cells) the auto-fill will close. 6 cells at 10 cm is ~25×25 cm.")]
+        [SerializeField, Range(1, 16)] private int fillMaxCells = 6;
+        [Tooltip("Weight written by auto-fill. Above MinMeshWeight so it meshes; below anything real depth accumulates so real data overrides it.")]
+        [SerializeField, Range(0.1f, 0.5f)] private float fillWeight = 0.15f;
+        [Tooltip("Max spread (m) of neighbour hit offsets for a gap to count as 'on one plane'.")]
+        [SerializeField] private float fillNeighborSpreadMax = 0.06f;
+        [Tooltip("Max fill dispatches per coverage tick (~1 Hz).")]
+        [SerializeField, Range(1, 32)] private int fillMaxPerTick = 8;
+        [Tooltip("Cluster-local 6-neighbour close for small furniture gaps.")]
+        [SerializeField] private bool closeFurnitureHoles = true;
+
+        public bool AutoFillShellGaps { get => autoFillShellGaps; set => autoFillShellGaps = value; }
+        public bool CloseFurnitureHoles { get => closeFurnitureHoles; set => closeFurnitureHoles = value; }
+        public int FillMaxCells => fillMaxCells;
+        public float FillNeighborSpreadMax => fillNeighborSpreadMax;
+        public int FillMaxPerTick => fillMaxPerTick;
+
         [Header("Pruning")]
         [SerializeField] private float pruneIntervalSeconds = 3f;
 
@@ -135,6 +156,34 @@ namespace Genesis.RoomScan
         private ComputeKernelHelper _freezeKernel;
         private ComputeKernelHelper _unfreezeKernel;
         private ComputeKernelHelper _eraseKernel;
+        private ComputeKernelHelper _shellMarchKernel;
+        private ComputeKernelHelper _fillPatchKernel;
+        private ComputeKernelHelper _closeHolesKernel;
+
+        private ComputeBuffer _shellPos;
+        private ComputeBuffer _shellNrm;
+        private ComputeBuffer _shellResult;
+        private int _shellCount;
+        private bool _shellReadbackPending;
+        private readonly uint[] _shellResultCpu = new uint[ShellCellSet.MaxCells];
+
+        private static readonly int CoverCellPosID = Shader.PropertyToID("gsCoverCellPos");
+        private static readonly int CoverCellNrmID = Shader.PropertyToID("gsCoverCellNrm");
+        private static readonly int CoverResultID = Shader.PropertyToID("gsCoverResult");
+        private static readonly int CoverCellCountID = Shader.PropertyToID("gsCoverCellCount");
+        private static readonly int CoverMinWeightID = Shader.PropertyToID("gsCoverMinWeight");
+        private static readonly int FillCenterID = Shader.PropertyToID("gsFillCenter");
+        private static readonly int FillInwardID = Shader.PropertyToID("gsFillInward");
+        private static readonly int FillAxisID = Shader.PropertyToID("gsFillAxis");
+        private static readonly int FillBitangentID = Shader.PropertyToID("gsFillBitangent");
+        private static readonly int FillWeightID = Shader.PropertyToID("gsFillWeight");
+
+        /// <summary>
+        /// Raised on the main thread after each shell-coverage readback with
+        /// the per-cell result words (bit0 covered, bits 8..15 hit step) and
+        /// the count. The array is reused; consume synchronously.
+        /// </summary>
+        public event Action<uint[], int> ShellResultReady;
 
         private ComputeBuffer _frustumVolume;
         private bool _frustumReady;
@@ -287,6 +336,19 @@ namespace Genesis.RoomScan
             _coverageKernel.Set(CoverageCountersID, _coverageCounters);
             compute.SetTexture(_coverageKernel.KernelIndex, ColorVolumeReadID, _colorVolume);
 
+            _shellMarchKernel = new ComputeKernelHelper(compute, "MarchShellCells");
+            _shellMarchKernel.Set(VolumeRWID, _volume);
+            _fillPatchKernel = new ComputeKernelHelper(compute, "FillShellPatch");
+            _fillPatchKernel.Set(VolumeRWID, _volume);
+            _closeHolesKernel = new ComputeKernelHelper(compute, "CloseSmallHoles");
+            _closeHolesKernel.Set(VolumeRWID, _volume);
+            _shellPos ??= new ComputeBuffer(ShellCellSet.MaxCells, sizeof(float) * 4);
+            _shellNrm ??= new ComputeBuffer(ShellCellSet.MaxCells, sizeof(float) * 4);
+            _shellResult ??= new ComputeBuffer(ShellCellSet.MaxCells, sizeof(uint));
+            _shellMarchKernel.Set(CoverCellPosID, _shellPos);
+            _shellMarchKernel.Set(CoverCellNrmID, _shellNrm);
+            _shellMarchKernel.Set(CoverResultID, _shellResult);
+
             _dummyCamTex = new Texture2D(1, 1, TextureFormat.RGBA32, false);
             _dummyCamTex.SetPixel(0, 0, Color.black);
             _dummyCamTex.Apply(false, true);
@@ -297,6 +359,10 @@ namespace Genesis.RoomScan
             ReleaseVolumes();
             _coverageCounters?.Release();
             _coverageCounters = null;
+            _shellPos?.Release();
+            _shellNrm?.Release();
+            _shellResult?.Release();
+            _shellPos = _shellNrm = _shellResult = null;
             if (_camFrameCopy) Destroy(_camFrameCopy);
             if (_dummyCamTex) Destroy(_dummyCamTex);
         }
@@ -377,6 +443,9 @@ namespace Genesis.RoomScan
             _eraseKernel.Set(ColorVolumeRWID, _colorVolume);
             _coverageKernel.Set(VolumeRWID, _volume);
             compute.SetTexture(_coverageKernel.KernelIndex, ColorVolumeReadID, _colorVolume);
+            _shellMarchKernel.Set(VolumeRWID, _volume);
+            _fillPatchKernel.Set(VolumeRWID, _volume);
+            _closeHolesKernel.Set(VolumeRWID, _volume);
         }
 
         private void DispatchCoverageCount()
@@ -389,6 +458,138 @@ namespace Genesis.RoomScan
             _coverageKernel.DispatchFit(_volume);
 
             AsyncGPUReadback.Request(_coverageCounters, OnCoverageReadback);
+            DispatchShellMarch();
+        }
+
+        // ── Shell coverage ──────────────────────────────────────────────
+
+        /// <summary>
+        /// Upload the captured-shell cells for the coverage march. Pass
+        /// count 0 to disable. Arrays are read up to <paramref name="count"/>.
+        /// </summary>
+        public void SetShellCells(Vector4[] pos, Vector4[] nrm, int count)
+        {
+            if (_shellPos == null || _shellNrm == null)
+            {
+                _shellCount = 0;
+                return;
+            }
+            count = Mathf.Clamp(count, 0, ShellCellSet.MaxCells);
+            if (count > 0)
+            {
+                _shellPos.SetData(pos, 0, 0, count);
+                _shellNrm.SetData(nrm, 0, 0, count);
+            }
+            _shellCount = count;
+        }
+
+        public void ClearShellCells() => _shellCount = 0;
+
+        void DispatchShellMarch()
+        {
+            if (_shellCount <= 0 || _shellReadbackPending || _shellResult == null
+                || _shellMarchKernel.Shader == null)
+                return;
+            _shellReadbackPending = true;
+            compute.SetInt(CoverCellCountID, _shellCount);
+            compute.SetFloat(CoverMinWeightID, minMeshWeight);
+            _shellMarchKernel.Set(VolumeRWID, _volume);
+            _shellMarchKernel.DispatchFit(_shellCount, 1);
+            AsyncGPUReadback.Request(_shellResult, _shellCount * sizeof(uint), 0, OnShellReadback);
+        }
+
+        private void OnShellReadback(AsyncGPUReadbackRequest request)
+        {
+            _shellReadbackPending = false;
+            if (request.hasError || _shellCount <= 0) return;
+            var data = request.GetData<uint>();
+            int n = Mathf.Min(data.Length, _shellCount);
+            if (n <= 0) return;
+            NativeArray<uint>.Copy(data, 0, _shellResultCpu, 0, n);
+            ShellResultReady?.Invoke(_shellResultCpu, n);
+        }
+
+        /// <summary>One auto-fill dispatch: a soft plane stamp or a furniture close, over a small voxel box.</summary>
+        public struct ShellFillRequest
+        {
+            public bool Close;
+            public Vector3 Center;
+            public Vector3 Inward;
+            public Vector3 Axis;
+            public Vector3 Bitangent;
+            public float HalfW;
+            public float HalfH;
+            public Vector3 BoxMin;
+            public Vector3 BoxMax;
+        }
+
+        /// <summary>Dispatch up to <paramref name="count"/> fills. Returns how many ran.</summary>
+        public int ApplyShellFills(ShellFillRequest[] requests, int count)
+        {
+            if (_volume == null || requests == null || count <= 0) return 0;
+            if (_fillPatchKernel.Shader == null || _closeHolesKernel.Shader == null) return 0;
+
+            compute.SetFloat(FillWeightID, fillWeight);
+            int applied = 0;
+            for (int i = 0; i < count; i++)
+            {
+                var r = requests[i];
+                if (r.Close)
+                {
+                    if (!closeFurnitureHoles) continue;
+                    if (!TryVoxelBox(r.BoxMin, r.BoxMax, out int mx, out int my, out int mz, out int sx, out int sy, out int sz))
+                        continue;
+                    compute.SetInts(StampVoxMinID, mx, my, mz);
+                    compute.SetInts(StampVoxMaxID, mx + sx, my + sy, mz + sz);
+                    _closeHolesKernel.Set(VolumeRWID, _volume);
+                    _closeHolesKernel.DispatchFit(sx, sy, sz);
+                }
+                else
+                {
+                    if (!autoFillShellGaps) continue;
+                    Vector3 bmin = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+                    Vector3 bmax = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+                    for (int u = -1; u <= 1; u += 2)
+                    for (int v = -1; v <= 1; v += 2)
+                    for (int w = -1; w <= 1; w += 2)
+                    {
+                        Vector3 corner = r.Center + r.Axis * (u * (r.HalfW + voxelSize))
+                            + r.Bitangent * (v * (r.HalfH + voxelSize))
+                            + r.Inward * (w * voxelDistance);
+                        bmin = Vector3.Min(bmin, corner);
+                        bmax = Vector3.Max(bmax, corner);
+                    }
+                    if (!TryVoxelBox(bmin, bmax, out int mx, out int my, out int mz, out int sx, out int sy, out int sz))
+                        continue;
+                    compute.SetVector(FillCenterID, new Vector4(r.Center.x, r.Center.y, r.Center.z, r.HalfW));
+                    compute.SetVector(FillInwardID, new Vector4(r.Inward.x, r.Inward.y, r.Inward.z, r.HalfH));
+                    compute.SetVector(FillAxisID, r.Axis);
+                    compute.SetVector(FillBitangentID, r.Bitangent);
+                    compute.SetInts(StampVoxMinID, mx, my, mz);
+                    compute.SetInts(StampVoxMaxID, mx + sx, my + sy, mz + sz);
+                    _fillPatchKernel.Set(VolumeRWID, _volume);
+                    _fillPatchKernel.DispatchFit(sx, sy, sz);
+                }
+                applied++;
+            }
+            return applied;
+        }
+
+        bool TryVoxelBox(Vector3 worldMin, Vector3 worldMax,
+            out int minX, out int minY, out int minZ, out int sx, out int sy, out int sz)
+        {
+            Vector3 vmin = WorldToVoxelFloat(worldMin);
+            Vector3 vmax = WorldToVoxelFloat(worldMax);
+            minX = Mathf.Clamp(Mathf.FloorToInt(vmin.x) - 1, 0, voxelCount.x);
+            minY = Mathf.Clamp(Mathf.FloorToInt(vmin.y) - 1, 0, voxelCount.y);
+            minZ = Mathf.Clamp(Mathf.FloorToInt(vmin.z) - 1, 0, voxelCount.z);
+            int maxX = Mathf.Clamp(Mathf.CeilToInt(vmax.x) + 1, 0, voxelCount.x);
+            int maxY = Mathf.Clamp(Mathf.CeilToInt(vmax.y) + 1, 0, voxelCount.y);
+            int maxZ = Mathf.Clamp(Mathf.CeilToInt(vmax.z) + 1, 0, voxelCount.z);
+            sx = maxX - minX;
+            sy = maxY - minY;
+            sz = maxZ - minZ;
+            return sx > 0 && sy > 0 && sz > 0;
         }
 
         private void OnCoverageReadback(AsyncGPUReadbackRequest request)

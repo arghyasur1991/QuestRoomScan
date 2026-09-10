@@ -69,6 +69,37 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Soft-stamp the captured plane over small uncovered wall / floor /
+        /// ceiling patches while scanning (see <c>ScanCoverage.ShellFillsApplied</c>).
+        /// Default on. Furniture close is a separate inspector toggle.
+        /// </summary>
+        public bool AutoFillShellGaps
+        {
+            get => _scanner != null && _scanner.VolumeIntegrator != null && _scanner.VolumeIntegrator.AutoFillShellGaps;
+            set
+            {
+                if (_scanner != null && _scanner.VolumeIntegrator != null)
+                    _scanner.VolumeIntegrator.AutoFillShellGaps = value;
+            }
+        }
+
+        /// <summary>
+        /// Largest uncovered shell patches (at most 8, largest first) from the
+        /// last coverage tick. Zero when <c>ScanCoverage.ShellCoverageAvailable</c>
+        /// is false. Whether a scan may finalize is the host's call — read
+        /// <c>ScanProgress.Coverage.ShellCoverage</c> from <see cref="ProgressUpdated"/>.
+        /// </summary>
+        public int CopyShellGaps(List<ShellGap> dest)
+        {
+            if (_scanner == null)
+            {
+                dest?.Clear();
+                return 0;
+            }
+            return _scanner.CopyShellGaps(dest);
+        }
+
+        /// <summary>
         /// Pin head and wrist transforms used to skip TSDF voxels around the
         /// operator (torso + hand/forearm capsules). Host-owned — the scanner
         /// will not overwrite them from the camera rig. Call before
