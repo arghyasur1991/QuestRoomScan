@@ -165,7 +165,16 @@ namespace Genesis.RoomScan
         private ComputeBuffer _shellResult;
         private int _shellCount;
         private bool _shellReadbackPending;
+        private int _shellReadbackGeneration;
         private readonly uint[] _shellResultCpu = new uint[ShellCellSet.MaxCells];
+
+        /// <summary>
+        /// Bumped by every <see cref="SetShellCells"/> / <see cref="ClearShellCells"/>.
+        /// A readback carries the generation it was dispatched under so a
+        /// result that raced a cell rebuild can be dropped instead of being
+        /// decoded against the new cell order.
+        /// </summary>
+        public int ShellGeneration { get; private set; }
 
         private static readonly int CoverCellPosID = Shader.PropertyToID("gsCoverCellPos");
         private static readonly int CoverCellNrmID = Shader.PropertyToID("gsCoverCellNrm");
@@ -180,10 +189,11 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Raised on the main thread after each shell-coverage readback with
-        /// the per-cell result words (bit0 covered, bits 8..15 hit step) and
-        /// the count. The array is reused; consume synchronously.
+        /// the per-cell result words (bit0 covered, bit1 observed-empty,
+        /// bits 8..15 hit step), the count, and the <see cref="ShellGeneration"/>
+        /// the march ran under. The array is reused; consume synchronously.
         /// </summary>
-        public event Action<uint[], int> ShellResultReady;
+        public event Action<uint[], int, int> ShellResultReady;
 
         private ComputeBuffer _frustumVolume;
         private bool _frustumReady;
@@ -481,9 +491,14 @@ namespace Genesis.RoomScan
                 _shellNrm.SetData(nrm, 0, 0, count);
             }
             _shellCount = count;
+            ShellGeneration++;
         }
 
-        public void ClearShellCells() => _shellCount = 0;
+        public void ClearShellCells()
+        {
+            _shellCount = 0;
+            ShellGeneration++;
+        }
 
         void DispatchShellMarch()
         {
@@ -491,6 +506,7 @@ namespace Genesis.RoomScan
                 || _shellMarchKernel.Shader == null)
                 return;
             _shellReadbackPending = true;
+            _shellReadbackGeneration = ShellGeneration;
             compute.SetInt(CoverCellCountID, _shellCount);
             compute.SetFloat(CoverMinWeightID, minMeshWeight);
             _shellMarchKernel.Set(VolumeRWID, _volume);
@@ -502,11 +518,12 @@ namespace Genesis.RoomScan
         {
             _shellReadbackPending = false;
             if (request.hasError || _shellCount <= 0) return;
+            if (_shellReadbackGeneration != ShellGeneration) return; // cells rebuilt while in flight
             var data = request.GetData<uint>();
             int n = Mathf.Min(data.Length, _shellCount);
             if (n <= 0) return;
             NativeArray<uint>.Copy(data, 0, _shellResultCpu, 0, n);
-            ShellResultReady?.Invoke(_shellResultCpu, n);
+            ShellResultReady?.Invoke(_shellResultCpu, n, _shellReadbackGeneration);
         }
 
         /// <summary>One auto-fill dispatch: a soft plane stamp or a furniture close, over a small voxel box.</summary>
@@ -530,6 +547,7 @@ namespace Genesis.RoomScan
             if (_fillPatchKernel.Shader == null || _closeHolesKernel.Shader == null) return 0;
 
             compute.SetFloat(FillWeightID, fillWeight);
+            compute.SetFloat(CoverMinWeightID, minMeshWeight);
             int applied = 0;
             for (int i = 0; i < count; i++)
             {

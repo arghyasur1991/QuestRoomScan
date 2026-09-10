@@ -42,9 +42,12 @@ namespace Genesis.RoomScan
         int _gapCount;
 
         public bool Available { get; private set; }
+        /// <summary>Covered / (uploaded − observed-empty). 0 until the first readback of a scan.</summary>
         public float Coverage { get; private set; }
         public int Uploaded { get; private set; }
         public int Covered { get; private set; }
+        /// <summary>Cells the march found to be observed air this tick; not in the denominator.</summary>
+        public int Empty { get; private set; }
         public int Excluded => _cells.ExcludedCount;
         public int GapCount { get; private set; }
         public ShellGap LargestGap { get; private set; }
@@ -55,23 +58,36 @@ namespace Genesis.RoomScan
             _cells = cells;
         }
 
-        /// <summary>Call after the cell set is rebuilt (scan start, anchors changed).</summary>
+        /// <summary>
+        /// Call after the cell set is rebuilt (scan start, anchors changed).
+        /// Keeps the last coverage figure when the tracker was already live,
+        /// so a mid-scan anchors-changed rebuild does not read as 0 % for a
+        /// tick; <see cref="Disable"/> between scans is what zeroes it.
+        /// </summary>
         public void Reset()
         {
+            bool wasLive = Available;
             Available = _cells.UploadCount > 0;
-            Coverage = 0f;
+            if (!wasLive)
+            {
+                Coverage = 0f;
+                Covered = 0;
+                Empty = 0;
+                FillsApplied = 0;
+            }
             Uploaded = _cells.UploadCount;
-            Covered = 0;
             GapCount = 0;
             _gapCount = 0;
             LargestGap = default;
-            FillsApplied = 0;
             System.Array.Clear(_uncoveredTicks, 0, _cells.CellCount);
         }
 
         public void Disable()
         {
             Available = false;
+            Coverage = 0f;
+            Covered = 0;
+            Empty = 0;
             GapCount = 0;
             _gapCount = 0;
             LargestGap = default;
@@ -97,17 +113,24 @@ namespace Genesis.RoomScan
             count = Mathf.Min(count, _cells.UploadCount);
 
             int covered = 0;
+            int empty = 0;
             for (int g = 0; g < count; g++)
             {
                 int c = _cells.CellOfGpu[g];
                 uint w = result[g];
-                bool isCovered = (w & 1u) != 0;
-                if (isCovered)
+                if ((w & 1u) != 0)
                 {
                     covered++;
                     _cells.State[c] = ShellCellSet.StateCovered;
                     int step = (int)((w >> 8) & 0xFFu);
                     _cells.HitOffset[c] = _cells.MarchStart[c] + step * voxelSize;
+                    _uncoveredTicks[c] = 0;
+                }
+                else if ((w & 2u) != 0)
+                {
+                    empty++;
+                    _cells.State[c] = ShellCellSet.StateEmpty;
+                    _cells.HitOffset[c] = float.NaN;
                     _uncoveredTicks[c] = 0;
                 }
                 else
@@ -118,8 +141,10 @@ namespace Genesis.RoomScan
                 }
             }
             Covered = covered;
+            Empty = empty;
             Uploaded = count;
-            Coverage = count > 0 ? (float)covered / count : 0f;
+            int required = count - empty;
+            Coverage = required > 0 ? (float)covered / required : 1f;
 
             BuildClusters();
             PublishGaps();
@@ -184,8 +209,9 @@ namespace Genesis.RoomScan
             int nb = _cells.CellIndex(surface, u, v);
             if (nb < 0) return;
             byte st = _cells.State[nb];
-            if (st == ShellCellSet.StateExcluded)
+            if (st == ShellCellSet.StateExcluded || st == ShellCellSet.StateEmpty)
             {
+                // A jamb, a window, or observed air: never extend a plane over it.
                 cl.TouchesExcluded = true;
                 return;
             }
@@ -256,13 +282,19 @@ namespace Genesis.RoomScan
 
                 if (cl.Kind == ShellSurfaceKind.Furniture)
                 {
-                    if (!vi.CloseFurnitureHoles) continue;
+                    // The real surface sits somewhere along the march (a couch
+                    // seat is well below its box top), so the close box is
+                    // placed where the covered neighbours found it. No covered
+                    // neighbour means nothing to close against.
+                    if (!vi.CloseFurnitureHoles || cl.NbCount < FillMinNeighbors) continue;
+                    if (cl.NbMax - cl.NbMin > spreadMax * 2f) continue;
+                    Vector3 shift = _cells.Surfaces[cl.Surface].Normal * (cl.NbSum / cl.NbCount);
                     var pad = Vector3.one * 0.15f;
                     _fills[n++] = new VolumeIntegrator.ShellFillRequest
                     {
                         Close = true,
-                        BoxMin = cl.BoxMin - pad,
-                        BoxMax = cl.BoxMax + pad
+                        BoxMin = Vector3.Min(cl.BoxMin + shift, cl.BoxMax + shift) - pad,
+                        BoxMax = Vector3.Max(cl.BoxMin + shift, cl.BoxMax + shift) + pad
                     };
                     continue;
                 }

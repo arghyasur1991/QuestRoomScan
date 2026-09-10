@@ -281,19 +281,33 @@ void EraseInsideExclusions(uint3 id : SV_DispatchThreadID)
 }
 
 // ──────────────────────────────────────────────────────────────────
-//  MarchShellCells: one thread per captured-shell cell. Walk from
-//  outside the plane into the room; covered when a confident voxel
-//  near its zero crossing lies on the segment. Runs with the 1 Hz
-//  coverage count — never per frame, never over the volume.
+//  MarchShellCells: one thread per captured-shell cell. Walk the
+//  cell's segment (outside the plane into the room; outside a
+//  furniture face through its box). Three outcomes:
+//    covered  — a confident voxel at or behind a zero crossing lies on
+//               the segment (tsdf <= 0.5 also catches a surface met
+//               from its back, e.g. the wall behind a wardrobe).
+//    empty    — every voxel on the segment is observed free space
+//               (weight >= min, tsdf > 0.5): the sensor has looked
+//               straight through and there is nothing there. Air
+//               inside a loose scene box, or glass. Not a hole.
+//    uncovered — otherwise: unobserved voxels and no surface.
+//  An opaque surface always leaves >= 3 unobserved voxels behind it
+//  (band + interior), so a 1-voxel tolerance on "empty" only forgives
+//  the odd grazing-angle voxel the frustum pass skipped.
+//  Runs with the 1 Hz coverage count — never per frame, never over
+//  the volume.
 // ──────────────────────────────────────────────────────────────────
 
 #pragma kernel MarchShellCells
 
 StructuredBuffer<float4> gsCoverCellPos;   // xyz world pos, w = march start (m, along normal)
-StructuredBuffer<float4> gsCoverCellNrm;   // xyz unit normal, w = march length (m)
-RWStructuredBuffer<uint> gsCoverResult;    // bit0 covered, bits 8..15 hit step (255 = none)
+StructuredBuffer<float4> gsCoverCellNrm;   // xyz unit march direction, w = march length (m)
+RWStructuredBuffer<uint> gsCoverResult;    // bit0 covered, bit1 empty, bits 8..15 hit step (255 = none)
 uint gsCoverCellCount;
 float gsCoverMinWeight;
+
+#define SHELL_EMPTY_TOLERANCE 1
 
 [numthreads(64, 1, 1)]
 void MarchShellCells(uint id : SV_DispatchThreadID)
@@ -306,6 +320,8 @@ void MarchShellCells(uint id : SV_DispatchThreadID)
 
     uint res = 255u << 8;
     bool found = false;
+    int sampled = 0;
+    int unobserved = 0;
     for (int k = 0; k < steps && !found; k++)
     {
         float3 p = p0 + nc.xyz * ((float)k * gsVoxSize);
@@ -314,12 +330,20 @@ void MarchShellCells(uint id : SV_DispatchThreadID)
         if (any(vf < 0.0) || any(vf >= (float3)gsVoxCount)) continue;
         uint3 coord = (uint3)floor(vf);
         float2 v = gsVolumeRW[coord];
-        if (abs(v.y) >= gsCoverMinWeight && abs(v.x) <= 0.5)
+        sampled++;
+        bool observed = abs(v.y) >= gsCoverMinWeight;
+        if (observed && v.x <= 0.5)
         {
             res = 1u | ((uint)k << 8);
             found = true;
         }
+        else if (!observed)
+        {
+            unobserved++;
+        }
     }
+    if (!found && sampled > 0 && unobserved <= SHELL_EMPTY_TOLERANCE)
+        res = 2u | (255u << 8);
     gsCoverResult[id] = res;
 }
 
@@ -350,7 +374,7 @@ void FillShellPatch(uint3 id : SV_DispatchThreadID)
 
     float2 old = gsVolumeRW[coord];
     if (old.y < 0) return;                  // frozen
-    if (old.y >= gsFillWeight) return;      // real data wins
+    if (old.y >= gsCoverMinWeight) return;  // any meshable real data wins, even a fresh seed
 
     float3 d = p - gsFillCenter.xyz;
     float du = dot(d, gsFillAxis.xyz);
@@ -388,12 +412,15 @@ void CloseSmallHoles(uint3 id : SV_DispatchThreadID)
     int count = 0;
     float sum = 0.0;
     int3 maxC = (int3)gsVoxCount - 1;
-    for (int axis = 0; axis < 3; axis++)
-    for (int s = -1; s <= 1; s += 2)
+    const int3 offs[6] = {
+        int3(-1, 0, 0), int3(1, 0, 0),
+        int3(0, -1, 0), int3(0, 1, 0),
+        int3(0, 0, -1), int3(0, 0, 1)
+    };
+    [unroll]
+    for (int i = 0; i < 6; i++)
     {
-        int3 n = coordI;
-        n[axis] += s;
-        n = clamp(n, int3(0, 0, 0), maxC);
+        int3 n = clamp(coordI + offs[i], int3(0, 0, 0), maxC);
         float2 nv = gsVolumeRW[(uint3)n];
         if (abs(nv.y) >= 0.2 && abs(nv.x) < 0.75)
         {

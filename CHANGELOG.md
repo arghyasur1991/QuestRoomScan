@@ -27,6 +27,10 @@ All notable changes to this package are documented here. The format follows
   `LargestGap`, `ShellFillsApplied`; `ScanProgress.OverallProgress` and the
   phase follow it when available. `RoomScanSession.CopyShellGaps` lists the
   largest holes. `FrozenFraction` stays as the freeze tool's metric.
+  Furniture faces march through the whole scene box, and a segment the
+  sensor has seen straight through (observed free space) is reported empty
+  and leaves the denominator (`ShellCellsEmpty`) — air inside a loose couch,
+  bed, or table box is not a hole.
 - Auto-fill while scanning: small wall / floor / ceiling gaps whose covered
   neighbours lie on one plane are stamped with that plane at a soft weight
   (`autoFillShellGaps`, on); small furniture gaps get a cluster-local

@@ -524,33 +524,54 @@ Shell coverage measures the room against the captured Scene API hull instead.
   clamp(sqrt(area / 14000), 0.10, 0.20)` m (≤ 16 384 cells). Doorway
   `INVISIBLE_WALL_FACE` anchors get no cells; wall cells inside a
   `DOOR_FRAME` / `WINDOW_FRAME` rect (+5 cm) are **excluded** from the
-  denominator. Furniture faces against a wall or under 10 cm are skipped.
-- **March.** One thread per cell walks along the inward normal from 0.50 m
-  outside the plane (the TSDF clip expand — a false ceiling is inside this
-  range) to 0.60 m inside (furniture: −0.15 → +0.25), one voxel per step.
-  Covered when a voxel with `|weight| ≥ minMeshWeight` and `|tsdf| ≤ 0.5` is
-  on the segment. Frozen counts. Dispatched with the 1 Hz `CountSurfaceCoverage`
-  tick; ≤ 16k threads × ≤ 22 reads — about 1 % of that pass.
-- **Readback.** One `uint` per cell (bit 0 covered, bits 8–15 hit step). On the
-  main thread `ShellCoverageTracker` flood-fills uncovered cells (4-neighbour,
-  per surface grid) into gaps: `ShellGapCount`, `LargestGap`,
-  `RoomScanSession.CopyShellGaps` (top 8). Preallocated; no GC.
+  denominator. Furniture side faces within 0.60 m of a wall (the unscannable
+  gap behind a couch or bed) or under 10 cm are skipped.
+- **March.** One thread per cell walks its segment one voxel per step. Plane
+  cells start 0.50 m outside the plane (the TSDF clip expand — a false
+  ceiling is inside this range) and go 1.00 m in for walls (the front of a
+  desk or wardrobe against the wall still covers the wall behind it), 0.80 m
+  for the ceiling (tall storage tops), 0.70 m for the floor (a bed or couch
+  covers the floor under it; a 0.75 m table does not). Furniture cells start
+  0.25 m outside the face and march **through the whole box** (top faces stop
+  0.10 m above the bottom). Three outcomes:
+  - *covered* — a voxel with `|weight| ≥ minMeshWeight` and `tsdf ≤ 0.5` is on
+    the segment (negative tsdf counts, so a surface met from behind — the wall
+    behind a wardrobe — is a hit). Frozen counts.
+  - *empty* — every sampled voxel is observed free space (`weight ≥ min`,
+    `tsdf > 0.5`, at most one unobserved voxel forgiven): the sensor has looked
+    straight through and there is nothing there. That is air inside a loose
+    scene box (a couch box top is the backrest, a bed box top the headboard, a
+    table box side is air between legs) or glass. The cell leaves the
+    denominator for that tick. An opaque surface always leaves ≥ 3 unobserved
+    voxels behind it, so it can never read as empty.
+  - *uncovered* — unobserved voxels and no surface. A hole, or not yet looked at.
+  Dispatched with the 1 Hz `CountSurfaceCoverage` tick; ≤ 16k threads × ≤ 64
+  reads — about 2 % of that pass.
+- **Readback.** One `uint` per cell (bit 0 covered, bit 1 empty, bits 8–15 hit
+  step), stamped with the cell-set generation so a result that raced an
+  anchors-changed rebuild is dropped. On the main thread `ShellCoverageTracker`
+  flood-fills uncovered cells (4-neighbour, per surface grid) into gaps:
+  `ShellGapCount`, `LargestGap`, `RoomScanSession.CopyShellGaps` (top 8).
+  `ShellCoverage = covered ÷ (uploaded − empty)`. Preallocated; no GC.
 - **Auto-fill A (`autoFillShellGaps`, default on).** A wall / floor / ceiling
   gap of ≤ `fillMaxCells` (6) cells, uncovered for ≥ 2 ticks, not touching an
-  opening, whose ≥ 4 covered neighbours hit within `fillNeighborSpreadMax`
-  (6 cm) of one plane, is stamped with that plane (`FillShellPatch`, box
-  dispatch like `StampScreen`) at `fillWeight` 0.15 — above `minMeshWeight`
-  so it meshes, below what real depth accumulates so real depth overrides it.
+  opening or an empty cell, whose ≥ 4 covered neighbours hit within
+  `fillNeighborSpreadMax` (6 cm) of one plane, is stamped with that plane
+  (`FillShellPatch`, box dispatch like `StampScreen`) at `fillWeight` 0.15 —
+  above `minMeshWeight` so it meshes, below what real depth accumulates so real
+  depth overrides it. Voxels already at `≥ minMeshWeight` are never touched.
   The plane is the captured plane shifted by the neighbours' mean hit offset.
-- **Auto-fill B (`closeFurnitureHoles`, default on).** Furniture gaps get a
-  cluster-local 6-neighbour close (`CloseSmallHoles`): an empty voxel with ≥ 4
-  neighbours at `|weight| ≥ 0.2` takes their mean tsdf at `fillWeight`. Filled
-  voxels are below 0.2 so they never seed further fills. Never a volume pass.
+- **Auto-fill B (`closeFurnitureHoles`, default on).** Furniture gaps with ≥ 4
+  covered neighbours on one depth get a cluster-local 6-neighbour close
+  (`CloseSmallHoles`) in a box placed at the neighbours' mean hit depth (the
+  real seat, not the scene-box face): an empty voxel with ≥ 4 neighbours at
+  `|weight| ≥ 0.2` takes their mean tsdf at `fillWeight`. Filled voxels are
+  below 0.2 so they never seed further fills. Never a volume pass.
 - The package does **not** gate finalize on coverage; the host reads
   `ScanCoverage.ShellCoverage` and decides.
 
 ### ScanCoverage / ScanProgress (CPU)
-- `ScanCoverage`: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`; legacy `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction`, `MeshVertexCount`, `MeshIndexCount`, `IsStabilized`
+- `ScanCoverage`: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`; legacy `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction`, `MeshVertexCount`, `MeshIndexCount`, `IsStabilized`
 - `ScanProgress`: when shell coverage is available `OverallProgress = ShellCoverage` and phase is `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. Otherwise the legacy blend `FrozenFraction×0.5 + ColorCoverage×0.3 + GeometryStability×0.2` and plateau phases below.
 - `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`
 

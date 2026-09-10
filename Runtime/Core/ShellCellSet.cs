@@ -5,9 +5,10 @@ namespace Genesis.RoomScan
     /// <summary>
     /// Sample points on the captured room shell (walls, floor, ceiling,
     /// furniture faces). Each cell carries a world position, an inward
-    /// normal, and a march segment along that normal; the GPU reports
-    /// whether a scanned surface lies on the segment. Fixed-capacity so the
-    /// per-scan readback path allocates nothing.
+    /// march direction (into the room for planes, into the box for
+    /// furniture), and a segment along it; the GPU reports whether a scanned
+    /// surface lies on the segment, or whether the segment is all observed
+    /// air. Fixed-capacity so the per-scan readback path allocates nothing.
     /// </summary>
     public sealed class ShellCellSet
     {
@@ -17,6 +18,13 @@ namespace Genesis.RoomScan
         public const byte StateExcluded = 0;
         public const byte StateUncovered = 1;
         public const byte StateCovered = 2;
+        /// <summary>
+        /// The whole segment is observed free space: nothing is there to
+        /// scan (air inside a loose furniture box, glass). Leaves the
+        /// denominator like an excluded cell, but is decided by the march
+        /// each tick rather than at build time.
+        /// </summary>
+        public const byte StateEmpty = 3;
 
         public struct Surface
         {

@@ -20,7 +20,7 @@ namespace Genesis.RoomScan
     {
         /// <summary>World-space centre of the patch on the captured surface.</summary>
         public readonly Vector3 Center;
-        /// <summary>Unit normal pointing into the room (outward for furniture).</summary>
+        /// <summary>Unit march direction: into the room for walls / floor / ceiling, into the box for furniture.</summary>
         public readonly Vector3 Normal;
         /// <summary>Number of shell cells in the patch.</summary>
         public readonly int Cells;

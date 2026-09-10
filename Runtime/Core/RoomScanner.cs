@@ -77,11 +77,17 @@ namespace Genesis.RoomScan
         /// or a resolved room — fall back to <see cref="FrozenFraction"/>.
         /// </summary>
         public bool ShellCoverageAvailable;
-        /// <summary>Fraction of shell cells with scanned matter in front of them (0–1). Openings are excluded from the denominator.</summary>
+        /// <summary>
+        /// Fraction of required shell cells with scanned matter on their march
+        /// segment (0–1). Door / window openings (build time) and cells whose
+        /// segment is observed air (per tick) are not in the denominator.
+        /// </summary>
         public float ShellCoverage;
         public int ShellCellsTotal;
         public int ShellCellsCovered;
         public int ShellCellsExcluded;
+        /// <summary>Cells the march found to be observed air this tick (nothing there to scan).</summary>
+        public int ShellCellsEmpty;
         /// <summary>Connected uncovered patches of two or more cells.</summary>
         public int ShellGapCount;
         /// <summary>Largest uncovered patch, or default when none.</summary>
@@ -1686,9 +1692,10 @@ namespace Genesis.RoomScan
             }
         }
 
-        void OnShellResult(uint[] result, int count)
+        void OnShellResult(uint[] result, int count, int generation)
         {
             if (!IsScanning || _shellTracker == null || _volumeIntegrator == null) return;
+            if (generation != _volumeIntegrator.ShellGeneration) return;
             _shellTracker.Update(result, count, _volumeIntegrator, _volumeIntegrator.VoxelSize);
 
             float t = Time.time;
@@ -1698,7 +1705,8 @@ namespace Genesis.RoomScan
                 var g = _shellTracker.LargestGap;
                 Logger.Verbose(
                     $"[RoomScanner] Shell coverage {_shellTracker.Coverage:P0} " +
-                    $"({_shellTracker.Covered}/{_shellTracker.Uploaded}) gaps={_shellTracker.GapCount} " +
+                    $"({_shellTracker.Covered}/{_shellTracker.Uploaded - _shellTracker.Empty}, " +
+                    $"empty={_shellTracker.Empty}) gaps={_shellTracker.GapCount} " +
                     $"largest={g.Cells} cells ({g.Kind}) fills={_shellTracker.FillsApplied}");
             }
         }
@@ -1985,6 +1993,7 @@ namespace Genesis.RoomScan
                 cov.ShellCellsTotal = _shellTracker.Uploaded;
                 cov.ShellCellsCovered = _shellTracker.Covered;
                 cov.ShellCellsExcluded = _shellTracker.Excluded;
+                cov.ShellCellsEmpty = _shellTracker.Empty;
                 cov.ShellGapCount = _shellTracker.GapCount;
                 cov.LargestGap = _shellTracker.LargestGap;
                 cov.ShellFillsApplied = _shellTracker.FillsApplied;

@@ -977,14 +977,37 @@ namespace Genesis.RoomScan
             const float ShellTargetCells = 14000f;
             const float ShellCellMin = 0.10f;
             const float ShellCellMax = 0.20f;
-            /// <summary>March from the 50 cm clip expand outside the plane to 60 cm inside.</summary>
+            /// <summary>
+            /// Plane cells march from the 50 cm clip expand outside the plane
+            /// to a per-kind depth inside. Walls go 1.0 m so the front of a
+            /// desk or wardrobe standing against the wall still covers the
+            /// wall behind it; the ceiling 0.8 m for the top of tall storage;
+            /// the floor 0.7 m so a bed or couch covers the floor under it
+            /// while a 0.75 m table does not.
+            /// </summary>
             const float ShellMarchStart = -TsdfClipExpandMetres;
-            const float ShellMarchLength = TsdfClipExpandMetres + 0.60f;
-            const float FurnitureMarchStart = -0.15f;
-            const float FurnitureMarchLength = 0.40f;
+            const float WallMarchLength = TsdfClipExpandMetres + 1.00f;
+            const float CeilingMarchLength = TsdfClipExpandMetres + 0.80f;
+            const float FloorMarchLength = TsdfClipExpandMetres + 0.70f;
+            /// <summary>
+            /// Furniture faces march from just outside the face through the
+            /// whole volume box. A scene box bounds the object loosely (a
+            /// couch box top is the backrest, a bed box top the headboard, a
+            /// table box side is mostly air between legs), so the real surface
+            /// may sit anywhere along that depth — and where there is nothing
+            /// at all the march reports observed-empty and the cell leaves the
+            /// denominator instead of reading as a hole.
+            /// </summary>
+            const float FurnitureMarchOutside = 0.25f;
+            /// <summary>Top faces stop short of the box bottom so the floor band is never the hit.</summary>
+            const float FurnitureBottomSkip = 0.10f;
             const float OpeningMargin = 0.05f;
             const float OpeningDepth = 0.15f;
-            const float FurnitureWallSkip = 0.35f;
+            /// <summary>
+            /// A side face within this distance of a wall is skipped: the gap
+            /// behind a couch or bed cannot be scanned and is not a leak.
+            /// </summary>
+            const float FurnitureWallSkip = 0.60f;
             const float FurnitureFloorSkip = 0.10f;
 
             const MRUKAnchor.SceneLabels ShellFurnitureLabels =
@@ -1029,12 +1052,10 @@ namespace Genesis.RoomScan
                         area += r.width * r.height;
                     }
                 }
-                var floor = room.FloorAnchor;
-                var ceiling = room.CeilingAnchor;
-                if (floor != null && floor.PlaneRect.HasValue)
-                    area += floor.PlaneRect.Value.width * floor.PlaneRect.Value.height;
-                if (ceiling != null && ceiling.PlaneRect.HasValue)
-                    area += ceiling.PlaneRect.Value.width * ceiling.PlaneRect.Value.height;
+                // High Fidelity scenes can carry several floor / ceiling planes.
+                var floors = room.FloorAnchors;
+                var ceilings = room.CeilingAnchors;
+                area += PlaneListArea(floors) + PlaneListArea(ceilings);
 
                 float cell = Mathf.Clamp(Mathf.Sqrt(area / ShellTargetCells), ShellCellMin, ShellCellMax);
                 dst.CellSize = cell;
@@ -1046,10 +1067,14 @@ namespace Genesis.RoomScan
                     if (!IsShellWall(a)) continue;
                     AddWallCells(room, a, cell, dst);
                 }
-                if (floor != null)
-                    AddPolygonCells(floor, Vector3.up, ShellSurfaceKind.Floor, cell, dst);
-                if (ceiling != null)
-                    AddPolygonCells(ceiling, Vector3.down, ShellSurfaceKind.Ceiling, cell, dst);
+                if (floors != null)
+                    for (int i = 0; i < floors.Count; i++)
+                        if (floors[i] != null)
+                            AddPolygonCells(floors[i], Vector3.up, ShellSurfaceKind.Floor, cell, dst);
+                if (ceilings != null)
+                    for (int i = 0; i < ceilings.Count; i++)
+                        if (ceilings[i] != null)
+                            AddPolygonCells(ceilings[i], Vector3.down, ShellSurfaceKind.Ceiling, cell, dst);
 
                 for (int i = 0; i < room.Anchors.Count; i++)
                 {
@@ -1060,6 +1085,19 @@ namespace Genesis.RoomScan
                 }
 
                 return dst.UploadCount;
+            }
+
+            static float PlaneListArea(List<MRUKAnchor> anchors)
+            {
+                if (anchors == null) return 0f;
+                float area = 0f;
+                for (int i = 0; i < anchors.Count; i++)
+                {
+                    var a = anchors[i];
+                    if (a == null || !a.PlaneRect.HasValue) continue;
+                    area += a.PlaneRect.Value.width * a.PlaneRect.Value.height;
+                }
+                return area;
             }
 
             static void AddWallCells(MRUKRoom room, MRUKAnchor a, float cell, ShellCellSet dst)
@@ -1079,7 +1117,7 @@ namespace Genesis.RoomScan
                     float ly = r.yMin + (v + 0.5f) * cell;
                     Vector3 p = t.TransformPoint(new Vector3(lx, ly, 0f));
                     bool excluded = InsideOpening(p);
-                    dst.AddCell(s, u, v, p, ShellMarchStart, ShellMarchLength, excluded);
+                    dst.AddCell(s, u, v, p, ShellMarchStart, WallMarchLength, excluded);
                 }
             }
 
@@ -1094,6 +1132,7 @@ namespace Genesis.RoomScan
                 int s = dst.BeginSurface(kind, t.right, t.up, normal, nu, nv);
                 if (s < 0) return;
 
+                float length = kind == ShellSurfaceKind.Floor ? FloorMarchLength : CeilingMarchLength;
                 bool usePoly = poly != null && poly.Count >= 3;
                 for (int v = 0; v < nv; v++)
                 for (int u = 0; u < nu; u++)
@@ -1101,7 +1140,7 @@ namespace Genesis.RoomScan
                     var l = new Vector2(r.xMin + (u + 0.5f) * cell, r.yMin + (v + 0.5f) * cell);
                     bool inside = !usePoly || PointInPolygon(poly, l);
                     Vector3 p = t.TransformPoint(new Vector3(l.x, l.y, 0f));
-                    dst.AddCell(s, u, v, p, ShellMarchStart, ShellMarchLength, !inside);
+                    dst.AddCell(s, u, v, p, ShellMarchStart, length, !inside);
                 }
             }
 
@@ -1136,12 +1175,20 @@ namespace Genesis.RoomScan
                         if (faceCenter.y - floorY < FurnitureFloorSkip) continue;
                     }
 
+                    // The march runs inward (against the face normal): from
+                    // just outside the face to the far side of the box, or
+                    // to just above the box bottom for the top face.
+                    float depth = e[axis] * 2f;
+                    if (!side) depth = Mathf.Max(depth - FurnitureBottomSkip, cell);
+                    float marchStart = -FurnitureMarchOutside;
+                    float marchLength = FurnitureMarchOutside + depth;
+
                     Vector3 la = Vector3.zero; la[ai] = 1f;
                     Vector3 lb = Vector3.zero; lb[bi] = 1f;
                     int nu = Mathf.CeilToInt(ea * 2f / cell);
                     int nv = Mathf.CeilToInt(eb * 2f / cell);
                     int s = dst.BeginSurface(ShellSurfaceKind.Furniture,
-                        t.TransformDirection(la).normalized, t.TransformDirection(lb).normalized, wn, nu, nv);
+                        t.TransformDirection(la).normalized, t.TransformDirection(lb).normalized, -wn, nu, nv);
                     if (s < 0) return;
 
                     for (int v = 0; v < nv; v++)
@@ -1150,7 +1197,7 @@ namespace Genesis.RoomScan
                         Vector3 lp = faceCenterLocal
                             + la * (-ea + (u + 0.5f) * cell)
                             + lb * (-eb + (v + 0.5f) * cell);
-                        dst.AddCell(s, u, v, t.TransformPoint(lp), FurnitureMarchStart, FurnitureMarchLength, false);
+                        dst.AddCell(s, u, v, t.TransformPoint(lp), marchStart, marchLength, false);
                     }
                 }
             }
