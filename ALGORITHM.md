@@ -550,14 +550,19 @@ kernels; the CPU sees a 32-word result once per `analysisIntervalSeconds`.
    is packed `count<<16 | root` with `InterlockedMax`, its centroid resolved.
    The scan frontier is simply the largest hole.
 7. **Readback** of the 32 words. CPU derives
-   `Closure = 1 / (1 + openBoundary / (closureReference × √meshArea))` with
-   `openBoundary = holeEdges × voxelSize` (edges past the snapshot capacity
-   count as open), `meshArea ≈ quads × voxel²`, `Refinement = confident ÷
-   surface`, and `OverallProgress = min(Closure, Refinement)`.
-   `closureReference` is the open boundary per √area that reads 50 %; boundary
-   length is ragged (voxel staircase, frontier fringe) and runs 3–5× the ideal
-   loop, so the default is 6.0: a half-scanned room with ~75 m of boundary
-   reads ~36 %, a finished 90 m² room 92 % at 5 m open, 100 % closed.
+   `Closure = 1 / (1 + max(0, open − closedBoundaryMetres) / (closureReference × √meshArea))`
+   with `open = holeEdges × voxelSize` (edges past the snapshot capacity count
+   as open), `meshArea ≈ quads × voxel²`; `Refinement = clamp01(confident ÷
+   surface ÷ refinementSaturation)`; and
+   `OverallProgress = Closure × (1 − refinementInfluence × (1 − Refinement))`.
+   `closureReference` (6.0) is the excess boundary per √area that reads 50 % —
+   boundary length is ragged (voxel staircase, frontier fringe) and runs 3–5×
+   the ideal loop, so a half-scanned room with ~75 m of boundary reads ~35 %.
+   `closedBoundaryMetres` (1.0) lets a room with a few unreachable 10 cm holes
+   read 100 %. `confidentWeight` 0.2, `refinementSaturation` 0.85 (the band
+   always carries fresh voxels; 100 % confident never happens),
+   `refinementInfluence` 0.4 (an unsettled but closed room reads 60 %; freezing
+   helps but cannot mask a hole).
 
 Why these two: a boundary edge is a place passthrough leaks through the
 finished mesh, and a voxel below the confident weight is a surface that is
@@ -629,7 +634,8 @@ makes the analytic closure above reach 100 % in practice.
 
 ### ScanCoverage / ScanProgress (CPU)
 - `ScanCoverage` analytic: `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`, `OpenBoundaryMetres`, `HoleCount`, `LargestHole` (`MeshHole`: centre, perimeter, edges). Shell prior: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`. Raw: `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction` (the freeze tool's own metric), `MeshVertexCount`, `MeshTriangleCount`.
-- `ScanProgress.OverallProgress = min(Closure, Refinement)` (0 until the first cycle); phase `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. There is no plateau or frozen-fraction blend any more.
+- `ScanProgress.OverallProgress = Closure × (1 − refinementInfluence × (1 − Refinement))` (0 until the first cycle); phase `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. There is no plateau or frozen-fraction blend any more.
+- `FreezeInView` / `UnfreezeInView` act on the centred `freezeViewFraction` (0.5) of the passthrough image, not the whole frame, so a press paints what the player is looking straight at and they turn their head for more.
 - `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`
 
 ## 12b. Depth Subsystem Gating

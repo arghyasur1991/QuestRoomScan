@@ -78,8 +78,13 @@ namespace Genesis.RoomScan
         /// not count; edges on a clip plane or the volume edge are cuts.
         /// </summary>
         public float Closure;
-        /// <summary>Confident ÷ surface voxels (0–1): how much of the surface has stopped moving.</summary>
+        /// <summary>
+        /// How much of the surface has stopped moving, 0–1: the confident
+        /// fraction scaled so the refinement saturation point reads 1.
+        /// </summary>
         public float Refinement;
+        /// <summary>Confident ÷ surface voxels, raw (0–1).</summary>
+        public float ConfidentFraction;
         /// <summary>Surface voxels at or above the confident weight.</summary>
         public int ConfidentSurfaceCount;
         /// <summary>Length of counted hole loops, metres.</summary>
@@ -122,9 +127,10 @@ namespace Genesis.RoomScan
         /// <summary>The underlying raw coverage metrics.</summary>
         public ScanCoverage Coverage;
         /// <summary>
-        /// min(<see cref="ScanCoverage.Closure"/>, <see cref="ScanCoverage.Refinement"/>):
-        /// the mesh has no holes and has stopped moving. 0 until the first
-        /// analysis cycle. Nothing from the scene model feeds this.
+        /// <c>Closure × (1 − influence × (1 − Refinement))</c>: the mesh has no
+        /// holes, discounted a little while its surface is still moving. 0
+        /// until the first analysis cycle. Nothing from the scene model feeds
+        /// this.
         /// </summary>
         public float OverallProgress;
         /// <summary>Current high-level scan phase.</summary>
@@ -557,7 +563,8 @@ namespace Genesis.RoomScan
                 {
                     var cl = _volumeIntegrator.Closure;
                     Logger.Info(
-                        $"[RoomScanner] Analysis: closure={cl.Closure:P0} refinement={_volumeIntegrator.Refinement:P0} " +
+                        $"[RoomScanner] Analysis: progress={_volumeIntegrator.Progress:P0} closure={cl.Closure:P0} " +
+                        $"refinement={_volumeIntegrator.Refinement:P0} (confident {_volumeIntegrator.ConfidentFraction:P0}) " +
                         $"open={cl.OpenBoundaryMetres:F2}m holes={cl.HoleCount} largest={cl.LargestHole.PerimeterMetres:F2}m " +
                         $"@({cl.LargestHole.Center.x:F2},{cl.LargestHole.Center.y:F2},{cl.LargestHole.Center.z:F2}) " +
                         $"area={cl.MeshAreaM2:F1}m2 edges: total={cl.OpenEdgesTotal} cut={cl.CutEdges} hole={cl.HoleEdges} " +
@@ -2014,6 +2021,7 @@ namespace Genesis.RoomScan
                 cov.AnalysisAvailable = true;
                 cov.Closure = cl.Closure;
                 cov.Refinement = _volumeIntegrator.Refinement;
+                cov.ConfidentFraction = _volumeIntegrator.ConfidentFraction;
                 cov.ConfidentSurfaceCount = _volumeIntegrator.ConfidentSurfaceCount;
                 cov.OpenBoundaryMetres = cl.OpenBoundaryMetres;
                 cov.HoleCount = cl.HoleCount;
@@ -2043,7 +2051,7 @@ namespace Genesis.RoomScan
         private ScanProgress BuildProgress()
         {
             var cov = BuildCoverage();
-            float progress = cov.AnalysisAvailable ? Mathf.Min(cov.Closure, cov.Refinement) : 0f;
+            float progress = cov.AnalysisAvailable ? _volumeIntegrator.Progress : 0f;
 
             ScanPhase phase;
             if (!IsScanning && _volumeIntegrator != null && _volumeIntegrator.IntegrationCount == 0)

@@ -240,20 +240,29 @@ namespace Genesis.RoomScan
         private static readonly int CcHashSizeID = Shader.PropertyToID("gsCcHashSize");
         private static readonly int CcMinEdgesID = Shader.PropertyToID("gsCcMinEdges");
         private static readonly int CcCutTolID = Shader.PropertyToID("gsCcCutTol");
+        private static readonly int FreezeUvHalfID = Shader.PropertyToID("gsFreezeUvHalf");
 
         enum AnalysisState { Idle, Link, Classify, Finalize, Readback, Disabled }
 
         [Header("Scan analysis")]
         [Tooltip("Seconds between analysis cycles. Each cycle is ~16 frames of small kernels and one 128-byte readback.")]
         [SerializeField, Range(0.25f, 5f)] private float analysisIntervalSeconds = 1f;
-        [Tooltip("Surface voxels at or above this |weight| count as refined. Weight only grows with good observations (max 0.5) and the blend rate falls with it, so this is 'the surface has stopped moving'.")]
-        [SerializeField, Range(0.1f, 0.5f)] private float confidentWeight = 0.3f;
+        [Tooltip("Surface voxels at or above this |weight| count as refined. Weight only grows with good observations (max 0.5) and the blend rate falls with it, so this is 'the surface has stopped moving'. 0.2 is about half a second of good frames.")]
+        [SerializeField, Range(0.1f, 0.5f)] private float confidentWeight = 0.2f;
+        [Tooltip("Confident fraction at which refinement reads 1. The band around every surface always carries some fresh low-weight voxels, so 100 % confident never happens; 0.85 is 'everything the eye can see has settled'.")]
+        [SerializeField, Range(0.5f, 1f)] private float refinementSaturation = 0.85f;
+        [Tooltip("How much an unsettled surface can hold progress back: progress = closure × (1 − influence × (1 − refinement)). 0.4 → a closed room whose surface has not settled at all reads 60 %; freezing a settled area still helps, but cannot mask a hole.")]
+        [SerializeField, Range(0f, 1f)] private float refinementInfluence = 0.4f;
         [Tooltip("Boundary loops shorter than this (metres) are ignored: a pit a few centimetres across is not a leak. 0.35 m is ~7 voxel edges, ~11 cm across.")]
         [SerializeField, Range(0.05f, 1f)] private float holeMinPerimeter = 0.35f;
-        [Tooltip("Open boundary, in metres per √meshArea, at which closure reads 50 %: closure = 1 / (1 + open / (ref × √area)). " +
+        [Tooltip("Open boundary up to this many metres counts as fully closed (a few 10 cm holes in nooks no one can reach). Above it the curve below applies.")]
+        [SerializeField, Range(0f, 5f)] private float closedBoundaryMetres = 1f;
+        [Tooltip("Open boundary beyond closedBoundaryMetres, in metres per √meshArea, at which closure reads 50 %: closure = 1 / (1 + (open − closed) / (ref × √area)). " +
                  "Boundary length is ragged (voxel staircase, frontier fringe) so it runs 3-5× the ideal loop. " +
-                 "6.0 → a half-scanned 50 m² room with 76 m of boundary reads ~36 %; a 90 m² room reads 88 % at 8 m open, 92 % at 5 m, 95 % at 3 m.")]
+                 "6.0 → a half-scanned 50 m² room with 76 m of boundary reads ~35 %; a 90 m² room reads 93 % at 5 m open, 97 % at 3 m, 100 % at 1 m.")]
         [SerializeField, Range(0.5f, 20f)] private float closureReference = 6f;
+        [Tooltip("Fraction of the passthrough camera image, centred, that FreezeInView / UnfreezeInView act on. 0.5 = the middle half of the width and height, so a press paints roughly what the player is looking straight at and they turn their head to paint more.")]
+        [SerializeField, Range(0.1f, 1f)] private float freezeViewFraction = 0.5f;
         [Tooltip("Boundary edges within this many voxels of a clip plane, the room AABB or the volume edge are cuts, not holes.")]
         [SerializeField, Range(1f, 4f)] private float cutToleranceVoxels = 2f;
         [Tooltip("Min-label link + pointer-jump rounds, one per frame. 12 converges loops of a few thousand edges.")]
@@ -267,10 +276,14 @@ namespace Genesis.RoomScan
         public int ColoredSurfaceCount { get; private set; }
         /// <summary>Surface voxels at or above <c>confidentWeight</c>.</summary>
         public int ConfidentSurfaceCount { get; private set; }
-        /// <summary>Confident ÷ surface (0–1): how much of the surface has stopped moving.</summary>
+        /// <summary>Confident ÷ surface, raw (0–1).</summary>
+        public float ConfidentFraction { get; private set; }
+        /// <summary>Refinement 0–1: <see cref="ConfidentFraction"/> scaled so <c>refinementSaturation</c> reads 1.</summary>
         public float Refinement { get; private set; }
         /// <summary>Mesh closure from the last analysis cycle.</summary>
         public MeshClosure Closure { get; private set; }
+        /// <summary>closure × (1 − refinementInfluence × (1 − refinement)). The number a host gates on.</summary>
+        public float Progress { get; private set; }
         /// <summary>True once a cycle has completed for the current scan.</summary>
         public bool AnalysisAvailable { get; private set; }
 
@@ -575,7 +588,7 @@ namespace Genesis.RoomScan
             _analysisExtractSeen = -1;
             _lastAnalysisTime = 0f;
             SurfaceVoxelCount = FrozenSurfaceCount = ColoredSurfaceCount = ConfidentSurfaceCount = 0;
-            Refinement = 0f;
+            ConfidentFraction = Refinement = Progress = 0f;
             Closure = default;
         }
 
@@ -673,7 +686,8 @@ namespace Genesis.RoomScan
             FrozenSurfaceCount = (int)r[1];
             ColoredSurfaceCount = (int)r[2];
             ConfidentSurfaceCount = (int)r[3];
-            Refinement = SurfaceVoxelCount > 0 ? (float)ConfidentSurfaceCount / SurfaceVoxelCount : 0f;
+            ConfidentFraction = SurfaceVoxelCount > 0 ? (float)ConfidentSurfaceCount / SurfaceVoxelCount : 0f;
+            Refinement = Mathf.Clamp01(ConfidentFraction / Mathf.Max(0.01f, refinementSaturation));
 
             int openTotal = (int)r[4];
             int openUsed = (int)r[5];
@@ -689,11 +703,15 @@ namespace Genesis.RoomScan
             float area = quads * voxelSize * voxelSize;
             float openMetres = sigEdges * voxelSize;
             float reference = Mathf.Max(closureReference * Mathf.Sqrt(Mathf.Max(area, 0f)), 4f * voxelSize);
-            float closure = area > 0f ? 1f / (1f + openMetres / reference) : 0f;
+            // Up to closedBoundaryMetres is "closed": a few 10 cm holes in nooks
+            // nobody can reach must still let the number reach 100 %.
+            float excess = Mathf.Max(0f, openMetres - closedBoundaryMetres);
+            float closure = area > 0f ? 1f / (1f + excess / reference) : 0f;
 
             Closure = new MeshClosure(
                 closure, openMetres, area, (int)r[9], (int)r[7], (int)r[6], openTotal,
                 new MeshHole(largestCenter, largestEdges * voxelSize, largestEdges));
+            Progress = Mathf.Clamp01(closure * (1f - refinementInfluence * (1f - Refinement)));
             AnalysisAvailable = true;
         }
 
@@ -1022,6 +1040,7 @@ namespace Genesis.RoomScan
             compute.SetVector(CamPrincipalPtID, principalPt);
             compute.SetVector(CamSensorResID, sensorRes);
             compute.SetVector(CamCurrentResID, currentRes);
+            compute.SetFloat(FreezeUvHalfID, 0.5f * Mathf.Clamp01(freezeViewFraction));
         }
 
         /// <summary>
