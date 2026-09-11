@@ -14,9 +14,6 @@ RWTexture3D<float4> gsColorVolumeRW;
 float gsDepthDispThresh;
 float gsMaxUpdateDist;
 
-#define EXCLUSION_TOP 0.25
-#define EXCLUSION_BOTTOM 1.7
-#define EXCLUSION_RADIUS 0.6
 #define MIN_DOT 0.3
 
 #define MIN_QUALITY_SEED 0.25
@@ -115,6 +112,12 @@ void Integrate(uint id : SV_DispatchThreadID)
     float3 depthNorm = gsDepthNormalSample(voxNDC.xy).xyz;
     float3 depthPos = gsDepthNDCtoWorld(float3(voxNDC.xy, depthNDC));
     if (!gsInsideRoom(depthPos)) return;
+    // The depth pixel itself is on the body: nothing along this ray may
+    // integrate. Testing only the voxel is not enough — a hand pixel still
+    // writes the negative band up to gsVoxDist behind the hand surface,
+    // which reaches past the capsule and meshes as a hand-shaped shell
+    // against the free space carved around it.
+    if (gsInsideAnyExclusion(depthPos)) return;
 
     float3 eyeToDepth = depthPos - eyePos;
     float depthEyeDist = length(eyeToDepth);
@@ -134,18 +137,7 @@ void Integrate(uint id : SV_DispatchThreadID)
     bool unoccludedByDilation = abs(voxView.z) < dilatedDepthLinear || acceptableDepthDisparity;
     bool validSurfaceNormal = empty || normDot > MIN_DOT;
 
-    bool outsideExclusions = true;
-    for (int p = 0; p < gsNumExclusions; p++)
-    {
-        float3 headPos = gsExclusionHeads[p];
-        float2 diff = vWorldPos.xz - headPos.xz;
-        if (dot(diff, diff) < EXCLUSION_RADIUS * EXCLUSION_RADIUS &&
-            vWorldPos.y < headPos.y + EXCLUSION_TOP &&
-            vWorldPos.y > headPos.y - EXCLUSION_BOTTOM)
-        {
-            outsideExclusions = false;
-        }
-    }
+    bool outsideExclusions = !gsInsideAnyExclusion(vWorldPos);
 
     bool valid = withinBand & outsideExclusions & validSurfaceNormal & unoccludedByDilation;
     if (!valid) return;
@@ -247,6 +239,20 @@ void StampScreen(uint3 id : SV_DispatchThreadID)
 #pragma kernel FreezeInFrustum
 #pragma kernel UnfreezeInFrustum
 
+// Freeze / unfreeze paint a spotlight cone from the head: apex at the eye,
+// axis along the gaze, half-angle from the host. A cone needs only the head
+// pose, which is always available; the old passthrough-camera frustum needed
+// intrinsics that were not, and its wide window painted the whole view.
+float4 gsFreezeOrigin;   // xyz eye position, w = cos(half angle)
+float4 gsFreezeDir;      // xyz unit gaze direction
+
+bool gsInFreezeCone(float3 worldPos)
+{
+    float3 d = worldPos - gsFreezeOrigin.xyz;
+    float len = length(d);
+    return len > 0.05 && dot(d, gsFreezeDir.xyz) >= gsFreezeOrigin.w * len;
+}
+
 [numthreads(4, 4, 4)]
 void FreezeInFrustum(uint3 id : SV_DispatchThreadID)
 {
@@ -255,9 +261,8 @@ void FreezeInFrustum(uint3 id : SV_DispatchThreadID)
     if (vol.y <= 0) return; // empty or already frozen
 
     float3 worldPos = gsVoxelToWorld(id);
-    float2 uv = ProjectToCameraUV(worldPos);
-    if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99)
-        return;
+    if (gsInsideAnyExclusion(worldPos)) return;
+    if (!gsInFreezeCone(worldPos)) return;
 
     gsVolumeRW[id] = float2(vol.x, -vol.y);
 }
@@ -270,44 +275,760 @@ void UnfreezeInFrustum(uint3 id : SV_DispatchThreadID)
     if (vol.y >= 0) return; // not frozen
 
     float3 worldPos = gsVoxelToWorld(id);
-    float2 uv = ProjectToCameraUV(worldPos);
-    if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99)
-        return;
+    if (!gsInFreezeCone(worldPos)) return;
 
     gsVolumeRW[id] = float2(vol.x, -vol.y);
 }
 
-// ──────────────────────────────────────────────────────────────────
-//  CountSurfaceCoverage: periodically count surface/frozen/colored
-//  voxels for scan progress metrics. NOT dispatched every frame.
-// ──────────────────────────────────────────────────────────────────
-
-#pragma kernel CountSurfaceCoverage
-
-RWStructuredBuffer<uint> _CoverageCounters; // [0]=surface, [1]=frozen, [2]=colored
-
-Texture3D<float4> gsColorVolumeRead;
+#pragma kernel EraseInsideExclusions
 
 [numthreads(4, 4, 4)]
-void CountSurfaceCoverage(uint3 id : SV_DispatchThreadID)
+void EraseInsideExclusions(uint3 id : SV_DispatchThreadID)
+{
+    if (gsEraseBody == 0) return;
+    if (any(id >= gsVoxCount)) return;
+    float2 vol = gsVolumeRW[id];
+    if (vol.y <= 0) return;
+    if (vol.y >= gsEraseMaxWeight) return;
+    float3 worldPos = gsVoxelToWorld(id);
+    if (!gsInsideErasableExclusion(worldPos)) return;
+    gsVolumeRW[id] = float2(GS_EMPTY_VOXEL, 0);
+    gsColorVolumeRW[id] = float4(0, 0, 0, 0);
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  MarchShellCells: one thread per captured-shell cell. Walk the
+//  cell's segment (outside the plane into the room; outside a
+//  furniture face through its box). Three outcomes:
+//    covered  — a confident voxel at or behind a zero crossing lies on
+//               the segment (tsdf <= 0.5 also catches a surface met
+//               from its back, e.g. the wall behind a wardrobe).
+//    empty    — every voxel on the segment is observed free space
+//               (weight >= min, tsdf > 0.5): the sensor has looked
+//               straight through and there is nothing there. Air
+//               inside a loose scene box, or glass. Not a hole.
+//    uncovered — otherwise: unobserved voxels and no surface.
+//  An opaque surface always leaves >= 3 unobserved voxels behind it
+//  (band + interior), so a 1-voxel tolerance on "empty" only forgives
+//  the odd grazing-angle voxel the frustum pass skipped.
+//  Runs with the 1 Hz coverage count — never per frame, never over
+//  the volume.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel MarchShellCells
+
+StructuredBuffer<float4> gsCoverCellPos;   // xyz world pos, w = march start (m, along normal)
+StructuredBuffer<float4> gsCoverCellNrm;   // xyz unit march direction, w = march length (m)
+RWStructuredBuffer<uint> gsCoverResult;    // bit0 covered, bit1 empty, bits 8..15 hit step (255 = none)
+uint gsCoverCellCount;
+float gsCoverMinWeight;
+
+#define SHELL_EMPTY_TOLERANCE 1
+
+[numthreads(64, 1, 1)]
+void MarchShellCells(uint id : SV_DispatchThreadID)
+{
+    if (id >= gsCoverCellCount) return;
+    float4 pc = gsCoverCellPos[id];
+    float4 nc = gsCoverCellNrm[id];
+    float3 p0 = pc.xyz + nc.xyz * pc.w;
+    int steps = min((int)ceil(nc.w / gsVoxSize), 64);
+
+    uint res = 255u << 8;
+    bool found = false;
+    int sampled = 0;
+    int unobserved = 0;
+    for (int k = 0; k < steps && !found; k++)
+    {
+        float3 p = p0 + nc.xyz * ((float)k * gsVoxSize);
+        if (!gsInsideRoom(p)) continue;
+        float3 vf = gsWorldToVoxelFloat(p);
+        if (any(vf < 0.0) || any(vf >= (float3)gsVoxCount)) continue;
+        uint3 coord = (uint3)floor(vf);
+        float2 v = gsVolumeRW[coord];
+        sampled++;
+        bool observed = abs(v.y) >= gsCoverMinWeight;
+        if (observed && v.x <= 0.5)
+        {
+            res = 1u | ((uint)k << 8);
+            found = true;
+        }
+        else if (!observed)
+        {
+            unobserved++;
+        }
+    }
+    if (!found && sampled > 0 && unobserved <= SHELL_EMPTY_TOLERANCE)
+        res = 2u | (255u << 8);
+    gsCoverResult[id] = res;
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  FillShellPatch: soft analytic-plane stamp over a small uncovered
+//  patch whose neighbours all lie on one plane. Weight stays low so
+//  real depth overrides it. Box dispatch via gsStampVoxMin/Max.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel FillShellPatch
+
+float4 gsFillCenter;     // xyz centre on the shifted plane, w = half width
+float4 gsFillInward;     // xyz unit inward normal,          w = half height
+float4 gsFillAxis;       // xyz unit tangent
+float4 gsFillBitangent;  // xyz unit bitangent
+float gsFillWeight;
+
+[numthreads(4, 4, 4)]
+void FillShellPatch(uint3 id : SV_DispatchThreadID)
+{
+    int3 coordI = gsStampVoxMin + (int3)id;
+    if (any(coordI >= gsStampVoxMax) || any(coordI < 0)) return;
+    uint3 coord = (uint3)coordI;
+    if (any(coord >= gsVoxCount)) return;
+
+    float3 p = gsVoxelToWorld(coord);
+    if (!gsInsideRoom(p)) return;
+
+    float2 old = gsVolumeRW[coord];
+    if (old.y < 0) return;                  // frozen
+    if (old.y >= gsCoverMinWeight) return;  // any meshable real data wins, even a fresh seed
+
+    float3 d = p - gsFillCenter.xyz;
+    float du = dot(d, gsFillAxis.xyz);
+    float dv = dot(d, gsFillBitangent.xyz);
+    if (abs(du) > gsFillCenter.w + 0.5 * gsVoxSize) return;
+    if (abs(dv) > gsFillInward.w + 0.5 * gsVoxSize) return;
+    float sd = dot(d, gsFillInward.xyz);
+    if (abs(sd) > gsVoxDist) return;
+
+    gsVolumeRW[coord] = float2(clamp(sd / gsVoxDist, -1.0, 1.0), gsFillWeight);
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  CloseSmallHoles: cluster-local 6-neighbour close for furniture
+//  gaps. Filled voxels get gsFillWeight (< 0.2) so they never count
+//  as neighbours — no chain reaction. Box dispatch only.
+// ──────────────────────────────────────────────────────────────────
+
+#pragma kernel CloseSmallHoles
+
+[numthreads(4, 4, 4)]
+void CloseSmallHoles(uint3 id : SV_DispatchThreadID)
+{
+    int3 coordI = gsStampVoxMin + (int3)id;
+    if (any(coordI >= gsStampVoxMax) || any(coordI < 0)) return;
+    uint3 coord = (uint3)coordI;
+    if (any(coord >= gsVoxCount)) return;
+
+    float3 p = gsVoxelToWorld(coord);
+    if (!gsInsideRoom(p)) return;
+
+    float2 old = gsVolumeRW[coord];
+    if (abs(old.y) > 0.001) return;         // only empty voxels
+
+    int count = 0;
+    float sum = 0.0;
+    int3 maxC = (int3)gsVoxCount - 1;
+    const int3 offs[6] = {
+        int3(-1, 0, 0), int3(1, 0, 0),
+        int3(0, -1, 0), int3(0, 1, 0),
+        int3(0, 0, -1), int3(0, 0, 1)
+    };
+    [unroll]
+    for (int i = 0; i < 6; i++)
+    {
+        int3 n = clamp(coordI + offs[i], int3(0, 0, 0), maxC);
+        float2 nv = gsVolumeRW[(uint3)n];
+        if (abs(nv.y) >= 0.2 && abs(nv.x) < 0.75)
+        {
+            count++;
+            sum += nv.x;
+        }
+    }
+    if (count < 4) return;
+    gsVolumeRW[coord] = float2(sum / (float)count, gsFillWeight);
+}
+
+// ──────────────────────────────────────────────────────────────────
+//  Scan analysis — the boundary of observed free space.
+//
+//  Every voxel is one of: F observed free (|w| >= min, tsdf > 0), S observed
+//  solid (|w| >= min, tsdf <= 0), U unobserved. The surface the player sees
+//  is the set of F–S faces. The only other faces on the boundary of F are
+//  F–U: standing in scanned air, the next thing is unknown — that is where
+//  passthrough leaks. Not every U counts: a sliver sealed off by F and S
+//  (un-seeded air in front of a grazing wall) leaks nothing. What does count
+//  is unknown that is *void*: connected to a full 8³ block (a 40 cm cube) of
+//  unknown — the unscanned outside, the far side of a hole, the inside of a
+//  couch, an unswept corner. Those blocks seed E (exterior/void unknown), a
+//  fine flood carries E through the shell blocks, and the leak surface is
+//  exactly the F–E faces. A 1-voxel gap in S lets E through — that is the
+//  hole. Behind a closed wall is S–E and never counts. No camera, no scene
+//  model, no rays.
+//
+//  Pipeline (host time-slices it, one readback per cycle):
+//    ClassifyVoxels   full volume once, one group per block: label texture,
+//                     per-block flags, coverage counters
+//    BuildBlockLists  flood list (blocks with U and F/S) and face list
+//                     (blocks with F and S/U); indirect dispatch args
+//    FineFloodStep    flood blocks only, 8 LDS rounds per dispatch: U next
+//                     to E (label, pure-U block, or outside) becomes E
+//    LeakFaces        face blocks: F next to E → leak face (cuts skipped);
+//                     F next to S counted as surface. F voxel marked LEAK.
+//    Closure*         connected components over leak faces → holes with area
+//    FillLeaks        cap small holes: E voxels behind a leak face become
+//                     solid, continuous with the F voxel's own value
+//
+//  Result words (uint unless noted):
+//    0 surface voxels    1 frozen      2 coloured     3 confident
+//    4 leak faces total  5 leak faces analysed (<= cap)  6 cut faces
+//    7 hole faces        8 faces in holes >= min  9 hole count (>= min)
+//   10 largest hole (faces<<16 | root)  11..13 largest centre, int mm
+//   14 surface faces (F–S)  15 filled faces  16 flood blocks  17 void blocks
+// ──────────────────────────────────────────────────────────────────
+
+#define AR_SURFACE      0
+#define AR_FROZEN       1
+#define AR_COLORED      2
+#define AR_CONFIDENT    3
+#define AR_LEAK_TOTAL   4
+#define AR_LEAK_USED    5
+#define AR_CUT_FACES    6
+#define AR_HOLE_FACES   7
+#define AR_SIG_FACES    8
+#define AR_HOLES        9
+#define AR_LARGEST      10
+#define AR_LCX          11
+#define AR_LCY          12
+#define AR_LCZ          13
+#define AR_SURF_FACES   14
+#define AR_FILLED       15
+#define AR_FLOOD_BLOCKS 16
+#define AR_VOID_BLOCKS  17
+#define AR_WORDS        32
+
+// Labels, stored in an R8_UNorm 3D texture as label / 5.
+#define LBL_F    0
+#define LBL_S    1
+#define LBL_U    2
+#define LBL_E    3
+#define LBL_LEAK 4          // F voxel with at least one F–E face
+
+RWStructuredBuffer<uint> _AnalysisResult;   // [AR_WORDS]
+float gsConfidentWeight;
+
+RWTexture3D<float> gsLabelRW;
+Texture3D<float4>  gsColorVolumeRead;
+
+// 8³ blocks.
+#define BLOCK 8
+uint3 gsBlockCount;                          // ceil(gsVoxCount / 8)
+RWStructuredBuffer<uint> gsBlockFlags;       // bit0 hasF, bit1 hasS, bit2 hasU
+RWStructuredBuffer<uint> gsFloodList;        // block indices holding U and (F or S)
+RWStructuredBuffer<uint> gsFloodArgs;        // [0] count (indirect groups X), [1] 1, [2] 1
+RWStructuredBuffer<uint> gsFaceList;         // block indices holding F and (S or U)
+RWStructuredBuffer<uint> gsFaceArgs;         // [0] count (indirect groups X), [1] 1, [2] 1
+
+uint LabelOf(uint3 c)   { return (uint)round(gsLabelRW[c] * 5.0); }
+void SetLabel(uint3 c, uint l) { gsLabelRW[c] = (float)l / 5.0; }
+
+uint BlockIndexOf(uint3 b) { return b.x + b.y * gsBlockCount.x + b.z * gsBlockCount.x * gsBlockCount.y; }
+uint3 BlockOfVoxel(uint3 c) { return c / BLOCK; }
+uint3 UnflattenBlock(uint i)
+{
+    uint slice = gsBlockCount.x * gsBlockCount.y;
+    uint z = i / slice;
+    uint rem = i - z * slice;
+    uint y = rem / gsBlockCount.x;
+    return uint3(rem - y * gsBlockCount.x, y, z);
+}
+
+bool IsPureU(uint flags) { return flags == 4u; }
+
+// A voxel counts as void-unknown if its own label says E, or it lies in a
+// pure-U block (those blocks are never visited by the fine flood, so their
+// voxels keep label U), or it is beyond the volume.
+bool IsExterior(uint3 c)
+{
+    bool e = false;
+    if (any(c >= gsVoxCount))
+    {
+        e = true;
+    }
+    else
+    {
+        uint l = LabelOf(c);
+        if (l == LBL_E)
+            e = true;
+        else if (l == LBL_U)
+            e = IsPureU(gsBlockFlags[BlockIndexOf(BlockOfVoxel(c))]);
+    }
+    return e;
+}
+
+// ── Reset ────────────────────────────────────────────────────────────
+
+#pragma kernel AnalysisReset
+
+[numthreads(64, 1, 1)]
+void AnalysisReset(uint id : SV_DispatchThreadID)
+{
+    if (id < 3u)
+    {
+        gsFloodArgs[id] = id == 0u ? 0u : 1u;
+        gsFaceArgs[id] = id == 0u ? 0u : 1u;
+    }
+    if (id < AR_WORDS) _AnalysisResult[id] = 0u;
+}
+
+#pragma kernel ClearLabels
+
+[numthreads(4, 4, 4)]
+void ClearLabels(uint3 id : SV_DispatchThreadID)
 {
     if (any(id >= gsVoxCount)) return;
-    float2 tsdf = gsVolumeRW[id];
-    float weight = tsdf.y;
-    bool isFrozen = weight < 0;
-    float absWeight = abs(weight);
-    bool isSurface = absWeight > PRUNE_WEIGHT && abs(tsdf.x) < 0.3;
+    SetLabel(id, LBL_U);
+}
 
-    if (isSurface)
+// ── Classify (the one full-volume pass) ──────────────────────────────
+
+#pragma kernel ClassifyVoxels
+
+// One group per 8³ block: flags and counters reduce in LDS and each group
+// writes its block word and adds four counters once — no per-voxel atomics.
+groupshared uint gsClsFlags;
+groupshared uint gsClsCount[4];
+
+[numthreads(8, 8, 8)]
+void ClassifyVoxels(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0u)
     {
-        InterlockedAdd(_CoverageCounters[0], 1);
-        if (isFrozen)
-            InterlockedAdd(_CoverageCounters[1], 1);
-        float4 color = gsColorVolumeRead[id];
-        if (color.a > 0.1)
-            InterlockedAdd(_CoverageCounters[2], 1);
+        gsClsFlags = 0u;
+        gsClsCount[0] = gsClsCount[1] = gsClsCount[2] = gsClsCount[3] = 0u;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint3 id = gid * BLOCK + tid;
+    if (all(id < gsVoxCount))
+    {
+        float2 v = gsVolumeRW[id];
+        float w = abs(v.y);
+        bool observed = w >= gsCoverMinWeight;
+        uint label = !observed ? LBL_U : (v.x > 0.0 ? LBL_F : LBL_S);
+        SetLabel(id, label);
+        InterlockedOr(gsClsFlags, 1u << label);
+
+        // Coverage counters.
+        bool isSurface = w > PRUNE_WEIGHT && abs(v.x) < 0.3;
+        if (isSurface)
+        {
+            InterlockedAdd(gsClsCount[AR_SURFACE], 1u);
+            if (v.y < 0) InterlockedAdd(gsClsCount[AR_FROZEN], 1u);
+            if (gsColorVolumeRead[id].a > 0.1) InterlockedAdd(gsClsCount[AR_COLORED], 1u);
+            if (w >= gsConfidentWeight) InterlockedAdd(gsClsCount[AR_CONFIDENT], 1u);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gi == 0u)
+    {
+        gsBlockFlags[BlockIndexOf(gid)] = gsClsFlags;
+        if (gsClsCount[0] != 0u) InterlockedAdd(_AnalysisResult[AR_SURFACE], gsClsCount[0]);
+        if (gsClsCount[1] != 0u) InterlockedAdd(_AnalysisResult[AR_FROZEN], gsClsCount[1]);
+        if (gsClsCount[2] != 0u) InterlockedAdd(_AnalysisResult[AR_COLORED], gsClsCount[2]);
+        if (gsClsCount[3] != 0u) InterlockedAdd(_AnalysisResult[AR_CONFIDENT], gsClsCount[3]);
     }
 }
+
+// ── Block lists ──────────────────────────────────────────────────────
+
+#pragma kernel BuildBlockLists
+
+[numthreads(64, 1, 1)]
+void BuildBlockLists(uint id : SV_DispatchThreadID)
+{
+    uint blocks = gsBlockCount.x * gsBlockCount.y * gsBlockCount.z;
+    if (id >= blocks) return;
+    uint flags = gsBlockFlags[id];
+    bool hasF = (flags & 1u) != 0u;
+    bool hasS = (flags & 2u) != 0u;
+    bool hasU = (flags & 4u) != 0u;
+    if (IsPureU(flags))
+        InterlockedAdd(_AnalysisResult[AR_VOID_BLOCKS], 1u);
+    if (hasU && (hasF || hasS))
+    {
+        uint slot;
+        InterlockedAdd(gsFloodArgs[0], 1u, slot);
+        gsFloodList[slot] = id;
+        InterlockedAdd(_AnalysisResult[AR_FLOOD_BLOCKS], 1u);
+    }
+    if (hasF && (hasS || hasU))
+    {
+        uint slot;
+        InterlockedAdd(gsFaceArgs[0], 1u, slot);
+        gsFaceList[slot] = id;
+    }
+}
+
+// ── Fine flood, flood blocks only (indirect over the flood list) ─────
+//  The block's labels live in LDS for 8 rounds; the halo (neighbours in
+//  other blocks) is read once from the texture. E only ever grows, so a
+//  stale halo read costs a round, never correctness.
+
+#pragma kernel FineFloodStep
+
+groupshared uint gsFlood[BLOCK * BLOCK * BLOCK];
+
+uint FloodIdx(uint3 t) { return t.x + t.y * BLOCK + t.z * BLOCK * BLOCK; }
+
+[numthreads(8, 8, 8)]
+void FineFloodStep(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint gi : SV_GroupIndex)
+{
+    uint bi = gsFloodList[gid.x];
+    uint3 origin = UnflattenBlock(bi) * BLOCK;
+    uint3 c = origin + tid;
+    bool inVol = all(c < gsVoxCount);
+    uint label = inVol ? LabelOf(c) : LBL_E;
+
+    // Halo: a U voxel on a block face looks across once.
+    bool haloE = false;
+    if (inVol && label == LBL_U)
+    {
+        if (tid.x == BLOCK - 1u) haloE = haloE || IsExterior(c + uint3(1,0,0));
+        if (tid.x == 0u)         haloE = haloE || (c.x == 0u || IsExterior(c - uint3(1,0,0)));
+        if (tid.y == BLOCK - 1u) haloE = haloE || IsExterior(c + uint3(0,1,0));
+        if (tid.y == 0u)         haloE = haloE || (c.y == 0u || IsExterior(c - uint3(0,1,0)));
+        if (tid.z == BLOCK - 1u) haloE = haloE || IsExterior(c + uint3(0,0,1));
+        if (tid.z == 0u)         haloE = haloE || (c.z == 0u || IsExterior(c - uint3(0,0,1)));
+        if (haloE) label = LBL_E;
+    }
+    uint startLabel = inVol ? LabelOf(c) : LBL_E;
+    gsFlood[gi] = label;
+    GroupMemoryBarrierWithGroupSync();
+
+    for (uint round = 0u; round < 8u; round++)
+    {
+        bool grow = false;
+        if (gsFlood[gi] == LBL_U)
+        {
+            if (tid.x + 1u < BLOCK && gsFlood[FloodIdx(tid + uint3(1,0,0))] == LBL_E) grow = true;
+            if (tid.x > 0u         && gsFlood[FloodIdx(tid - uint3(1,0,0))] == LBL_E) grow = true;
+            if (tid.y + 1u < BLOCK && gsFlood[FloodIdx(tid + uint3(0,1,0))] == LBL_E) grow = true;
+            if (tid.y > 0u         && gsFlood[FloodIdx(tid - uint3(0,1,0))] == LBL_E) grow = true;
+            if (tid.z + 1u < BLOCK && gsFlood[FloodIdx(tid + uint3(0,0,1))] == LBL_E) grow = true;
+            if (tid.z > 0u         && gsFlood[FloodIdx(tid - uint3(0,0,1))] == LBL_E) grow = true;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (grow) gsFlood[gi] = LBL_E;
+        GroupMemoryBarrierWithGroupSync();
+    }
+
+    if (inVol && gsFlood[gi] == LBL_E && startLabel == LBL_U)
+        SetLabel(c, LBL_E);
+}
+
+// ── Leak faces ───────────────────────────────────────────────────────
+
+RWStructuredBuffer<float4> gsLeakFaces;    // xyz F voxel centre, w packed axis normal
+RWStructuredBuffer<uint>   gsLeakCounters; // [2] = leak faces (CcCount reads it)
+uint  gsLeakCap;
+float gsCcCutTol;
+
+uint PackAxis(uint dirIndex) { return dirIndex; }   // 0..5: +x -x +y -y +z -z
+
+static const int3 kLeakDirs[6] =
+{
+    int3(1,0,0), int3(-1,0,0), int3(0,1,0), int3(0,-1,0), int3(0,0,1), int3(0,0,-1)
+};
+
+void TryFace(uint3 c, float3 cw, uint dirIndex, inout bool leak, inout uint surf)
+{
+    int3 d = kLeakDirs[dirIndex];
+    int3 nbI = (int3)c + d;
+    if (any(nbI < 0) || any(nbI >= (int3)gsVoxCount)) return;   // volume edge is a cut
+    uint3 nb = (uint3)nbI;
+    uint l = LabelOf(nb);
+    if (l == LBL_S)
+    {
+        surf++;
+        return;
+    }
+    if (!IsExterior(nb)) return;
+
+    float3 face = cw + (float3)d * (0.5 * gsVoxSize);
+    if (gsNearSurfaceCut(face, gsCcCutTol))
+    {
+        InterlockedAdd(_AnalysisResult[AR_CUT_FACES], 1u);
+        return;
+    }
+    leak = true;
+    uint slot;
+    InterlockedAdd(gsLeakCounters[2], 1u, slot);
+    if (slot < gsLeakCap)
+        gsLeakFaces[slot] = float4(cw, asfloat(PackAxis(dirIndex)));
+}
+
+#pragma kernel LeakFaces
+
+[numthreads(8, 8, 8)]
+void LeakFaces(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID)
+{
+    uint bi = gsFaceList[gid.x];
+    uint3 c = UnflattenBlock(bi) * BLOCK + tid;
+    if (any(c >= gsVoxCount)) return;
+    if (LabelOf(c) != LBL_F) return;
+
+    float3 cw = gsVoxelToWorld(c);
+    bool leak = false;
+    uint surf = 0u;
+    [unroll]
+    for (uint k = 0u; k < 6u; k++)
+        TryFace(c, cw, k, leak, surf);
+    if (surf > 0u) InterlockedAdd(_AnalysisResult[AR_SURF_FACES], surf);
+    if (leak) SetLabel(c, LBL_LEAK);
+}
+
+// ── Connected components over leak faces ─────────────────────────────
+//  Keyed by the F voxel, so the several faces of one voxel merge in the
+//  hash and 26-neighbour lookups join adjacent voxels' faces. Min-label
+//  linking with pointer jumping, one round per frame.
+
+StructuredBuffer<float4>  gsCcEdges;      // = gsLeakFaces
+StructuredBuffer<uint>    gsCcCounters;   // = gsLeakCounters
+RWStructuredBuffer<uint>  gsCcHashKey;
+RWStructuredBuffer<uint>  gsCcHashVal;
+RWStructuredBuffer<uint>  gsCcLabel;
+RWStructuredBuffer<int>   gsCcComp;       // [cap * 4] count, sum x/y/z in mm (roots only)
+uint  gsCcCap;
+uint  gsCcHashMask;
+uint  gsCcHashSize;
+uint  gsCcMinFaces;
+
+#define CC_EMPTY 0xFFFFFFFFu
+#define CC_PROBES 64
+
+uint CcCount() { return min(gsCcCounters[2], gsCcCap); }
+
+uint CcKey(float3 p)
+{
+    int3 q = (int3)floor(p / gsVoxSize + 0.5) + 512;
+    q = clamp(q, 0, 1023);
+    return (uint)q.x | ((uint)q.y << 10) | ((uint)q.z << 20);
+}
+
+uint CcHash(uint key)
+{
+    key ^= key >> 16;
+    key *= 0x7feb352du;
+    key ^= key >> 15;
+    key *= 0x846ca68bu;
+    key ^= key >> 16;
+    return key & gsCcHashMask;
+}
+
+uint CcFind(uint key)
+{
+    uint found = CC_EMPTY;
+    bool done = false;
+    uint slot = CcHash(key);
+    for (int n = 0; n < CC_PROBES && !done; n++)
+    {
+        uint k = gsCcHashKey[slot];
+        if (k == key)
+        {
+            found = gsCcHashVal[slot];
+            done = true;
+        }
+        else if (k == CC_EMPTY)
+        {
+            done = true;
+        }
+        slot = (slot + 1) & gsCcHashMask;
+    }
+    return found;
+}
+
+#pragma kernel ClosureReset
+
+[numthreads(64, 1, 1)]
+void ClosureReset(uint id : SV_DispatchThreadID)
+{
+    if (id < gsCcHashSize)
+    {
+        gsCcHashKey[id] = CC_EMPTY;
+        gsCcHashVal[id] = CC_EMPTY;
+    }
+    if (id < gsCcCap)
+    {
+        gsCcLabel[id] = id;
+        gsCcComp[id * 4 + 0] = 0;
+        gsCcComp[id * 4 + 1] = 0;
+        gsCcComp[id * 4 + 2] = 0;
+        gsCcComp[id * 4 + 3] = 0;
+    }
+    if (id < 4u) gsLeakCounters[id] = 0u;
+}
+
+#pragma kernel ClosureInsert
+
+[numthreads(64, 1, 1)]
+void ClosureInsert(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    uint key = CcKey(gsCcEdges[id].xyz);
+    uint slot = CcHash(key);
+    bool done = false;
+    for (int n = 0; n < CC_PROBES && !done; n++)
+    {
+        uint old;
+        InterlockedCompareExchange(gsCcHashKey[slot], CC_EMPTY, key, old);
+        if (old == CC_EMPTY || old == key)
+        {
+            InterlockedMin(gsCcHashVal[slot], id);
+            done = true;
+        }
+        slot = (slot + 1) & gsCcHashMask;
+    }
+}
+
+#pragma kernel ClosureLink
+
+[numthreads(64, 1, 1)]
+void ClosureLink(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    float3 p = gsCcEdges[id].xyz;
+    uint li = gsCcLabel[id];
+    for (int dz = -1; dz <= 1; dz++)
+    for (int dy = -1; dy <= 1; dy++)
+    for (int dx = -1; dx <= 1; dx++)
+    {
+        uint j = CcFind(CcKey(p + float3(dx, dy, dz) * gsVoxSize));
+        if (j == CC_EMPTY || j == id) continue;
+        uint lj = gsCcLabel[j];
+        uint m = min(li, lj);
+        InterlockedMin(gsCcLabel[id], m);
+        InterlockedMin(gsCcLabel[j], m);
+        InterlockedMin(gsCcLabel[li], m);
+        InterlockedMin(gsCcLabel[lj], m);
+        li = m;
+    }
+}
+
+#pragma kernel ClosureJump
+
+[numthreads(64, 1, 1)]
+void ClosureJump(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    uint l = gsCcLabel[id];
+    for (int n = 0; n < 8; n++)
+    {
+        uint l2 = gsCcLabel[l];
+        if (l2 == l) break;
+        l = l2;
+    }
+    gsCcLabel[id] = l;
+}
+
+#pragma kernel ClosureClassify
+
+[numthreads(64, 1, 1)]
+void ClosureClassify(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    float3 p = gsCcEdges[id].xyz;
+    uint root = gsCcLabel[id];
+    int3 mm = (int3)round(p * 1000.0);
+    InterlockedAdd(gsCcComp[root * 4 + 0], 1);
+    InterlockedAdd(gsCcComp[root * 4 + 1], mm.x);
+    InterlockedAdd(gsCcComp[root * 4 + 2], mm.y);
+    InterlockedAdd(gsCcComp[root * 4 + 3], mm.z);
+}
+
+#pragma kernel ClosureFinalize
+
+[numthreads(64, 1, 1)]
+void ClosureFinalize(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    int c = gsCcComp[id * 4];
+    if (c <= 0) return;
+    InterlockedAdd(_AnalysisResult[AR_HOLE_FACES], (uint)c);
+    if ((uint)c < gsCcMinFaces) return;
+    InterlockedAdd(_AnalysisResult[AR_HOLES], 1u);
+    InterlockedAdd(_AnalysisResult[AR_SIG_FACES], (uint)c);
+    InterlockedMax(_AnalysisResult[AR_LARGEST], (min((uint)c, 65535u) << 16) | id);
+}
+
+// ── Fill: cap small holes along the F–E interface ────────────────────
+//  The two E voxels behind each leak face become solid, continued from the
+//  F voxel's own TSDF value at the band slope (one voxel = gsVoxSize /
+//  gsVoxDist in normalised units), so the zero crossing lands where the
+//  neighbouring real surface puts it — a hole in a wall closes on the wall,
+//  not half a voxel off it. Where the air in front of a small hole was
+//  observed, that interface is the missing surface itself. Frontier-sized
+//  components are never capped.
+
+#pragma kernel FillLeaks
+
+uint gsFillMaxFaces;
+
+void CapVoxel(int3 v, float tsdf, inout bool wrote)
+{
+    if (any(v < 0) || any(v >= (int3)gsVoxCount)) return;
+    uint3 c = (uint3)v;
+    float3 q = gsVoxelToWorld(c);
+    if (!gsInsideRoom(q) || gsInsideAnyExclusion(q)) return;
+    float2 old = gsVolumeRW[c];
+    if (old.y < 0 || old.y >= gsCoverMinWeight) return;
+    gsVolumeRW[c] = float2(tsdf, gsFillWeight);
+    wrote = true;
+}
+
+[numthreads(64, 1, 1)]
+void FillLeaks(uint id : SV_DispatchThreadID)
+{
+    if (id >= CcCount()) return;
+    uint root = gsCcLabel[id];
+    int c = gsCcComp[root * 4];
+    if (c <= 0 || (uint)c > gsFillMaxFaces) return;
+
+    float4 f = gsCcEdges[id];
+    uint dirIndex = min(asuint(f.w), 5u);
+    int3 step = kLeakDirs[dirIndex];
+
+    int3 fv = (int3)floor(gsWorldToVoxelFloat(f.xyz));
+    float front = 0.5;
+    if (all(fv >= 0) && all(fv < (int3)gsVoxCount))
+        front = max(gsVolumeRW[(uint3)fv].x, 0.0);
+    float slope = gsVoxSize / gsVoxDist;
+    float t1 = clamp(front - slope, -1.0, -0.05);
+    float t2 = clamp(front - 2.0 * slope, -1.0, -0.1);
+
+    bool wrote = false;
+    CapVoxel(fv + step, t1, wrote);
+    bool wrote2 = false;
+    CapVoxel(fv + step * 2, t2, wrote2);
+    if (wrote) InterlockedAdd(_AnalysisResult[AR_FILLED], 1u);
+}
+
+#pragma kernel ClosureCentroid
+
+[numthreads(1, 1, 1)]
+void ClosureCentroid(uint id : SV_DispatchThreadID)
+{
+    _AnalysisResult[AR_LEAK_TOTAL] = gsCcCounters[2];
+    _AnalysisResult[AR_LEAK_USED] = CcCount();
+    uint packed = _AnalysisResult[AR_LARGEST];
+    if (packed == 0) return;
+    uint root = packed & 0xFFFFu;
+    float inv = 1.0 / max((float)gsCcComp[root * 4], 1.0);
+    _AnalysisResult[AR_LCX] = asuint((int)round((float)gsCcComp[root * 4 + 1] * inv));
+    _AnalysisResult[AR_LCY] = asuint((int)round((float)gsCcComp[root * 4 + 2] * inv));
+    _AnalysisResult[AR_LCZ] = asuint((int)round((float)gsCcComp[root * 4 + 3] * inv));
+}
+
 
 // ──────────────────────────────────────────────────────────────────
 //  BakeRelocation: resample TSDF+color from old grid into current

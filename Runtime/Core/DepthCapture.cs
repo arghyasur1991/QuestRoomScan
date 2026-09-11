@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using Unity.XR.CoreUtils.Collections;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
@@ -37,6 +38,10 @@ namespace Genesis.RoomScan
         [SerializeField] private int dilationSteps = 8;
         [SerializeField] private float voxelDistance = 0.2f;
         [SerializeField] private float voxelSize = 0.05f;
+
+        [Header("Hand removal")]
+        [Tooltip("Ask the Meta occlusion subsystem to inpaint hands/controllers out of the depth texture. Needs hand tracking; the runtime disables this while holding controllers. Capsule exclusion still covers that case.")]
+        [SerializeField] private bool removeHandsFromDepth = true;
 
         private readonly Matrix4x4[] _proj = new Matrix4x4[2];
         private readonly Matrix4x4[] _projInv = new Matrix4x4[2];
@@ -137,6 +142,8 @@ namespace Genesis.RoomScan
         private bool _dilationDirty;
         private int _frameCount;
         private float _lastLogTime;
+
+        private bool _handRemovalLogged;
 
         private const string ScenePermission = "com.oculus.permission.USE_SCENE";
 
@@ -305,6 +312,7 @@ namespace Genesis.RoomScan
                     _arOcclusionManager.frameReceived += OnDepthFrame;
                     _subscribed = true;
                 }
+                TryEnableHandRemoval();
             }
             else
             {
@@ -316,6 +324,42 @@ namespace Genesis.RoomScan
                 if (_arOcclusionManager.enabled)
                     _arOcclusionManager.enabled = false;
                 DepthAvailable = false;
+            }
+        }
+
+        /// <summary>
+        /// Meta's occlusion subsystem can inpaint hands out of the depth
+        /// texture (TSDF-safe). The Unity.XR.MetaOpenXR assembly is a
+        /// project-level OpenXR plugin, not a package.json dependency, so
+        /// this uses the type name + TrySetHandRemovalEnabled rather than a
+        /// hard reference.
+        /// </summary>
+        void TryEnableHandRemoval()
+        {
+            if (!removeHandsFromDepth || _arOcclusionManager == null) return;
+            var subsystem = _arOcclusionManager.subsystem;
+            if (subsystem == null) return;
+            var type = subsystem.GetType();
+            if (type.Name.IndexOf("MetaOpenXROcclusion", StringComparison.Ordinal) < 0)
+                return;
+            var method = type.GetMethod("TrySetHandRemovalEnabled", BindingFlags.Instance | BindingFlags.Public);
+            if (method == null) return;
+            try
+            {
+                var result = method.Invoke(subsystem, new object[] { true });
+                if (!_handRemovalLogged)
+                {
+                    Logger.Info($"DepthCapture: Meta hand removal requested ({result})");
+                    _handRemovalLogged = true;
+                }
+            }
+            catch (Exception e)
+            {
+                if (!_handRemovalLogged)
+                {
+                    Logger.Warning($"DepthCapture: Meta hand removal request failed: {e.Message}");
+                    _handRemovalLogged = true;
+                }
             }
         }
 

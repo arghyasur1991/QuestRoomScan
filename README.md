@@ -59,7 +59,9 @@ This is the case the package was built for. Quest's built-in room mesh gives you
 - **Package-Based Persistence** — Multi-scan persistence system where each scan is a self-contained package (`pkg_YYYYMMDD_HHMMSS/`) with its own TSDF, triplanar textures, keyframes, splat, and refined textures. Scan browser in the debug menu lists all saved packages. Artifacts (splat, refined, HQ) auto-save to the active package on creation.
 - **OVRSpatialAnchor Relocation** — `RoomAnchorManager` creates a persisted `OVRSpatialAnchor` per scan package for reliable cross-session relocation. The package also stores the Scene API UUID of the MRUK room that contained that anchor (`sceneRoomUuid` in `anchor.json` / the manifest) so hosts can test the headset against **that** room, not any captured space. Per-artifact creation matrices in `anchor.json` track when each artifact was created relative to the spatial anchor, enabling accurate relocation even for artifacts created across different sessions. Falls back to MRUK floor anchor if spatial anchor localization fails.
 - **Temporal Stabilization** — Adaptive per-vertex temporal blending on GPU prevents mesh jitter while allowing fast convergence. Optional live-mesh **birth fade** and **hold-and-morph** are presentation-only (forward shader). Texture refinement / PLY call `ExtractForAuthoring` and project onto extractor `pos`, never the in-flight lerp.
-- **Exclusion Zones** — Cylindrical rejection around tracked heads prevents body reconstruction (configurable radius and height, up to 64 zones)
+- **Exclusion Zones** — Capsule rejection around the operator (torso 0.35 m + hand/forearm) so the body is not reconstructed; freeze skips those voxels. Optional Meta depth hand-removal. Up to 64 capsules.
+- **Analytic Scan Progress** — every TSDF voxel is observed-free, observed-solid or unknown; unknown that connects to the outside of the volume is *exterior*. Free–solid faces are the surface, free–exterior faces are **leaks** — exactly where passthrough shows through the mesh. `Closure = surface / (surface + leak)`; `ScanCoverage.LeakAreaM2` is the absolute area still open, `HoleCount` / `LargestHole` list the patches, small ones are capped automatically, and the mesh tints them red — all from one GPU label volume, so they agree. Refinement is the share of surface voxels whose TSDF weight says they have stopped moving. Time-sliced GPU work, one 128-byte readback per second; no camera pose, no rays, no scene model.
+- **Shell Coverage** — With `RoomUnderstanding`, the captured room hull is sampled into ≤ 16k cells and marched against the TSDF once a second: `ScanCoverage.ShellCoverage` is how much of the shell has scanned matter in front of it (doorways, doors, windows excluded), `LargestGap` / `CopyShellGaps` say where the unscanned patches are, and small wall / floor / ceiling gaps whose neighbours lie on one plane are auto-filled with a soft plane stamp that real depth can still override. Guidance and acceleration only — it never feeds progress.
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
 - **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools) and right detail views. Includes scan browser with load/delete per package (with delete confirmation), "Load Refined Only" for fast game-mode loading, context-sensitive artifact deletion, and dynamic button disabled states. Scene Objects toggle with live count. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
 - **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, GPU unsharp-mask sharpening, and Sobel normal map generation for real-time lighting. Produces sharp, seamless textures with surface detail from captured keyframes. `TextureRefinement` is an instance-based MonoBehaviour module — all configuration (xatlas options, bake settings, sharpen/seam parameters) is via inspector fields on the component.
@@ -111,12 +113,12 @@ Add to your project's `Packages/manifest.json`, pinned to a release tag:
 ```json
 {
   "dependencies": {
-    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.0.0"
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.1.0"
   }
 }
 ```
 
-Drop the `#v1.0.0` suffix to track `main`. Releases and their notes are in
+Drop the `#v1.1.0` suffix to track `main`. Releases and their notes are in
 [`CHANGELOG.md`](CHANGELOG.md); `main` only moves by squash-merged release PR.
 
 For Gaussian Splat support, also add the optional dependency:
@@ -196,7 +198,7 @@ Call `await RoomScanner.Instance.StartScanningAsync()` to begin (or use the debu
 
 When a region of the mesh looks good and you don't want further integration to degrade it:
 
-- **Freeze In View** (Y/B button): Locks all voxels currently in your camera frustum. Frozen voxels are skipped during integration — their geometry and color are preserved exactly as-is.
+- **Freeze In View** (Y/B button): Locks the voxels inside a 15° spotlight cone from your eye along your gaze (`freezeConeHalfAngle`); turn your head to paint more. Hosts can draw a ring at `RoomScanSession.FreezeConeHalfAngle`. Frozen voxels are skipped during integration — their geometry and color are preserved exactly as-is.
 - **Unfreeze In View** (X/A button): Restores frozen voxels in your current frustum to normal integration.
 
 This lets you selectively protect good surfaces while continuing to refine other areas.
@@ -511,9 +513,9 @@ await session.StartScanAsync();
 session.ProgressUpdated += p => progressBar.value = p.OverallProgress;
 
 // 3. As the user sweeps the room, paint visible chunks as "done":
-//    FreezeInView locks all voxels currently in the camera frustum so they
-//    stop receiving updates. The FrozenFraction metric (which drives
-//    ScanPhase.Complete) climbs as more of the room is painted. Use this as
+//    FreezeInView locks the voxels in a head-forward spotlight cone so they
+//    stop receiving updates. Frozen voxels count as refined, so painting a
+//    settled region also locks its share of OverallProgress. Use this as
 //    the natural "I'm satisfied with this region" gesture rather than a
 //    global pause.
 session.FreezeInView();    // typically bound to a controller button
@@ -703,14 +705,13 @@ await scanner.StartScanningAsync();
 #### Monitoring Scan Progress
 
 ```csharp
-// Raw coverage metrics
+// Analytic coverage: read off the live mesh and the TSDF, no scene model needed
 ScanCoverage cov = scanner.CurrentCoverage;
-Debug.Log($"Surfaces: {cov.SurfaceVoxelCount}, " +
-          $"Colored: {cov.ColorCoverage:P0}, " +
-          $"Frozen: {cov.FrozenFraction:P0}, " +
-          $"Stable: {cov.IsStabilized}");
+Debug.Log($"Closed: {cov.Closure:P0} (holes {cov.HoleCount}, leak {cov.LeakAreaM2:F2} m²), " +
+          $"Refined: {cov.Refinement:P0}, " +
+          $"Largest hole at {cov.LargestHole.Center} ({cov.LargestHole.AreaM2:F2} m²)");
 
-// High-level progress
+// High-level progress = Closure × (1 − 0.4 × (1 − Refinement)); gate on cov.LeakAreaM2
 ScanProgress prog = scanner.CurrentProgress;
 progressBar.value = prog.OverallProgress; // 0.0 – 1.0
 statusText.text = prog.Phase.ToString();  // Discovering → Refining → Stabilized → Complete
@@ -737,12 +738,15 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `IsHeadsetInsideASceneRoom` | `bool` | Headset is inward of every outer wall of **any** loaded room (doorway faces included). Boot / Space Setup: any set-up room is enough. Floor-outline `IsPositionInRoom` is not enough. Always true in the editor |
 | `ConfineScanToContainingRoom` | `bool` | When true, TSDF stays in the MRUK room that contained the headset at scan start (outer walls / floor / ceiling expanded 50 cm outward, then hard-confined). Default **false**. Set before `StartScanAsync`. No-op without `RoomUnderstanding` |
 | `StampScreenPlanes` | `bool` | When true, `SCREEN` (TV) plane stamps are a dedicated voxel-AABB dispatch after Integrate. Default **true**. Set false before `StartScanAsync` to skip |
+| `SetBodyExclusionAnchors(head, left, right)` | `void` | Optional. Pin head + wrist transforms for torso/hand/forearm capsules and mark them host-owned (scanner will not overwrite). For non-OVR rigs. Default is `OVRCameraRig` each integrate. Null wrists skip that side |
 | `BoundSceneRoomUuid` | `Guid` | Scene API UUID of the MRUK room the active package was scanned in (stored with the spatial-anchor UUID). Empty when no package is loaded. Rebound from the localized anchor pose if missing or stale |
 | `IsHeadsetInsideBoundSceneRoom` | `bool` | Headset is inside the active package's bound room — not some other captured space. False when no package is loaded. Always true in the editor |
 | `CopyHeadsetRoomWallFaces(List<SceneWallFace>)` | `int` | Visible `WALL_FACE` and `SCREEN` (TV) planes of the room containing the headset. `IsScreen` marks a television. Empty in the editor and when not inside a captured room. Implemented by `RoomUnderstanding` |
 | `HeadsetSceneRoomUuid` | `Guid` | Scene API UUID of the room that contains the headset, or empty. Not the active scan package (`BoundSceneRoomUuid`) |
 | `TryRebindBoundSceneRoomIfHeadsetMatches()` | `bool` | After `LoadAsync`: true when headset and the localized spatial anchor share a captured room; persists that room's current Scene API UUID (Space Setup redo in the same physical room). False in a hallway or a different set-up room |
-| `ProgressUpdated` | `event Action<ScanProgress>` | Per-frame progress while scanning |
+| `ProgressUpdated` | `event Action<ScanProgress>` | Per-frame progress while scanning. `OverallProgress = Coverage.Closure × (1 − 0.4 × (1 − Coverage.Refinement))` — closure is surface ÷ (surface + leak) from the boundary of observed free space; no camera or scene model involved. `Coverage.LeakAreaM2` is the absolute area still open (the natural gate), `HoleCount` / `LargestHole` locate the patches. With `RoomUnderstanding`, `Coverage.ShellCoverage` / `LargestGap` add hull-based guidance and drive auto-fill, but never the progress number. Hosts gate finalize themselves — the package does not |
+| `CopyShellGaps(List<ShellGap>)` | `int` | Largest uncovered shell patches (≤ 8, largest first): centre, normal, cell count, area, surface kind. 0 when shell coverage is unavailable |
+| `AutoFillShellGaps` | `bool` | Soft-stamp the captured plane over small wall / floor / ceiling gaps while scanning. Default **true** |
 | `RequestCameraPermissionAsync()` | `Task<bool>` | Awaits the system permission dialog; resolves true if already granted |
 | `RequestScenePermissionAsync()` | `Task<bool>` | Awaits spatial-data permission |
 | `RequestAnchorPermissionAsync()` | `Task<bool>` | Awaits spatial-anchor permission |
@@ -750,7 +754,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `ReloadSceneFromDeviceAsync()` | `Task<bool>` | Re-run discovery with auto-capture **off** (no Space Setup). True if rooms exist. Use after spatial-data permission is granted — the first load often finished empty while `USE_SCENE` was still denied. |
 | `RequestSpaceSetupAndReloadAsync()` | `Task<bool>` | Horizon Space Setup, then reload with auto-capture **off**. True only if rooms exist afterwards (cancel is not success-with-rooms) |
 | `StartScanAsync()` | `Task` | Begin a new scan session (unloads a loaded package on a non-resume start, creates `_tmp/` package + spatial anchor; completes at the first integrated frame) |
-| `FreezeInView()` | `void` | Paint voxels in current camera frustum as done; integration continues globally |
+| `FreezeInView()` | `void` | Paint voxels inside the head cone (`FreezeConeHalfAngle`, 15°) as done; integration continues globally |
 | `UnfreezeInView()` | `void` | Inverse of `FreezeInView` for re-capture of bad regions |
 | `FinalizeScanAsync()` | `Task<ScanResult>` | Stop scanning → refine → save → release GPU; returns mesh + atlas + package id |
 | `LoadAsync(packageId)` | `Task<ScanResult>` | Load refined mesh + atlas from a specific package (< 1 s) |

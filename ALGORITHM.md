@@ -97,7 +97,7 @@ withinBand = sDistNorm >= -voxelMin / voxelSize
 **Step 4: Validity checks**
 - Depth disparity: raw depth vs dilated depth within `depthDisparityThreshold`
 - Surface normal: `normDot > MIN_DOT` (0.3) for occupied voxels
-- Exclusion zones: cylinder rejection around tracked heads
+- Exclusion zones: capsule rejection around the operator (torso + hands/forearms)
 
 **Step 5: Quality computation**
 ```
@@ -470,33 +470,215 @@ MRUK's world-lock can reposition the `TrackingSpace` transform each frame. `Dept
 
 ## 11. Exclusion Zones
 
-Cylindrical exclusion zones around tracked transforms (typically the user's head):
-- **Radius:** 0.6m (XZ plane)
-- **Top:** 0.25m above head
-- **Bottom:** 1.7m below head
+Capsules around the operator, tested twice per voxel in `Integrate` (not by
+editing the depth texture). Up to 64 capsules.
 
-Voxels inside any exclusion cylinder are skipped during integration, preventing the user's body from being reconstructed.
+1. **The depth sample.** If the world point the depth pixel hit is inside a
+   capsule, the pixel is body and nothing along that ray integrates — no
+   surface band, no free-space carve. This is the test that actually keeps a
+   hand out: a hand pixel otherwise still writes the negative band up to
+   `voxelDistance` (15 cm) *behind* the hand surface, which reaches past the
+   14 cm capsule and meshes as a hand-shaped shell against the free space
+   carved around the silhouette. Seen on device before this test existed.
+2. **The voxel.** A voxel inside a capsule is never written, whatever the
+   depth says, so a wall behind a hand still fills when the hand moves and a
+   stale frame during fast motion cannot seed the arm.
+
+| Capsule | Segment | Radius | Erasable |
+|---|---|---|---|
+| Torso | head + 0.25 m world-up → head − 1.7 m | 0.35 m | no |
+| Hand / controller ×2 | wrist ± 0.08 m along forward | 0.14 m | yes |
+| Forearm ×2 | wrist toward estimated shoulder, 0.28 m | 0.08 m | yes |
+
+Torso uses world up so looking down does not swing a 0.6 m cylinder into the
+floor. Extra `AddExclusionZone` transforms are extra torso capsules.
+
+`FreezeInFrustum` skips voxels inside any capsule (so a freeze paint cannot
+lock a body blob). Unfreeze does not skip — old blobs can be unlocked.
+
+Optional `eraseBodyBlobs` (off by default) runs after Integrate and zeros
+non-frozen voxels inside **hand/forearm** capsules whose weight is below
+`eraseMaxWeight` (default 0.2, above `SEED_WEIGHT` 0.10). Torso is never
+erased. Do not key this on `minMeshWeight` (0.08) — a freshly seeded voxel
+is already 0.10 and would never clear.
+
+`DepthCapture.removeHandsFromDepth` (default on) asks the Meta occlusion
+subsystem to inpaint hands out of the depth texture via
+`TrySetHandRemovalEnabled`. That path needs hand tracking and is disabled by
+the runtime while holding controllers — capsules cover that case.
+
+Hosts may pin anchors with `RoomScanSession.SetBodyExclusionAnchors` before
+`StartScanAsync` (non-OVR rigs; marks them host-owned). Otherwise
+`RoomScanner` refreshes from a cached `OVRCameraRig` each integrate
+(controller tracked → `HandOnControllerAnchor` / controller; else tracked
+`OVRHand`).
 
 ## 12. Coverage Metrics & Scan Progress
 
-### CountSurfaceCoverage (compute kernel)
-Dispatched every ~30 integrations (1× per second) to count surface statistics via `InterlockedAdd`:
-- **Surface voxels**: `abs(tsdf) < 0.3 && absWeight > PRUNE_WEIGHT`
-- **Frozen voxels**: Surface voxels with `weight < 0` (frozen encoding)
-- **Colored voxels**: Surface voxels with `colorAlpha > 0.05`
+Progress is **analytic**: it is read off the live mesh and the TSDF alone,
+needs no scene model, and is the number a host should gate on. The shell
+prior below is optional guidance plus auto-fill — it accelerates closure, it
+never defines it.
 
-Results read back via `AsyncGPUReadback` to avoid GPU stalls.
+### Scan analysis cycle (one 128-byte readback per second)
+
+The question is not "does the mesh have a boundary" — every TSDF surface has a
+ragged band edge behind it and in front of grazing walls — but **where does
+observed free space stop at something unknown that connects to the outside?**
+That is exactly where passthrough shows through the mesh, and it is a property
+of the volume alone: no camera pose, no ray, no scene model.
+
+Every voxel is one of three classes: **F** observed free (`|w| ≥ minMeshWeight`,
+`tsdf > 0`), **S** observed solid (`|w| ≥ minMeshWeight`, `tsdf ≤ 0`), **U**
+unobserved. The surface is the set of F–S faces. Not every F–U face is a leak:
+un-seeded air in front of a grazing wall is a thin U sliver sealed by F and S
+and leaks nothing. What does count is unknown that is **void** — connected to
+a full 8³ block (a 40 cm cube) of unknown: the unscanned outside, the far side
+of a hole, the unobserved inside of a couch, an unswept corner. Those blocks
+seed **E**, a fine flood carries E through the shell blocks, and the **leak
+surface is the set of F–E faces**. A single missing solid voxel lets E through
+— that is the hole. Behind a closed wall is S–E and never counts. (An earlier
+cut seeded E only from the volume edge; holes into enclosed unobserved
+pockets — under a bed, inside a closet — then read as sealed and were missed.)
+
+Everything heavy stays on the GPU, spread over ~20 frames of small kernels;
+the CPU sees a 32-word result once per `analysisIntervalSeconds`.
+
+1. **`AnalysisReset`** / **`ClosureReset`** — zero the result words, the
+   list counters, the component hash and stats.
+2. **`ClassifyVoxels`** — the one full-volume pass, one 8³ group per block.
+   Writes each voxel's label into an `R8_UNorm` 3-D texture (`gsLabelVolume`,
+   label ÷ 5; also the source of the mesh's red leak tint), reduces the
+   block's class flags (hasF / hasS / hasU) and the coverage counters in LDS
+   and writes them once per group (no per-voxel atomics): surface voxels
+   (`|tsdf| < 0.3 && |w| > PRUNE_WEIGHT`), frozen (`w < 0`), coloured, and
+   **confident** (`|w| ≥ confidentWeight`).
+3. **`BuildBlockLists`** — two indirect-dispatch lists: the *flood* list
+   (blocks holding U and F or S — the shell, ~10 %) and the *face* list
+   (blocks holding F and S or U — everywhere a surface or a leak can be).
+   Pure-U blocks are counted as void.
+4. **`FineFloodStep`** × (2 per frame × 3 frames) over the flood list. The
+   block's 512 labels are loaded into LDS; voxels on the block's faces look
+   across once (a neighbour is void if its label is E, or it lies in a pure-U
+   block, or it is beyond the volume); then 8 in-block rounds of "U next to
+   E becomes E" run in LDS and changed voxels are written back. Cross-block
+   travel costs one dispatch per block; void reaches a hole through a few
+   voxels of shell, so six dispatches are generous. E only grows, so a stale
+   halo read costs a round, never correctness.
+5. **`LeakFaces`** over the face list: for each F voxel, each 6-neighbour
+   that is S counts one **surface face**; each neighbour that is E is a
+   **leak face** unless it lies within `cutToleranceVoxels` (2) of a clip
+   plane, the room AABB or the volume edge — those are **cuts** (the doorway
+   invisible wall, the 0.5 m expand). Leak faces are appended (F voxel
+   centre + packed direction, ≤ 65 536; the counter keeps the true total) and
+   the F voxel is relabelled **LEAK** so the mesh shader can tint it.
+6. **Connected components** over the leak faces (`ClosureInsert`,
+   `ClosureLink` × `closureLinkRounds`, `ClosureJump`, `ClosureClassify`,
+   `ClosureFinalize`, `ClosureCentroid`). Faces are keyed by their F voxel, so
+   the several faces of one voxel merge in the hash and a 26-neighbour lookup
+   joins adjacent voxels. Each component gets a face count and centroid;
+   components with ≥ `holeMinAreaM2 / voxel²` faces are **holes**, the largest
+   is packed `faces<<16 | root` with `InterlockedMax`. The scan frontier is
+   simply the largest hole.
+7. **`FillLeaks`** (`fillLeaks`, on): for every leak face whose component is
+   ≤ `fillLeakMaxAreaM2` (0.25 m²), the two E voxels behind the face become
+   solid at `fillWeight`, with TSDF values continued from the F voxel's own
+   value at the band slope (`f − voxel/truncation`, `f − 2·voxel/truncation`,
+   clamped negative). The zero crossing therefore lands where the
+   neighbouring real surface puts it — a hole in a wall closes *on* the wall,
+   not half a voxel off it. Where the air in front of a small hole was
+   observed, the F–E interface *is* the missing surface. Frontier-sized
+   components are never capped; real depth (weight ≥ minMeshWeight) is never
+   overwritten; body capsules and outside-room voxels are skipped.
+8. **Readback** of the 32 words. CPU derives
+   `Closure = surfaceArea / (surfaceArea + leakArea)` with both areas =
+   faces × voxel² (the staircase inflates both alike, so the ratio is fair),
+   `Refinement = clamp01(confident ÷ surface ÷ refinementSaturation)`, and
+   `OverallProgress = Closure × (1 − refinementInfluence × (1 − Refinement))`.
+   `ScanCoverage.LeakAreaM2` is the absolute number a host gates on
+   ("under 0.3 m² still open"); `HoleCount`, `LargestHole` (area, centroid)
+   list the holes; the tint, the count, the list and the fill all read the same
+   label texture, so they agree by construction.
+
+Why this and not the mesh boundary: a Surface Nets boundary edge appears
+wherever the ±0.15 m band meets unobserved voxels — behind every surface and in
+front of every grazing one — so counting edges over-reports holes everywhere.
+A free–exterior face appears only where the player could look *through* the
+scan. The two agree at a real hole and disagree exactly at the false positives.
+
+Cost per cycle: one full-volume read (2 bytes/voxel, was already there) with
+one block word and four counter adds per 512 voxels, six LDS dispatches over
+~10 % of the voxels, one face pass over the surface blocks, ≤ 65k × 27 hash
+probes per link round, one 128-byte readback. Nothing per frame, nothing over
+the volume beyond step 2. The mesh shader samples the label volume **per
+vertex** (two fetches), never per fragment — two dependent 3-D fetches per
+stereo pixel on a 16 MB texture cost ~10 fps on Quest 3. Memory: 16 MB label
+texture + ~4 MB of buffers.
+
+### Shell coverage (compute kernel `MarchShellCells`, requires `RoomUnderstanding`)
+
+An **accelerator**, not the gate. It measures the room against the captured
+Scene API hull so it can name the largest unscanned patch for guidance and
+stamp small planar gaps before the player has to hunt them — which is what
+makes the analytic closure above reach 100 % in practice.
+
+- **Cells.** `RoomUnderstanding.CopyShellCells` samples every outer `WALL_FACE`
+  rect, the floor and ceiling polygons (`PlaneBoundary2D`), and the top + side
+  faces of `TABLE` / `COUCH` / `BED` / `STORAGE` volumes at `cellSize =
+  clamp(sqrt(area / 14000), 0.10, 0.20)` m (≤ 16 384 cells). Doorway
+  `INVISIBLE_WALL_FACE` anchors get no cells; wall cells inside a
+  `DOOR_FRAME` / `WINDOW_FRAME` rect (+5 cm) are **excluded** from the
+  denominator. Furniture side faces within 0.60 m of a wall (the unscannable
+  gap behind a couch or bed) or under 10 cm are skipped.
+- **March.** One thread per cell walks its segment one voxel per step. Plane
+  cells start 0.50 m outside the plane (the TSDF clip expand — a false
+  ceiling is inside this range) and go 1.00 m in for walls (the front of a
+  desk or wardrobe against the wall still covers the wall behind it), 0.80 m
+  for the ceiling (tall storage tops), 0.70 m for the floor (a bed or couch
+  covers the floor under it; a 0.75 m table does not). Furniture cells start
+  0.25 m outside the face and march **through the whole box** (top faces stop
+  0.10 m above the bottom). Three outcomes:
+  - *covered* — a voxel with `|weight| ≥ minMeshWeight` and `tsdf ≤ 0.5` is on
+    the segment (negative tsdf counts, so a surface met from behind — the wall
+    behind a wardrobe — is a hit). Frozen counts.
+  - *empty* — every sampled voxel is observed free space (`weight ≥ min`,
+    `tsdf > 0.5`, at most one unobserved voxel forgiven): the sensor has looked
+    straight through and there is nothing there. That is air inside a loose
+    scene box (a couch box top is the backrest, a bed box top the headboard, a
+    table box side is air between legs) or glass. The cell leaves the
+    denominator for that tick. An opaque surface always leaves ≥ 3 unobserved
+    voxels behind it, so it can never read as empty.
+  - *uncovered* — unobserved voxels and no surface. A hole, or not yet looked at.
+  Dispatched on the 1 Hz analysis tick alongside `ClassifyVoxels`; ≤ 16k
+  threads × ≤ 64 reads — about 2 % of that pass.
+- **Readback.** One `uint` per cell (bit 0 covered, bit 1 empty, bits 8–15 hit
+  step), stamped with the cell-set generation so a result that raced an
+  anchors-changed rebuild is dropped. On the main thread `ShellCoverageTracker`
+  flood-fills uncovered cells (4-neighbour, per surface grid) into gaps:
+  `ShellGapCount`, `LargestGap`, `RoomScanSession.CopyShellGaps` (top 8).
+  `ShellCoverage = covered ÷ (uploaded − empty)`. Preallocated; no GC.
+- **Auto-fill A (`autoFillShellGaps`, default on).** A wall / floor / ceiling
+  gap of ≤ `fillMaxCells` (6) cells, uncovered for ≥ 2 ticks, not touching an
+  opening or an empty cell, whose ≥ 4 covered neighbours hit within
+  `fillNeighborSpreadMax` (6 cm) of one plane, is stamped with that plane
+  (`FillShellPatch`, box dispatch like `StampScreen`) at `fillWeight` 0.15 —
+  above `minMeshWeight` so it meshes, below what real depth accumulates so real
+  depth overrides it. Voxels already at `≥ minMeshWeight` are never touched.
+  The plane is the captured plane shifted by the neighbours' mean hit offset.
+- **Auto-fill B (`closeFurnitureHoles`, default on).** Furniture gaps with ≥ 4
+  covered neighbours on one depth get a cluster-local 6-neighbour close
+  (`CloseSmallHoles`) in a box placed at the neighbours' mean hit depth (the
+  real seat, not the scene-box face): an empty voxel with ≥ 4 neighbours at
+  `|weight| ≥ 0.2` takes their mean tsdf at `fillWeight`. Filled voxels are
+  below 0.2 so they never seed further fills. Never a volume pass.
+- Shell coverage never feeds `OverallProgress`. The package does **not** gate
+  finalize; the host reads `ScanProgress.OverallProgress` and decides.
 
 ### ScanCoverage / ScanProgress (CPU)
-- `ScanCoverage`: Raw metrics — `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction`, `MeshVertexCount`, `MeshIndexCount`, `IsStabilized`
-- `ScanProgress`: Blended progress — `OverallProgress = FrozenFraction×0.5 + ColorCoverage×0.3 + GeometryStability×0.2`
+- `ScanCoverage` analytic: `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`, `LeakAreaM2`, `SurfaceAreaM2`, `HoleCount`, `LargestHole` (`MeshHole`: centre, area, faces), `LeakFills`. Shell prior: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`. Raw: `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction` (the freeze tool's own metric), `MeshVertexCount`, `MeshTriangleCount`.
+- `ScanProgress.OverallProgress = Closure × (1 − refinementInfluence × (1 − Refinement))` (0 until the first cycle); phase `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. There is no plateau or frozen-fraction blend any more.
+- `FreezeInView` / `UnfreezeInView` paint a spotlight cone from the head — apex at the eye, axis along the gaze, half-angle `freezeConeHalfAngle` (15°) — so a press paints what the player is looking straight at and they turn their head for more. The head pose is always available; the earlier passthrough-camera frustum needed intrinsics that were not, and its wide window painted the whole view. Hosts read `RoomScanSession.FreezeConeHalfAngle` to draw a ring.
 - `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`
-
-### Plateau Detection
-Per mesh extraction cycle, `UpdatePlateauDetection` tracks:
-- **Vertex stability**: `abs(growth) < 1%` increments `_stableVertexCycles`
-- **Color stability**: `abs(colorGrowth) < 0.5%` increments `_stableColorCycles`
-- `IsStabilized` when vertex cycles ≥ threshold (5). `Stabilized` phase entered when both vertex and color cycles reach the threshold. After `StabilizedHoldSeconds` (3s), phase transitions to `Complete`.
 
 ## 12b. Depth Subsystem Gating
 
@@ -512,7 +694,9 @@ sensor and neural depth pipeline run **only while a scan is active**:
   `RoomScanSession.Request*PermissionAsync` for their own UX.
 - **`StartDepthCapture()`:** Sets `_captureActive`. When permission is ready,
   enables `AROcclusionManager` and subscribes to `frameReceived`. Called by
-  `RoomScanner.StartScanningAsync()`.
+  `RoomScanner.StartScanningAsync()`. After enable, `removeHandsFromDepth`
+  requests Meta hand removal on the occlusion subsystem (reflection; the
+  Meta OpenXR assembly is not a package.json dependency).
 - **`StopDepthCapture()`:** Unsubscribes and disables the manager (stops the
   sensor). Called by `RoomScanner.StopScanning()`.
 - **`_captureActive`:** Persists across app pause/resume. `OnApplicationPause(false)`
@@ -542,6 +726,17 @@ Passthrough **visualization** (`OVRPassthroughLayer`) is unrelated and stays on.
 | `maxUpdateDist` | 5.0m | Far plane for integration |
 | `minUpdateDist` | 0.5m | Near plane (rejects close noise) |
 | `maxFrustumPositions` | 1,000,000 | Cap on frustum grid cells |
+
+### Body exclusion
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `torsoRadius` | 0.35 m | Torso capsule radius (world-up); was a 0.6 m cylinder |
+| `torsoAbove` / `torsoBelow` | 0.25 / 1.7 m | Torso segment from head |
+| `handRadius` / `handHalfLength` | 0.14 / 0.08 m | Wrist capsule along forward |
+| `forearmRadius` / `forearmLength` | 0.08 / 0.28 m | Wrist toward estimated shoulder |
+| `eraseBodyBlobs` | false | Optional post-Integrate clear of unfrozen hand/forearm voxels below `eraseMaxWeight` |
+| `eraseMaxWeight` | 0.2 | Eraser weight ceiling. Must be above `SEED_WEIGHT` (0.10) |
+| `removeHandsFromDepth` | true | Meta occlusion inpaint (hand tracking; off while holding controllers) |
 
 ### Convergence
 | Parameter | Default | Description |
@@ -784,6 +979,7 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
    - Projects to keyframe screen space via intrinsics (fx, fy, cx, cy with crop offset)
    - **Bounds check**: Discards if outside image
    - **Occlusion check**: Compares projected depth against depth buffer (with 0.05 tolerance)
+   - **Body check**: the keyframe carries the player's hand / forearm capsules at capture (`"cap"` in `frames.jsonl`, written by `KeyframeCollector`, relocated with the pose). A texel whose segment camera → world point passes within `radius × 1.4` of any capsule (`SegSegDistSq`) is skipped — that pixel was the hand, not the wall. Frames where the capsules cover more than `maxHandCoverage` (12 %) of the image are never saved. Same test in `BlendAccum`.
    - **Score**: `dot(surfaceNormal, viewDirection)` — prefers head-on views
    - **Atomic best-score selection**: `InterlockedMax(_ScoreBuf[texelIdx], asuint(score))` — since scores are positive floats, `asuint()` preserves ordering. Color is written only when the thread wins the comparison.
 

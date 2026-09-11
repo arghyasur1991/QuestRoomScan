@@ -37,13 +37,13 @@ namespace Genesis.RoomScan
     {
         /// <summary>Before <see cref="RoomScanner.StartScanningAsync"/> is called.</summary>
         NotStarted,
-        /// <summary>New geometry appearing rapidly — early scan.</summary>
+        /// <summary>Progress below 0.30 — the mesh is mostly frontier.</summary>
         Discovering,
-        /// <summary>Geometry mostly stable, color/frozen coverage still filling in.</summary>
+        /// <summary>Progress 0.30–0.90 — closing holes, surfaces still settling.</summary>
         Refining,
-        /// <summary>Both geometry and color have plateaued.</summary>
+        /// <summary>Progress 0.90–0.95.</summary>
         Stabilized,
-        /// <summary>Plateaued long enough to consider the scan ready for refinement.</summary>
+        /// <summary>Progress at or above 0.95: closed and refined.</summary>
         Complete
     }
 
@@ -64,12 +64,66 @@ namespace Genesis.RoomScan
         public int ColoredSurfaceCount;
         /// <summary>Colored / Surface ratio (0–1).</summary>
         public float ColorCoverage;
-        /// <summary>Frozen / Surface ratio (0–1). Strongest "done" signal.</summary>
+        /// <summary>Frozen / Surface ratio (0–1). The freeze tool's own metric; not part of progress.</summary>
         public float FrozenFraction;
         /// <summary>Number of captured keyframes so far.</summary>
         public int KeyframeCount;
-        /// <summary>True when mesh vertex count has plateaued for several cycles.</summary>
-        public bool IsStabilized;
+
+        // ── Analytic (always available; the gate) ─────────────────────
+        /// <summary>True once the first analysis cycle of this scan has completed.</summary>
+        public bool AnalysisAvailable;
+        /// <summary>
+        /// Closure 0–1 = surface area / (surface area + leak area). Leak area
+        /// is where observed free space meets unknown connected to the outside
+        /// of the scan — where passthrough shows through. 1 for a sealed scan.
+        /// Faces on a clip plane or the volume edge are cuts, not leaks.
+        /// </summary>
+        public float Closure;
+        /// <summary>
+        /// How much of the surface has stopped moving, 0–1: the confident
+        /// fraction scaled so the refinement saturation point reads 1.
+        /// </summary>
+        public float Refinement;
+        /// <summary>Confident ÷ surface voxels, raw (0–1).</summary>
+        public float ConfidentFraction;
+        /// <summary>Surface voxels at or above the confident weight.</summary>
+        public int ConfidentSurfaceCount;
+        /// <summary>Total leak area, m². The number a host gates on ("under 0.3 m² still open").</summary>
+        public float LeakAreaM2;
+        /// <summary>Surface area estimate, m².</summary>
+        public float SurfaceAreaM2;
+        /// <summary>Leak patches at or above the minimum area.</summary>
+        public int HoleCount;
+        /// <summary>Largest leak patch (the frontier while scanning), or default.</summary>
+        public MeshHole LargestHole;
+        /// <summary>Leak faces capped by the auto-fill so far this scan.</summary>
+        public int LeakFills;
+
+        // ── Shell prior (optional; guidance and auto-fill, never the gate) ──
+        /// <summary>
+        /// True when the captured room shell (MRUK walls / floor / ceiling /
+        /// furniture) is being marched. False without <see cref="RoomUnderstanding"/>
+        /// or a resolved room. Guidance only — progress is <see cref="Closure"/>
+        /// and <see cref="Refinement"/>.
+        /// </summary>
+        public bool ShellCoverageAvailable;
+        /// <summary>
+        /// Fraction of required shell cells with scanned matter on their march
+        /// segment (0–1). Door / window openings (build time) and cells whose
+        /// segment is observed air (per tick) are not in the denominator.
+        /// </summary>
+        public float ShellCoverage;
+        public int ShellCellsTotal;
+        public int ShellCellsCovered;
+        public int ShellCellsExcluded;
+        /// <summary>Cells the march found to be observed air this tick (nothing there to scan).</summary>
+        public int ShellCellsEmpty;
+        /// <summary>Connected uncovered patches of two or more cells.</summary>
+        public int ShellGapCount;
+        /// <summary>Largest uncovered patch, or default when none.</summary>
+        public ShellGap LargestGap;
+        /// <summary>Auto-fill dispatches so far this scan.</summary>
+        public int ShellFillsApplied;
     }
 
     /// <summary>High-level scan progress combining raw metrics into a single progress value and phase.</summary>
@@ -77,7 +131,12 @@ namespace Genesis.RoomScan
     {
         /// <summary>The underlying raw coverage metrics.</summary>
         public ScanCoverage Coverage;
-        /// <summary>Blended 0–1 overall progress (frozen fraction weighted heaviest).</summary>
+        /// <summary>
+        /// <c>Closure × (1 − influence × (1 − Refinement))</c>: the mesh has no
+        /// holes, discounted a little while its surface is still moving. 0
+        /// until the first analysis cycle. Nothing from the scene model feeds
+        /// this.
+        /// </summary>
         public float OverallProgress;
         /// <summary>Current high-level scan phase.</summary>
         public ScanPhase Phase;
@@ -187,6 +246,18 @@ namespace Genesis.RoomScan
             set { showFreezeTint = value; Shader.SetGlobalFloat(NoFreezeTintID, value ? 0f : 1f); }
         }
 
+        /// <summary>
+        /// Tint the live mesh red where the surface is open — the boundary
+        /// edges the closure metric counts. The same data the analysis uses,
+        /// so what is red is what is holding the number down.
+        /// </summary>
+        public bool ShowHoles
+        {
+            get => _showHoles;
+            set { _showHoles = value; Shader.SetGlobalFloat(ShowHolesID, value ? 1f : 0f); }
+        }
+        private bool _showHoles;
+
         /// <summary>The unified scene object registry (MRUK + AI detections).</summary>
         public SceneObjectRegistry SceneObjectRegistry => _sceneObjectRegistry;
 
@@ -268,17 +339,6 @@ namespace Genesis.RoomScan
         private bool _started;
         private bool _serverTrainingInProgress;
         private bool _scanResourcesReleased;
-
-        // Plateau detection state
-        private int _prevVertexCount;
-        private int _stableVertexCycles;
-        private int _stableColorCycles;
-        private float _prevColorCoverage;
-        private float _stabilizedTime;
-        private const int StableThresholdCycles = 5;
-        private const float StabilizedHoldSeconds = 3f;
-        private const float VertexGrowthThreshold = 0.02f; // 2% change considered growth
-        private const float ColorGrowthThreshold = 0.01f;  // 1% change
 
         // ─────────────────────────────────────────────────────────────
         //  Texture refinement state
@@ -381,6 +441,9 @@ namespace Genesis.RoomScan
                 _persistence.LoadCompleted += ApplyRenderMode;
 
             SetupHeadExclusion();
+            _shellTracker = new ShellCoverageTracker(_shellCells);
+            if (_volumeIntegrator != null)
+                _volumeIntegrator.ShellResultReady += OnShellResult;
 
             if (_roomAnchor != null && _roomAnchor.enabled)
             {
@@ -435,6 +498,12 @@ namespace Genesis.RoomScan
             UnsubscribeFromAnchorsChanged();
         }
 
+        private void OnDestroy()
+        {
+            if (_volumeIntegrator != null)
+                _volumeIntegrator.ShellResultReady -= OnShellResult;
+        }
+
         private float _lastScannerLog;
         private int _integrateCount;
         private bool _subscribedToAnchorsChanged;
@@ -442,6 +511,12 @@ namespace Genesis.RoomScan
         private float _lastEmptyRoomBindAttempt;
         private readonly List<Vector4> _clipScratch = new(32);
         private readonly List<ScanScreenStamp> _stampScratch = new(4);
+        private readonly ShellCellSet _shellCells = new();
+        private ShellCoverageTracker _shellTracker;
+        private float _lastShellLog;
+        private OVRCameraRig _bodyRig;
+        private OVRHand _leftOvrHand;
+        private OVRHand _rightOvrHand;
 
         private void Update()
         {
@@ -473,6 +548,7 @@ namespace Genesis.RoomScan
             {
                 _lastIntegrationTime = t;
 
+                RefreshBodyAnchors();
                 ProvideColorFrame();
                 _volumeIntegrator.Integrate();
                 Integrated?.Invoke();
@@ -485,17 +561,32 @@ namespace Genesis.RoomScan
                     if (_meshExtractor != null && _meshExtractor.TryExtract())
                     {
                         _lastMeshTime = t;
-                        UpdatePlateauDetection();
                         MeshExtracted?.Invoke();
                     }
                 }
             }
+
+            _volumeIntegrator.StepAnalysis();
 
             if (t - _lastScannerLog >= 5f)
             {
                 _lastScannerLog = t;
                 Logger.Verbose($"Scanner: integrations={_integrateCount}, " +
                     $"depthAvail={DepthCapture.DepthAvailable}");
+                if (_volumeIntegrator.AnalysisAvailable)
+                {
+                    var cl = _volumeIntegrator.Closure;
+                    Logger.Info(
+                        $"[RoomScanner] Analysis: progress={_volumeIntegrator.Progress:P0} closure={cl.Closure:P0} " +
+                        $"refinement={_volumeIntegrator.Refinement:P0} (confident {_volumeIntegrator.ConfidentFraction:P0}) " +
+                        $"leak={cl.LeakAreaM2:F2}m2 surface={cl.SurfaceAreaM2:F1}m2 holes={cl.HoleCount} " +
+                        $"largest={cl.LargestHole.AreaM2:F2}m2 (~{cl.LargestHole.ApproxWidthMetres:F2}m across) " +
+                        $"@({cl.LargestHole.Center.x:F2},{cl.LargestHole.Center.y:F2},{cl.LargestHole.Center.z:F2}) " +
+                        $"faces: leak={cl.LeakFaces} cut={cl.CutFaces} " +
+                        $"voxels: surface={_volumeIntegrator.SurfaceVoxelCount} confident={_volumeIntegrator.ConfidentSurfaceCount} " +
+                        $"fills: leak={_volumeIntegrator.LeakFills} shell={(_shellTracker != null && _shellTracker.Available ? _shellTracker.FillsApplied : 0)}" +
+                        (_shellTracker != null && _shellTracker.Available ? $" shellCov={_shellTracker.Coverage:P0} shellGaps={_shellTracker.GapCount}" : ""));
+                }
             }
         }
 
@@ -655,11 +746,7 @@ namespace Genesis.RoomScan
                 // vertex preview and open a fresh _tmp package + anchor.
                 if (!resuming)
                 {
-                    _prevVertexCount = 0;
-                    _stableVertexCycles = 0;
-                    _stableColorCycles = 0;
-                    _prevColorCoverage = 0f;
-                    _stabilizedTime = 0f;
+                    _volumeIntegrator.ResetAnalysis();
 
                     SetRenderMode(ScanRenderMode.Vertex);
 
@@ -754,6 +841,8 @@ namespace Genesis.RoomScan
             _depthCapture.StopDepthCapture();
 
             _volumeIntegrator?.ClearScanPriors();
+            _volumeIntegrator?.ClearShellCells();
+            _shellTracker?.Disable();
             _scanRoomUuid = Guid.Empty;
 
             ScanStopped?.Invoke();
@@ -1013,29 +1102,46 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Freezes voxels currently visible in the camera frustum, preventing further integration updates.
+        /// Freezes voxels inside the spotlight cone in front of the head
+        /// (see <see cref="FreezeConeHalfAngle"/>), preventing further
+        /// integration updates there. Uses the head pose, which is always
+        /// available — not the passthrough camera, whose intrinsics were not.
         /// </summary>
         public void FreezeInView()
         {
             if (_volumeIntegrator == null) return;
-            if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
-                    out var sensor, out var current)) return;
+            if (!TryGetGaze(out var eye, out var gaze)) return;
 
-            _volumeIntegrator.FreezeInView(pose.position, pose.rotation,
-                focal, principal, sensor, current);
+            RefreshBodyAnchors();
+            _volumeIntegrator.FreezeInView(eye, gaze);
         }
 
-        /// <summary>
-        /// Unfreezes previously frozen voxels in the current camera frustum, allowing integration to resume.
-        /// </summary>
+        /// <summary>Unfreezes frozen voxels inside the same spotlight cone.</summary>
         public void UnfreezeInView()
         {
             if (_volumeIntegrator == null) return;
-            if (!TryGetCameraIntrinsics(out var pose, out var focal, out var principal,
-                    out var sensor, out var current)) return;
+            if (!TryGetGaze(out var eye, out var gaze)) return;
 
-            _volumeIntegrator.UnfreezeInView(pose.position, pose.rotation,
-                focal, principal, sensor, current);
+            _volumeIntegrator.UnfreezeInView(eye, gaze);
+        }
+
+        /// <summary>Half-angle, degrees, of the freeze / unfreeze cone. Hosts draw a ring at this.</summary>
+        public float FreezeConeHalfAngle => _volumeIntegrator != null ? _volumeIntegrator.FreezeConeHalfAngle : 15f;
+
+        bool TryGetGaze(out Vector3 eye, out Vector3 gaze)
+        {
+            RefreshBodyAnchors();
+            var head = _volumeIntegrator != null ? _volumeIntegrator.HeadAnchor : null;
+            if (head == null && Camera.main != null) head = Camera.main.transform;
+            if (head == null)
+            {
+                eye = default;
+                gaze = default;
+                return false;
+            }
+            eye = head.position;
+            gaze = head.forward;
+            return true;
         }
 
         /// <summary>
@@ -1107,7 +1213,8 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Registers a transform as an exclusion zone; voxels near it are skipped during integration (e.g. the user's head).
+        /// Registers an extra torso exclusion capsule at <paramref name="t"/>.
+        /// Head and hands are <see cref="SetBodyExclusionAnchors"/>, not this list.
         /// </summary>
         public void AddExclusionZone(Transform t)
         {
@@ -1116,12 +1223,22 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Unregisters a previously added exclusion zone.
+        /// Unregisters a previously added extra exclusion zone.
         /// </summary>
         public void RemoveExclusionZone(Transform t)
         {
             if (_volumeIntegrator != null)
                 _volumeIntegrator.ExclusionZones.Remove(t);
+        }
+
+        /// <summary>
+        /// Pin head and wrist transforms for body-exclusion capsules.
+        /// Host-owned: the scanner will not overwrite them from the camera rig.
+        /// Call before <see cref="StartScanningAsync"/>.
+        /// </summary>
+        public void SetBodyExclusionAnchors(Transform head, Transform leftHand, Transform rightHand)
+        {
+            _volumeIntegrator?.SetBodyExclusionAnchors(head, leftHand, rightHand, hostOwned: true);
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -1617,6 +1734,58 @@ namespace Genesis.RoomScan
                     $"room={_scanRoomUuid} clipPlanes={_clipScratch.Count} " +
                     $"aabb={(useAabb ? 1 : 0)} screens={_stampScratch.Count}");
             }
+
+            BindShellCells();
+        }
+
+        void BindShellCells()
+        {
+            if (_volumeIntegrator == null || _shellTracker == null) return;
+            int uploaded = _roomUnderstanding != null
+                ? _roomUnderstanding.CopyShellCells(_scanRoomUuid, _shellCells)
+                : 0;
+            _volumeIntegrator.SetShellCells(_shellCells.GpuPos, _shellCells.GpuNrm, uploaded);
+            _shellTracker.Reset();
+            if (uploaded > 0)
+            {
+                Logger.Info(
+                    $"[RoomScanner] Shell cells: total={_shellCells.CellCount} uploaded={uploaded} " +
+                    $"excluded={_shellCells.ExcludedCount} cell={_shellCells.CellSize:F2}m " +
+                    $"surfaces={_shellCells.SurfaceCount} dropped={_shellCells.DroppedSurfaces}");
+            }
+        }
+
+        void OnShellResult(uint[] result, int count, int generation)
+        {
+            if (!IsScanning || _shellTracker == null || _volumeIntegrator == null) return;
+            if (generation != _volumeIntegrator.ShellGeneration) return;
+            _shellTracker.Update(result, count, _volumeIntegrator, _volumeIntegrator.VoxelSize);
+
+            float t = Time.time;
+            if (t - _lastShellLog >= 2f)
+            {
+                _lastShellLog = t;
+                var g = _shellTracker.LargestGap;
+                Logger.Verbose(
+                    $"[RoomScanner] Shell coverage {_shellTracker.Coverage:P0} " +
+                    $"({_shellTracker.Covered}/{_shellTracker.Uploaded - _shellTracker.Empty}, " +
+                    $"empty={_shellTracker.Empty}) gaps={_shellTracker.GapCount} " +
+                    $"largest={g.Cells} cells ({g.Kind}) fills={_shellTracker.FillsApplied}");
+            }
+        }
+
+        /// <summary>
+        /// Largest uncovered shell patches, largest first (at most 8). Zero
+        /// when shell coverage is unavailable.
+        /// </summary>
+        public int CopyShellGaps(List<ShellGap> dest)
+        {
+            if (_shellTracker == null)
+            {
+                dest?.Clear();
+                return 0;
+            }
+            return _shellTracker.CopyGaps(dest);
         }
 
         void MaybeRetryScanRoomBind()
@@ -1756,56 +1925,63 @@ namespace Genesis.RoomScan
         //  Internal helpers
         // ─────────────────────────────────────────────────────────────
 
-        private bool TryGetCameraIntrinsics(out Pose pose, out Vector2 focal,
-            out Vector2 principal, out Vector2 sensor, out Vector2 current)
-        {
-            pose = default;
-            focal = principal = sensor = current = default;
-
-            ICameraProvider provider = GetActiveCameraProvider();
-            if (provider != null && provider.IsReady)
-            {
-                pose = provider.CameraPose;
-                if (_depthCapture != null)
-                    pose = _depthCapture.TrackingToWorld(pose);
-                focal = provider.FocalLength;
-                principal = provider.PrincipalPoint;
-                sensor = provider.SensorResolution;
-                current = provider.CurrentResolution;
-                return true;
-            }
-
-            // Fallback to main camera intrinsics when no provider is available
-            var cam = Camera.main;
-            if (cam == null) return false;
-
-            var ct = cam.transform;
-            pose = new Pose(ct.position, ct.rotation);
-            float w = cam.pixelWidth;
-            float h = cam.pixelHeight;
-            float vFovRad = cam.fieldOfView * Mathf.Deg2Rad;
-            float fy = h / (2f * Mathf.Tan(vFovRad * 0.5f));
-            focal = new Vector2(fy, fy);
-            principal = new Vector2(w * 0.5f, h * 0.5f);
-            sensor = new Vector2(w, h);
-            current = new Vector2(w, h);
-            return true;
-        }
-
         private void SetupHeadExclusion()
         {
             if (_volumeIntegrator == null) return;
+            if (_volumeIntegrator.HeadAnchor != null) return;
 
             var cam = Camera.main;
             if (cam != null)
             {
-                AddExclusionZone(cam.transform);
-                Logger.Info($"Head exclusion zone added: {cam.gameObject.name}");
+                _volumeIntegrator.HeadAnchor = cam.transform;
+                Logger.Info($"Head exclusion anchor: {cam.gameObject.name}");
             }
             else
             {
-                Logger.Warning("No main camera found for head exclusion zone");
+                Logger.Warning("No main camera found for head exclusion");
             }
+        }
+
+        void RefreshBodyAnchors()
+        {
+            if (_volumeIntegrator == null || _volumeIntegrator.BodyAnchorsHostOwned)
+                return;
+
+            if (_bodyRig == null)
+                _bodyRig = FindAnyObjectByType<OVRCameraRig>();
+
+            var rig = _bodyRig;
+            if (rig != null && rig.centerEyeAnchor != null)
+                _volumeIntegrator.HeadAnchor = rig.centerEyeAnchor;
+            else if (_volumeIntegrator.HeadAnchor == null && Camera.main != null)
+                _volumeIntegrator.HeadAnchor = Camera.main.transform;
+
+            if (rig == null) return;
+            _volumeIntegrator.LeftHandAnchor = PickWrist(rig, left: true);
+            _volumeIntegrator.RightHandAnchor = PickWrist(rig, left: false);
+        }
+
+        Transform PickWrist(OVRCameraRig rig, bool left)
+        {
+            var controller = left ? OVRInput.Controller.LTouch : OVRInput.Controller.RTouch;
+            if (OVRInput.GetControllerPositionTracked(controller))
+            {
+                var onCtrl = left ? rig.leftHandOnControllerAnchor : rig.rightHandOnControllerAnchor;
+                if (onCtrl != null) return onCtrl;
+                return left ? rig.leftControllerAnchor : rig.rightControllerAnchor;
+            }
+
+            var handAnchor = left ? rig.leftHandAnchor : rig.rightHandAnchor;
+            if (handAnchor == null) return null;
+            var hand = left ? _leftOvrHand : _rightOvrHand;
+            if (hand == null)
+            {
+                hand = handAnchor.GetComponentInChildren<OVRHand>();
+                if (left) _leftOvrHand = hand;
+                else _rightOvrHand = hand;
+            }
+            if (hand != null && !hand.IsTracked) return null;
+            return handAnchor;
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -1823,7 +1999,7 @@ namespace Genesis.RoomScan
             float colorCov = surfaceVoxels > 0 ? (float)coloredVoxels / surfaceVoxels : 0f;
             float frozenFrac = surfaceVoxels > 0 ? (float)frozenVoxels / surfaceVoxels : 0f;
 
-            return new ScanCoverage
+            var cov = new ScanCoverage
             {
                 IntegrationCount = _volumeIntegrator != null ? _volumeIntegrator.IntegrationCount : 0,
                 MeshVertexCount = vertCount,
@@ -1833,28 +2009,57 @@ namespace Genesis.RoomScan
                 ColoredSurfaceCount = coloredVoxels,
                 ColorCoverage = colorCov,
                 FrozenFraction = frozenFrac,
-                KeyframeCount = _keyframeCollector != null ? _keyframeCollector.SavedCount : 0,
-                IsStabilized = _stableVertexCycles >= StableThresholdCycles
+                KeyframeCount = _keyframeCollector != null ? _keyframeCollector.SavedCount : 0
             };
+
+            if (_volumeIntegrator != null && _volumeIntegrator.AnalysisAvailable)
+            {
+                var cl = _volumeIntegrator.Closure;
+                cov.AnalysisAvailable = true;
+                cov.Closure = cl.Closure;
+                cov.Refinement = _volumeIntegrator.Refinement;
+                cov.ConfidentFraction = _volumeIntegrator.ConfidentFraction;
+                cov.ConfidentSurfaceCount = _volumeIntegrator.ConfidentSurfaceCount;
+                cov.LeakAreaM2 = cl.LeakAreaM2;
+                cov.SurfaceAreaM2 = cl.SurfaceAreaM2;
+                cov.HoleCount = cl.HoleCount;
+                cov.LargestHole = cl.LargestHole;
+                cov.LeakFills = _volumeIntegrator.LeakFills;
+            }
+
+            if (_shellTracker != null && _shellTracker.Available)
+            {
+                cov.ShellCoverageAvailable = true;
+                cov.ShellCoverage = _shellTracker.Coverage;
+                cov.ShellCellsTotal = _shellTracker.Uploaded;
+                cov.ShellCellsCovered = _shellTracker.Covered;
+                cov.ShellCellsExcluded = _shellTracker.Excluded;
+                cov.ShellCellsEmpty = _shellTracker.Empty;
+                cov.ShellGapCount = _shellTracker.GapCount;
+                cov.LargestGap = _shellTracker.LargestGap;
+                cov.ShellFillsApplied = _shellTracker.FillsApplied;
+            }
+            return cov;
         }
 
+        /// <summary>
+        /// Progress is analytic only: the mesh's own closure and how much of
+        /// the surface has stopped moving. The shell prior is reported beside
+        /// it for guidance and drives auto-fill, but never this number.
+        /// </summary>
         private ScanProgress BuildProgress()
         {
             var cov = BuildCoverage();
-            float geometryStability = cov.IsStabilized ? 1f : Mathf.Clamp01(_stableVertexCycles / (float)StableThresholdCycles);
-            float progress = cov.FrozenFraction * 0.5f + cov.ColorCoverage * 0.3f + geometryStability * 0.2f;
+            float progress = cov.AnalysisAvailable ? _volumeIntegrator.Progress : 0f;
 
             ScanPhase phase;
             if (!IsScanning && _volumeIntegrator != null && _volumeIntegrator.IntegrationCount == 0)
                 phase = ScanPhase.NotStarted;
-            else if (_stableVertexCycles < 2)
-                phase = ScanPhase.Discovering;
-            else if (_stableColorCycles < StableThresholdCycles)
-                phase = ScanPhase.Refining;
-            else if (_stabilizedTime > 0f && Time.time - _stabilizedTime < StabilizedHoldSeconds)
-                phase = ScanPhase.Stabilized;
             else
-                phase = ScanPhase.Complete;
+                phase = progress < 0.30f ? ScanPhase.Discovering
+                    : progress < 0.90f ? ScanPhase.Refining
+                    : progress < 0.95f ? ScanPhase.Stabilized
+                    : ScanPhase.Complete;
 
             return new ScanProgress
             {
@@ -1862,37 +2067,6 @@ namespace Genesis.RoomScan
                 OverallProgress = Mathf.Clamp01(progress),
                 Phase = phase
             };
-        }
-
-        private void UpdatePlateauDetection()
-        {
-            int curVerts = _meshExtractor != null ? _meshExtractor.LastVertexCount : 0;
-            if (_prevVertexCount > 0 && curVerts > 0)
-            {
-                float growth = Mathf.Abs(curVerts - _prevVertexCount) / (float)_prevVertexCount;
-                if (growth < VertexGrowthThreshold)
-                    _stableVertexCycles++;
-                else
-                    _stableVertexCycles = 0;
-            }
-            _prevVertexCount = curVerts;
-
-            float curColor = _volumeIntegrator != null && _volumeIntegrator.SurfaceVoxelCount > 0
-                ? (float)_volumeIntegrator.ColoredSurfaceCount / _volumeIntegrator.SurfaceVoxelCount
-                : 0f;
-            if (_prevColorCoverage > 0f)
-            {
-                float colorGrowth = Mathf.Abs(curColor - _prevColorCoverage);
-                if (colorGrowth < ColorGrowthThreshold)
-                    _stableColorCycles++;
-                else
-                    _stableColorCycles = 0;
-            }
-            _prevColorCoverage = curColor;
-
-            if (_stableVertexCycles >= StableThresholdCycles && _stableColorCycles >= StableThresholdCycles
-                && _stabilizedTime == 0f)
-                _stabilizedTime = Time.time;
         }
 
         private static readonly int NormalFallbackID = Shader.PropertyToID("_RSNormalFallback");
@@ -1904,6 +2078,7 @@ namespace Genesis.RoomScan
             Shader.SetGlobalFloat(WireframeID, 0f);
             Shader.SetGlobalFloat(WireThicknessID, wireThickness);
             Shader.SetGlobalFloat(NoFreezeTintID, showFreezeTint ? 0f : 1f);
+            Shader.SetGlobalFloat(ShowHolesID, _showHoles ? 1f : 0f);
         }
 
         private int _colorFrameLog;
@@ -1971,6 +2146,7 @@ namespace Genesis.RoomScan
         }
 
         private static readonly int NoFreezeTintID = Shader.PropertyToID("_RSNoFreezeTint");
+        private static readonly int ShowHolesID = Shader.PropertyToID("_RSShowHoles");
         private static readonly int TriAvailableID = Shader.PropertyToID("_RSTriAvailable");
         private static readonly int WireframeID = Shader.PropertyToID("_RSWireframe");
         private static readonly int WireThicknessID = Shader.PropertyToID("_RSWireThickness");

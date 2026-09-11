@@ -68,6 +68,64 @@ namespace Genesis.RoomScan
             }
         }
 
+        /// <summary>
+        /// Tint the live scan mesh red where the surface is open — the same
+        /// boundary the closure metric counts, so the player can see what is
+        /// holding <c>ScanProgress.OverallProgress</c> down. Off by default.
+        /// </summary>
+        public bool ShowHoles
+        {
+            get => _scanner != null && _scanner.ShowHoles;
+            set { if (_scanner != null) _scanner.ShowHoles = value; }
+        }
+
+        /// <summary>
+        /// Soft-stamp the captured plane over small uncovered wall / floor /
+        /// ceiling patches while scanning (see <c>ScanCoverage.ShellFillsApplied</c>).
+        /// Default on. Furniture close is a separate inspector toggle.
+        /// </summary>
+        public bool AutoFillShellGaps
+        {
+            get => _scanner != null && _scanner.VolumeIntegrator != null && _scanner.VolumeIntegrator.AutoFillShellGaps;
+            set
+            {
+                if (_scanner != null && _scanner.VolumeIntegrator != null)
+                    _scanner.VolumeIntegrator.AutoFillShellGaps = value;
+            }
+        }
+
+        /// <summary>
+        /// Largest uncovered shell patches (at most 8, largest first) from the
+        /// last coverage tick. Zero when <c>ScanCoverage.ShellCoverageAvailable</c>
+        /// is false. Whether a scan may finalize is the host's call — read
+        /// <c>ScanProgress.Coverage.ShellCoverage</c> from <see cref="ProgressUpdated"/>.
+        /// </summary>
+        public int CopyShellGaps(List<ShellGap> dest)
+        {
+            if (_scanner == null)
+            {
+                dest?.Clear();
+                return 0;
+            }
+            return _scanner.CopyShellGaps(dest);
+        }
+
+        /// <summary>
+        /// Pin head and wrist transforms used to skip TSDF voxels around the
+        /// operator (torso + hand/forearm capsules). Host-owned — the scanner
+        /// will not overwrite them from the camera rig. Call before
+        /// <see cref="StartScanAsync"/>. Null wrists skip that side.
+        /// </summary>
+        public void SetBodyExclusionAnchors(Transform head, Transform leftHand, Transform rightHand)
+        {
+            if (_scanner == null)
+            {
+                Logger.Error("RoomScanSession: RoomScanner not found");
+                return;
+            }
+            _scanner.SetBodyExclusionAnchors(head, leftHand, rightHand);
+        }
+
         private RoomScanner _scanner;
         private RoomScanPersistence _persistence;
 
@@ -142,13 +200,13 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Paints the voxels currently visible in the camera frustum as
-        /// "frozen" — they stop receiving integration updates until the user
-        /// explicitly <see cref="UnfreezeInView"/>s them again. Use this as
-        /// the user sweeps the room: visible chunks they're satisfied with
-        /// get painted done, and the <see cref="ScanCoverage.FrozenFraction"/>
-        /// metric (which drives <see cref="ScanPhase.Complete"/>) grows.
-        /// Integration keeps running globally on un-painted regions.
+        /// Paints the voxels inside a spotlight cone from the head (half-angle
+        /// <see cref="FreezeConeHalfAngle"/>) as "frozen" — they stop receiving
+        /// integration updates until the user explicitly
+        /// <see cref="UnfreezeInView"/>s them. Frozen voxels count as refined,
+        /// so painting a settled region locks its share of progress. Hosts
+        /// should draw a ring at the cone angle so the player sees what a
+        /// press will paint. Integration keeps running on un-painted regions.
         /// </summary>
         public void FreezeInView()
         {
@@ -156,11 +214,13 @@ namespace Genesis.RoomScan
             _scanner.FreezeInView();
         }
 
+        /// <summary>Half-angle, degrees, of the freeze / unfreeze cone. Draw the ring at this.</summary>
+        public float FreezeConeHalfAngle => _scanner != null ? _scanner.FreezeConeHalfAngle : 15f;
+
         /// <summary>
-        /// Inverse of <see cref="FreezeInView"/>: unfreezes voxels in the
-        /// current camera frustum so depth integration can refine them again.
-        /// Useful when you painted too aggressively or part of the scan looks
-        /// bad and needs re-capturing.
+        /// Inverse of <see cref="FreezeInView"/>: unfreezes voxels in the same
+        /// cone so depth integration can refine them again. Useful when you
+        /// painted too aggressively or part of the scan needs re-capturing.
         /// </summary>
         public void UnfreezeInView()
         {

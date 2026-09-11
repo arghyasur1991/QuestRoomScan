@@ -66,6 +66,8 @@ namespace Genesis.RoomScan
 
         internal GPUSurfaceNets GpuSurfaceNets => _gpuSurfaceNets;
         public bool IsInitialized => _gpuSurfaceNets != null;
+        /// <summary>Extracts issued since init; the analysis cycle keys on this to snapshot only a new mesh.</summary>
+        public int ExtractCount => _extractCount;
 
         /// <summary>Current GPU mesh vertex count (updated after each extraction via async readback).</summary>
         public int LastVertexCount { get; private set; }

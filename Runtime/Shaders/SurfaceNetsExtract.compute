@@ -66,7 +66,7 @@ RWStructuredBuffer<int>       _CoordVertMap;     // [totalVoxels] flat idx -> co
 RWStructuredBuffer<GPUVertex> _Vertices;         // [maxVertices] compact vertex output
 RWStructuredBuffer<uint>      _Indices;          // [maxIndices]  triangle index output
 
-RWStructuredBuffer<uint>      _Counters;         // [0] = vertex count, [1] = index count
+RWStructuredBuffer<uint>      _Counters;         // [0] vertex count, [1] index count, [2..3] reserved
 RWStructuredBuffer<uint>      _DispatchArgs;     // [0,1,2] = indirect dispatch group counts
 RWStructuredBuffer<uint>      _DrawIndirectArgs; // [0..4]  = DrawProceduralIndirect args
 
@@ -155,6 +155,8 @@ void ClearCounters(uint3 id : SV_DispatchThreadID)
 {
     _Counters[0] = 0;
     _Counters[1] = 0;
+    _Counters[2] = 0;
+    _Counters[3] = 0;
 }
 
 // ══════════════════════════════════════════════════════════════════

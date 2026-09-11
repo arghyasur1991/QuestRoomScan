@@ -32,6 +32,8 @@ namespace Genesis.RoomScan
         private GraphicsBuffer _smoothPosA;
         private GraphicsBuffer _smoothPosB;
 
+        public const int CounterCount = 4;
+
         // Temporal state as 3D texture (avoids 128MB structured buffer limit on Quest)
         private RenderTexture _temporalState;
 
@@ -55,6 +57,7 @@ namespace Genesis.RoomScan
         public GraphicsBuffer VertexBuffer => _vertices;
         public GraphicsBuffer IndexBuffer => _indices;
         public GraphicsBuffer DrawIndirectArgs => _drawIndirectArgs;
+        /// <summary>[0] vertices, [1] indices, [2..3] reserved.</summary>
         public GraphicsBuffer CountersBuffer => _counters;
 
         private static readonly int ID_TsdfVolume = Shader.PropertyToID("_TsdfVolume");
@@ -129,7 +132,8 @@ namespace Genesis.RoomScan
             _coordVertMap = new GraphicsBuffer(GraphicsBuffer.Target.Structured, totalVoxels, 4);
             _vertices = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxVertices, VertexStride);
             _indices = new GraphicsBuffer(GraphicsBuffer.Target.Structured, _maxIndices, 4);
-            _counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, 2, 4);
+            _counters = new GraphicsBuffer(GraphicsBuffer.Target.Structured, CounterCount, 4);
+            _counters.SetData(new uint[CounterCount]);
             _dispatchArgs = new GraphicsBuffer(structuredIndirect, 3, 4);
             _drawIndirectArgs = new GraphicsBuffer(structuredIndirect, 5, 4);
 
@@ -169,7 +173,7 @@ namespace Genesis.RoomScan
             long totalBytes = (long)totalVoxels * 4
                             + (long)_maxVertices * VertexStride
                             + (long)_maxIndices * 4
-                            + 2 * 4 + 3 * 4 + 5 * 4
+                            + CounterCount * 4 + 3 * 4 + 5 * 4
                             + (long)_maxVertices * Float3Stride * 2
                             + (long)totalVoxels * 16;
             Logger.Info($"[GPUSurfaceNets] Allocated buffers: vox={voxCount}, " +

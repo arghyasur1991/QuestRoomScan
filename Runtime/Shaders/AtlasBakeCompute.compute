@@ -29,6 +29,63 @@ StructuredBuffer<int>    _OutIdx;
 // ── Per-keyframe pixel data (Color32 packed as uint) ────────
 StructuredBuffer<uint>   _KfPixels;
 
+// ── Per-keyframe body capsules (hands / forearms at capture) ─
+//  A texel whose line of sight from this view passes through one of
+//  them is looking at the player's hand, not the wall. xyz + radius.
+#define BODY_CAP_MAX 8
+int      _BodyCapCount;
+float4   _BodyCapP0[BODY_CAP_MAX];
+float4   _BodyCapP1[BODY_CAP_MAX];
+float    _BodyCapMargin;             // radius multiplier for the blurry hand edge
+
+// Squared distance between segments a0-a1 and b0-b1 (Ericson 5.1.9).
+float SegSegDistSq(float3 a0, float3 a1, float3 b0, float3 b1)
+{
+    float3 d1 = a1 - a0, d2 = b1 - b0, r = a0 - b0;
+    float a = dot(d1, d1), e = dot(d2, d2), f = dot(d2, r);
+    float s = 0, t = 0;
+    if (a <= 1e-8 && e <= 1e-8)
+    {
+        s = 0; t = 0;
+    }
+    else if (a <= 1e-8)
+    {
+        t = saturate(f / e);
+    }
+    else
+    {
+        float c = dot(d1, r);
+        if (e <= 1e-8)
+        {
+            s = saturate(-c / a);
+        }
+        else
+        {
+            float b = dot(d1, d2);
+            float denom = a * e - b * b;
+            s = denom != 0 ? saturate((b * f - c * e) / denom) : 0;
+            t = (b * s + f) / e;
+            if (t < 0) { t = 0; s = saturate(-c / a); }
+            else if (t > 1) { t = 1; s = saturate((b - c) / a); }
+        }
+    }
+    float3 c1 = a0 + d1 * s, c2 = b0 + d2 * t;
+    float3 dd = c1 - c2;
+    return dot(dd, dd);
+}
+
+bool BodyOccludes(float3 camPos, float3 worldPt)
+{
+    bool hit = false;
+    for (int i = 0; i < _BodyCapCount && i < BODY_CAP_MAX; i++)
+    {
+        float r = _BodyCapP0[i].w * _BodyCapMargin;
+        if (SegSegDistSq(camPos, worldPt, _BodyCapP0[i].xyz, _BodyCapP1[i].xyz) < r * r)
+            hit = true;
+    }
+    return hit;
+}
+
 // ── Persistent GPU buffers ──────────────────────────────────
 RWStructuredBuffer<uint> _DepthBuf;  // asuint(linearZ), per-keyframe
 RWStructuredBuffer<uint> _ScoreBuf;  // asuint(score), persists across KFs
@@ -196,6 +253,7 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
             float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
             float closestZ = asfloat(_DepthBuf[py * _ImgW + px]);
             if (camPt.z > closestZ + 0.05) continue;
+            if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) continue;
 
             // All validity checks passed — now do atomic score comparison.
             // Score must only be updated when we are certain a pixel will be
@@ -306,8 +364,10 @@ RWStructuredBuffer<uint> _AccumR;   // fixed-point R sum (×65536)
 RWStructuredBuffer<uint> _AccumG;   // fixed-point G sum (×65536)
 RWStructuredBuffer<uint> _AccumB;   // fixed-point B sum (×65536)
 RWStructuredBuffer<uint> _AccumW;   // fixed-point weight sum (×65536)
+RWStructuredBuffer<uint> _AccumN;   // views accumulated so far per texel
 StructuredBuffer<uint>   _BestScore; // best score from pass 1 (read-only)
-float _BlendMinFraction;            // threshold: 0.3 = top ~30% of best score
+float _BlendMinFraction;            // threshold: 0.75 = only views near the best
+int   _MaxViews;                    // at most this many views per texel; more views blur misregistration into mush
 
 [numthreads(64, 1, 1)]
 void BlendAccum(uint3 id : SV_DispatchThreadID)
@@ -399,6 +459,15 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
             float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
             float closestZ = asfloat(_DepthBuf[py * _ImgW + px]);
             if (camPt.z > closestZ + 0.05) continue;
+            if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) continue;
+
+            // Cap the observations per texel. Views arrive in capture order,
+            // all already within _BlendMinFraction of the best, so the first
+            // _MaxViews are near-best; beyond that each extra view only adds
+            // registration error.
+            uint seen;
+            InterlockedAdd(_AccumN[texelIdx], 1, seen);
+            if ((int)seen >= _MaxViews) continue;
 
             uint kfColor = _KfPixels[py * _ImgW + px];
             float r = (float)(kfColor & 0xFF);

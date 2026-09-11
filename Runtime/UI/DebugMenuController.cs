@@ -522,7 +522,12 @@ namespace Genesis.RoomScan.UI
 
             var progress = scanner.CurrentProgress;
             var cov = progress.Coverage;
-            SetLabel(_valProgress, $"{progress.OverallProgress:P0}");
+            string analytic = cov.AnalysisAvailable
+                ? $"{progress.OverallProgress:P0} (closed {cov.Closure:P0} · refined {cov.Refinement:P0} · leak {cov.LeakAreaM2:F2} m² · holes {cov.HoleCount})"
+                : "--";
+            SetLabel(_valProgress, cov.ShellCoverageAvailable
+                ? $"{analytic} · shell {cov.ShellCoverage:P0} fills {cov.ShellFillsApplied}"
+                : analytic);
             SetLabel(_valPhase, progress.Phase.ToString());
             SetLabel(_valColorCoverage, $"{cov.ColorCoverage:P0}");
             SetLabel(_valFrozen, $"{cov.FrozenFraction:P0}");

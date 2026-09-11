@@ -65,9 +65,12 @@ namespace Genesis.RoomScan
         [Tooltip("Seam blending pixel radius")]
         [Range(1, 8)]
         [SerializeField] internal int seamBlendRadius = 3;
-        [Tooltip("Minimum score fraction for multi-view blend inclusion")]
-        [Range(0.1f, 0.9f)]
-        [SerializeField] internal float blendMinFraction = 0.3f;
+        [Tooltip("Minimum score fraction of the texel's best view for multi-view blend inclusion. 0.75 keeps only near-frontal, near-distance views; lower values average in oblique / far views and the atlas turns to mush.")]
+        [Range(0.1f, 0.95f)]
+        [SerializeField] internal float blendMinFraction = 0.75f;
+        [Tooltip("At most this many views blended per texel. 2-3 averages sensor noise without stacking registration error from a long scan.")]
+        [Range(1, 8)]
+        [SerializeField] internal int maxViewsPerTexel = 3;
         [Tooltip("Sobel normal map strength (0 = skip normal map generation)")]
         [Range(0f, 20f)]
         [SerializeField] internal float normalStrength = 8f;
@@ -304,6 +307,31 @@ namespace Genesis.RoomScan
             public Quaternion Rotation;
             public float Fx, Fy, Cx, Cy;
             public string JpgPath; // deferred: path to JPEG, read on demand to avoid OOM
+            /// <summary>Hand / forearm capsules at capture (xyz + radius per end), or null.</summary>
+            public Vector4[] BodyCapP0, BodyCapP1;
+        }
+
+        const int BodyCapMax = 8;
+        static readonly Vector4[] s_bodyCapP0 = new Vector4[BodyCapMax];
+        static readonly Vector4[] s_bodyCapP1 = new Vector4[BodyCapMax];
+
+        /// <summary>
+        /// Upload this view's hand capsules so the bake skips texels whose line
+        /// of sight passed through a hand. Radius margin covers the blurry
+        /// edge and the controller.
+        /// </summary>
+        static void BindBodyCapsules(ComputeShader compute, in Keyframe kf)
+        {
+            int n = kf.BodyCapP0 != null ? Mathf.Min(kf.BodyCapP0.Length, BodyCapMax) : 0;
+            for (int i = 0; i < BodyCapMax; i++)
+            {
+                s_bodyCapP0[i] = i < n ? kf.BodyCapP0[i] : Vector4.zero;
+                s_bodyCapP1[i] = i < n ? kf.BodyCapP1[i] : Vector4.zero;
+            }
+            compute.SetInt("_BodyCapCount", n);
+            compute.SetVectorArray("_BodyCapP0", s_bodyCapP0);
+            compute.SetVectorArray("_BodyCapP1", s_bodyCapP1);
+            compute.SetFloat("_BodyCapMargin", 1.4f);
         }
 
         struct TriData
@@ -411,6 +439,16 @@ namespace Genesis.RoomScan
                     {
                         kf.Position = keyframeRelocation.MultiplyPoint3x4(kf.Position);
                         kf.Rotation = keyframeRelocation.rotation * kf.Rotation;
+                        if (kf.BodyCapP0 != null)
+                        {
+                            for (int i = 0; i < kf.BodyCapP0.Length; i++)
+                            {
+                                Vector3 a = keyframeRelocation.MultiplyPoint3x4((Vector3)kf.BodyCapP0[i]);
+                                Vector3 b = keyframeRelocation.MultiplyPoint3x4((Vector3)kf.BodyCapP1[i]);
+                                kf.BodyCapP0[i] = new Vector4(a.x, a.y, a.z, kf.BodyCapP0[i].w);
+                                kf.BodyCapP1[i] = new Vector4(b.x, b.y, b.z, kf.BodyCapP1[i].w);
+                            }
+                        }
                     }
                     metaList.Add(kf);
                 }
@@ -422,6 +460,34 @@ namespace Genesis.RoomScan
             return metaList;
         }
 
+        /// <summary>"x y z x y z r;..." as written by the keyframe collector.</summary>
+        static void ParseBodyCapsules(string caps, ref Keyframe kf)
+        {
+            if (string.IsNullOrEmpty(caps)) return;
+            var ci = System.Globalization.CultureInfo.InvariantCulture;
+            string[] entries = caps.Split(';');
+            var p0 = new System.Collections.Generic.List<Vector4>(entries.Length);
+            var p1 = new System.Collections.Generic.List<Vector4>(entries.Length);
+            foreach (string e in entries)
+            {
+                string[] f = e.Split(' ');
+                if (f.Length < 7) continue;
+                if (!float.TryParse(f[0], System.Globalization.NumberStyles.Float, ci, out float ax)) continue;
+                if (!float.TryParse(f[1], System.Globalization.NumberStyles.Float, ci, out float ay)) continue;
+                if (!float.TryParse(f[2], System.Globalization.NumberStyles.Float, ci, out float az)) continue;
+                if (!float.TryParse(f[3], System.Globalization.NumberStyles.Float, ci, out float bx)) continue;
+                if (!float.TryParse(f[4], System.Globalization.NumberStyles.Float, ci, out float by)) continue;
+                if (!float.TryParse(f[5], System.Globalization.NumberStyles.Float, ci, out float bz)) continue;
+                if (!float.TryParse(f[6], System.Globalization.NumberStyles.Float, ci, out float r)) continue;
+                p0.Add(new Vector4(ax, ay, az, r));
+                p1.Add(new Vector4(bx, by, bz, r));
+                if (p0.Count >= BodyCapMax) break;
+            }
+            if (p0.Count == 0) return;
+            kf.BodyCapP0 = p0.ToArray();
+            kf.BodyCapP1 = p1.ToArray();
+        }
+
         static Keyframe ParseKeyframe(string jsonLine, string imagesDir)
         {
             var kf = new Keyframe();
@@ -430,6 +496,7 @@ namespace Genesis.RoomScan
             int id = 0;
             float fx = 0, fy = 0, cx = 0, cy = 0;
             int sw = 0, sh = 0;
+            string caps = null;
 
             foreach (string token in jsonLine.Trim('{', '}', ' ').Split(','))
             {
@@ -439,6 +506,7 @@ namespace Genesis.RoomScan
                 string val = kv[1].Trim('"', ' ');
                 switch (key)
                 {
+                    case "cap": caps = val; break;
                     case "id": id = int.Parse(val); break;
                     case "px": px = float.Parse(val, System.Globalization.CultureInfo.InvariantCulture); break;
                     case "py": py = float.Parse(val, System.Globalization.CultureInfo.InvariantCulture); break;
@@ -462,6 +530,7 @@ namespace Genesis.RoomScan
             kf.Cx = cx; kf.Cy = cy;
             kf.SensorWidth = sw;
             kf.SensorHeight = sh;
+            ParseBodyCapsules(caps, ref kf);
 
             string imgPath = Path.Combine(imagesDir, $"{id:D6}.jpg");
             if (!File.Exists(imgPath)) return kf;
@@ -605,6 +674,7 @@ namespace Genesis.RoomScan
                 compute.SetFloat("_CropY", cropY);
                 compute.SetInt("_ImgW", imgW);
                 compute.SetInt("_ImgH", imgH);
+                BindBodyCapsules(compute, kf);
 
                 // Bind per-keyframe buffers
                 compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
@@ -641,10 +711,13 @@ namespace Genesis.RoomScan
                 var accumG = new ComputeBuffer(texelCount, 4);
                 var accumB = new ComputeBuffer(texelCount, 4);
                 var accumW = new ComputeBuffer(texelCount, 4);
-                accumR.SetData(new uint[texelCount]);
-                accumG.SetData(new uint[texelCount]);
-                accumB.SetData(new uint[texelCount]);
-                accumW.SetData(new uint[texelCount]);
+                var accumN = new ComputeBuffer(texelCount, 4);
+                var zeros = new uint[texelCount];
+                accumR.SetData(zeros);
+                accumG.SetData(zeros);
+                accumB.SetData(zeros);
+                accumW.SetData(zeros);
+                accumN.SetData(zeros);
 
                 compute.SetBuffer(kAccum, "_OutPos", outPosBuf);
                 compute.SetBuffer(kAccum, "_OutNorm", outNormBuf);
@@ -654,8 +727,10 @@ namespace Genesis.RoomScan
                 compute.SetBuffer(kAccum, "_AccumG", accumG);
                 compute.SetBuffer(kAccum, "_AccumB", accumB);
                 compute.SetBuffer(kAccum, "_AccumW", accumW);
+                compute.SetBuffer(kAccum, "_AccumN", accumN);
                 compute.SetBuffer(kAccum, "_BestScore", scoreBuf);
                 compute.SetFloat("_BlendMinFraction", blendMinFraction);
+                compute.SetInt("_MaxViews", Mathf.Max(1, maxViewsPerTexel));
 
                 ReportStatus("Multi-view blending (pass 2)...");
                 int blendCount = 0;
@@ -709,6 +784,7 @@ namespace Genesis.RoomScan
                     compute.SetFloat("_CropY", cropY);
                     compute.SetInt("_ImgW", imgW);
                     compute.SetInt("_ImgH", imgH);
+                    BindBodyCapsules(compute, kf);
 
                     compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
                     compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
@@ -740,8 +816,8 @@ namespace Genesis.RoomScan
                 compute.Dispatch(kResolve, (texelCount + 255) / 256, 1, 1);
 
                 accumR.Release(); accumG.Release();
-                accumB.Release(); accumW.Release();
-                Logger.Info("[TextureRefine] Multi-view blend resolved");
+                accumB.Release(); accumW.Release(); accumN.Release();
+                Logger.Info($"[TextureRefine] Multi-view blend resolved (minFraction={blendMinFraction:F2}, maxViews={maxViewsPerTexel})");
             }
 
             // ── Sharpening pass (GPU unsharp mask) ──
