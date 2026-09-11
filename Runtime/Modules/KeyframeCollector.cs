@@ -30,6 +30,15 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Min seconds between captures to prevent burst saves")]
         private float minCaptureInterval = 1f;
 
+        [SerializeField, Tooltip("Skip a frame when the player's hands / forearms cover more than this fraction of the image. Smaller intrusions are kept and masked out of the texture bake per pixel.")]
+        [Range(0.02f, 0.5f)] private float maxHandCoverage = 0.12f;
+
+        /// <summary>Hand / forearm capsules recorded per frame (see <see cref="VolumeIntegrator.CopyHandCapsules"/>).</summary>
+        public const int MaxBodyCapsules = 8;
+        private readonly Vector4[] _capP0 = new Vector4[MaxBodyCapsules];
+        private readonly Vector4[] _capP1 = new Vector4[MaxBodyCapsules];
+        private int _skippedForHands;
+
         private string _exportDir;
         private string _imagesDir;
         private string _manifestPath;
@@ -117,6 +126,24 @@ namespace Genesis.RoomScan
 
             if (!ShouldCapture(pos, rot)) return;
 
+            // Where the hands are right now, in this frame's own image. A
+            // frame that is mostly hand is useless; a hand in the corner is
+            // recorded so the bake can mask those pixels.
+            int capCount = _scanner != null && _scanner.VolumeIntegrator != null
+                ? _scanner.VolumeIntegrator.CopyHandCapsules(_capP0, _capP1) : 0;
+            string caps = null;
+            if (capCount > 0)
+            {
+                float coverage = HandCoverage(capCount, pos, rot, focalLen, currentRes);
+                if (coverage > maxHandCoverage)
+                {
+                    if (++_skippedForHands <= 3 || _skippedForHands % 25 == 0)
+                        Logger.Info($"KeyframeCollector: skipped frame, hands cover {coverage:P0} of the image ({_skippedForHands} so far)");
+                    return;
+                }
+                caps = FormatCapsules(capCount);
+            }
+
             int id = _nextId++;
             _savedPositions.Add(pos);
             _savedRotations.Add(rot);
@@ -129,13 +156,67 @@ namespace Genesis.RoomScan
                 _pendingWrites++;
                 AsyncGPUReadback.Request(rt, 0, TextureFormat.RGBA32, req =>
                     OnReadbackComplete(req, id, timestamp, pos, rot,
-                        focalLen, principalPt, sensorRes, currentRes));
+                        focalLen, principalPt, sensorRes, currentRes, caps));
             }
             else if (frame is Texture2D tex2d)
             {
                 SaveKeyframeData(tex2d.EncodeToJPG(jpegQuality), id, timestamp,
-                    pos, rot, focalLen, principalPt, sensorRes, currentRes);
+                    pos, rot, focalLen, principalPt, sensorRes, currentRes, caps);
             }
+        }
+
+        /// <summary>
+        /// Fraction of the image covered by the hand capsules, estimated as the
+        /// union-free sum of each capsule's projected footprint: the segment
+        /// between its end points swept by the projected radius, clipped to
+        /// the image. Capsules behind the camera contribute nothing.
+        /// </summary>
+        float HandCoverage(int count, Vector3 camPos, Quaternion camRot, Vector2 focal, Vector2 res)
+        {
+            if (res.x <= 1f || res.y <= 1f || focal.x <= 1f) return 0f;
+            Quaternion inv = Quaternion.Inverse(camRot);
+            float imgArea = res.x * res.y;
+            float total = 0f;
+            for (int i = 0; i < count; i++)
+            {
+                Vector3 a = inv * ((Vector3)_capP0[i] - camPos);
+                Vector3 b = inv * ((Vector3)_capP1[i] - camPos);
+                float r = _capP0[i].w;
+                // Camera looks down +Z in this convention (see the bake's projection).
+                float za = Mathf.Max(a.z, 0.05f), zb = Mathf.Max(b.z, 0.05f);
+                if (a.z < 0.05f && b.z < 0.05f) continue;
+                Vector2 pa = new Vector2(focal.x * a.x / za, focal.y * a.y / za) + res * 0.5f;
+                Vector2 pb = new Vector2(focal.x * b.x / zb, focal.y * b.y / zb) + res * 0.5f;
+                float pr = focal.x * r / Mathf.Min(za, zb);
+                // Footprint of the capsule's projection, clipped to the image rect.
+                Vector2 min = Vector2.Min(pa, pb) - Vector2.one * pr;
+                Vector2 max = Vector2.Max(pa, pb) + Vector2.one * pr;
+                min = Vector2.Max(min, Vector2.zero);
+                max = Vector2.Min(max, res);
+                if (max.x <= min.x || max.y <= min.y) continue;
+                // A capsule is thinner than its bounding box: length × 2r + disc ends.
+                float len = Vector2.Distance(pa, pb);
+                float footprint = len * 2f * pr + Mathf.PI * pr * pr;
+                float box = (max.x - min.x) * (max.y - min.y);
+                total += Mathf.Min(footprint, box);
+            }
+            return Mathf.Clamp01(total / imgArea);
+        }
+
+        string FormatCapsules(int count)
+        {
+            var ci = System.Globalization.CultureInfo.InvariantCulture;
+            var sb = new StringBuilder(count * 64);
+            for (int i = 0; i < count; i++)
+            {
+                if (i > 0) sb.Append(';');
+                var a = _capP0[i];
+                var b = _capP1[i];
+                sb.Append(a.x.ToString("F4", ci)).Append(' ').Append(a.y.ToString("F4", ci)).Append(' ').Append(a.z.ToString("F4", ci)).Append(' ')
+                  .Append(b.x.ToString("F4", ci)).Append(' ').Append(b.y.ToString("F4", ci)).Append(' ').Append(b.z.ToString("F4", ci)).Append(' ')
+                  .Append(a.w.ToString("F4", ci));
+            }
+            return sb.ToString();
         }
 
         private bool ShouldCapture(Vector3 pos, Quaternion rot)
@@ -152,7 +233,7 @@ namespace Genesis.RoomScan
 
         private void OnReadbackComplete(AsyncGPUReadbackRequest req, int id, float timestamp,
             Vector3 pos, Quaternion rot, Vector2 focalLen, Vector2 principalPt,
-            Vector2 sensorRes, Vector2 currentRes)
+            Vector2 sensorRes, Vector2 currentRes, string caps)
         {
             _pendingWrites--;
             if (req.hasError)
@@ -171,7 +252,7 @@ namespace Genesis.RoomScan
                 Destroy(tex);
 
                 SaveKeyframeData(jpg, id, timestamp, pos, rot,
-                    focalLen, principalPt, sensorRes, currentRes);
+                    focalLen, principalPt, sensorRes, currentRes, caps);
             }
             catch (Exception e)
             {
@@ -181,7 +262,7 @@ namespace Genesis.RoomScan
 
         private void SaveKeyframeData(byte[] jpgBytes, int id, float timestamp,
             Vector3 pos, Quaternion rot, Vector2 focalLen, Vector2 principalPt,
-            Vector2 sensorRes, Vector2 currentRes)
+            Vector2 sensorRes, Vector2 currentRes, string caps = null)
         {
             Task.Run(() =>
             {
@@ -208,6 +289,10 @@ namespace Genesis.RoomScan
                     sb.Append(",\"sh\":").Append((int)sensorRes.y);
                     sb.Append(",\"w\":").Append((int)currentRes.x);
                     sb.Append(",\"h\":").Append((int)currentRes.y);
+                    // Hand / forearm capsules at capture: "x y z x y z r;..." (no
+                    // commas — the manifest reader splits lines on them).
+                    if (!string.IsNullOrEmpty(caps))
+                        sb.Append(",\"cap\":\"").Append(caps).Append('"');
                     sb.Append('}');
 
                     lock (_manifestPath)

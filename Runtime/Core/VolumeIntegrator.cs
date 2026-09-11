@@ -1510,6 +1510,35 @@ namespace Genesis.RoomScan
             target.SetFloat(EraseMaxWeightID, eraseMaxWeight);
         }
 
+        /// <summary>
+        /// Current hand / forearm capsules in world space, for a consumer that
+        /// needs to know where the player's hands were at a moment (the
+        /// keyframe collector records them so the texture bake can ignore
+        /// pixels that were looking at a hand). Torso capsules are skipped.
+        /// Each entry: (x, y, z, radius) for both ends. Returns the count.
+        /// </summary>
+        public int CopyHandCapsules(Vector4[] p0, Vector4[] p1)
+        {
+            if (p0 == null || p1 == null) return 0;
+            int n = BodyExclusion.Pack(
+                _exclusionP0, _exclusionP1,
+                HeadAnchor, LeftHandAnchor, RightHandAnchor, null,
+                torsoRadius, torsoAbove, torsoBelow,
+                handRadius, handHalfLength,
+                forearmRadius, forearmLength,
+                shoulderDrop, shoulderLateral);
+            int k = 0;
+            for (int i = 0; i < n && k < p0.Length && k < p1.Length; i++)
+            {
+                if (_exclusionP1[i].w < 0.5f) continue;   // torso
+                float r = _exclusionP0[i].w;
+                p0[k] = _exclusionP0[i];
+                p1[k] = new Vector4(_exclusionP1[i].x, _exclusionP1[i].y, _exclusionP1[i].z, r);
+                k++;
+            }
+            return k;
+        }
+
         void DispatchEraseBodyBlobs()
         {
             if (!eraseBodyBlobs || _volume == null || _eraseKernel.Shader == null) return;

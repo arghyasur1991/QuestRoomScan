@@ -979,6 +979,7 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
    - Projects to keyframe screen space via intrinsics (fx, fy, cx, cy with crop offset)
    - **Bounds check**: Discards if outside image
    - **Occlusion check**: Compares projected depth against depth buffer (with 0.05 tolerance)
+   - **Body check**: the keyframe carries the player's hand / forearm capsules at capture (`"cap"` in `frames.jsonl`, written by `KeyframeCollector`, relocated with the pose). A texel whose segment camera → world point passes within `radius × 1.4` of any capsule (`SegSegDistSq`) is skipped — that pixel was the hand, not the wall. Frames where the capsules cover more than `maxHandCoverage` (12 %) of the image are never saved. Same test in `BlendAccum`.
    - **Score**: `dot(surfaceNormal, viewDirection)` — prefers head-on views
    - **Atomic best-score selection**: `InterlockedMax(_ScoreBuf[texelIdx], asuint(score))` — since scores are positive floats, `asuint()` preserves ordering. Color is written only when the thread wins the comparison.
 

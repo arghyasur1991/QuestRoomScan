@@ -51,6 +51,14 @@ All notable changes to this package are documented here. The format follows
   `closureReference`, `fillMeshHoles*`; `MeshClosure.OpenBoundaryMetres` /
   `HoleEdges` / `CutEdges` / `OpenEdgesTotal`, `MeshHole.PerimeterMetres` /
   `Edges`, `ScanCoverage.MeshHoleFills`.
+- Hands stay out of the texture. Body exclusion kept hands out of the mesh,
+  but a keyframe with a hand in front of the camera baked it onto the wall
+  behind. `KeyframeCollector` now records the hand / forearm capsules at
+  capture (`"cap"` in `frames.jsonl`, relocated with the pose on load) and
+  skips frames where they cover more than `maxHandCoverage` (12 %) of the
+  image; `AtlasBakeCompute` rejects any texel whose line of sight from that
+  view passes through a recorded capsule (radius × 1.4 for the blurry edge
+  and the controller), in both the best-view and the blend pass.
 - Multi-view bake: `blendMinFraction` 0.3 → 0.75 and new `maxViewsPerTexel`
   (3) so a long scan no longer averages dozens of misregistered views into
   mush. Keyframe capture thresholds 0.4 m / 20° → 0.5 m / 25°.
