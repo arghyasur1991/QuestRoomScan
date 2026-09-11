@@ -618,7 +618,7 @@ void ClassifyVoxels(uint3 gid : SV_GroupID, uint3 tid : SV_GroupThreadID, uint g
         SetLabel(id, label);
         InterlockedOr(gsClsFlags, 1u << label);
 
-        // Coverage counters (was CountSurfaceCoverage).
+        // Coverage counters.
         bool isSurface = w > PRUNE_WEIGHT && abs(v.x) < 0.3;
         if (isSurface)
         {

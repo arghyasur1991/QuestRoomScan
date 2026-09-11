@@ -6,81 +6,96 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
-### Live scan
+## [1.1.0] - 2026-09-11
 
-- Body exclusion is capsules, not a 0.6 m head cylinder: torso (0.35 m,
-  world-up), hands (0.14 m), and short forearms. Tests both the depth sample
-  (a body pixel integrates nothing along its ray — the negative band behind a
-  hand otherwise meshes as a hand-shaped shell) and the voxel (a wall behind
-  a hand still fills). `FreezeInView` skips capsules; unfreeze does not.
-  Optional `eraseBodyBlobs` (off) can clear leftover hand voxels below
-  `eraseMaxWeight` (0.2, above seed weight).
-- `DepthCapture.removeHandsFromDepth` requests Meta occlusion hand removal
-  (inpaints depth). Needs hand tracking; the runtime turns it off while
-  holding controllers. Capsules cover that case.
-- Default: `RoomScanner` refreshes head / wrists from `OVRCameraRig` each
-  integrate (controller → `HandOnControllerAnchor`; else tracked `OVRHand`).
-  `RoomScanSession.SetBodyExclusionAnchors` is for hosts with a non-OVR
-  rig; it marks anchors host-owned so the scanner will not overwrite them.
-- Scan progress is analytic, from the boundary of observed free space. Each
-  voxel is observed-free, observed-solid or unknown; unknown that touches a
-  full 8³ block of unknown (a 40 cm cube of nothing: the outside, the far
-  side of a hole, the inside of a couch) is void, carried through the shell
-  blocks by an LDS fine flood. Free–solid faces are the surface,
-  free–void faces are leaks — where passthrough shows through. Faces
-  within `cutToleranceVoxels` of a clip plane / the volume edge are cuts.
-  `Closure = surface / (surface + leak)`; `ScanProgress.OverallProgress =
-  Closure × (1 − refinementInfluence × (1 − Refinement))`, refinement being
-  the fraction of surface voxels at or above `confidentWeight`. One
-  full-volume classify per cycle, the rest over ~10 % of the voxels,
-  time-sliced over ~25 frames, one 128-byte readback per
-  `analysisIntervalSeconds`. `ScanCoverage` gains `AnalysisAvailable`,
-  `Closure`, `Refinement`, `ConfidentSurfaceCount`, `LeakAreaM2`,
-  `SurfaceAreaM2`, `HoleCount`, `LargestHole` (area, centroid), `LeakFills`.
-  Needs no camera pose, no rays, no scene model. The labels live in an
-  `R8_UNorm` 3-D texture (`gsLabelVolume`) that the scan mesh shader samples
-  for the red leak tint (`ShowHoles`), so tint, count, list and fill agree.
-- Leak fill (`fillLeaks`, on): leak patches up to `fillLeakMaxAreaM2`
+Analytic scan progress, body exclusion that holds up, and a texture bake
+that ignores the player's hands. `RoomScanSession` only gains members;
+`ScanCoverage` loses its legacy stabilisation fields (see Removed).
+
+### Added
+
+- **Analytic scan progress** from the boundary of observed free space. Every
+  TSDF voxel is observed-free, observed-solid or unknown; unknown that
+  touches a full 8³ block of unknown (a 40 cm cube of nothing — the outside,
+  the far side of a hole, the inside of a couch) is *void*, carried through
+  the shell blocks by an LDS fine flood. Free–solid faces are the surface,
+  free–void faces are **leaks** — exactly where passthrough shows through the
+  mesh. Faces within `cutToleranceVoxels` of a clip plane or the volume edge
+  are cuts, not leaks. `Closure = surface / (surface + leak)`;
+  `ScanProgress.OverallProgress = Closure × (1 − refinementInfluence × (1 −
+  Refinement))`, refinement being the fraction of surface voxels at or above
+  `confidentWeight`. One full-volume classify per cycle, everything else over
+  the ~10 % of blocks that hold both unknown and observed voxels, time-sliced
+  over ~20 frames, one 128-byte readback per `analysisIntervalSeconds`. No
+  camera pose, no rays, no scene model.
+  `ScanCoverage` gains `AnalysisAvailable`, `Closure`, `Refinement`,
+  `ConfidentFraction`, `ConfidentSurfaceCount`, `LeakAreaM2` (the absolute
+  number a host should gate on), `SurfaceAreaM2`, `HoleCount`, `LargestHole`
+  (`MeshHole`: centre, area, faces), `LeakFills`.
+- **Leak tint** (`RoomScanSession.ShowHoles`): the labels live in an
+  `R8_UNorm` 3-D texture (`gsLabelVolume`) the scan mesh shader samples per
+  vertex, so what is red is what is counted, listed and filled.
+- **Leak fill** (`fillLeaks`, on): leak patches up to `fillLeakMaxAreaM2`
   (0.25 m²) are capped by turning the two unknown voxels behind each leak
   face solid, continued from the free voxel's own TSDF value at the band
   slope, so a hole in a wall closes on the wall. Frontier-sized patches are
-  never capped; real depth is never overwritten. Replaces the mesh-boundary
-  disc stamp.
-- Removed: Surface Nets `_OpenEdges` / `MarkBoundary` boundary emission and
-  the vertex `_pad` tint; `holeMinPerimeter`, `closedBoundaryMetres`,
-  `closureReference`, `fillMeshHoles*`; `MeshClosure.OpenBoundaryMetres` /
-  `HoleEdges` / `CutEdges` / `OpenEdgesTotal`, `MeshHole.PerimeterMetres` /
-  `Edges`, `ScanCoverage.MeshHoleFills`.
-- Hands stay out of the texture. Body exclusion kept hands out of the mesh,
-  but a keyframe with a hand in front of the camera baked it onto the wall
-  behind. `KeyframeCollector` now records the hand / forearm capsules at
-  capture (`"cap"` in `frames.jsonl`, relocated with the pose on load) and
-  skips frames where they cover more than `maxHandCoverage` (12 %) of the
-  image; `AtlasBakeCompute` rejects any texel whose line of sight from that
-  view passes through a recorded capsule (radius × 1.4 for the blurry edge
-  and the controller), in both the best-view and the blend pass.
-- Multi-view bake: `blendMinFraction` 0.3 → 0.75 and new `maxViewsPerTexel`
-  (3) so a long scan no longer averages dozens of misregistered views into
-  mush. Keyframe capture thresholds 0.4 m / 20° → 0.5 m / 25°.
-- Removed: the frozen-fraction / colour / plateau progress blend,
-  `ScanCoverage.IsStabilized`, `coverageUpdateInterval`. `FrozenFraction`
-  and `ColorCoverage` stay as raw fields.
-- Shell coverage (needs `RoomUnderstanding`): the captured hull — outer
+  never capped; real depth is never overwritten.
+- **Body exclusion capsules** replace the 0.6 m head cylinder: torso
+  (0.35 m, world-up), hands (0.14 m) and short forearms. Tested at both the
+  depth sample (a body pixel integrates nothing along its ray — the negative
+  band behind a hand otherwise meshes as a hand-shaped shell) and the voxel
+  (a wall behind a hand still fills). `FreezeInView` skips capsules; unfreeze
+  does not. Optional `eraseBodyBlobs` (off) clears leftover hand voxels
+  below `eraseMaxWeight`. `RoomScanner` refreshes head / wrists from
+  `OVRCameraRig` each integrate (controller → `HandOnControllerAnchor`, else
+  tracked `OVRHand`); `RoomScanSession.SetBodyExclusionAnchors` is for hosts
+  with a non-OVR rig and marks the anchors host-owned.
+- `DepthCapture.removeHandsFromDepth` requests Meta occlusion hand removal
+  (inpainted depth). Needs hand tracking; the runtime turns it off while
+  controllers are held, which the capsules cover.
+- **Hands stay out of the texture.** `KeyframeCollector` records the hand /
+  forearm capsules at capture (`"cap"` in `frames.jsonl`, relocated with the
+  pose on load) and skips frames where they cover more than
+  `maxHandCoverage` (12 %) of the image; `AtlasBakeCompute` rejects any
+  texel whose line of sight from that view passes through a recorded
+  capsule (radius × 1.4), in both the best-view and the blend pass.
+- **Shell coverage** (needs `RoomUnderstanding`): the captured hull — outer
   walls, floor, ceiling, furniture faces — is sampled into ≤ 16k cells and
-  marched against the TSDF at the analysis tick. `ScanCoverage` gains
-  `ShellCoverage` (openings excluded from the denominator), `ShellGapCount`,
-  `LargestGap`, `ShellFillsApplied`. Guidance and auto-fill only; it never
-  feeds `OverallProgress`. `RoomScanSession.CopyShellGaps` lists the
-  largest unscanned patches.
+  marched against the TSDF on the analysis tick. `ScanCoverage` gains
+  `ShellCoverageAvailable`, `ShellCoverage` (openings excluded from the
+  denominator), `ShellCellsTotal / Covered / Excluded / Empty`,
+  `ShellGapCount`, `LargestGap`, `ShellFillsApplied`;
+  `RoomScanSession.CopyShellGaps` lists the largest unscanned patches.
   Furniture faces march through the whole scene box, and a segment the
-  sensor has seen straight through (observed free space) is reported empty
-  and leaves the denominator (`ShellCellsEmpty`) — air inside a loose couch,
-  bed, or table box is not a hole.
-- Auto-fill while scanning: small wall / floor / ceiling gaps whose covered
-  neighbours lie on one plane are stamped with that plane at a soft weight
-  (`autoFillShellGaps`, on); small furniture gaps get a cluster-local
+  sensor has seen straight through is reported empty and leaves the
+  denominator — air inside a loose couch or table box is not a hole.
+  Guidance and auto-fill only; it never feeds `OverallProgress`.
+- **Shell auto-fill** while scanning: small wall / floor / ceiling gaps whose
+  covered neighbours lie on one plane are stamped with that plane at a soft
+  weight (`autoFillShellGaps`, on); small furniture gaps get a cluster-local
   6-neighbour close (`closeFurnitureHoles`, on). Real depth overrides both.
-  No volume-wide pass is added.
+- **Freeze / unfreeze spotlight**: `FreezeInView` / `UnfreezeInView` paint a
+  head-forward cone (`freezeConeHalfAngle`, 15°) instead of the whole depth
+  frustum; `RoomScanSession.FreezeConeHalfAngle` lets a host draw the ring.
+
+### Changed
+
+- Multi-view bake: `blendMinFraction` 0.3 → 0.75 and new `maxViewsPerTexel`
+  (3), so a long scan no longer averages dozens of misregistered views into
+  mush. Keyframe capture thresholds 0.4 m / 20° → 0.5 m / 25°.
+- `ScanProgress.Phase` thresholds now read `OverallProgress` (< 0.30
+  Discovering, < 0.90 Refining, < 0.95 Stabilized, else Complete).
+- The compute package compiles warning-free on Vulkan (single-exit helpers,
+  direction tables instead of dynamic vector-component writes).
+
+### Removed
+
+- The frozen-fraction / colour / vertex-plateau progress blend:
+  `ScanCoverage.IsStabilized`, `VolumeIntegrator.coverageUpdateInterval` and
+  the separate coverage readback. `FrozenFraction` and `ColorCoverage` stay
+  as raw fields. Hosts that gated on `IsStabilized` should gate on
+  `Coverage.LeakAreaM2` (absolute) or `OverallProgress`.
+- `RoomScanner.TryGetCameraIntrinsics` and the body-exclusion diagnostic log.
 
 ## [1.0.0] - 2026-09-09
 

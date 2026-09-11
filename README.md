@@ -113,12 +113,12 @@ Add to your project's `Packages/manifest.json`, pinned to a release tag:
 ```json
 {
   "dependencies": {
-    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.0.0"
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.1.0"
   }
 }
 ```
 
-Drop the `#v1.0.0` suffix to track `main`. Releases and their notes are in
+Drop the `#v1.1.0` suffix to track `main`. Releases and their notes are in
 [`CHANGELOG.md`](CHANGELOG.md); `main` only moves by squash-merged release PR.
 
 For Gaussian Splat support, also add the optional dependency:

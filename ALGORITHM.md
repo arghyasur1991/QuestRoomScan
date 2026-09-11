@@ -649,8 +649,8 @@ makes the analytic closure above reach 100 % in practice.
     denominator for that tick. An opaque surface always leaves ≥ 3 unobserved
     voxels behind it, so it can never read as empty.
   - *uncovered* — unobserved voxels and no surface. A hole, or not yet looked at.
-  Dispatched with the 1 Hz `CountSurfaceCoverage` tick; ≤ 16k threads × ≤ 64
-  reads — about 2 % of that pass.
+  Dispatched on the 1 Hz analysis tick alongside `ClassifyVoxels`; ≤ 16k
+  threads × ≤ 64 reads — about 2 % of that pass.
 - **Readback.** One `uint` per cell (bit 0 covered, bit 1 empty, bits 8–15 hit
   step), stamped with the cell-set generation so a result that raced an
   anchors-changed rebuild is dropped. On the main thread `ShellCoverageTracker`
