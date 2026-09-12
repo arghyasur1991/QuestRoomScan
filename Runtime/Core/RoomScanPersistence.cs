@@ -661,6 +661,99 @@ namespace Genesis.RoomScan
             return RoomAnchorManager.ComputeRelocationMatrix(anchorNow, atCreate);
         }
 
+        // ─────────────────────────────────────────────────────────────
+        //  Anchor frame (for content a game persists relative to the room)
+        // ─────────────────────────────────────────────────────────────
+
+        Vector3[] _refinedStoredPositions;
+        Vector3[] _refinedStoredNormals;
+
+        /// <summary>
+        /// The relocation applied to the refined / simplified / enhanced mesh
+        /// vertices when the active package was loaded:
+        /// <c>world = RefinedRelocation × stored</c>. Identity for a fresh scan
+        /// or a package loaded without an anchor.
+        /// </summary>
+        public Matrix4x4 RefinedRelocation { get; private set; } = Matrix4x4.identity;
+
+        /// <summary>
+        /// Pose of the spatial anchor when the refined mesh was created — the
+        /// frame the stored vertices are expressed against (<c>anchor.json</c>
+        /// <c>refinedMatrixAtCreate</c>, falling back to <c>baseMatrixAtSave</c>).
+        /// Identity when the package has no anchor.
+        /// </summary>
+        public Matrix4x4 RefinedAnchorAtCreate
+        {
+            get
+            {
+                var ad = _activeAnchorData;
+                if (ad == null) return Matrix4x4.identity;
+                if (ad.refinedMatrixAtCreate != null) return FloatsToMatrix(ad.refinedMatrixAtCreate);
+                if (ad.baseMatrixAtSave != null) return FloatsToMatrix(ad.baseMatrixAtSave);
+                return Matrix4x4.identity;
+            }
+        }
+
+        /// <summary>
+        /// The game mesh expressed in the spatial-anchor frame.
+        ///
+        /// <para>The mesh a load hands back is in world space, relocated with
+        /// the anchor pose sampled when the anchor localized. Anything that
+        /// follows the anchor afterwards (a root parented under it) sees a
+        /// slightly different pose every frame as tracking refines, so
+        /// "world mesh × root.worldToLocal" is a different set of vertices on
+        /// every call and in every session — millimetres, but enough to move
+        /// anything rasterised from it. This method rebuilds the mesh from
+        /// package constants only — <c>AnchorAtCreate⁻¹ × stored vertices</c> —
+        /// so two loads of the same package give the same bits. Author
+        /// persistent room content in this frame and present it under a root
+        /// bound to the anchor.</para>
+        ///
+        /// <para><paramref name="worldMesh"/> supplies UVs and triangles (and
+        /// the vertices themselves for a fresh scan, whose stored frame is the
+        /// world it was scanned in). Returns null if no mesh is available.</para>
+        /// </summary>
+        public Mesh BuildAnchorFrameMesh(Mesh worldMesh)
+        {
+            if (worldMesh == null) return null;
+
+            Vector3[] stored = _refinedStoredPositions;
+            Vector3[] storedNormals = _refinedStoredNormals;
+            if (stored == null || stored.Length != worldMesh.vertexCount)
+            {
+                // Fresh scan (nothing was relocated): the mesh is already in
+                // the frame the create-time anchor matrix was recorded against.
+                stored = worldMesh.vertices;
+                storedNormals = worldMesh.normals;
+            }
+
+            Matrix4x4 toAnchor = RefinedAnchorAtCreate.inverse;
+            var positions = new Vector3[stored.Length];
+            for (int i = 0; i < stored.Length; i++)
+                positions[i] = toAnchor.MultiplyPoint3x4(stored[i]);
+
+            var mesh = new Mesh
+            {
+                name = worldMesh.name + "_AnchorFrame",
+                indexFormat = worldMesh.indexFormat
+            };
+            mesh.SetVertices(positions);
+            if (storedNormals != null && storedNormals.Length == stored.Length)
+            {
+                var normals = new Vector3[storedNormals.Length];
+                for (int i = 0; i < normals.Length; i++)
+                    normals[i] = toAnchor.MultiplyVector(storedNormals[i]).normalized;
+                mesh.SetNormals(normals);
+            }
+            var uvs = new List<Vector2>();
+            worldMesh.GetUVs(0, uvs);
+            if (uvs.Count == stored.Length) mesh.SetUVs(0, uvs);
+            mesh.SetTriangles(worldMesh.triangles, 0);
+            if (uvs.Count == stored.Length) mesh.RecalculateTangents();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
         /// <summary>
         /// Loads refined mesh variants, atlas(es), applies vertex relocation, and
         /// sends everything to the scanner. Both full and refined-only paths call this.
@@ -698,6 +791,17 @@ namespace Genesis.RoomScan
             });
 
             await SwitchToUnityMainThreadAsync(unitySync);
+
+            // Keep the display mesh's vertices as stored, before relocation:
+            // BuildAnchorFrameMesh rebuilds the mesh in the anchor frame from
+            // these and the package's create-time anchor pose alone, so the
+            // result does not depend on where tracking put the anchor today.
+            {
+                var stored = hasEnhanced ? enhancedData : hasSimplified ? simplifiedData : meshData;
+                _refinedStoredPositions = (Vector3[])stored.Positions.Clone();
+                _refinedStoredNormals = stored.Normals != null ? (Vector3[])stored.Normals.Clone() : null;
+            }
+            RefinedRelocation = relocRefined;
 
             if (relocRefined != Matrix4x4.identity)
             {
@@ -1093,6 +1197,7 @@ namespace Genesis.RoomScan
             {
                 ActivePackageId = null;
                 _activeAnchorData = null;
+                ClearRefinedFrame();
             }
 
             Logger.Info($"Package deleted: {pkgId}");
@@ -1103,6 +1208,14 @@ namespace Genesis.RoomScan
         {
             ActivePackageId = null;
             _activeAnchorData = null;
+            ClearRefinedFrame();
+        }
+
+        void ClearRefinedFrame()
+        {
+            _refinedStoredPositions = null;
+            _refinedStoredNormals = null;
+            RefinedRelocation = Matrix4x4.identity;
         }
 
         /// <summary>
@@ -1159,6 +1272,7 @@ namespace Genesis.RoomScan
             Directory.CreateDirectory(Path.Combine(tmpDir, "keyframes", "images"));
             ActivePackageId = TmpPkgId;
             _activeAnchorData = new PackageAnchorData();
+            ClearRefinedFrame();
             Logger.Info($"Tmp package created: {tmpDir}");
         }
 

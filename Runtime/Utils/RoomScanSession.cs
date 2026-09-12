@@ -11,9 +11,23 @@ namespace Genesis.RoomScan
     /// </summary>
     public struct ScanResult
     {
+        /// <summary>The game-ready mesh in world space, relocated with the
+        /// anchor pose sampled when the anchor localized. Render this.</summary>
         public Mesh Mesh;
         public Texture2D Atlas;
         public string PackageId;
+
+        /// <summary>
+        /// The same mesh in the spatial-anchor frame, rebuilt from package
+        /// constants only (see
+        /// <see cref="RoomScanPersistence.BuildAnchorFrameMesh"/>). Use this,
+        /// not <c>Mesh × root.worldToLocal</c>, for anything you generate once
+        /// and persist relative to the room: it is identical across loads and
+        /// sessions, where the world mesh moves with tracking. Present the
+        /// result under a root bound to the anchor (<see cref="RoomSpaceRoot"/>).
+        /// Null when no persistence component is present.
+        /// </summary>
+        public Mesh AnchorFrameMesh;
     }
 
     /// <summary>
@@ -269,7 +283,8 @@ namespace Genesis.RoomScan
             {
                 Mesh = _scanner.RefinedMesh,
                 Atlas = _scanner.RefinedAtlas,
-                PackageId = _persistence?.ActivePackageId
+                PackageId = _persistence?.ActivePackageId,
+                AnchorFrameMesh = _persistence?.BuildAnchorFrameMesh(_scanner.RefinedMesh)
             };
         }
 
@@ -290,7 +305,8 @@ namespace Genesis.RoomScan
             {
                 Mesh = _scanner.RefinedMesh,
                 Atlas = _scanner.RefinedAtlas,
-                PackageId = packageId
+                PackageId = packageId,
+                AnchorFrameMesh = _persistence?.BuildAnchorFrameMesh(_scanner.RefinedMesh)
             };
         }
 

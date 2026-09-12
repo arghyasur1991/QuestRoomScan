@@ -6,6 +6,20 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Anchor-frame mesh for persistent room content.**
+  `ScanResult.AnchorFrameMesh` and `RoomScanPersistence.BuildAnchorFrameMesh`
+  return the game mesh in the spatial-anchor frame, rebuilt from package
+  constants only (`AnchorAtCreate⁻¹ × stored vertices`). The world mesh is
+  relocated with the anchor pose sampled when the anchor localized, and a
+  root parented under the anchor moves with tracking afterwards, so
+  `worldMesh × root.worldToLocal` differs by millimetres on every call and in
+  every session — enough to change anything rasterised from it. Author
+  once-generated room content in this frame and present it under
+  `RoomSpaceRoot`; two loads of one package give identical bits.
+  `RefinedRelocation` and `RefinedAnchorAtCreate` expose the matrices.
+
 ## [1.1.0] - 2026-09-11
 
 Analytic scan progress, body exclusion that holds up, and a texture bake
