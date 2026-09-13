@@ -1,4 +1,6 @@
 #pragma kernel ClearDepth
+#pragma kernel ClearBuffer
+#pragma kernel CopyUint
 #pragma kernel BuildDepth
 #pragma kernel BakeAtlas
 #pragma kernel BlendSeams
@@ -109,6 +111,28 @@ void ClearDepth(uint3 id : SV_DispatchThreadID)
 {
     if ((int)id.x >= _ImgW * _ImgH) return;
     _DepthBuf[id.x] = asuint(999.0);
+}
+
+// Zero a uint buffer on GPU. Score / atlas / blend-accum used to
+// SetData(new uint[texelCount]) on the main thread (16 MB × N at 2048²).
+RWStructuredBuffer<uint> _ClearBuf;
+int _ClearCount;
+
+[numthreads(256, 1, 1)]
+void ClearBuffer(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _ClearCount) return;
+    _ClearBuf[id.x] = 0;
+}
+
+StructuredBuffer<uint> _CopySrc;
+RWStructuredBuffer<uint> _CopyDst;
+
+[numthreads(256, 1, 1)]
+void CopyUint(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _ClearCount) return;
+    _CopyDst[id.x] = _CopySrc[id.x];
 }
 
 // ═════════════════════════════════════════════════════════════

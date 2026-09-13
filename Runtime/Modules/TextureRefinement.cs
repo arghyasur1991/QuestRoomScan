@@ -142,6 +142,9 @@ namespace Genesis.RoomScan
 
             ReportStatus("UV unwrapping...");
             XAtlasWrapper.Result uvResult = default;
+            Vector3[] outPos = null;
+            Vector3[] outNorm = null;
+            Vector2[] outUVs = null;
 
             await Task.Run(() =>
             {
@@ -158,28 +161,32 @@ namespace Genesis.RoomScan
                 }
                 uvResult = XAtlasWrapper.Unwrap(flatPos, flatNorm, inPos.Length,
                     inIdx, inIdx.Length, opts);
+                if (uvResult.VertexCount == 0) return;
+
+                int aw = uvResult.AtlasWidth;
+                int ah = uvResult.AtlasHeight;
+                outPos = new Vector3[uvResult.VertexCount];
+                outNorm = new Vector3[uvResult.VertexCount];
+                outUVs = new Vector2[uvResult.VertexCount];
+                for (int i = 0; i < uvResult.VertexCount; i++)
+                {
+                    int src = uvResult.Xrefs[i];
+                    outPos[i] = inPos[src];
+                    outNorm[i] = inNorm[src];
+                    outUVs[i] = new Vector2(
+                        uvResult.UVs[i * 2] / aw,
+                        uvResult.UVs[i * 2 + 1] / ah);
+                }
             });
 
-            if (uvResult.VertexCount == 0)
+            if (uvResult.VertexCount == 0 || outPos == null)
                 throw new InvalidOperationException("xatlas produced no output vertices");
 
             int atlasW = uvResult.AtlasWidth;
             int atlasH = uvResult.AtlasHeight;
             Logger.Info($"[TextureRefine] xatlas: {uvResult.VertexCount} verts, " +
                       $"{uvResult.IndexCount / 3} tris, atlas {atlasW}x{atlasH}");
-
-            Vector3[] outPos = new Vector3[uvResult.VertexCount];
-            Vector3[] outNorm = new Vector3[uvResult.VertexCount];
-            Vector2[] outUVs = new Vector2[uvResult.VertexCount];
-            for (int i = 0; i < uvResult.VertexCount; i++)
-            {
-                int src = uvResult.Xrefs[i];
-                outPos[i] = inPos[src];
-                outNorm[i] = inNorm[src];
-                outUVs[i] = new Vector2(
-                    uvResult.UVs[i * 2] / atlasW,
-                    uvResult.UVs[i * 2 + 1] / atlasH);
-            }
+            await Task.Yield();
 
             return new UnwrappedMeshResult
             {
@@ -561,9 +568,11 @@ namespace Genesis.RoomScan
             }
 
             ReportStatus("Loading keyframe metadata...");
-            var metaList = ParseKeyframeManifest(keyframeDir, keyframeRelocation);
+            var relocation = keyframeRelocation;
+            var metaList = await Task.Run(() => ParseKeyframeManifest(keyframeDir, relocation));
             if (metaList.Count == 0)
                 throw new InvalidOperationException("No keyframes available for baking");
+            await Task.Yield();
 
             int total = metaList.Count;
             Logger.Info($"[TextureRefine] GPU compute bake: {total} keyframes" +
@@ -579,30 +588,44 @@ namespace Genesis.RoomScan
             int kClear = compute.FindKernel("ClearDepth");
             int kDepth = compute.FindKernel("BuildDepth");
             int kBake  = compute.FindKernel("BakeAtlas");
+            int kClearU = -1;
+            int kCopyU = -1;
+            try { kClearU = compute.FindKernel("ClearBuffer"); }
+            catch { /* shader variant without the GPU zero kernel */ }
+            try { kCopyU = compute.FindKernel("CopyUint"); }
+            catch { /* shader variant without the GPU copy kernel */ }
+
+            ReportStatus("Uploading mesh to GPU...");
+            Vector2[] rawUV2 = null;
+            var rawUVs = mesh.RawUVs;
+            int vertCount = mesh.Positions.Length;
+            await Task.Run(() =>
+            {
+                rawUV2 = new Vector2[vertCount];
+                for (int i = 0; i < rawUV2.Length; i++)
+                    rawUV2[i] = new Vector2(rawUVs[i * 2], rawUVs[i * 2 + 1]);
+            });
 
             // ── Create persistent GPU buffers (mesh data + atlas) ──
             var origPosBuf = new ComputeBuffer(mesh.OrigPositions.Length, 12);
-            origPosBuf.SetData(mesh.OrigPositions);
+            await UploadBuffer(origPosBuf, mesh.OrigPositions);
             var origIdxBuf = new ComputeBuffer(mesh.OrigIndices.Length, 4);
-            origIdxBuf.SetData(mesh.OrigIndices);
+            await UploadBuffer(origIdxBuf, mesh.OrigIndices);
 
             var outPosBuf = new ComputeBuffer(mesh.Positions.Length, 12);
-            outPosBuf.SetData(mesh.Positions);
+            await UploadBuffer(outPosBuf, mesh.Positions);
             var outNormBuf = new ComputeBuffer(mesh.Normals.Length, 12);
-            outNormBuf.SetData(mesh.Normals);
+            await UploadBuffer(outNormBuf, mesh.Normals);
             var outIdxBuf = new ComputeBuffer(mesh.Indices.Length, 4);
-            outIdxBuf.SetData(mesh.Indices);
+            await UploadBuffer(outIdxBuf, mesh.Indices);
 
-            var rawUV2 = new Vector2[mesh.Positions.Length];
-            for (int i = 0; i < rawUV2.Length; i++)
-                rawUV2[i] = new Vector2(mesh.RawUVs[i * 2], mesh.RawUVs[i * 2 + 1]);
             var rawUVBuf = new ComputeBuffer(rawUV2.Length, 8);
-            rawUVBuf.SetData(rawUV2);
+            await UploadBuffer(rawUVBuf, rawUV2);
 
             var scoreBuf = new ComputeBuffer(texelCount, 4);
-            scoreBuf.SetData(new uint[texelCount]);
+            await ZeroUintBuffer(compute, kClearU, scoreBuf, texelCount);
             var atlasBuf = new ComputeBuffer(texelCount, 4);
-            atlasBuf.SetData(new uint[texelCount]);
+            await ZeroUintBuffer(compute, kClearU, atlasBuf, texelCount);
 
             // Bind static buffers to kernels
             compute.SetBuffer(kDepth, "_OrigPos", origPosBuf);
@@ -643,12 +666,11 @@ namespace Genesis.RoomScan
                 var accumB = new ComputeBuffer(texelCount, 4);
                 var accumW = new ComputeBuffer(texelCount, 4);
                 var accumN = new ComputeBuffer(texelCount, 4);
-                var zeros = new uint[texelCount];
-                accumR.SetData(zeros);
-                accumG.SetData(zeros);
-                accumB.SetData(zeros);
-                accumW.SetData(zeros);
-                accumN.SetData(zeros);
+                await ZeroUintBuffer(compute, kClearU, accumR, texelCount);
+                await ZeroUintBuffer(compute, kClearU, accumG, texelCount);
+                await ZeroUintBuffer(compute, kClearU, accumB, texelCount);
+                await ZeroUintBuffer(compute, kClearU, accumW, texelCount);
+                await ZeroUintBuffer(compute, kClearU, accumN, texelCount);
 
                 compute.SetBuffer(kAccum, "_OutPos", outPosBuf);
                 compute.SetBuffer(kAccum, "_OutNorm", outNormBuf);
@@ -694,9 +716,7 @@ namespace Genesis.RoomScan
                 ReportStatus("Sharpening...");
                 int kSharpen = compute.FindKernel("SharpenAtlas");
                 var sharpenSrcBuf = new ComputeBuffer(texelCount, 4);
-                var tmp = new uint[texelCount];
-                atlasBuf.GetData(tmp);
-                sharpenSrcBuf.SetData(tmp);
+                await CopyUintBuffer(compute, kCopyU, atlasBuf, sharpenSrcBuf, texelCount);
 
                 compute.SetFloat("_SharpenStrength", sharpenStrength);
                 compute.SetInt("_SharpenRadius", sharpenRadius);
@@ -722,9 +742,7 @@ namespace Genesis.RoomScan
             {
                 ReportStatus("Blending seams...");
                 var seamSrcBuf = new ComputeBuffer(texelCount, 4);
-                var tmp = new uint[texelCount];
-                atlasBuf.GetData(tmp);
-                seamSrcBuf.SetData(tmp);
+                await CopyUintBuffer(compute, kCopyU, atlasBuf, seamSrcBuf, texelCount);
 
                 compute.SetInt("_AtlasW", atlasW);
                 compute.SetInt("_AtlasH", atlasH);
@@ -749,9 +767,7 @@ namespace Genesis.RoomScan
                 normalBuf = new ComputeBuffer(texelCount, 4);
 
                 var sobelSrcBuf = new ComputeBuffer(texelCount, 4);
-                var tmp = new uint[texelCount];
-                atlasBuf.GetData(tmp);
-                sobelSrcBuf.SetData(tmp);
+                await CopyUintBuffer(compute, kCopyU, atlasBuf, sobelSrcBuf, texelCount);
 
                 compute.SetFloat("_NormalStrength", normalStrength);
                 compute.SetInt("_AtlasW", atlasW);
@@ -851,6 +867,45 @@ namespace Genesis.RoomScan
                 await Task.Yield();
         }
 
+        static async Task UploadBuffer<T>(ComputeBuffer buf, T[] data) where T : struct
+        {
+            buf.SetData(data);
+            await Task.Yield();
+        }
+
+        async Task ZeroUintBuffer(ComputeShader compute, int kClear, ComputeBuffer buf, int count)
+        {
+            if (kClear >= 0)
+            {
+                compute.SetInt("_ClearCount", count);
+                compute.SetBuffer(kClear, "_ClearBuf", buf);
+                compute.Dispatch(kClear, (count + 255) / 256, 1, 1);
+                await Task.Yield();
+                return;
+            }
+            var zeros = await Task.Run(() => new uint[count]);
+            buf.SetData(zeros);
+            await Task.Yield();
+        }
+
+        async Task CopyUintBuffer(
+            ComputeShader compute, int kCopy, ComputeBuffer src, ComputeBuffer dst, int count)
+        {
+            if (kCopy >= 0)
+            {
+                compute.SetInt("_ClearCount", count);
+                compute.SetBuffer(kCopy, "_CopySrc", src);
+                compute.SetBuffer(kCopy, "_CopyDst", dst);
+                compute.Dispatch(kCopy, (count + 255) / 256, 1, 1);
+                await Task.Yield();
+                return;
+            }
+            var tmp = new uint[count];
+            src.GetData(tmp);
+            dst.SetData(tmp);
+            await Task.Yield();
+        }
+
         /// <summary>
         /// One keyframe, split across compositor frames: clear+depth, then
         /// shade, then idle frames so compute cannot pile up. Decode the next
@@ -912,6 +967,7 @@ namespace Genesis.RoomScan
                 kf.Width = tex.width;
                 kf.Height = tex.height;
                 metaList[ki] = kf;
+                await Task.Yield();
                 return true;
             }
 
