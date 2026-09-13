@@ -232,6 +232,15 @@ namespace Genesis.RoomScan
         public float FreezeConeHalfAngle => _scanner != null ? _scanner.FreezeConeHalfAngle : 15f;
 
         /// <summary>
+        /// See <see cref="RoomScanner.PresentRefinedWhenReady"/>.
+        /// </summary>
+        public bool PresentRefinedWhenReady
+        {
+            get => _scanner != null && _scanner.PresentRefinedWhenReady;
+            set { if (_scanner != null) _scanner.PresentRefinedWhenReady = value; }
+        }
+
+        /// <summary>
         /// Inverse of <see cref="FreezeInView"/>: unfreezes voxels in the same
         /// cone so depth integration can refine them again. Useful when you
         /// painted too aggressively or part of the scan needs re-capturing.
@@ -244,7 +253,11 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Stops scanning, runs on-device texture refinement (UV unwrap + atlas bake + simplification),
-        /// saves to a permanent package, and releases heavy GPU resources (~400-500 MB).
+        /// and saves to a permanent package. When
+        /// <see cref="PresentRefinedWhenReady"/> is true (default), also
+        /// switches to the refined mesh and releases the live TSDF
+        /// (~400-500 MB). When false, the live vertex mesh stays until the
+        /// host presents and releases.
         /// Returns a <see cref="ScanResult"/> with the game-ready mesh and atlas.
         /// </summary>
         public async Task<ScanResult> FinalizeScanAsync()
@@ -277,7 +290,8 @@ namespace Genesis.RoomScan
             if (!saved)
                 Logger.Warning("RoomScanSession: save failed — result is in memory only");
 
-            _scanner.ReleaseScanResources();
+            if (_scanner.PresentRefinedWhenReady)
+                _scanner.ReleaseScanResources();
 
             return new ScanResult
             {

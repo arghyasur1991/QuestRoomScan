@@ -361,6 +361,17 @@ namespace Genesis.RoomScan
         public bool HasRefinedTexture { get; private set; }
         public bool HasHQRefinedTexture { get; private set; }
 
+        /// <summary>
+        /// True (default): when on-device refinement finishes, switch to
+        /// the refined mesh and <see cref="RoomScanSession.FinalizeScanAsync"/>
+        /// releases the live TSDF. False: bake into memory
+        /// (<see cref="HasRefinedTexture"/>, <see cref="RefinedMeshReady"/>)
+        /// but keep drawing the live vertex mesh until the host calls
+        /// <see cref="SetRenderMode"/>(<see cref="ScanRenderMode.Refined"/>)
+        /// and then <see cref="ReleaseScanResources"/>.
+        /// </summary>
+        public bool PresentRefinedWhenReady { get; set; } = true;
+
         /// <summary>The refined-mesh renderer, or null until a refined mesh exists.</summary>
         public MeshRenderer RefinedMeshRenderer => _refinedRenderer;
         public bool IsRefining { get; private set; }
@@ -1298,7 +1309,8 @@ namespace Genesis.RoomScan
 
                 ApplyRefinedAtlas(toRender);
                 HasRefinedTexture = true;
-                SetRenderMode(ScanRenderMode.Refined);
+                if (PresentRefinedWhenReady)
+                    SetRenderMode(ScanRenderMode.Refined);
 
                 // IMPORTANT: persist refined artifacts BEFORE firing RefinedMeshReady.
                 // RoomScanSession.FinalizeScanAsync wakes on this event and then calls
