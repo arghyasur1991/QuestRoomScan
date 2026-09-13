@@ -826,7 +826,8 @@ End-to-end pipeline: on-device keyframe + point cloud capture → server-based C
 ### 14.1 KeyframeCollector (Quest, automatic)
 Runs alongside scanning with no user interaction. Saves posed camera frames directly into the active scan package (`keyframes/`):
 - **Selection**: Motion-gated — translation > 0.5m OR rotation > 25 deg from any saved keyframe, and at least 1 s since the last capture
-- **Rejection**: The head must be still over each of the last **two** camera intervals: angular velocity ≤ 45 deg/s and linear velocity ≤ 0.5 m/s, measured from the frames' own PCA timestamps (`ICameraFrameTiming`), not the app frame they were seen in. Motion blur and exposure-time pose error both scale with head speed; the first still frame after a turn straddled the motion and is skipped
+- **Rejection**: The head must be still over each of the last **two** camera intervals: angular velocity ≤ 60 deg/s and linear velocity ≤ 1.0 m/s, measured from the frames' own PCA timestamps (`ICameraFrameTiming`), not the app frame they were seen in. Motion blur and exposure-time pose error both scale with head speed; the first still frame after a turn straddled the motion and is skipped. **Coverage beats sharpness**: after `motionGraceSeconds` (2.5 s) without a keyframe, a frame moving up to twice the gates is accepted anyway — a headset scan at 0.5 m/s gave 22 keyframes for a whole room and left walls black; a slightly soft photo textures the wall, no photo does not
+- **Hand footprint**: capsules are clipped at the near plane before projection; a forearm running back past the camera used to project to a footprint the size of the image and reject the frame as "100 % hand"
 - **Per frame**: JPEG (1280x960, quality 95) + one JSON line in `frames.jsonl` with:
   - Position (px, py, pz), rotation quaternion (qx, qy, qz, qw)
   - Intrinsics (fx, fy, cx, cy), sensor resolution, current resolution
@@ -953,7 +954,11 @@ The corrected pose drives that keyframe's depth pass and `BlendAccum`. A pure im
 
 ### 15.1b Chart-Consistent View Preference
 
-Pass 1 sums each keyframe's valid texel scores per xatlas chart (one atomic per triangle per keyframe into a `charts × keyframes` table); `ChartArgmax` picks the chart's best view. In pass 2 that view is weighted ×`chartBestViewBoost` (default 3), admitted at 0.7× the usual `blendMinFraction`, and never spends one of the `maxViewsPerTexel` slots. A chart therefore reads from one photo wherever that photo sees it, and view switches move to chart borders, where `BlendSeams` already feathers. `ResolveBlend` keeps the pass-1 colour on texels no blend sample reached instead of clearing them.
+**Admission is a ramp, not a bar.** A view's blend weight is `score × smoothstep(blendMinFraction × best, best, score)`: zero at 0.75× the texel's pass-1 best score, full at the best. Where the best view changes across a chart the two are near equal and both count; where one fades out it fades — a hard threshold switched views along a line and printed a seam *inside* the chart. Views under 2 % weight do not spend a `maxViewsPerTexel` slot.
+
+**Exposure equalisation** (`equalizeExposure`, with registration on). The passthrough camera re-exposes between frames, so two well-registered views of one wall still meet with a brightness step. The registration chain already renders the pass-1 atlas into the keyframe's view at 1/4 res (`RenderAtlasView`, now packed RGB) and downsamples the photo (`KfLumDownsample`, packed mean RGB); `ViewGainReduce` sums both over the covered pixels (groupshared partials, one atomic per channel per group) and C# turns the ratio into a per-channel gain clamped to `[1/exposureGainLimit, exposureGainLimit]` (1.6). `BlendAccum` multiplies the photo by `_KfGain`. Means over tens of thousands of pixels are indifferent to the few-pixel shift, so this needs no extra pass and a 28-byte readback. Headset package: 22 keyframes, luma gains 0.96..1.07.
+
+Pass 1 sums each keyframe's valid texel scores per xatlas chart (one atomic per triangle per keyframe into a `charts × keyframes` table); `ChartArgmax` picks the chart's best view. In pass 2 that view is weighted ×`chartBestViewBoost` (default 3) and never spends one of the `maxViewsPerTexel` slots, but it meets the same `blendMinFraction` bar as every other view: admitting it below the bar painted chart corners with stretched pixels from a grazing photo. A chart therefore reads from one photo wherever that photo sees it well, and view switches move to chart borders, which seam levelling (§15.3.1) then flattens. `ResolveBlend` keeps the pass-1 colour on texels no blend sample reached instead of clearing them.
 
 ### 15.2 UV Unwrapping (xatlas)
 
@@ -999,13 +1004,28 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
    - **Score**: `dot(surfaceNormal, viewDirection)` — prefers head-on views
    - **Atomic best-score selection**: `InterlockedMax(_ScoreBuf[texelIdx], asuint(score))` — since scores are positive floats, `asuint()` preserves ordering. Color is written only when the thread wins the comparison.
 
-**Keyframe processing** is sequential from C#, split across compositor frames so the bake cannot stall the eye buffer: decode JPEG → `ClearDepth` + `BuildDepth` → idle frames (`gpuIdleFramesPerStep`, default 2) → shade (`BakeAtlas` / `BlendAccum`) → fence + idle frames. Score and atlas buffers persist across keyframes (best score accumulates). Pass 2 multi-view blend still iterates every keyframe.
+**Keyframe sampling** is bilinear at the exact projected position (`SampleKf`, four `Load`s): where one photo pixel spans several atlas texels — a far or oblique view — nearest sampling stamped blocks.
+
+**Keyframe processing** is sequential from C#, split across compositor frames so the bake cannot stall the eye buffer. Every one-thread-per-triangle dispatch (`BuildDepth`, `BakeAtlas`, `BlendAccum`, `RenderAtlasView`) runs in `computeSlicesPerKeyframe` slices (default 3) on consecutive frames via `_TriOffset`, so no frame carries a whole keyframe of raster: `ClearDepth` + `BuildDepth` ×3 → fence → idle (`gpuIdleFramesPerStep`, default 1) → shade ×3 → fence + idle. Score and atlas buffers persist across keyframes (best score accumulates). Pass 2 multi-view blend still iterates every keyframe.
+
+**JPEG decode is off the main thread.** `ImageConversion.LoadImage` decodes on the calling thread — 15-30 ms per 1280×960 frame on Quest, twice per keyframe (pass 1 and pass 2), a dropped frame each time. `KeyframeImageDecoder` reads and decodes the next keyframe on a worker while the current one bakes: on Android through `BitmapFactory.decodeByteArray` (JNI, thread attached for the call) into a direct `ByteBuffer` over a `NativeArray`, rows flipped to Unity's bottom-up layout; the main thread only does `LoadRawTextureData` + `Apply`. Editor and other platforms, or a JNI failure, fall back to `LoadImage`. On the capture side `KeyframeCollector` encodes with the thread-safe `ImageConversion.EncodeArrayToJPG` on a worker instead of a main-thread `Texture2D.EncodeToJPG`.
 
 **Post-processing** (CPU):
 - **Dilation**: Fills empty texels at UV island edges by averaging non-empty neighbors (multiple passes)
 - **Denoise** (optional, `skipDenoise` toggle): Median-like filter to remove speckle noise from misaligned projections. GPU compute bake produces fewer speckles than CPU bake, so this is off by default.
 
 **CPU fallback**: `BakeAtlasCPUAsync` implements identical logic in C# with `unsafe` pointer access. Used when compute shader is null (`forceCpuBake` toggle).
+
+#### 15.3.1 Seam levelling (`SeamDelta` / `SeamDiffuse` / `SeamApply`)
+
+A UV seam is one mesh edge drawn twice in the atlas, once per chart. The two sides were shaded from different photos (different exposure, different residual misregistration) and meet in 3D with a colour step. Blurring in atlas space cannot touch this — the neighbour across the seam is somewhere else in the atlas — so the old `BlendSeams` (a 3 px Gaussian at island borders) only softened chart edges against their own padding and is gone.
+
+1. **Seam pairs** (CPU, worker, from the unwrap only). xatlas splits a vertex at a seam, so the two copies share an exact position. Every triangle edge is keyed by its endpoints' canonical (position-deduplicated) ids; a key with two entries whose *output* vertex ids differ is a seam edge drawn on two charts. It is sampled one texel apart along its longer side; each sample is nudged half a texel toward the triangle's opposite vertex so it lands on a shaded texel, not the border. Result: `(texelA, texelB)` pairs — two atlas texels on the same 3D point. 28.8k triangles → ~81k pairs.
+2. **`SeamDelta`**: for each pair with both sides shaded, pin a correction of `(mean − own)` on each side (3 × 10-bit signed fixed point, ¼ level, in one `uint` per texel; bit 30 = pinned, bit 31 = present).
+3. **`SeamDiffuse`** × `seamLevelIterations` (default 40, one a frame, ping-pong): Jacobi step over filled texels — the mean of the 8 neighbours at distance 1 and 2 (walks two texels a step), pinned texels held, unfilled texels not neighbours (Neumann at the chart border, which is where the seam sits). From a zero start this is heat diffusion from the seams: a smooth `erfc` falloff that is ~0.16 of the step at 2√K ≈ 25 texels and ~0.05 at 40, so the step becomes a gradient nobody can see and the chart interior is untouched.
+4. **`SeamApply`**: `atlas += correction`, clamped, filled texels only. Dilation then carries the levelled colours into the padding.
+
+Measured on a headset package (22 keyframes, 2152×2200): mean |ΔRGB| across the 67.6k shaded seam samples 6.0 → 3.2 levels, samples with a step > 12 levels 12.0 % → 6.1 %. The residual is texels the sampling pins to two different partners (a chart with a coarser texel density than its neighbour); the last pin wins. Runs after sharpening, before the normal map. Memory: two correction buffers of `atlasW × atlasH × 4` bytes during the pass.
 
 ### 15.4 Render Modes
 

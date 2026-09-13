@@ -3,7 +3,9 @@
 #pragma kernel CopyUint
 #pragma kernel BuildDepth
 #pragma kernel BakeAtlas
-#pragma kernel BlendSeams
+#pragma kernel SeamDelta
+#pragma kernel SeamDiffuse
+#pragma kernel SeamApply
 #pragma kernel BlendAccum
 #pragma kernel ResolveBlend
 #pragma kernel SharpenAtlas
@@ -12,6 +14,7 @@
 #pragma kernel RenderAtlasView
 #pragma kernel KfLumDownsample
 #pragma kernel MatchShift
+#pragma kernel ViewGainReduce
 
 // ── Shared uniforms ──────────────────────────────────────────
 float4x4 _ViewMat;
@@ -21,6 +24,10 @@ float    _CropX, _CropY;
 int      _ImgW, _ImgH;
 int      _AtlasW, _AtlasH;
 int      _OrigTriCount, _OutTriCount;
+// Triangle kernels run in slices across compositor frames: thread 0 of a
+// dispatch is triangle _TriOffset, so one keyframe's work never lands in a
+// single frame.
+int      _TriOffset;
 
 // ── Original mesh (occlusion depth) ─────────────────────────
 StructuredBuffer<float3> _OrigPos;
@@ -108,13 +115,35 @@ StructuredBuffer<int>    _ChartBest;   // per chart: keyframe index, -1 none
 int   _KfIndex, _KfCount, _ChartCount;
 float _ChartBoost;
 
-uint LoadKf(int px, int py)
+uint PackColor(float4 c)
 {
-    float4 c = _KfTex.Load(int3(px, py, 0));
     return (uint)(c.r * 255.0 + 0.5)
          | ((uint)(c.g * 255.0 + 0.5) << 8)
          | ((uint)(c.b * 255.0 + 0.5) << 16)
          | ((uint)(c.a * 255.0 + 0.5) << 24);
+}
+
+uint LoadKf(int px, int py)
+{
+    return PackColor(_KfTex.Load(int3(px, py, 0)));
+}
+
+// Bilinear keyframe fetch at a continuous pixel position (pixel centres at
+// integer + 0.5). Where one photo pixel spans several atlas texels — far or
+// oblique views — nearest sampling stamps blocks; this stays smooth.
+uint SampleKf(float2 s)
+{
+    float2 f = s - 0.5;
+    int2 p0 = (int2)floor(f);
+    float2 w = f - (float2)p0;
+    int2 lo = int2(0, 0), hi = int2(_ImgW - 1, _ImgH - 1);
+    int2 a = clamp(p0, lo, hi);
+    int2 b = clamp(p0 + int2(1, 0), lo, hi);
+    int2 c = clamp(p0 + int2(0, 1), lo, hi);
+    int2 d = clamp(p0 + int2(1, 1), lo, hi);
+    float4 col = lerp(lerp(_KfTex.Load(int3(a, 0)), _KfTex.Load(int3(b, 0)), w.x),
+                      lerp(_KfTex.Load(int3(c, 0)), _KfTex.Load(int3(d, 0)), w.x), w.y);
+    return PackColor(col);
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -158,9 +187,9 @@ void CopyUint(uint3 id : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void BuildDepth(uint3 id : SV_DispatchThreadID)
 {
-    if ((int)id.x >= _OrigTriCount) return;
+    int t = (int)id.x + _TriOffset;
+    if (t >= _OrigTriCount) return;
 
-    int t = (int)id.x;
     int i0 = _OrigIdx[t * 3];
     int i1 = _OrigIdx[t * 3 + 1];
     int i2 = _OrigIdx[t * 3 + 2];
@@ -216,9 +245,9 @@ void BuildDepth(uint3 id : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void BakeAtlas(uint3 id : SV_DispatchThreadID)
 {
-    if ((int)id.x >= _OutTriCount) return;
+    int t = (int)id.x + _TriOffset;
+    if (t >= _OutTriCount) return;
 
-    int t = (int)id.x;
     int i0 = _OutIdx[t * 3];
     int i1 = _OutIdx[t * 3 + 1];
     int i2 = _OutIdx[t * 3 + 2];
@@ -317,8 +346,9 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
             InterlockedMax(_ScoreBuf[texelIdx], scoreU, oldS);
             if (oldS >= scoreU) continue;
 
-            // Read keyframe pixel: same layout as GetPixels32() byte array
-            uint kfColor = LoadKf(px, py);
+            // Keyframe colour at the exact projected position (bilinear);
+            // same byte layout as GetPixels32().
+            uint kfColor = SampleKf(float2(sx, sy));
             _AtlasBuf[texelIdx] = kfColor | (255u << 24);
         }
     }
@@ -365,8 +395,9 @@ void ChartArgmax(uint3 id : SV_DispatchThreadID)
 //  for these kernels; _DepthBuf is a low-res depth from BuildDepth.
 // ═════════════════════════════════════════════════════════════
 
-RWStructuredBuffer<uint>  _ViewLum;   // low-res: bit 31 = covered, low 8 bits = luminance
-RWStructuredBuffer<uint>  _KfLum;     // low-res photo luminance
+RWStructuredBuffer<uint>  _ViewLum;   // low-res: bit 31 = covered, low 24 bits = atlas RGB seen from this pose
+RWStructuredBuffer<uint>  _KfLum;     // low-res photo, packed mean RGB per block
+RWStructuredBuffer<uint>  _GainSums;  // [0..2] atlas RGB sums, [3..5] photo RGB sums, [6] covered pixels
 RWStructuredBuffer<float> _MatchOut;  // (2R+1)^2 ZNCC scores, row-major over (oy, ox)
 int _LowScale;
 int _SearchR;
@@ -380,9 +411,9 @@ uint LumOf(uint packed)
 [numthreads(64, 1, 1)]
 void RenderAtlasView(uint3 id : SV_DispatchThreadID)
 {
-    if ((int)id.x >= _OutTriCount) return;
+    int t = (int)id.x + _TriOffset;
+    if (t >= _OutTriCount) return;
 
-    int t = (int)id.x;
     int i0 = _OutIdx[t * 3];
     int i1 = _OutIdx[t * 3 + 1];
     int i2 = _OutIdx[t * 3 + 2];
@@ -436,7 +467,7 @@ void RenderAtlasView(uint3 id : SV_DispatchThreadID)
             uint packed = _AtlasBufSrc[ty * _AtlasW + tx];
             if ((packed >> 24) == 0) continue;
 
-            _ViewLum[y * _ImgW + x] = 0x80000000u | LumOf(packed);
+            _ViewLum[y * _ImgW + x] = 0x80000000u | (packed & 0xFFFFFFu);
         }
     }
 }
@@ -446,11 +477,15 @@ void KfLumDownsample(uint3 id : SV_DispatchThreadID)
 {
     int x = (int)id.x, y = (int)id.y;
     if (x >= _ImgW || y >= _ImgH) return;
-    uint sum = 0;
+    uint3 sum = 0;
     for (int by = 0; by < _LowScale; by++)
     for (int bx = 0; bx < _LowScale; bx++)
-        sum += LumOf(LoadKf(x * _LowScale + bx, y * _LowScale + by));
-    _KfLum[y * _ImgW + x] = sum / (uint)(_LowScale * _LowScale);
+    {
+        uint c = LoadKf(x * _LowScale + bx, y * _LowScale + by);
+        sum += uint3(c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF);
+    }
+    sum /= (uint)(_LowScale * _LowScale);
+    _KfLum[y * _ImgW + x] = sum.x | (sum.y << 8) | (sum.z << 16);
 }
 
 // One thread per candidate shift; each walks every covered low-res pixel.
@@ -475,8 +510,8 @@ void MatchShift(uint3 id : SV_DispatchThreadID)
             if ((v & 0x80000000u) == 0) continue;
             int kx = x + ox;
             if (kx < 0 || kx >= _ImgW) continue;
-            float a = (float)(v & 0xFF);
-            float b = (float)_KfLum[ky * _ImgW + kx];
+            float a = (float)LumOf(v);
+            float b = (float)LumOf(_KfLum[ky * _ImgW + kx]);
             sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
             count++;
         }
@@ -494,85 +529,151 @@ void MatchShift(uint3 id : SV_DispatchThreadID)
     _MatchOut[id.x] = ncc;
 }
 
-// ═════════════════════════════════════════════════════════════
-//  Kernel 3: Seam blending — gaussian-weighted averaging at UV
-//  island boundaries. Detects boundary texels (filled texel
-//  adjacent to texels from a different UV island or unfilled)
-//  and blends them with nearby filled neighbors.
-// ═════════════════════════════════════════════════════════════
+// Per-keyframe exposure: sum the atlas colour this pose sees and the
+// photo's colour over the same covered low-res pixels (unshifted; means
+// over tens of thousands of pixels do not care about a few px). C# turns
+// the ratio into an RGB gain that BlendAccum applies to this photo, so
+// views that met at different auto-exposures blend without a step.
+groupshared uint gs_gain[7 * 8];
 
-int _BlendRadius;
-
-[numthreads(8, 8, 1)]
-void BlendSeams(uint3 id : SV_DispatchThreadID)
+[numthreads(256, 1, 1)]
+void ViewGainReduce(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
 {
-    if ((int)id.x >= _AtlasW || (int)id.y >= _AtlasH) return;
-
-    int idx = (int)id.y * _AtlasW + (int)id.x;
-    uint centerPacked = _AtlasBufSrc[idx];
-    uint centerA = (centerPacked >> 24) & 0xFF;
-    if (centerA == 0) return;  // unfilled texel, skip
-
-    // Check if this texel is near a UV island boundary:
-    // a filled texel that has at least one unfilled neighbor within 1 pixel
-    bool nearBoundary = false;
-    for (int dy = -1; dy <= 1 && !nearBoundary; dy++)
+    uint3 va = 0, vb = 0;
+    uint n = 0;
+    int idx = (int)id.x;
+    if (idx < _ImgW * _ImgH)
     {
-        for (int dx = -1; dx <= 1 && !nearBoundary; dx++)
+        uint v = _ViewLum[idx];
+        if (v & 0x80000000u)
         {
-            if (dx == 0 && dy == 0) continue;
-            int nx = (int)id.x + dx;
-            int ny = (int)id.y + dy;
-            if (nx < 0 || ny < 0 || nx >= _AtlasW || ny >= _AtlasH)
-            {
-                nearBoundary = true;
-                continue;
-            }
-            uint nPacked = _AtlasBufSrc[ny * _AtlasW + nx];
-            uint nA = (nPacked >> 24) & 0xFF;
-            if (nA == 0) nearBoundary = true;
+            uint k = _KfLum[idx];
+            va = uint3(v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF);
+            vb = uint3(k & 0xFF, (k >> 8) & 0xFF, (k >> 16) & 0xFF);
+            n = 1;
         }
     }
-
-    if (!nearBoundary) return;
-
-    // Gaussian-weighted blend of filled neighbors within _BlendRadius
-    float sigmaS = (float)_BlendRadius * 0.5;
-    float invSigS2 = -0.5 / (sigmaS * sigmaS);
-    float wSum = 0;
-    float3 colorSum = 0;
-
-    for (int by = -_BlendRadius; by <= _BlendRadius; by++)
+    // Eight partial rows so the 256 atomics on shared memory spread out.
+    uint lane = gi & 7;
+    if (gi < 56) gs_gain[gi] = 0;
+    GroupMemoryBarrierWithGroupSync();
+    if (n)
     {
-        for (int bx = -_BlendRadius; bx <= _BlendRadius; bx++)
-        {
-            int sx = (int)id.x + bx;
-            int sy = (int)id.y + by;
-            if (sx < 0 || sy < 0 || sx >= _AtlasW || sy >= _AtlasH) continue;
-
-            uint nPacked = _AtlasBufSrc[sy * _AtlasW + sx];
-            uint nA = (nPacked >> 24) & 0xFF;
-            if (nA == 0) continue;
-
-            float dist2 = (float)(bx * bx + by * by);
-            float w = exp(dist2 * invSigS2);
-
-            float3 c = float3((nPacked & 0xFF) / 255.0,
-                              ((nPacked >> 8) & 0xFF) / 255.0,
-                              ((nPacked >> 16) & 0xFF) / 255.0);
-            colorSum += c * w;
-            wSum += w;
-        }
+        InterlockedAdd(gs_gain[lane * 7 + 0], va.x);
+        InterlockedAdd(gs_gain[lane * 7 + 1], va.y);
+        InterlockedAdd(gs_gain[lane * 7 + 2], va.z);
+        InterlockedAdd(gs_gain[lane * 7 + 3], vb.x);
+        InterlockedAdd(gs_gain[lane * 7 + 4], vb.y);
+        InterlockedAdd(gs_gain[lane * 7 + 5], vb.z);
+        InterlockedAdd(gs_gain[lane * 7 + 6], 1u);
     }
-
-    if (wSum > 1e-6)
+    GroupMemoryBarrierWithGroupSync();
+    if (gi < 7)
     {
-        float3 blended = colorSum / wSum;
-        uint r = (uint)round(saturate(blended.x) * 255.0);
-        uint g = (uint)round(saturate(blended.y) * 255.0);
-        uint b = (uint)round(saturate(blended.z) * 255.0);
-        _AtlasBuf[idx] = r | (g << 8) | (b << 16) | (255u << 24);
+        uint total = 0;
+        for (uint l = 0; l < 8; l++) total += gs_gain[l * 7 + gi];
+        if (total) InterlockedAdd(_GainSums[gi], total);
     }
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Seam levelling. A UV seam is one mesh edge drawn twice in the
+//  atlas, once per chart; the two sides were shaded from different
+//  photos and meet in 3D with a colour step. _SeamPairs holds
+//  (texelA, texelB) for points sampled along every seam edge: two
+//  atlas texels that sit on the same 3D point. SeamDelta pins a
+//  correction of (mean − own) on each side, SeamDiffuse spreads it
+//  a few dozen texels into each chart (heat diffusion, filled
+//  texels only, seam texels held), SeamApply adds it. The step
+//  becomes a gradient nobody can see; the chart interior is untouched.
+//
+//  Correction texel: 3 × 10-bit signed fixed point (¼ level, ±128
+//  levels) | bit 30 = pinned seam texel | bit 31 = present.
+// ═════════════════════════════════════════════════════════════
+
+StructuredBuffer<uint2>  _SeamPairs;
+int                      _SeamPairCount;
+StructuredBuffer<uint>   _CorrIn;
+RWStructuredBuffer<uint> _CorrOut;
+
+#define CORR_PIN     (1u << 30)
+#define CORR_PRESENT (1u << 31)
+
+uint PackCorr(float3 c, bool pin)
+{
+    int3 q = clamp((int3)round(c * 4.0), -512, 511) + 512;
+    return (uint)q.x | ((uint)q.y << 10) | ((uint)q.z << 20)
+         | (pin ? CORR_PIN : 0u) | CORR_PRESENT;
+}
+
+float3 UnpackCorr(uint p)
+{
+    int3 q = int3(p & 0x3FF, (p >> 10) & 0x3FF, (p >> 20) & 0x3FF) - 512;
+    return (float3)q * 0.25;
+}
+
+float3 AtlasRgb(uint packed)
+{
+    return float3(packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF);
+}
+
+[numthreads(256, 1, 1)]
+void SeamDelta(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _SeamPairCount) return;
+    uint2 pr = _SeamPairs[id.x];
+    uint pa = _AtlasBufSrc[pr.x], pb = _AtlasBufSrc[pr.y];
+    if ((pa >> 24) == 0 || (pb >> 24) == 0) return;   // one side never shaded
+    float3 ca = AtlasRgb(pa), cb = AtlasRgb(pb);
+    float3 mean = 0.5 * (ca + cb);
+    _CorrOut[pr.x] = PackCorr(mean - ca, true);
+    _CorrOut[pr.y] = PackCorr(mean - cb, true);
+}
+
+// One Jacobi step. Neighbours at distance 1 and 2 (8 taps) so the field
+// walks two texels a step; unfilled texels are not neighbours (Neumann
+// at the chart border, which is where the seam already sits).
+[numthreads(8, 8, 1)]
+void SeamDiffuse(uint3 id : SV_DispatchThreadID)
+{
+    int x = (int)id.x, y = (int)id.y;
+    if (x >= _AtlasW || y >= _AtlasH) return;
+    int idx = y * _AtlasW + x;
+    if ((_AtlasBufSrc[idx] >> 24) == 0) { _CorrOut[idx] = 0; return; }
+
+    uint self = _CorrIn[idx];
+    if (self & CORR_PIN) { _CorrOut[idx] = self; return; }
+
+    float3 sum = 0;
+    int n = 0;
+    const int2 taps[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1),
+                           int2(2, 0), int2(-2, 0), int2(0, 2), int2(0, -2) };
+    [unroll]
+    for (int k = 0; k < 8; k++)
+    {
+        int2 q = int2(x, y) + taps[k];
+        if (q.x < 0 || q.y < 0 || q.x >= _AtlasW || q.y >= _AtlasH) continue;
+        int qi = q.y * _AtlasW + q.x;
+        if ((_AtlasBufSrc[qi] >> 24) == 0) continue;
+        uint c = _CorrIn[qi];
+        if (c & CORR_PRESENT) sum += UnpackCorr(c);
+        n++;
+    }
+    _CorrOut[idx] = n > 0 ? PackCorr(sum / (float)n, false) : 0;
+}
+
+[numthreads(256, 1, 1)]
+void SeamApply(uint3 id : SV_DispatchThreadID)
+{
+    int idx = (int)id.x;
+    if (idx >= _AtlasW * _AtlasH) return;
+    uint packed = _AtlasBufSrc[idx];
+    if ((packed >> 24) == 0) return;
+    uint c = _CorrIn[idx];
+    if (!(c & CORR_PRESENT)) return;
+    float3 rgb = clamp(AtlasRgb(packed) + UnpackCorr(c), 0.0, 255.0);
+    uint3 q = (uint3)round(rgb);
+    _AtlasBuf[idx] = q.x | (q.y << 8) | (q.z << 16) | (255u << 24);
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -589,15 +690,16 @@ RWStructuredBuffer<uint> _AccumB;   // fixed-point B sum (×65536)
 RWStructuredBuffer<uint> _AccumW;   // fixed-point weight sum (×65536)
 RWStructuredBuffer<uint> _AccumN;   // views accumulated so far per texel
 StructuredBuffer<uint>   _BestScore; // best score from pass 1 (read-only)
-float _BlendMinFraction;            // threshold: 0.75 = only views near the best
+float _BlendMinFraction;            // ramp start: weight 0 at this fraction of the texel's best score, 1 at the best
+float4 _KfGain;                     // per-keyframe RGB exposure gain toward the pass-1 atlas (1 = none)
 int   _MaxViews;                    // at most this many views per texel; more views blur misregistration into mush
 
 [numthreads(64, 1, 1)]
 void BlendAccum(uint3 id : SV_DispatchThreadID)
 {
-    if ((int)id.x >= _OutTriCount) return;
+    int t = (int)id.x + _TriOffset;
+    if (t >= _OutTriCount) return;
 
-    int t = (int)id.x;
     int i0 = _OutIdx[t * 3];
     int i1 = _OutIdx[t * 3 + 1];
     int i2 = _OutIdx[t * 3 + 2];
@@ -675,11 +777,14 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
             float bestS = asfloat(_BestScore[texelIdx]);
             if (bestS <= 0) continue;
 
-            // Only accumulate if this view's score meets the threshold. The
-            // chart's preferred view is admitted a little below it so one
-            // photo can carry the chart into its slightly oblique corners.
-            float minFrac = preferred ? _BlendMinFraction * 0.7 : _BlendMinFraction;
-            if (score < minFrac * bestS) continue;
+            // Admission is a ramp, not a bar: a view's weight rises from 0 at
+            // _BlendMinFraction × best to full at best. Where the best view
+            // changes across a chart the two are near equal and both count;
+            // where one fades out it fades, instead of switching off along a
+            // line and printing a seam inside the chart. The chart's
+            // preferred view rides the same ramp with its boost on top.
+            float ramp = smoothstep(_BlendMinFraction, 1.0, score / bestS);
+            if (ramp <= 0.02) continue;
 
             float sx = bw0 * sp0.x + bw1 * sp1.x + bw2 * sp2.x;
             float sy = bw0 * sp0.y + bw1 * sp1.y + bw2 * sp2.y;
@@ -706,14 +811,14 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
                 if ((int)seen >= _MaxViews) continue;
             }
 
-            uint kfColor = LoadKf(px, py);
-            float r = (float)(kfColor & 0xFF);
-            float g = (float)((kfColor >> 8) & 0xFF);
-            float b = (float)((kfColor >> 16) & 0xFF);
+            uint kfColor = SampleKf(float2(sx, sy));
+            float r = min(255.0, (float)(kfColor & 0xFF) * _KfGain.r);
+            float g = min(255.0, (float)((kfColor >> 8) & 0xFF) * _KfGain.g);
+            float b = min(255.0, (float)((kfColor >> 16) & 0xFF) * _KfGain.b);
 
             // Fixed-point accumulation: scale by 256 to preserve fractional precision
             // score is typically 0.01-10.0, so score*256 fits in uint range
-            uint ws = (uint)(score * 256.0 * (preferred ? _ChartBoost : 1.0));
+            uint ws = max(1u, (uint)(score * 256.0 * ramp * (preferred ? _ChartBoost : 1.0)));
             InterlockedAdd(_AccumR[texelIdx], (uint)(r * ws));
             InterlockedAdd(_AccumG[texelIdx], (uint)(g * ws));
             InterlockedAdd(_AccumB[texelIdx], (uint)(b * ws));

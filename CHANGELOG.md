@@ -8,6 +8,45 @@ All notable changes to this package are documented here. The format follows
 
 ### Changed
 
+- **Texture bake keeps the headset at refresh.** Debugged from a headset
+  package (22 keyframes, `pkg_20260913_165307`):
+  - JPEG decode is off the main thread. `KeyframeImageDecoder` reads and
+    decodes the next keyframe on a worker (`BitmapFactory` via JNI on
+    Android, `LoadImage` fallback elsewhere); the main thread only uploads
+    pixels. `LoadImage` was 15-30 ms per frame, twice per keyframe.
+  - Every per-keyframe triangle dispatch runs in `computeSlicesPerKeyframe`
+    (3) slices on consecutive frames via `_TriOffset`, including the
+    registration raster. `gpuIdleFramesPerStep` 2 → 1 on top of that.
+  - Capture-side encode uses the thread-safe `EncodeArrayToJPG` on a
+    worker instead of `Texture2D.EncodeToJPG` on the main thread.
+- **Seam levelling replaces `BlendSeams`.** The two atlas sides of every
+  UV seam edge are paired by position (worker CPU), pinned to their mean
+  (`SeamDelta`) and the correction diffused into each chart
+  (`SeamDiffuse` × `seamLevelIterations`, default 40, one a frame) then
+  added (`SeamApply`). Mean seam step 6.0 → 3.2 levels on the headset
+  package. `seamBlendRadius` is gone; `enableSeamBlending` keeps its name.
+- **Keyframe gate admits a normal scan.** Angular 45 → 60 °/s, linear
+  0.5 → 1.0 m/s, and after `motionGraceSeconds` (2.5 s) without a keyframe
+  a frame moving up to twice the gates is taken anyway. 0.5 m/s rejected
+  most of a walking scan (22 keyframes, black walls). Hand capsules are
+  clipped at the near plane before projection — a forearm running back
+  past the camera projected to a full-image footprint and rejected the
+  frame as 100 % hand.
+- **Blend admission is a ramp; keyframes are exposure-equalised.** A view's
+  weight rises from 0 at `blendMinFraction` × best to full at best instead
+  of switching on at a threshold, so view changes inside a chart fade
+  instead of printing a line. With registration on, `ViewGainReduce` sums
+  the pass-1 atlas and the photo over the covered low-res pixels and the
+  blend scales the photo by the per-channel ratio (`equalizeExposure`,
+  `exposureGainLimit` 1.6).
+- **Capture density**: `minCaptureInterval` 1 → 0.5 s, `rotateThresholdDeg`
+  25 → 20 now that a capture costs the main thread one readback copy.
+- **Bilinear keyframe sampling** in `BakeAtlas` / `BlendAccum`
+  (`SampleKf`): far and oblique views no longer stamp photo pixels as
+  blocks.
+- **Chart-preferred view meets the same `blendMinFraction` bar.** The
+  0.7× admission painted chart corners with stretched pixels from a
+  grazing photo.
 - **Texture bake: views agree instead of seaming.** Four registration
   fixes, all measured against the fixture-era look:
   - Simplification runs **before** the UV unwrap (`meshopt_simplify`,

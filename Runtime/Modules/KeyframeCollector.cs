@@ -19,19 +19,22 @@ namespace Genesis.RoomScan
         private float moveThreshold = 0.5f;
 
         [SerializeField, Tooltip("Min rotation (deg) from every saved keyframe to trigger a new capture")]
-        private float rotateThresholdDeg = 25f;
+        private float rotateThresholdDeg = 20f;
 
         [SerializeField, Range(50, 100)]
         private int jpegQuality = 95;
 
-        [SerializeField, Tooltip("Max head angular velocity (deg/s) over each of the last two camera frames to accept a frame. Motion blur and exposure-time pose error scale with this; 45 keeps texture-grade frames, 120 admits blurred ones.")]
-        private float maxAngularVelocity = 45f;
+        [SerializeField, Tooltip("Max head angular velocity (deg/s) over each of the last two camera frames to accept a frame. Motion blur and exposure-time pose error scale with this; 60 keeps texture-grade frames while the player looks around, 120 admits blurred ones.")]
+        private float maxAngularVelocity = 60f;
 
-        [SerializeField, Tooltip("Max head linear velocity (m/s) over each of the last two camera frames. Walking while scanning smears the frame just like turning does.")]
-        private float maxLinearVelocity = 0.5f;
+        [SerializeField, Tooltip("Max head linear velocity (m/s) over each of the last two camera frames. A slow walk is ~0.8-1.0 m/s; 0.5 rejected most of a normal scan and left the atlas with holes.")]
+        private float maxLinearVelocity = 1.0f;
 
-        [SerializeField, Tooltip("Min seconds between captures to prevent burst saves")]
-        private float minCaptureInterval = 1f;
+        [SerializeField, Tooltip("After this many seconds without a keyframe, accept a frame moving up to twice the gates above. Coverage beats sharpness: a slightly soft photo textures a wall, no photo leaves it black.")]
+        private float motionGraceSeconds = 2.5f;
+
+        [SerializeField, Tooltip("Min seconds between captures. A capture costs the main thread one readback copy (~1 ms); the JPEG encode and the disk write are on a worker, so 0.5 s is affordable and a room scan lands well over 100 keyframes.")]
+        private float minCaptureInterval = 0.5f;
 
         [SerializeField, Tooltip("Skip a frame when the player's hands / forearms cover more than this fraction of the image. Smaller intrusions are kept and masked out of the texture bake per pixel.")]
         [Range(0.02f, 0.5f)] private float maxHandCoverage = 0.12f;
@@ -64,6 +67,7 @@ namespace Genesis.RoomScan
         private float _lastAngVel, _lastLinVel;
         private float _prevAngVel, _prevLinVel;
         private int _skippedForMotion;
+        private int _acceptedMoving;
 
         /// <summary>Number of keyframes saved so far in this session.</summary>
         public int SavedCount => _nextId;
@@ -132,10 +136,19 @@ namespace Genesis.RoomScan
 
             if (!still)
             {
-                if (++_skippedForMotion <= 3 || _skippedForMotion % 50 == 0)
-                    Logger.Info($"KeyframeCollector: skipped frame, head moving " +
-                                $"{_lastAngVel:F0}°/s {_lastLinVel:F2} m/s ({_skippedForMotion} so far)");
-                return;
+                bool starved = Time.time - _lastCaptureTime >= motionGraceSeconds;
+                bool moderate = _lastAngVel <= 2f * maxAngularVelocity && _prevAngVel <= 2f * maxAngularVelocity
+                             && _lastLinVel <= 2f * maxLinearVelocity && _prevLinVel <= 2f * maxLinearVelocity;
+                if (!(starved && moderate))
+                {
+                    if (++_skippedForMotion <= 3 || _skippedForMotion % 50 == 0)
+                        Logger.Info($"KeyframeCollector: skipped frame, head moving " +
+                                    $"{_lastAngVel:F0}°/s {_lastLinVel:F2} m/s ({_skippedForMotion} so far)");
+                    return;
+                }
+                if (++_acceptedMoving <= 3 || _acceptedMoving % 25 == 0)
+                    Logger.Info($"KeyframeCollector: accepting a moving frame after {motionGraceSeconds:F1} s without one " +
+                                $"({_lastAngVel:F0}°/s {_lastLinVel:F2} m/s, {_acceptedMoving} so far)");
             }
 
             if (!ShouldCapture(pos, rot)) return;
@@ -237,8 +250,15 @@ namespace Genesis.RoomScan
                 Vector3 b = inv * ((Vector3)_capP1[i] - camPos);
                 float r = _capP0[i].w;
                 // Camera looks down +Z in this convention (see the bake's projection).
-                float za = Mathf.Max(a.z, 0.05f), zb = Mathf.Max(b.z, 0.05f);
-                if (a.z < 0.05f && b.z < 0.05f) continue;
+                const float near = 0.05f;
+                if (a.z < near && b.z < near) continue;
+                // Clip the segment at the near plane instead of clamping z: a
+                // forearm running back past the camera used to project to a
+                // footprint the size of the image and reject the frame as
+                // "100 % hand".
+                if (a.z < near) a = Vector3.Lerp(a, b, (near - a.z) / (b.z - a.z));
+                else if (b.z < near) b = Vector3.Lerp(b, a, (near - b.z) / (a.z - b.z));
+                float za = a.z, zb = b.z;
                 Vector2 pa = new Vector2(focal.x * a.x / za, focal.y * a.y / za) + res * 0.5f;
                 Vector2 pb = new Vector2(focal.x * b.x / zb, focal.y * b.y / zb) + res * 0.5f;
                 float pr = focal.x * r / Mathf.Min(za, zb);
@@ -298,15 +318,20 @@ namespace Genesis.RoomScan
 
             try
             {
+                // Copy the readback out (the NativeArray dies with this
+                // callback) and encode on a worker: EncodeArrayToJPG is
+                // thread-safe, and a 1280×960 encode on the main thread was
+                // a 30-40 ms hitch in the scan loop per keyframe.
                 var data = req.GetData<byte>();
-                var tex = new Texture2D(req.width, req.height, TextureFormat.RGBA32, false);
-                tex.LoadRawTextureData(data);
-                tex.Apply();
-                byte[] jpg = tex.EncodeToJPG(jpegQuality);
-                Destroy(tex);
+                byte[] pixels = new byte[data.Length];
+                data.CopyTo(pixels);
+                int w = req.width, h = req.height;
+                int quality = jpegQuality;
 
-                SaveKeyframeData(jpg, id, timestamp, pos, rot,
-                    focalLen, principalPt, sensorRes, currentRes, caps);
+                SaveKeyframeData(() => ImageConversion.EncodeArrayToJPG(
+                        pixels, UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_SRGB,
+                        (uint)w, (uint)h, 0, quality),
+                    id, timestamp, pos, rot, focalLen, principalPt, sensorRes, currentRes, caps);
             }
             catch (Exception e)
             {
@@ -317,11 +342,17 @@ namespace Genesis.RoomScan
         private void SaveKeyframeData(byte[] jpgBytes, int id, float timestamp,
             Vector3 pos, Quaternion rot, Vector2 focalLen, Vector2 principalPt,
             Vector2 sensorRes, Vector2 currentRes, string caps = null)
+            => SaveKeyframeData(() => jpgBytes, id, timestamp, pos, rot, focalLen, principalPt, sensorRes, currentRes, caps);
+
+        private void SaveKeyframeData(Func<byte[]> encode, int id, float timestamp,
+            Vector3 pos, Quaternion rot, Vector2 focalLen, Vector2 principalPt,
+            Vector2 sensorRes, Vector2 currentRes, string caps = null)
         {
             Task.Run(() =>
             {
                 try
                 {
+                    byte[] jpgBytes = encode();
                     string imgPath = Path.Combine(_imagesDir, $"{id:D6}.jpg");
                     File.WriteAllBytes(imgPath, jpgBytes);
 

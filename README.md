@@ -229,7 +229,7 @@ After scanning, you can produce a sharper UV-mapped texture atlas from the captu
    - **GPU readback**: Reads the current mesh from the GPU Surface Nets buffers
    - **UV unwrapping**: xatlas (native C++ via P/Invoke) generates a UV atlas with seam-aware parameterization, with tunable chart/pack options for speed vs quality
    - **GPU atlas baking**: A compute shader (`AtlasBakeCompute.compute`) processes each keyframe — two-pass multi-view blending selects and blends the top-scoring views per texel with occlusion-aware depth testing (~5-10s for 300 keyframes)
-   - **GPU seam blending**: Gaussian-weighted blend across UV chart boundaries reduces color discontinuities
+   - **Seam levelling**: the two atlas sides of every UV seam edge are paired by 3D position, pinned to their mean and the correction diffused into each chart on the GPU; per-keyframe exposure gains and a smooth view-admission ramp keep view switches inside a chart from printing a line
    - **GPU sharpening**: Unsharp mask restores crispness lost during multi-view blending (configurable strength and radius)
    - **Sobel normal map**: GPU Sobel edge detection generates a normal map from the atlas for real-time fake lighting
    - **Dilation**: Fills gaps at UV island edges
@@ -651,7 +651,8 @@ For game integration where you want to minimize GPU overhead during scanning. Th
 |---------|-------|--------|
 | RoomScanner.meshExtractionHz | **8** | Live Surface Nets dump; 30 Hz was fill-rate expensive |
 | KeyframeCollector move / rotate / interval | **0.5 m / 25° / 1 s** | Atlas bake still needs frames; denser capture is a GPU readback tax |
-| KeyframeCollector angular / linear velocity | **45°/s / 0.5 m/s** over the last two camera frames | Blur and exposure-time pose error scale with head speed |
+| KeyframeCollector angular / linear velocity | **60°/s / 1.0 m/s** over the last two camera frames, 2× after 2.5 s without a keyframe | Blur and exposure-time pose error scale with head speed; 0.5 m/s rejected a walking scan and left walls black |
+| KeyframeCollector capture interval | **0.5 s** (encode + write on a worker) | A room scan lands well over 100 keyframes; the bake needs the density |
 | TextureRefinement.postBakeSimplificationRatio | **0.5** | Simplified before unwrap and bake; 1.0 disables |
 | RoomScanner.ConfineScanToContainingRoom | host opt-in | Single-room mesh; default **false**. Needs `RoomUnderstanding` |
 | TriplanarCache | **Disabled** | Saves ~240 MB GPU; vertex colors are sufficient for scan-phase visualization |
