@@ -294,9 +294,10 @@ struct TexelView
     float2 photoPx;   // continuous photo position
 };
 
-// Returned by value (a fully written local), not through an `out` struct:
-// the Vulkan compiler flags an `out` written before early returns as
-// potentially uninitialised.
+// Single exit: the Vulkan compiler flags any early return from a function
+// that writes a struct — through `out` or by value — as a potentially
+// uninitialised use at the call site. Every reject sets `ok` false and the
+// one return at the end carries it.
 TexelView ProjectTexel(int idx, uint2 texel)
 {
     TexelView v;
@@ -304,10 +305,10 @@ TexelView ProjectTexel(int idx, uint2 texel)
     v.tri = -1;
     v.score = 0;
     v.photoPx = float2(0, 0);
+
     uint t1 = _TexelTri[idx];
-    if (t1 == 0) return v;
-    int t = (int)t1 - 1;
-    v.tri = t;
+    bool ok = t1 != 0;
+    int t = ok ? (int)t1 - 1 : 0;
 
     int i0 = _OutIdx[t * 3], i1 = _OutIdx[t * 3 + 1], i2 = _OutIdx[t * 3 + 2];
     float3 p0 = _OutPos[i0], p1 = _OutPos[i1], p2 = _OutPos[i2];
@@ -315,8 +316,8 @@ TexelView ProjectTexel(int idx, uint2 texel)
     // Barycentrics of this texel centre in the triangle's UV space.
     float2 uv0 = _RawUV[i0], uv1 = _RawUV[i1], uv2 = _RawUV[i2];
     float denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
-    if (abs(denom) < 1e-8) return v;
-    float invD = 1.0 / denom;
+    ok = ok && abs(denom) >= 1e-8;
+    float invD = 1.0 / (ok ? denom : 1.0);
     float2 d = float2(texel) - uv2;
     float bw0 = ((uv1.y - uv2.y) * d.x + (uv2.x - uv1.x) * d.y) * invD;
     float bw1 = ((uv2.y - uv0.y) * d.x + (uv0.x - uv2.x) * d.y) * invD;
@@ -334,31 +335,35 @@ TexelView ProjectTexel(int idx, uint2 texel)
     n = nLen > 1e-4 ? n / nLen : normalize(fn);
     // Keep the face-normal sign: a vertex normal averaged over a fold can
     // point away from the side this triangle actually faces.
-    if (dot(n, fn) < 0) n = -n;
+    n = dot(n, fn) < 0 ? -n : n;
 
     float3 vd = _CamPos.xyz - worldPt;
     float vdLen = length(vd);
-    if (vdLen < 0.001) return v;
-    vd /= vdLen;
+    ok = ok && vdLen >= 0.001;
+    vd /= max(vdLen, 0.001);
     float dotNV = dot(n, vd);
-    if (dotNV <= 0.05) return v;
-    v.score = dotNV / max(vdLen, 0.1);
+    ok = ok && dotNV > 0.05;
+    float score = dotNV / max(vdLen, 0.1);
 
     float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
-    if (camPt.z <= 0.001) return v;
-    float2 sp = float2(_Fx * camPt.x / camPt.z + _Cx - _CropX,
-                       _Fy * camPt.y / camPt.z + _Cy - _CropY);
+    ok = ok && camPt.z > 0.001;
+    float invZ = 1.0 / max(camPt.z, 0.001);
+    float2 sp = float2(_Fx * camPt.x * invZ + _Cx - _CropX,
+                       _Fy * camPt.y * invZ + _Cy - _CropY);
     int px = (int)round(sp.x), py = (int)round(sp.y);
-    if (px < 0 || px >= _ImgW || py < 0 || py >= _ImgH) return v;
+    ok = ok && px >= 0 && px < _ImgW && py >= 0 && py < _ImgH;
 
     int dx = clamp((int)(sp.x * _DepthScale), 0, _DepthW - 1);
     int dy = clamp((int)(sp.y * _DepthScale), 0, _DepthH - 1);
     float closestZ = asfloat(_DepthBuf[dy * _DepthW + dx]);
-    if (camPt.z > closestZ + 0.05) return v;
-    if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) return v;
+    ok = ok && camPt.z <= closestZ + 0.05;
+    if (ok && _BodyCapCount > 0)
+        ok = !BodyOccludes(_CamPos.xyz, worldPt);
 
+    v.valid = ok;
+    v.tri = t;
+    v.score = score;
     v.photoPx = sp;
-    v.valid = true;
     return v;
 }
 
