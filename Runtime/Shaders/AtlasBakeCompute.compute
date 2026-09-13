@@ -288,18 +288,24 @@ void BuildTexelMap(uint3 id : SV_DispatchThreadID)
 // texel is padding, faces away, is outside the photo, occluded, or hand.
 struct TexelView
 {
+    bool  valid;
     int   tri;
     float score;
     float2 photoPx;   // continuous photo position
 };
 
-bool ProjectTexel(int idx, uint2 texel, out TexelView v)
+// Returned by value (a fully written local), not through an `out` struct:
+// the Vulkan compiler flags an `out` written before early returns as
+// potentially uninitialised.
+TexelView ProjectTexel(int idx, uint2 texel)
 {
+    TexelView v;
+    v.valid = false;
     v.tri = -1;
     v.score = 0;
     v.photoPx = float2(0, 0);
     uint t1 = _TexelTri[idx];
-    if (t1 == 0) return false;
+    if (t1 == 0) return v;
     int t = (int)t1 - 1;
     v.tri = t;
 
@@ -309,7 +315,7 @@ bool ProjectTexel(int idx, uint2 texel, out TexelView v)
     // Barycentrics of this texel centre in the triangle's UV space.
     float2 uv0 = _RawUV[i0], uv1 = _RawUV[i1], uv2 = _RawUV[i2];
     float denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
-    if (abs(denom) < 1e-8) return false;
+    if (abs(denom) < 1e-8) return v;
     float invD = 1.0 / denom;
     float2 d = float2(texel) - uv2;
     float bw0 = ((uv1.y - uv2.y) * d.x + (uv2.x - uv1.x) * d.y) * invD;
@@ -332,27 +338,28 @@ bool ProjectTexel(int idx, uint2 texel, out TexelView v)
 
     float3 vd = _CamPos.xyz - worldPt;
     float vdLen = length(vd);
-    if (vdLen < 0.001) return false;
+    if (vdLen < 0.001) return v;
     vd /= vdLen;
     float dotNV = dot(n, vd);
-    if (dotNV <= 0.05) return false;
+    if (dotNV <= 0.05) return v;
     v.score = dotNV / max(vdLen, 0.1);
 
     float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
-    if (camPt.z <= 0.001) return false;
+    if (camPt.z <= 0.001) return v;
     float2 sp = float2(_Fx * camPt.x / camPt.z + _Cx - _CropX,
                        _Fy * camPt.y / camPt.z + _Cy - _CropY);
     int px = (int)round(sp.x), py = (int)round(sp.y);
-    if (px < 0 || px >= _ImgW || py < 0 || py >= _ImgH) return false;
+    if (px < 0 || px >= _ImgW || py < 0 || py >= _ImgH) return v;
 
     int dx = clamp((int)(sp.x * _DepthScale), 0, _DepthW - 1);
     int dy = clamp((int)(sp.y * _DepthScale), 0, _DepthH - 1);
     float closestZ = asfloat(_DepthBuf[dy * _DepthW + dx]);
-    if (camPt.z > closestZ + 0.05) return false;
-    if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) return false;
+    if (camPt.z > closestZ + 0.05) return v;
+    if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) return v;
 
     v.photoPx = sp;
-    return true;
+    v.valid = true;
+    return v;
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -369,8 +376,8 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
     if (idx >= _AtlasW * _AtlasH) return;
 
     uint2 texel = uint2((uint)idx % (uint)_AtlasW, (uint)idx / (uint)_AtlasW);
-    TexelView v;
-    if (!ProjectTexel(idx, texel, v)) return;
+    TexelView v = ProjectTexel(idx, texel);
+    if (!v.valid) return;
 
     if (_ChartCount > 0)
     {
@@ -755,8 +762,8 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
     if (bestS <= 0) return;
 
     uint2 texel = uint2((uint)idx % (uint)_AtlasW, (uint)idx / (uint)_AtlasW);
-    TexelView v;
-    if (!ProjectTexel(idx, texel, v)) return;
+    TexelView v = ProjectTexel(idx, texel);
+    if (!v.valid) return;
 
     // Admission is a ramp, not a bar: a view's weight rises from 0 at
     // _BlendMinFraction × best to full at best. Where the best view

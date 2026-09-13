@@ -946,6 +946,25 @@ After atlas baking, the refined mesh can be optionally simplified using [meshopt
 
 > Running simplification *after* baking (instead of before) preserves atlas quality: the UV unwrap and atlas bake operate on the full-resolution mesh, and only the final game-ready mesh is reduced. This replaces the old pre-bake decimation which degraded baking quality.
 
+### 15.1a Keyframe Registration (pass 2 pre-step)
+
+Each keyframe is aligned to the pass-1 atlas before it is blended:
+
+1. `BuildDepth` at 1/4 resolution from the dense mesh, then `RenderAtlasView` rasterises the output mesh into the keyframe's image plane, sampling the pass-1 atlas — the room as the mesh *thinks* this photo should look.
+2. `KfLumDownsample` averages the photo to the same 1/4 grid.
+3. `MatchShift` — one 256-thread group per candidate shift striding the low-res image with a groupshared reduction (one thread per shift walking the whole image was a 77 k-iteration serial loop on 169 lanes, ~20 ms of GPU a keyframe) — computes zero-mean normalized cross-correlation for every integer shift in ±R (R = 6 low-res px ≈ ±1.6° at Quest 3 focal length), one thread per shift.
+4. Host reads the (2R+1)² scores, fits a parabola for sub-pixel peak, rejects peaks below `registrationMinNcc` or on the search border, and turns the shift into a yaw/pitch correction of the keyframe rotation (`ApplyImageShift`: `R' = R · ΔR⁻¹`, ΔR = Rx(−dy/fy) · Ry(dx/fx)).
+
+The corrected pose drives that keyframe's depth pass and `BlendAccum`. A pure image shift absorbs the dominant errors — exposure-time pose offset and residual mesh bias — for a mostly rotating head; it costs one light GPU chain and a 676-byte readback per keyframe, no extra JPEG decode. Requires `multiViewBlend` (the pass-1 colours are not re-projected).
+
+### 15.1b Chart-Consistent View Preference
+
+**Admission is a ramp, not a bar.** A view's blend weight is `score × smoothstep(blendMinFraction × best, best, score)`: zero at 0.75× the texel's pass-1 best score, full at the best. Where the best view changes across a chart the two are near equal and both count; where one fades out it fades — a hard threshold switched views along a line and printed a seam *inside* the chart. Views under 2 % weight do not spend a `maxViewsPerTexel` slot.
+
+**Exposure equalisation** (`equalizeExposure`, with registration on). The passthrough camera re-exposes between frames, so two well-registered views of one wall still meet with a brightness step. The registration chain already renders the pass-1 atlas into the keyframe's view at 1/4 res (`RenderAtlasView`, now packed RGB) and downsamples the photo (`KfLumDownsample`, packed mean RGB); `ViewGainReduce` sums both over the covered pixels (groupshared partials, one atomic per channel per group) and C# turns the ratio into a per-channel gain clamped to `[1/exposureGainLimit, exposureGainLimit]` (1.6). `BlendAccum` multiplies the photo by `_KfGain`. Means over tens of thousands of pixels are indifferent to the few-pixel shift, so this needs no extra pass and a 28-byte readback. Headset package: 22 keyframes, luma gains 0.96..1.07.
+
+Pass 1 sums each keyframe's valid texel scores per xatlas chart (one atomic per 4×4 texel block per keyframe into a `charts × keyframes` table); `ChartArgmax` picks the chart's best view. In pass 2 that view is weighted ×`chartBestViewBoost` (default 3) and never spends one of the `maxViewsPerTexel` slots, but it meets the same `blendMinFraction` bar as every other view: admitting it below the bar painted chart corners with stretched pixels from a grazing photo. A chart therefore reads from one photo wherever that photo sees it well, and view switches move to chart borders, which seam levelling (§15.3.1) then flattens. `ResolveBlend` keeps the pass-1 colour on texels no blend sample reached instead of clearing them.
+
 ### 15.2 UV Unwrapping (xatlas)
 
 **Threads.** xatlas's task scheduler takes `hardware_concurrency` threads by default — every core on Quest 3 — and its `wait()` spins the caller. During a 15-70 s unwrap that starves Unity's main and render threads: the headset fell to 10-20 fps for the whole stage. The bundled `xatlas.cpp` is patched with `xatlas::SetThreading(maxThreads, workerNice)` (C API `xatlas_set_threading`, read when the atlas is created): `TextureRefinement.xatlasThreads` (default **3**, incl. the calling worker) caps the scheduler and `xatlasThreadNice` (default **10**) sets a POSIX nice on the worker threads and, for the length of `Generate`, on the caller, so the engine's threads win any contended core. Older plugin binaries without the export fall back to every core (the P/Invoke is guarded).
