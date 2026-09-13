@@ -1933,6 +1933,21 @@ namespace Genesis.RoomScan
                 _occlusionMaterial = new Material(occShader);
         }
 
+        /// <summary>
+        /// Swap the refined mesh between two-sided (in-room) and Cull Back
+        /// (outside). Quest ignores ShaderLab <c>Cull [_Cull]</c>; this is a
+        /// second program, not a float.
+        /// </summary>
+        internal void SetRefinedBackfaceCull(bool cullBack)
+        {
+            if (_refinedMaterial == null || _textureRefinement == null) return;
+            var shader = cullBack
+                ? _textureRefinement.refinedMeshBackfaceShader
+                : _textureRefinement.refinedMeshShader;
+            if (shader == null || _refinedMaterial.shader == shader) return;
+            _refinedMaterial.shader = shader;
+        }
+
         // ─────────────────────────────────────────────────────────────
         //  Internal helpers
         // ─────────────────────────────────────────────────────────────

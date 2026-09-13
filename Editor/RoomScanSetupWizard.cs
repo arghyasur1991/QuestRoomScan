@@ -140,7 +140,7 @@ namespace Genesis.RoomScan.Editor
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
             _refinedShaderWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
-                "refinedMeshShader");
+                "refinedMeshShader", "refinedMeshBackfaceShader");
             _occlusionShaderWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "occlusionMeshShader");
             _atlasBakeComputeWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
@@ -1631,6 +1631,7 @@ namespace Genesis.RoomScan.Editor
                 {
                     var so = new SerializedObject(tr);
                     AssignAsset<Shader>(so, "refinedMeshShader", PKG_SHADERS + "RefinedMesh.shader");
+                    AssignAsset<Shader>(so, "refinedMeshBackfaceShader", PKG_SHADERS + "RefinedMeshBackface.shader");
                     AssignAsset<Shader>(so, "occlusionMeshShader", PKG_SHADERS + "OcclusionMesh.shader");
                     AssignAsset<ComputeShader>(so, "atlasBakeCompute", PKG_SHADERS + "AtlasBakeCompute.compute");
                     so.ApplyModifiedProperties();

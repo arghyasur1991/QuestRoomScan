@@ -596,6 +596,15 @@ namespace Genesis.RoomScan
         public MeshRenderer RefinedMeshRenderer =>
             _scanner != null ? _scanner.RefinedMeshRenderer : null;
 
+        /// <summary>
+        /// Two-sided in the room, Cull Back outside so the near walls vanish
+        /// and the interior reads as a shell. No-op if shaders are unwired.
+        /// </summary>
+        public void SetRefinedBackfaceCull(bool cullBack)
+        {
+            _scanner?.SetRefinedBackfaceCull(cullBack);
+        }
+
         /// <summary>Completes when scene discovery has finished. Completed
         /// immediately if it already has.</summary>
         public Task WaitUntilRoomReadyAsync()
