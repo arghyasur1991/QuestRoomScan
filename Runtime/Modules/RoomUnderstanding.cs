@@ -747,19 +747,72 @@ namespace Genesis.RoomScan
             {
                 if (Time.unscaledTime - s_invLogAt < 1.5f) return;
                 s_invLogAt = Time.unscaledTime;
-                var sb = new System.Text.StringBuilder(128);
-                int screens = 0;
-                for (int i = 0; i < room.Anchors.Count; i++)
-                {
-                    var a = room.Anchors[i];
-                    if (a == null) continue;
-                    if (sb.Length > 0) sb.Append(' ');
-                    sb.Append(a.Label);
-                    if (a.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN)) screens++;
-                }
+                var all = MRUK.Instance != null ? MRUK.Instance.Rooms : null;
+                LogAllRooms(all);
+                int n = room != null && room.Anchors != null ? room.Anchors.Count : 0;
                 Logger.Info(
-                    $"[PinFace] room anchors={room.Anchors.Count} pin={pinCount} " +
-                    $"screens={screens} labels={sb}");
+                    $"[PinFace] pin-room uuid={ShortUuid(RoomUuid(room))} " +
+                    $"anchors={n} pinSurfaces={pinCount}");
+            }
+
+            internal static void LogAllRooms(IList<MRUKRoom> rooms)
+            {
+                Vector3 head = HeadsetWorldPosition();
+                MRUKRoom native = null;
+                var mruk = MRUK.Instance;
+                if (mruk != null)
+                    native = mruk.GetCurrentRoom();
+                var containing = FindContaining(rooms, head);
+                int n = rooms != null ? rooms.Count : 0;
+                Logger.Info(
+                    $"[PinFace] rooms={n} nativeCurrent={ShortUuid(RoomUuid(native))} " +
+                    $"containing={ShortUuid(RoomUuid(containing))} headset={V3(head)}");
+                if (rooms == null) return;
+
+                for (int i = 0; i < rooms.Count; i++)
+                {
+                    var room = rooms[i];
+                    if (room == null)
+                    {
+                        Logger.Info($"[PinFace] [{i}] null");
+                        continue;
+                    }
+
+                    bool inFloor = room.IsPositionInRoom(head, testVerticalBounds: true);
+                    bool inWalls = Contains(room, head);
+                    int anchors = room.Anchors != null ? room.Anchors.Count : 0;
+                    int screens = 0;
+                    Logger.Info(
+                        $"[PinFace] [{i}] uuid={ShortUuid(RoomUuid(room))} " +
+                        $"name={room.name} anchors={anchors} " +
+                        $"inFloor={inFloor} inWalls={inWalls} " +
+                        $"floorY={FloorY(room):F2}");
+                    if (room.Anchors == null) continue;
+                    for (int j = 0; j < room.Anchors.Count; j++)
+                    {
+                        var a = room.Anchors[j];
+                        if (a == null) continue;
+                        if (a.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN))
+                            screens++;
+                        string plane = a.PlaneRect.HasValue ? "plane" : "no-plane";
+                        string vol = a.VolumeBounds.HasValue
+                            ? $"vol={V3(a.VolumeBounds.Value.size)}"
+                            : "vol=none";
+                        string geom = TryPlaneSize(a, out Vector3 center, out float w, out float h)
+                            ? $"{w:F2}x{h:F2} c={V3(center)}"
+                            : "no-size";
+                        Logger.Info(
+                            $"[PinFace]   [{i}.{j}] {a.Label} {plane} {vol} {geom} " +
+                            $"pos={V3(a.transform.position)}");
+                    }
+                    Logger.Info($"[PinFace] [{i}] screens={screens}");
+                }
+            }
+
+            static string ShortUuid(Guid uuid)
+            {
+                if (uuid == Guid.Empty) return "-";
+                return uuid.ToString("N").Substring(0, 8);
             }
 
             static void TryAddPinSurface(

@@ -209,11 +209,7 @@ namespace Genesis.RoomScan
                                 RoomUnderstanding.Query.HeadsetWorldPosition())
                             ?? _mruk.Rooms[0];
 
-            Logger.Info($"MRUK rooms={_mruk.Rooms.Count}, " +
-                        $"headset-room anchors={room.Anchors.Count} " +
-                        "(floor transform only; occupancy is RoomUnderstanding)");
-            foreach (var a in room.Anchors)
-                Logger.Info($"  anchor: {a.Label} vol={a.VolumeBounds.HasValue} plane={a.PlaneRect.HasValue}");
+            RoomUnderstanding.Query.LogAllRooms(_mruk.Rooms);
 
             MRUKAnchor floorAnchor = null;
             if (room.FloorAnchors != null && room.FloorAnchors.Count > 0)
