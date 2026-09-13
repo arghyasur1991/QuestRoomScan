@@ -1160,7 +1160,7 @@ Iterates `MRUKRoom.Anchors`, for each:
 4. Special handling for floor/ceiling: wall-aligned bounding box via `FindWallHorizontalRight`
 5. Register as `SceneObject` with `id = mruk_{index}_{label}`, `source = MRUK`
 
-**Scene model**: Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh for reliable detection. Event-driven updates via `MRUKRoom.AnchorCreatedEvent` / `AnchorUpdatedEvent`.
+**Scene model**: Uses `SceneModel.V1` (semantic planes and furniture volumes). V2 is the HiFi room mesh and does not attach those volumes. Event-driven updates via `MRUKRoom.AnchorCreatedEvent` / `AnchorUpdatedEvent`.
 
 ### 17.2 Surface Classification
 

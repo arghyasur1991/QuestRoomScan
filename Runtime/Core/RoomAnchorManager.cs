@@ -75,7 +75,10 @@ namespace Genesis.RoomScan
             _mruk.SceneSettings ??= new MRUK.MRUKSettings();
             _mruk.SceneSettings.DataSource = MRUK.SceneDataSource.Device;
             _mruk.SceneSettings.LoadSceneOnStartup = false;
-            _mruk.SceneSettings.EnableHighFidelityScene = true;
+            // V2 is HiFi room mesh (layout faces). Furniture volumes (SCREEN,
+            // TABLE, …) live on V1. HiFi is unsupported; V2FallbackV1 never
+            // falls back on a Quest 3 that already has a room mesh.
+            _mruk.SceneSettings.EnableHighFidelityScene = false;
 
             if (_mruk.SceneLoadedEvent != null)
                 _mruk.SceneLoadedEvent.AddListener(OnSceneLoaded);
@@ -88,11 +91,11 @@ namespace Genesis.RoomScan
             // default (requestSceneCaptureIfNoDataFound: true) paused the
             // Unity app into Meta's UI with no host copy, and on cancel
             // SceneLoadedEvent never fired so RoomReady hung.
-            Logger.Info("MRUK LoadSceneFromDevice (V2FallbackV1, capture=false)...");
+            Logger.Info("MRUK LoadSceneFromDevice (V1, capture=false)...");
             var loadTask = _mruk.LoadSceneFromDevice(
                 requestSceneCaptureIfNoDataFound: false,
                 removeMissingRooms: true,
-                sceneModel: MRUK.SceneModel.V2FallbackV1);
+                sceneModel: MRUK.SceneModel.V1);
             while (!loadTask.IsCompleted)
                 yield return null;
 
@@ -131,13 +134,13 @@ namespace Genesis.RoomScan
         {
             if (_mruk == null) return HasSceneRooms;
 
-            Logger.Info("MRUK LoadSceneFromDevice reload (V2FallbackV1, capture=false)...");
+            Logger.Info("MRUK LoadSceneFromDevice reload (V1, capture=false)...");
             try
             {
                 var result = await _mruk.LoadSceneFromDevice(
                     requestSceneCaptureIfNoDataFound: false,
                     removeMissingRooms: true,
-                    sceneModel: MRUK.SceneModel.V2FallbackV1);
+                    sceneModel: MRUK.SceneModel.V1);
                 Logger.Info($"LoadSceneFromDevice reload result={result}");
             }
             catch (Exception ex)
