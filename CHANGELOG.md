@@ -8,73 +8,65 @@ All notable changes to this package are documented here. The format follows
 
 ### Changed
 
-- **Texture bake keeps the headset at refresh.** Debugged from a headset
-  package (22 keyframes, `pkg_20260913_165307`):
-  - JPEG decode is off the main thread. `KeyframeImageDecoder` reads and
-    decodes the next keyframe on a worker (`BitmapFactory` via JNI on
-    Android, `LoadImage` fallback elsewhere); the main thread only uploads
-    pixels. `LoadImage` was 15-30 ms per frame, twice per keyframe.
-  - Every per-keyframe triangle dispatch runs in `computeSlicesPerKeyframe`
-    (3) slices on consecutive frames via `_TriOffset`, including the
-    registration raster. `gpuIdleFramesPerStep` 2 → 1 on top of that.
-  - Capture-side encode uses the thread-safe `EncodeArrayToJPG` on a
-    worker instead of `Texture2D.EncodeToJPG` on the main thread.
+- **Keyframe collection is back to the pre-1.0 recipe.** `moveThreshold`
+  0.15 m, `rotateThresholdDeg` 10°, `minCaptureInterval` 0.25 s, one
+  angular gate at 120 °/s on the app clock. The 1.0 "game-proven" sparser
+  defaults and the 1.2 two-interval PCA-timestamp gate with a linear-speed
+  term are gone: on a headset scan they left 22 keyframes for a room and
+  the bake had nothing to paint the walls with. `ICameraFrameTiming` stays
+  on the providers. Hand capsules are clipped at the near plane before
+  projection — a forearm running back past the camera projected to a
+  full-image footprint and rejected the frame as 100 % hand.
+- **Bake is pipelined, not sliced.** One keyframe per compositor frame:
+  keyframe N+1 is read and JPEG-decoded on a worker
+  (`KeyframeImageDecoder`: `BitmapFactory` via JNI on Android, `LoadImage`
+  fallback elsewhere) while N's dispatches run; the main thread uploads
+  pixels into one of two alternating textures and issues clear → depth →
+  shade in one submission. The compositor-frame splitting, per-step fences
+  and idle frames (`gpuIdleFramesPerStep`) from 1.1 are removed. Capture-side
+  encode is the thread-safe `EncodeArrayToJPG` on a worker.
+- **Simplification is post-bake again** (`meshopt_simplifyWithAttributes`,
+  UV-locked borders, `simplified_mesh.bin`), as in 1.1. Simplifying before
+  the unwrap did not visibly help alignment and made the unwrap the slowest
+  stage of the refinement.
 - **Seam levelling replaces `BlendSeams`.** The two atlas sides of every
   UV seam edge are paired by position (worker CPU), pinned to their mean
   (`SeamDelta`) and the correction diffused into each chart
   (`SeamDiffuse` × `seamLevelIterations`, default 40, one a frame) then
-  added (`SeamApply`). Mean seam step 6.0 → 3.2 levels on the headset
+  added (`SeamApply`). Mean seam step 6.0 → 3.2 levels on a headset
   package. `seamBlendRadius` is gone; `enableSeamBlending` keeps its name.
-- **Keyframe gate admits a normal scan.** Angular 45 → 60 °/s, linear
-  0.5 → 1.0 m/s, and after `motionGraceSeconds` (2.5 s) without a keyframe
-  a frame moving up to twice the gates is taken anyway. 0.5 m/s rejected
-  most of a walking scan (22 keyframes, black walls). Hand capsules are
-  clipped at the near plane before projection — a forearm running back
-  past the camera projected to a full-image footprint and rejected the
-  frame as 100 % hand.
 - **Blend admission is a ramp; keyframes are exposure-equalised.** A view's
   weight rises from 0 at `blendMinFraction` × best to full at best instead
   of switching on at a threshold, so view changes inside a chart fade
   instead of printing a line. With registration on, `ViewGainReduce` sums
   the pass-1 atlas and the photo over the covered low-res pixels and the
   blend scales the photo by the per-channel ratio (`equalizeExposure`,
-  `exposureGainLimit` 1.6).
-- **Capture density**: `minCaptureInterval` 1 → 0.5 s, `rotateThresholdDeg`
-  25 → 20 now that a capture costs the main thread one readback copy.
+  `exposureGainLimit` 1.6). The chart-preferred view meets the same bar as
+  every other view (its 0.7× admission painted chart corners with
+  stretched pixels from a grazing photo).
 - **Bilinear keyframe sampling** in `BakeAtlas` / `BlendAccum`
   (`SampleKf`): far and oblique views no longer stamp photo pixels as
   blocks.
-- **Chart-preferred view meets the same `blendMinFraction` bar.** The
-  0.7× admission painted chart corners with stretched pixels from a
-  grazing photo.
-- **Texture bake: views agree instead of seaming.** Four registration
-  fixes, all measured against the fixture-era look:
-  - Simplification runs **before** the UV unwrap (`meshopt_simplify`,
-    geometry only), so the atlas is baked onto the mesh that is displayed.
-    The dense mesh still builds the per-keyframe occlusion depth. Baking on
-    the dense mesh and collapsing afterwards slid the surface under a fixed
-    texture, by different amounts on the two sides of every chart border.
-    No `simplified_mesh.bin` is written any more; older packages still load
-    theirs. `postBakeSimplificationRatio` keeps its name for serialized
-    scenes; the Inspector text now says pre-bake.
-  - Keyframe motion gate uses the frames' own PCA timestamps
-    (`ICameraFrameTiming`, implemented by both providers) and requires the
-    head still over the last **two** camera intervals: angular ≤ 45°/s
-    (was 120, app-clock), new linear ≤ 0.5 m/s. The first still frame after
-    a turn is skipped — its exposure straddled the motion.
-  - Per-keyframe registration before the blend pass: the pass-1 atlas is
-    rendered into the keyframe's image at 1/4 resolution, a ZNCC sweep over
-    ±6 px finds the best shift, and a parabolic sub-pixel peak becomes a
-    yaw/pitch correction (`ApplyImageShift`). One light GPU chain per
-    keyframe, no extra JPEG decode. `refineKeyframePoses`,
-    `registrationSearchRadius`, `registrationMinNcc`.
-  - Chart-consistent blend: pass 1 tallies texel scores per xatlas chart,
-    the chart's best view is boosted ×3 (`chartBestViewBoost`), admitted a
-    little below `blendMinFraction`, and exempt from the per-texel view cap,
-    so a chart reads from one photo and view switches land on chart borders.
-    `ResolveBlend` keeps the pass-1 colour where no blend sample reached.
+- **Per-keyframe registration and chart-consistent blend** (from the 1.2
+  work, kept): the pass-1 atlas is rendered into the keyframe's image at
+  1/4 resolution, a ZNCC sweep over ±6 px finds the best shift, and a
+  parabolic sub-pixel peak becomes a yaw/pitch correction
+  (`ApplyImageShift`) before the blend pass (`refineKeyframePoses`,
+  `registrationSearchRadius`, `registrationMinNcc`). Pass 1 tallies texel
+  scores per xatlas chart, the chart's best view is boosted ×3
+  (`chartBestViewBoost`) and exempt from the per-texel view cap.
+  `ResolveBlend` keeps the pass-1 colour where no blend sample reached.
 
 ### Added
+
+- **Refinement profile.** `profileRefinement` (default on) ends every
+  refinement with one `[TextureRefine][Profile]` block: wall time per
+  stage, per-keyframe main-thread and worker time, the compositor frames
+  the bake ran across (count, mean, max and its stage, over-budget,
+  hitches) and memory deltas. `KeyframeCollector` logs a
+  `[KeyframeCollector][Profile]` line every 25 saves and at scan stop
+  (main-thread readback copy, worker encode and write). Diagnose a
+  headset refinement from logcat alone.
 
 - **`SceneFaceKind` on plane copy.** `CopyHeadsetRoomWallFaces(dest, kind)`
   takes the labels the host wants (`Wall`, `Screen`, or both). Overlapping

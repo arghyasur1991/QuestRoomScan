@@ -16,25 +16,19 @@ namespace Genesis.RoomScan
     public class KeyframeCollector : MonoBehaviour
     {
         [SerializeField, Tooltip("Min translation (m) from every saved keyframe to trigger a new capture. A frame is redundant only if it is close in BOTH position and rotation to a saved one.")]
-        private float moveThreshold = 0.5f;
+        private float moveThreshold = 0.15f;
 
         [SerializeField, Tooltip("Min rotation (deg) from every saved keyframe to trigger a new capture")]
-        private float rotateThresholdDeg = 20f;
+        private float rotateThresholdDeg = 10f;
 
         [SerializeField, Range(50, 100)]
         private int jpegQuality = 95;
 
-        [SerializeField, Tooltip("Max head angular velocity (deg/s) over each of the last two camera frames to accept a frame. Motion blur and exposure-time pose error scale with this; 60 keeps texture-grade frames while the player looks around, 120 admits blurred ones.")]
-        private float maxAngularVelocity = 60f;
+        [SerializeField, Tooltip("Max angular velocity (deg/s) to accept a frame (rejects motion blur)")]
+        private float maxAngularVelocity = 120f;
 
-        [SerializeField, Tooltip("Max head linear velocity (m/s) over each of the last two camera frames. A slow walk is ~0.8-1.0 m/s; 0.5 rejected most of a normal scan and left the atlas with holes.")]
-        private float maxLinearVelocity = 1.0f;
-
-        [SerializeField, Tooltip("After this many seconds without a keyframe, accept a frame moving up to twice the gates above. Coverage beats sharpness: a slightly soft photo textures a wall, no photo leaves it black.")]
-        private float motionGraceSeconds = 2.5f;
-
-        [SerializeField, Tooltip("Min seconds between captures. A capture costs the main thread one readback copy (~1 ms); the JPEG encode and the disk write are on a worker, so 0.5 s is affordable and a room scan lands well over 100 keyframes.")]
-        private float minCaptureInterval = 0.5f;
+        [SerializeField, Tooltip("Min seconds between captures to prevent burst saves. A capture costs the main thread one readback copy; the JPEG encode and the disk write run on a worker.")]
+        private float minCaptureInterval = 0.25f;
 
         [SerializeField, Tooltip("Skip a frame when the player's hands / forearms cover more than this fraction of the image. Smaller intrusions are kept and masked out of the texture bake per pixel.")]
         [Range(0.02f, 0.5f)] private float maxHandCoverage = 0.12f;
@@ -55,19 +49,8 @@ namespace Genesis.RoomScan
         private int _pendingWrites;
         private float _lastCaptureTime;
         private bool _initialized;
-
-        // Motion history from the frames' own timestamps: the last two
-        // frame-to-frame speeds. A frame is admitted only when both are under
-        // the gates, so the first still frame after a fast turn is rejected
-        // (its exposure straddled the motion) and the second is taken.
-        private Vector3 _prevPos;
         private Quaternion _prevRot;
-        private double _prevFrameTime;
-        private bool _hasPrevFrame;
-        private float _lastAngVel, _lastLinVel;
-        private float _prevAngVel, _prevLinVel;
-        private int _skippedForMotion;
-        private int _acceptedMoving;
+        private float _prevRotTime;
 
         /// <summary>Number of keyframes saved so far in this session.</summary>
         public int SavedCount => _nextId;
@@ -128,27 +111,15 @@ namespace Genesis.RoomScan
         {
             if (!_initialized || frame == null || _exportDir == null) return;
 
-            // Motion history first, every frame, so the gate below sees the
-            // two most recent intervals even while the interval gate is closed.
-            bool still = UpdateMotion(pos, rot);
-
             if (Time.time - _lastCaptureTime < minCaptureInterval) return;
 
-            if (!still)
+            float dt = Time.time - _prevRotTime;
+            if (dt > 0.001f)
             {
-                bool starved = Time.time - _lastCaptureTime >= motionGraceSeconds;
-                bool moderate = _lastAngVel <= 2f * maxAngularVelocity && _prevAngVel <= 2f * maxAngularVelocity
-                             && _lastLinVel <= 2f * maxLinearVelocity && _prevLinVel <= 2f * maxLinearVelocity;
-                if (!(starved && moderate))
-                {
-                    if (++_skippedForMotion <= 3 || _skippedForMotion % 50 == 0)
-                        Logger.Info($"KeyframeCollector: skipped frame, head moving " +
-                                    $"{_lastAngVel:F0}°/s {_lastLinVel:F2} m/s ({_skippedForMotion} so far)");
-                    return;
-                }
-                if (++_acceptedMoving <= 3 || _acceptedMoving % 25 == 0)
-                    Logger.Info($"KeyframeCollector: accepting a moving frame after {motionGraceSeconds:F1} s without one " +
-                                $"({_lastAngVel:F0}°/s {_lastLinVel:F2} m/s, {_acceptedMoving} so far)");
+                float angVel = Quaternion.Angle(_prevRot, rot) / dt;
+                _prevRot = rot;
+                _prevRotTime = Time.time;
+                if (angVel > maxAngularVelocity) return;
             }
 
             if (!ShouldCapture(pos, rot)) return;
@@ -190,46 +161,6 @@ namespace Genesis.RoomScan
                 SaveKeyframeData(tex2d.EncodeToJPG(jpegQuality), id, timestamp,
                     pos, rot, focalLen, principalPt, sensorRes, currentRes, caps);
             }
-        }
-
-        /// <summary>
-        /// Advance the motion history with this frame and report whether the
-        /// head was still over the last two camera intervals. Time comes from
-        /// the provider's frame timestamps when it has them
-        /// (<see cref="ICameraFrameTiming"/>), else the app clock.
-        /// </summary>
-        bool UpdateMotion(Vector3 pos, Quaternion rot)
-        {
-            double now = _scanner != null && _scanner.ActiveCameraProvider is ICameraFrameTiming timing
-                ? timing.FrameTimeSeconds
-                : Time.realtimeSinceStartupAsDouble;
-
-            if (_hasPrevFrame)
-            {
-                double dt = now - _prevFrameTime;
-                if (dt > 1e-4)
-                {
-                    _prevAngVel = _lastAngVel;
-                    _prevLinVel = _lastLinVel;
-                    _lastAngVel = (float)(Quaternion.Angle(_prevRot, rot) / dt);
-                    _lastLinVel = (float)(Vector3.Distance(_prevPos, pos) / dt);
-                }
-            }
-            else
-            {
-                // No history yet: treat as moving so the very first frame of a
-                // session (often mid-gesture) is not the first keyframe.
-                _lastAngVel = _prevAngVel = float.PositiveInfinity;
-                _lastLinVel = _prevLinVel = float.PositiveInfinity;
-            }
-
-            _prevPos = pos;
-            _prevRot = rot;
-            _prevFrameTime = now;
-            _hasPrevFrame = true;
-
-            return _lastAngVel <= maxAngularVelocity && _prevAngVel <= maxAngularVelocity
-                   && _lastLinVel <= maxLinearVelocity && _prevLinVel <= maxLinearVelocity;
         }
 
         /// <summary>
@@ -322,9 +253,13 @@ namespace Genesis.RoomScan
                 // callback) and encode on a worker: EncodeArrayToJPG is
                 // thread-safe, and a 1280×960 encode on the main thread was
                 // a 30-40 ms hitch in the scan loop per keyframe.
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 var data = req.GetData<byte>();
                 byte[] pixels = new byte[data.Length];
                 data.CopyTo(pixels);
+                double copyMs = sw.Elapsed.TotalMilliseconds;
+                _mainCopyMs += copyMs;
+                if (copyMs > _mainCopyMaxMs) _mainCopyMaxMs = copyMs;
                 int w = req.width, h = req.height;
                 int quality = jpegQuality;
 
@@ -352,7 +287,10 @@ namespace Genesis.RoomScan
             {
                 try
                 {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
                     byte[] jpgBytes = encode();
+                    double encodeMs = sw.Elapsed.TotalMilliseconds;
+                    sw.Restart();
                     string imgPath = Path.Combine(_imagesDir, $"{id:D6}.jpg");
                     File.WriteAllBytes(imgPath, jpgBytes);
 
@@ -384,6 +322,7 @@ namespace Genesis.RoomScan
                     {
                         File.AppendAllText(_manifestPath, sb.ToString() + "\n");
                     }
+                    RecordWorker(encodeMs, sw.Elapsed.TotalMilliseconds);
 
                     if (id < 5 || id % 50 == 0)
                         Logger.Info($"KeyframeCollector: saved frame {id} ({jpgBytes.Length / 1024}KB)");
@@ -422,9 +361,46 @@ namespace Genesis.RoomScan
             _savedPositions.Clear();
             _savedRotations.Clear();
             _nextId = 0;
-            _hasPrevFrame = false;
-            _skippedForMotion = 0;
+            _prevRotTime = 0f;
+            _skippedForHands = 0;
+            _mainCopyMs = _mainCopyMaxMs = 0;
+            lock (_workerStats) { _encodeMs = _writeMs = _encodeMaxMs = _writeMaxMs = 0; _workerDone = 0; }
         }
+
+        // ── Profile: what a capture costs the main thread (the readback
+        // copy) and the worker (encode, write). One line every 25 saves and
+        // on the last write, so a headset scan can be read from logcat.
+        double _mainCopyMs, _mainCopyMaxMs;
+        readonly object _workerStats = new object();
+        double _encodeMs, _writeMs, _encodeMaxMs, _writeMaxMs;
+        int _workerDone;
+
+        void RecordWorker(double encodeMs, double writeMs)
+        {
+            int done;
+            lock (_workerStats)
+            {
+                _encodeMs += encodeMs; if (encodeMs > _encodeMaxMs) _encodeMaxMs = encodeMs;
+                _writeMs += writeMs;   if (writeMs > _writeMaxMs) _writeMaxMs = writeMs;
+                done = ++_workerDone;
+            }
+            if (done % 25 == 0)
+                Logger.Info(ProfileLine());
+        }
+
+        string ProfileLine()
+        {
+            lock (_workerStats)
+            {
+                double n = Math.Max(1, _workerDone);
+                return $"[KeyframeCollector][Profile] saved={_nextId} written={_workerDone} pending={_pendingWrites} " +
+                       $"main copy={_mainCopyMs / n:F2}/{_mainCopyMaxMs:F1} | worker encode={_encodeMs / n:F1}/{_encodeMaxMs:F0} " +
+                       $"write={_writeMs / n:F1}/{_writeMaxMs:F0} (ms mean/max) skippedHands={_skippedForHands}";
+            }
+        }
+
+        /// <summary>Log the capture-cost profile now (scan end).</summary>
+        public void LogProfile() => Logger.Info(ProfileLine());
 
     }
 }

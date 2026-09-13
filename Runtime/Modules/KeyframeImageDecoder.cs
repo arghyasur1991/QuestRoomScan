@@ -27,6 +27,9 @@ namespace Genesis.RoomScan
             public int Width, Height;
             public NativeArray<byte> Rgba;   // bottom-up rows, RGBA32
             public byte[] Encoded;           // fallback: LoadImage on the main thread
+            /// <summary>Worker time spent in the file read and in the decode (profile).</summary>
+            public double ReadMs, DecodeMs;
+            public bool IsFallback => !Rgba.IsCreated;
 
             /// <summary>Main thread. Upload into <paramref name="tex"/>, resizing
             /// it to the image. Returns false when nothing could be decoded.</summary>
@@ -61,27 +64,37 @@ namespace Genesis.RoomScan
         internal static bool NativeDecodeAvailable => AndroidPlayer && !_nativeDisabled;
 
         /// <summary>Read the file and decode it, all on worker threads.</summary>
-        internal static async Task<Decoded> ReadAndDecodeAsync(string path)
+        internal static Task<Decoded> ReadAndDecodeAsync(string path)
         {
-            byte[] jpg;
-#if UNITY_2021_3_OR_NEWER
-            jpg = await File.ReadAllBytesAsync(path);
-#else
-            jpg = await Task.Run(() => File.ReadAllBytes(path));
-#endif
-            return await DecodeAsync(jpg);
-        }
-
-        internal static Task<Decoded> DecodeAsync(byte[] jpg)
-        {
-            if (jpg == null || jpg.Length == 0) return Task.FromResult<Decoded>(null);
-            if (!NativeDecodeAvailable)
-                return Task.FromResult(new Decoded { Encoded = jpg });
+            // One worker hop for both: the read is a few ms of I/O and the
+            // decode 15-30 ms of CPU, neither belongs anywhere near the frame.
             return Task.Run(() =>
             {
-                var d = DecodeAndroid(jpg);
-                return d ?? new Decoded { Encoded = jpg };
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                byte[] jpg = File.ReadAllBytes(path);
+                double readMs = sw.Elapsed.TotalMilliseconds;
+                sw.Restart();
+                var d = Decode(jpg);
+                if (d != null)
+                {
+                    d.ReadMs = readMs;
+                    d.DecodeMs = sw.Elapsed.TotalMilliseconds;
+                }
+                return d;
             });
+        }
+
+        /// <summary>Worker thread. Native decode when available, else the bytes
+        /// for a main-thread <c>LoadImage</c>.</summary>
+        static Decoded Decode(byte[] jpg)
+        {
+            if (jpg == null || jpg.Length == 0) return null;
+            if (NativeDecodeAvailable)
+            {
+                var d = DecodeAndroid(jpg);
+                if (d != null) return d;
+            }
+            return new Decoded { Encoded = jpg };
         }
 
 #if UNITY_ANDROID && !UNITY_EDITOR
@@ -108,6 +121,15 @@ namespace Genesis.RoomScan
                 int rowBytes = bmp.Call<int>("getRowBytes");
                 int byteCount = bmp.Call<int>("getByteCount");
                 if (w <= 0 || h <= 0 || rowBytes < w * 4 || byteCount < rowBytes * h) return null;
+                // The byte layout below assumes ARGB_8888 (R,G,B,A in memory);
+                // a decoder that ignored the preference would hand us 565 rows.
+                using var config = bmp.Call<AndroidJavaObject>("getConfig");
+                if (config == null || config.Call<string>("name") != "ARGB_8888")
+                {
+                    Logger.Warning("[KeyframeImageDecoder] Bitmap is not ARGB_8888; using LoadImage.");
+                    _nativeDisabled = true;
+                    return null;
+                }
 
                 raw = new NativeArray<byte>(byteCount, Allocator.Persistent, NativeArrayOptions.UninitializedMemory);
                 bufferRef = AndroidJNI.NewDirectByteBuffer(raw);

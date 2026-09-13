@@ -395,21 +395,19 @@ namespace Genesis.RoomScan
         public Texture2D HQAtlas => _hqAtlasTexture;
 
         /// <summary>
-        /// The refined mesh data (already simplified before the bake when the
-        /// refinement ratio is below 1). Source of truth for re-refinement and
-        /// UV reconstruction.
+        /// The original (unsimplified) refined mesh data. Always preserved across re-refines.
+        /// Used as the source-of-truth for re-refinement and UV reconstruction.
         /// </summary>
         internal RefinedTextureResult? LastRefinedResult { get; set; }
 
         /// <summary>
-        /// A separately simplified copy of the refined mesh. New bakes no longer
-        /// produce one — simplification runs before the unwrap so the atlas is
-        /// registered to the displayed mesh — but packages saved by earlier
-        /// versions still load theirs here and hosts keep preferring it.
+        /// The post-bake simplified mesh (if simplification was applied). Null when
+        /// postBakeSimplificationRatio >= 1 or simplification hasn't run.
+        /// This is what gets rendered and saved, but re-refinement always uses LastRefinedResult.
         /// </summary>
         internal RefinedTextureResult? LastSimplifiedResult { get; set; }
 
-        /// <summary>Whether a separately simplified refined mesh exists (legacy packages).</summary>
+        /// <summary>Whether a simplified version of the refined mesh exists.</summary>
         public bool HasSimplifiedMesh => LastSimplifiedResult.HasValue;
 
         /// <summary>
@@ -857,6 +855,7 @@ namespace Genesis.RoomScan
             _volumeIntegrator?.ClearShellCells();
             _shellTracker?.Disable();
             _scanRoomUuid = Guid.Empty;
+            _keyframeCollector?.LogProfile();
 
             ScanStopped?.Invoke();
             if (_modules != null)
@@ -1298,14 +1297,18 @@ namespace Genesis.RoomScan
                     AtlasHeight = unwrap.AtlasHeight
                 };
 
-                // Simplification now happens before the unwrap (see
-                // TextureRefinement.UnwrapMeshAsync), so the refined result
-                // is already the display mesh and there is no separate
-                // simplified variant. Older packages may still carry one.
                 LastRefinedResult = original;
                 LastSimplifiedResult = null;
 
-                ApplyRefinedAtlas(original);
+                var toRender = original;
+                if (_textureRefinement.postBakeSimplificationRatio < 1f)
+                {
+                    var simplified = await _textureRefinement.SimplifyRefinedMeshAsync(original);
+                    LastSimplifiedResult = simplified;
+                    toRender = simplified;
+                }
+
+                ApplyRefinedAtlas(toRender);
                 HasRefinedTexture = true;
                 if (PresentRefinedWhenReady)
                     SetRenderMode(ScanRenderMode.Refined);
@@ -1317,7 +1320,11 @@ namespace Genesis.RoomScan
                 // point at _tmp while the directory was being renamed), and refined_mesh.bin
                 // would silently fail to land in the final package.
                 if (_persistence != null && _persistence.HasActivePackage)
+                {
                     await _persistence.SaveArtifactAsync(ArtifactType.Refined, null, original);
+                    if (LastSimplifiedResult.HasValue)
+                        await _persistence.SaveArtifactAsync(ArtifactType.SimplifiedMesh, null, LastSimplifiedResult);
+                }
 
                 RefinedMeshReady?.Invoke(_refinedMesh, _refinedAtlasTexture);
 

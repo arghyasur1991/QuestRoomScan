@@ -24,10 +24,6 @@ float    _CropX, _CropY;
 int      _ImgW, _ImgH;
 int      _AtlasW, _AtlasH;
 int      _OrigTriCount, _OutTriCount;
-// Triangle kernels run in slices across compositor frames: thread 0 of a
-// dispatch is triangle _TriOffset, so one keyframe's work never lands in a
-// single frame.
-int      _TriOffset;
 
 // ── Original mesh (occlusion depth) ─────────────────────────
 StructuredBuffer<float3> _OrigPos;
@@ -187,8 +183,9 @@ void CopyUint(uint3 id : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void BuildDepth(uint3 id : SV_DispatchThreadID)
 {
-    int t = (int)id.x + _TriOffset;
-    if (t >= _OrigTriCount) return;
+    if ((int)id.x >= _OrigTriCount) return;
+
+    int t = (int)id.x;
 
     int i0 = _OrigIdx[t * 3];
     int i1 = _OrigIdx[t * 3 + 1];
@@ -245,8 +242,9 @@ void BuildDepth(uint3 id : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void BakeAtlas(uint3 id : SV_DispatchThreadID)
 {
-    int t = (int)id.x + _TriOffset;
-    if (t >= _OutTriCount) return;
+    if ((int)id.x >= _OutTriCount) return;
+
+    int t = (int)id.x;
 
     int i0 = _OutIdx[t * 3];
     int i1 = _OutIdx[t * 3 + 1];
@@ -411,8 +409,9 @@ uint LumOf(uint packed)
 [numthreads(64, 1, 1)]
 void RenderAtlasView(uint3 id : SV_DispatchThreadID)
 {
-    int t = (int)id.x + _TriOffset;
-    if (t >= _OutTriCount) return;
+    if ((int)id.x >= _OutTriCount) return;
+
+    int t = (int)id.x;
 
     int i0 = _OutIdx[t * 3];
     int i1 = _OutIdx[t * 3 + 1];
@@ -697,8 +696,9 @@ int   _MaxViews;                    // at most this many views per texel; more v
 [numthreads(64, 1, 1)]
 void BlendAccum(uint3 id : SV_DispatchThreadID)
 {
-    int t = (int)id.x + _TriOffset;
-    if (t >= _OutTriCount) return;
+    if ((int)id.x >= _OutTriCount) return;
+
+    int t = (int)id.x;
 
     int i0 = _OutIdx[t * 3];
     int i1 = _OutIdx[t * 3 + 1];
