@@ -737,82 +737,7 @@ namespace Genesis.RoomScan
                 for (int i = 0; i < room.Anchors.Count; i++)
                     TryAddPinSurface(room, room.Anchors[i], floorY, dst);
 
-                LogRoomInventory(room, dst.Count);
                 return dst.Count;
-            }
-
-            static float s_invLogAt;
-
-            static void LogRoomInventory(MRUKRoom room, int pinCount)
-            {
-                if (Time.unscaledTime - s_invLogAt < 1.5f) return;
-                s_invLogAt = Time.unscaledTime;
-                var all = MRUK.Instance != null ? MRUK.Instance.Rooms : null;
-                LogAllRooms(all);
-                int n = room != null && room.Anchors != null ? room.Anchors.Count : 0;
-                Logger.Info(
-                    $"[PinFace] pin-room uuid={ShortUuid(RoomUuid(room))} " +
-                    $"anchors={n} pinSurfaces={pinCount}");
-            }
-
-            internal static void LogAllRooms(IList<MRUKRoom> rooms)
-            {
-                Vector3 head = HeadsetWorldPosition();
-                MRUKRoom native = null;
-                var mruk = MRUK.Instance;
-                if (mruk != null)
-                    native = mruk.GetCurrentRoom();
-                var containing = FindContaining(rooms, head);
-                int n = rooms != null ? rooms.Count : 0;
-                Logger.Info(
-                    $"[PinFace] rooms={n} nativeCurrent={ShortUuid(RoomUuid(native))} " +
-                    $"containing={ShortUuid(RoomUuid(containing))} headset={V3(head)}");
-                if (rooms == null) return;
-
-                for (int i = 0; i < rooms.Count; i++)
-                {
-                    var room = rooms[i];
-                    if (room == null)
-                    {
-                        Logger.Info($"[PinFace] [{i}] null");
-                        continue;
-                    }
-
-                    bool inFloor = room.IsPositionInRoom(head, testVerticalBounds: true);
-                    bool inWalls = Contains(room, head);
-                    int anchors = room.Anchors != null ? room.Anchors.Count : 0;
-                    int screens = 0;
-                    Logger.Info(
-                        $"[PinFace] [{i}] uuid={ShortUuid(RoomUuid(room))} " +
-                        $"name={room.name} anchors={anchors} " +
-                        $"inFloor={inFloor} inWalls={inWalls} " +
-                        $"floorY={FloorY(room):F2}");
-                    if (room.Anchors == null) continue;
-                    for (int j = 0; j < room.Anchors.Count; j++)
-                    {
-                        var a = room.Anchors[j];
-                        if (a == null) continue;
-                        if (a.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN))
-                            screens++;
-                        string plane = a.PlaneRect.HasValue ? "plane" : "no-plane";
-                        string vol = a.VolumeBounds.HasValue
-                            ? $"vol={V3(a.VolumeBounds.Value.size)}"
-                            : "vol=none";
-                        string geom = TryPlaneSize(a, out Vector3 center, out float w, out float h)
-                            ? $"{w:F2}x{h:F2} c={V3(center)}"
-                            : "no-size";
-                        Logger.Info(
-                            $"[PinFace]   [{i}.{j}] {a.Label} {plane} {vol} {geom} " +
-                            $"pos={V3(a.transform.position)}");
-                    }
-                    Logger.Info($"[PinFace] [{i}] screens={screens}");
-                }
-            }
-
-            static string ShortUuid(Guid uuid)
-            {
-                if (uuid == Guid.Empty) return "-";
-                return uuid.ToString("N").Substring(0, 8);
             }
 
             static void TryAddPinSurface(
@@ -829,63 +754,19 @@ namespace Genesis.RoomScan
                 Vector3 inward = Inward(room, a);
                 float upDot = Vector3.Dot(inward, Vector3.up);
                 if (upDot > 0.7f || upDot < -0.7f)
-                {
-                    if (isScreen)
-                        LogPinSurface(a, inward, default, 0f, 0f, "skip-vertical");
                     return;
-                }
 
                 if (!TryPlaneSize(a, out Vector3 center, out float width, out float height))
-                {
-                    if (isScreen)
-                        LogPinSurface(a, inward, default, 0f, 0f, "skip-no-size");
                     return;
-                }
 
                 float min = isScreen ? 0.15f : 0.2f;
                 if (width < min || height < min)
-                {
-                    if (isScreen)
-                        LogPinSurface(a, inward, center, width, height, "skip-small");
                     return;
-                }
 
                 bool avoid = !isScreen && a.HasAnyLabel(PinWallAvoidLabels);
                 dst.Add(new SceneWallFace(
                     center, inward, width, height, floorY, avoid, isScreen));
-                if (isScreen)
-                    LogPinSurface(a, inward, center, width, height, "ok");
             }
-
-            static float s_pinLogAt;
-            static int s_pinLogFrame = -1;
-
-            static void LogPinSurface(
-                MRUKAnchor a, Vector3 inward, Vector3 center, float width, float height, string status)
-            {
-                if (Time.frameCount != s_pinLogFrame)
-                {
-                    if (status == "ok" && Time.unscaledTime - s_pinLogAt < 1.5f)
-                        return;
-                    s_pinLogAt = Time.unscaledTime;
-                    s_pinLogFrame = Time.frameCount;
-                }
-                var t = a.transform;
-                string rect = a.PlaneRect.HasValue
-                    ? $"rect=({a.PlaneRect.Value.x:F3},{a.PlaneRect.Value.y:F3},{a.PlaneRect.Value.width:F3}x{a.PlaneRect.Value.height:F3}) rectCenter={V3(t.TransformPoint(a.PlaneRect.Value.center))}"
-                    : "rect=none";
-                string vol = a.VolumeBounds.HasValue
-                    ? $"vol={V3(a.VolumeBounds.Value.size)} volCenter={V3(a.GetAnchorCenter())}"
-                    : "vol=none";
-                Logger.Info(
-                    $"[PinFace] SCREEN {status} {width:F2}x{height:F2} " +
-                    $"center={V3(center)} pos={V3(t.position)} " +
-                    $"inward={V3(inward)} fwd={V3(t.forward)} up={V3(t.up)} " +
-                    $"{rect} {vol}");
-            }
-
-            static string V3(Vector3 v)
-                => $"({v.x:F2},{v.y:F2},{v.z:F2})";
 
             static bool TryPlaneSize(
                 MRUKAnchor a, out Vector3 center, out float width, out float height)

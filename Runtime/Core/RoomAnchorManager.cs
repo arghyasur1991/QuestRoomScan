@@ -212,7 +212,8 @@ namespace Genesis.RoomScan
                                 RoomUnderstanding.Query.HeadsetWorldPosition())
                             ?? _mruk.Rooms[0];
 
-            RoomUnderstanding.Query.LogAllRooms(_mruk.Rooms);
+            Logger.Info($"MRUK rooms={_mruk.Rooms.Count}, " +
+                        $"headset-room anchors={room.Anchors?.Count ?? 0}");
 
             MRUKAnchor floorAnchor = null;
             if (room.FloorAnchors != null && room.FloorAnchors.Count > 0)
