@@ -6,121 +6,96 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
-### Changed
+## [1.2.0] - 2026-09-14
 
-- **Keyframe collection is back to the pre-1.0 recipe.** `moveThreshold`
-  0.15 m, `rotateThresholdDeg` 10°, `minCaptureInterval` 0.25 s, one
-  angular gate at 120 °/s on the app clock. The 1.0 "game-proven" sparser
-  defaults and the 1.2 two-interval PCA-timestamp gate with a linear-speed
-  term are gone: on a headset scan they left 22 keyframes for a room and
-  the bake had nothing to paint the walls with. `ICameraFrameTiming` stays
-  on the providers. Hand capsules are clipped at the near plane before
-  projection — a forearm running back past the camera projected to a
-  full-image footprint and rejected the frame as 100 % hand.
-- **Bake is pipelined, not sliced.** One keyframe per compositor frame:
-  keyframe N+1 is read and JPEG-decoded on a worker
-  (`KeyframeImageDecoder`: `BitmapFactory` via JNI on Android, `LoadImage`
-  fallback elsewhere) while N's dispatches run; the main thread uploads
-  pixels into one of two alternating textures and issues clear → depth →
-  shade in one submission. The compositor-frame splitting, per-step fences
-  and idle frames (`gpuIdleFramesPerStep`) from 1.1 are removed. Capture-side
-  encode is the thread-safe `EncodeArrayToJPG` on a worker.
-- **Simplification stage is a toggle.** `simplifyBeforeUnwrap` (default on):
-  geometry-only `meshopt_simplify` before xatlas, so the unwrap and both
-  bake passes run on the reduced mesh (the unwrap scales with input
-  triangles: 66k → 72 s, 29k → 15 s on Quest 3; dense mesh still drives
-  occlusion). Off: the 1.1 path — unwrap the dense mesh, simplify after the
-  bake with UV-locked borders into `simplified_mesh.bin`. The fps collapse
-  seen with the pre-unwrap variant was xatlas taking every core (below).
-- **Seam levelling replaces `BlendSeams`.** The two atlas sides of every
-  UV seam edge are paired by position (worker CPU), pinned to their mean
-  (`SeamDelta`) and the correction diffused into each chart
-  (`SeamDiffuse` × `seamLevelIterations`, default 40, one a frame) then
-  added (`SeamApply`). Mean seam step 6.0 → 3.2 levels on a headset
-  package. `seamBlendRadius` is gone; `enableSeamBlending` keeps its name.
-- **Blend admission is a ramp; keyframes are exposure-equalised.** A view's
-  weight rises from 0 at `blendMinFraction` × best to full at best instead
-  of switching on at a threshold, so view changes inside a chart fade
-  instead of printing a line. With registration on, `ViewGainReduce` sums
-  the pass-1 atlas and the photo over the covered low-res pixels and the
-  blend scales the photo by the per-channel ratio (`equalizeExposure`,
-  `exposureGainLimit` 1.6). The chart-preferred view meets the same bar as
-  every other view (its 0.7× admission painted chart corners with
-  stretched pixels from a grazing photo).
-- **Bilinear keyframe sampling** in `BakeAtlas` / `BlendAccum`
-  (`SampleKf`): far and oblique views no longer stamp photo pixels as
-  blocks.
-- **Per-keyframe registration and chart-consistent blend** (from the 1.2
-  work, kept): the pass-1 atlas is rendered into the keyframe's image at
-  1/4 resolution, a ZNCC sweep over ±6 px finds the best shift, and a
-  parabolic sub-pixel peak becomes a yaw/pitch correction
-  (`ApplyImageShift`) before the blend pass (`refineKeyframePoses`,
-  `registrationSearchRadius`, `registrationMinNcc`). Pass 1 tallies texel
-  scores per xatlas chart, the chart's best view is boosted ×3
-  (`chartBestViewBoost`) and exempt from the per-texel view cap.
-  `ResolveBlend` keeps the pass-1 colour where no blend sample reached.
+Texture bake that keeps the compositor at refresh: denser keyframes, a
+pipelined GPU atlas, and views that agree across seams. Game APIs for an
+anchor-frame mesh, when to present the refined result, and which scene
+planes to copy.
 
 ### Added
 
-- **Refinement's first and last frames.** The mesh readback requested the
-  extractor buffers' full capacity (tens of MB for a few MB of mesh) and
-  parsed them on the main thread — a ~100 ms frame; it now reads
-  `vertCount × stride` / `idxCount × 4` and parses on a worker. The
-  refined atlas, normal map and mesh are applied over three frames with
-  tangents computed on a worker (`TextureRefinement.ComputeTangents`)
-  instead of `Mesh.RecalculateTangents` after two 19 MB uploads in one frame.
-- **`MatchShift` is one thread group per candidate shift** (256 threads
-  striding the low-res image, groupshared reduction). It was one thread
-  per shift walking all 76 800 pixels alone — 169 serial 77 k-iteration
-  loops, ~20 ms of GPU per keyframe on a few lanes, the 40-50 fps jitter of
-  pass 2 on the headset.
-- **Texel-parallel bake.** `BuildTexelMap` builds a static texel → triangle
-  map once per bake; `BakeAtlas` / `BlendAccum` run one thread per atlas
-  texel with a per-texel score (own point, interpolated normal) instead of
-  one thread per triangle looping its texel box with a per-triangle score.
-  On Quest 3 a keyframe cost ~35 ms of GPU in one frame (30 fps through
-  both passes) and, on a simplified mesh, the per-triangle best view flipped
-  along every edge — the "more seamed" simplified atlas. Occlusion depth
-  rasterises at photo ÷ `occlusionDepthDivisor` (2). `SimplifyGeometry`
-  target error 1e-2 → 3e-3 of the mesh extent (~2 cm) so the simplified
-  surface cannot drift far enough for views to disagree.
-- **xatlas threading control.** `xatlas.cpp` gains `SetThreading(maxThreads,
-  workerNice)` (C API `xatlas_set_threading`); `TextureRefinement.xatlasThreads`
-  (3) and `xatlasThreadNice` (10) keep the unwrap off five of Quest 3's eight
-  cores and below the engine's threads in priority. xatlas took every core
-  by default and the app ran at 10-20 fps for the length of the unwrap.
-  Android and macOS plugins rebuilt; Windows / Linux binaries need a rebuild
-  from the wizard (the call is guarded until then).
-- **Bake decode prefetch depth 3.** One decode in flight left the bake
-  waiting on the worker two frames out of three (37 ms decode vs a
-  one-frame keyframe); registration's two readbacks are requested
-  together instead of awaited in turn.
-- **Refinement profile.** `profileRefinement` (default on) ends every
-  refinement with one `[TextureRefine][Profile]` block: wall time per
-  stage, per-keyframe main-thread and worker time, the compositor frames
-  the bake ran across (count, mean, max and its stage, over-budget,
-  hitches) and memory deltas. `KeyframeCollector` logs a
-  `[KeyframeCollector][Profile]` line every 25 saves and at scan stop
-  (main-thread readback copy, worker encode and write). Diagnose a
-  headset refinement from logcat alone.
-
-- **`SceneFaceKind` on plane copy.** `CopyHeadsetRoomWallFaces(dest, kind)`
-  takes the labels the host wants (`Wall`, `Screen`, or both). Overlapping
-  rooms are unioned. Copied planes are uniform (no per-label size gate,
-  no `IsScreen` on the result). `RoomReady` is `LoadSceneFromDevice`
-  finished; `SceneAnchorsChanged` is later `RoomUpdated` / `AnchorCreated`.
-
-- **Anchor-frame mesh for persistent room content.**
-  `ScanResult.AnchorFrameMesh` and `RoomScanPersistence.BuildAnchorFrameMesh`
-  return the game mesh in the spatial-anchor frame, rebuilt from package
-  constants only (`AnchorAtCreate⁻¹ × stored vertices`). The world mesh is
-  relocated with the anchor pose sampled when the anchor localized, and a
-  root parented under the anchor moves with tracking afterwards, so
-  `worldMesh × root.worldToLocal` differs by millimetres on every call and in
-  every session — enough to change anything rasterised from it. Author
-  once-generated room content in this frame and present it under
-  `RoomSpaceRoot`; two loads of one package give identical bits.
+- **Anchor-frame mesh.** `ScanResult.AnchorFrameMesh` and
+  `RoomScanPersistence.BuildAnchorFrameMesh` rebuild the game mesh in the
+  spatial-anchor frame from package constants only
+  (`AnchorAtCreate⁻¹ × stored vertices`). The world mesh is relocated with
+  the pose sampled when the anchor localized; a root parented under the
+  anchor then moves with tracking, so `worldMesh × root.worldToLocal`
+  differs by millimetres on every call and every session. Author persistent
+  room content in this frame and present it under `RoomSpaceRoot`.
   `RefinedRelocation` and `RefinedAnchorAtCreate` expose the matrices.
+- **`PresentRefinedWhenReady`** (default true) on `RoomScanSession` /
+  `RoomScanner`. When false, finalize bakes into memory
+  (`HasRefinedTexture`, `RefinedMeshReady`) but keeps drawing the live
+  vertex mesh until the host presents `ScanRenderMode.Refined` and calls
+  `ReleaseScanResources`.
+- **`SceneFaceKind` on plane copy.** `CopyHeadsetRoomWallFaces(dest, kind)`
+  takes `Wall`, `Screen`, or both. Overlapping rooms are unioned. Copied
+  planes are uniform (no per-label size gate). `RoomScanSession.RoomReady`
+  is `LoadSceneFromDevice` finished; `SceneAnchorsChanged` is later
+  `RoomUpdated` / `AnchorCreated`.
+- **Cull Back refined-mesh shader** (`RefinedMeshBackface.shader`) swapped
+  in by `RoomScanSession.SetRefinedBackfaceCull`. Quest ignores ShaderLab
+  `Cull [_Cull]`; this is a second program. Default refined shader stays
+  two-sided. `OcclusionMesh` is now `Cull Front` so an inward room writes
+  depth from outside.
+- **`KeyframeImageDecoder`.** File read + JPEG decode in one worker hop:
+  Android `BitmapFactory` via JNI into `ARGB_8888`, rows flipped; editor
+  and other platforms (or a JNI failure) fall back to `LoadImage`.
+- **xatlas threading.** `xatlas::SetThreading(maxThreads, workerNice)`
+  (`xatlas_set_threading`). `TextureRefinement.xatlasThreads` (3) and
+  `xatlasThreadNice` (10) keep the unwrap off most of Quest 3's cores and
+  below the engine's threads. The P/Invoke is guarded for older plugin
+  binaries; rebuild from the wizard on Windows / Linux.
+- **Optional `ICameraFrameTiming`** on camera providers: capture time of
+  `CurrentFrame` on a monotonic clock, so a consumer can measure motion
+  between frames from the frames' own timestamps.
+- **Refinement profile** (`TextureRefinement.profileRefinement`,
+  `KeyframeCollector.profileCapture`; both **off**). One
+  `[TextureRefine][Profile]` block per bake (stages, per-keyframe
+  main/worker time, compositor-frame count/mean/max, hitches, managed and
+  native memory) and a `[KeyframeCollector][Profile]` line every 25 saves
+  and at scan stop.
+
+### Changed
+
+- **Keyframe collection** defaults to 0.15 m / 10° / 0.25 s with a 120 °/s
+  angular gate on the app clock. Hand capsules are clipped at the near plane
+  before projection so a forearm behind the camera is not a full-image
+  footprint. Capture encode is `EncodeArrayToJPG` on a worker; the main
+  thread only copies the readback.
+- **Bake is pipelined.** One keyframe per compositor frame: N+1 is read and
+  decoded on a worker (prefetch depth 3) while N's GPU runs; the main thread
+  uploads into one of two alternating `Texture2D`s and issues
+  clear → depth → shade in one submission. Atlas buffers are zeroed on the
+  GPU. Mesh readback requests `vertCount × stride` / `idxCount × 4` and
+  parses on a worker. Atlas, normal map and mesh apply over three frames;
+  tangents are `TextureRefinement.ComputeTangents` on a worker.
+- **Texel-parallel bake.** `BuildTexelMap` once per bake; `BakeAtlas` /
+  `BlendAccum` run one thread per atlas texel with a per-texel score (own
+  point, interpolated vertex normal). Occlusion depth is photo ÷
+  `occlusionDepthDivisor` (2). `SampleKf` is bilinear. `MatchShift` is one
+  256-thread group per candidate shift with a groupshared reduction.
+  `simplifyBeforeUnwrap` (default on): geometry-only `meshopt_simplify`
+  before xatlas (target error 3e-3 of extent); the dense mesh still builds
+  occlusion. Off: the 1.1 path — unwrap the dense mesh, UV-locked simplify
+  after the bake into `simplified_mesh.bin`.
+- **Views agree across a chart.** Pass 1 aligns each keyframe to the atlas
+  (`refineKeyframePoses`: 1/4-res ZNCC shift → yaw/pitch). Blend admission
+  is a ramp from `blendMinFraction` × best to the best score. The
+  chart-preferred view is boosted × `chartBestViewBoost` (3) and exempt
+  from `maxViewsPerTexel`, but meets the same bar. With registration on,
+  `equalizeExposure` scales each photo to the pass-1 atlas
+  (`exposureGainLimit` 1.6). `ResolveBlend` keeps pass-1 colour where no
+  blend sample reached.
+- **Seam levelling** replaces `BlendSeams`. CPU `BuildSeamPairs` (position-
+  deduped endpoints) then GPU `SeamDelta` / `SeamDiffuse` ×
+  `seamLevelIterations` (40, one a frame) / `SeamApply`. `enableSeamBlending`
+  keeps its name; `seamBlendRadius` is gone.
+
+### Removed
+
+- `SceneWallFace.IsScreen`. Filter with `SceneFaceKind` at copy time.
 
 ## [1.1.0] - 2026-09-11
 

@@ -33,6 +33,9 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Skip a frame when the player's hands / forearms cover more than this fraction of the image. Smaller intrusions are kept and masked out of the texture bake per pixel.")]
         [Range(0.02f, 0.5f)] private float maxHandCoverage = 0.12f;
 
+        [SerializeField, Tooltip("Log [KeyframeCollector][Profile] every 25 saves and at scan stop: main-thread readback copy, worker encode and write. Off by default.")]
+        private bool profileCapture = false;
+
         /// <summary>Hand / forearm capsules recorded per frame (see <see cref="VolumeIntegrator.CopyHandCapsules"/>).</summary>
         public const int MaxBodyCapsules = 8;
         private readonly Vector4[] _capP0 = new Vector4[MaxBodyCapsules];
@@ -253,13 +256,21 @@ namespace Genesis.RoomScan
                 // callback) and encode on a worker: EncodeArrayToJPG is
                 // thread-safe, and a 1280×960 encode on the main thread was
                 // a 30-40 ms hitch in the scan loop per keyframe.
-                var sw = System.Diagnostics.Stopwatch.StartNew();
                 var data = req.GetData<byte>();
                 byte[] pixels = new byte[data.Length];
-                data.CopyTo(pixels);
-                double copyMs = sw.Elapsed.TotalMilliseconds;
-                _mainCopyMs += copyMs;
-                if (copyMs > _mainCopyMaxMs) _mainCopyMaxMs = copyMs;
+                double copyMs = 0;
+                if (profileCapture)
+                {
+                    var sw = System.Diagnostics.Stopwatch.StartNew();
+                    data.CopyTo(pixels);
+                    copyMs = sw.Elapsed.TotalMilliseconds;
+                    _mainCopyMs += copyMs;
+                    if (copyMs > _mainCopyMaxMs) _mainCopyMaxMs = copyMs;
+                }
+                else
+                {
+                    data.CopyTo(pixels);
+                }
                 int w = req.width, h = req.height;
                 int quality = jpegQuality;
 
@@ -287,12 +298,23 @@ namespace Genesis.RoomScan
             {
                 try
                 {
-                    var sw = System.Diagnostics.Stopwatch.StartNew();
-                    byte[] jpgBytes = encode();
-                    double encodeMs = sw.Elapsed.TotalMilliseconds;
-                    sw.Restart();
-                    string imgPath = Path.Combine(_imagesDir, $"{id:D6}.jpg");
-                    File.WriteAllBytes(imgPath, jpgBytes);
+                    byte[] jpgBytes;
+                    double encodeMs = 0, writeMs = 0;
+                    if (profileCapture)
+                    {
+                        var sw = System.Diagnostics.Stopwatch.StartNew();
+                        jpgBytes = encode();
+                        encodeMs = sw.Elapsed.TotalMilliseconds;
+                        sw.Restart();
+                        string imgPath = Path.Combine(_imagesDir, $"{id:D6}.jpg");
+                        File.WriteAllBytes(imgPath, jpgBytes);
+                        writeMs = sw.Elapsed.TotalMilliseconds;
+                    }
+                    else
+                    {
+                        jpgBytes = encode();
+                        File.WriteAllBytes(Path.Combine(_imagesDir, $"{id:D6}.jpg"), jpgBytes);
+                    }
 
                     var sb = new StringBuilder(256);
                     sb.Append("{\"id\":").Append(id);
@@ -322,7 +344,7 @@ namespace Genesis.RoomScan
                     {
                         File.AppendAllText(_manifestPath, sb.ToString() + "\n");
                     }
-                    RecordWorker(encodeMs, sw.Elapsed.TotalMilliseconds);
+                    if (profileCapture) RecordWorker(encodeMs, writeMs);
 
                     if (id < 5 || id % 50 == 0)
                         Logger.Info($"KeyframeCollector: saved frame {id} ({jpgBytes.Length / 1024}KB)");
@@ -384,7 +406,7 @@ namespace Genesis.RoomScan
                 _writeMs += writeMs;   if (writeMs > _writeMaxMs) _writeMaxMs = writeMs;
                 done = ++_workerDone;
             }
-            if (done % 25 == 0)
+            if (profileCapture && done % 25 == 0)
                 Logger.Info(ProfileLine());
         }
 
@@ -399,8 +421,12 @@ namespace Genesis.RoomScan
             }
         }
 
-        /// <summary>Log the capture-cost profile now (scan end).</summary>
-        public void LogProfile() => Logger.Info(ProfileLine());
+        /// <summary>Log the capture-cost profile now (scan end). No-op when profiling is off.</summary>
+        public void LogProfile()
+        {
+            if (!profileCapture) return;
+            Logger.Info(ProfileLine());
+        }
 
     }
 }

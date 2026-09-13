@@ -1266,11 +1266,11 @@ namespace Genesis.RoomScan.Editor
             {
                 var so = new SerializedObject(kf);
                 var move = so.FindProperty("moveThreshold");
-                if (move != null) move.floatValue = 0.4f;
+                if (move != null) move.floatValue = 0.15f;
                 var rot = so.FindProperty("rotateThresholdDeg");
-                if (rot != null) rot.floatValue = 20f;
+                if (rot != null) rot.floatValue = 10f;
                 var interval = so.FindProperty("minCaptureInterval");
-                if (interval != null) interval.floatValue = 1f;
+                if (interval != null) interval.floatValue = 0.25f;
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(kf);
             }

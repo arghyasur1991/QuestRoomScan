@@ -90,10 +90,10 @@ namespace Genesis.RoomScan
         [Tooltip("Chart growth cost limit")]
         [Range(0.5f, 4f)]
         [SerializeField] internal float xatlasMaxCost = 1.5f;
-        [Tooltip("Threads xatlas may use for the unwrap, including the worker that calls it (0 = every core). xatlas defaults to all cores and a 66k-triangle unwrap on Quest 3 held them for over a minute — main and render threads starved and the app fell to 10-20 fps. 3 leaves five cores to the frame.")]
+        [Tooltip("Threads xatlas may use for the unwrap, including the calling worker (0 = every core). xatlas defaults to all cores; 3 leaves the rest to the frame.")]
         [Range(0, 8)]
         [SerializeField] internal int xatlasThreads = 3;
-        [Tooltip("POSIX nice for the unwrap threads on Android (0 = normal, 19 = lowest). With a positive value the engine's threads win every contended core; the unwrap only takes what the frame leaves.")]
+        [Tooltip("POSIX nice for the unwrap threads on Android (0 = normal, 19 = lowest). With a positive value the engine's threads win every contended core.")]
         [Range(0, 19)]
         [SerializeField] internal int xatlasThreadNice = 10;
 
@@ -101,7 +101,7 @@ namespace Genesis.RoomScan
         [Tooltip("Target triangle ratio for the refined mesh (1.0 = disabled, 0.5 = 50% triangles). Applied before the unwrap or after the bake, see below. Runs on a background thread.")]
         [Range(0.1f, 1f)]
         [SerializeField] internal float postBakeSimplificationRatio = 0.5f;
-        [Tooltip("On: simplify the geometry BEFORE the UV unwrap (meshopt_simplify), so xatlas and both bake passes run on the reduced mesh — the unwrap is the slowest refinement stage and scales with input triangles (66k tris: 72 s on Quest 3; 29k: 15 s). The dense mesh still builds the occlusion depth. Off: unwrap and bake the dense mesh, simplify after the bake with UV-locked borders (meshopt_simplifyWithAttributes), as in 1.1.")]
+        [Tooltip("On: simplify geometry before the UV unwrap (meshopt_simplify) so xatlas and both bake passes run on the reduced mesh. The dense mesh still builds occlusion depth. Off: unwrap and bake the dense mesh, then simplify with UV-locked borders.")]
         [SerializeField] internal bool simplifyBeforeUnwrap = true;
 
         [Header("Keyframe Registration")]
@@ -135,8 +135,8 @@ namespace Genesis.RoomScan
         [SerializeField] internal int occlusionDepthDivisor = 2;
 
         [Header("Diagnostics")]
-        [Tooltip("Write one [TextureRefine][Profile] block per refinement: wall time per stage, main-thread and worker time per keyframe, and the compositor frame times the bake ran across (count, max, missed 72 Hz, hitches). Stopwatch reads only.")]
-        [SerializeField] internal bool profileRefinement = true;
+        [Tooltip("Write one [TextureRefine][Profile] block per refinement: wall time per stage, main-thread and worker time per keyframe, and the compositor frame times the bake ran across (count, max, missed 72 Hz, hitches). Off by default.")]
+        [SerializeField] internal bool profileRefinement = false;
 
         private RoomScanner _scanner;
         private RefineProfile _profile;
