@@ -74,6 +74,9 @@ namespace Genesis.RoomScan
         [Tooltip("Sobel normal map strength (0 = skip normal map generation)")]
         [Range(0f, 20f)]
         [SerializeField] internal float normalStrength = 8f;
+        [Tooltip("Empty compositor frames after each keyframe GPU step (clear/depth, then shade). 2 keeps Quest near 72 while the bake runs.")]
+        [Range(0, 4)]
+        [SerializeField] internal int gpuIdleFramesPerStep = 2;
 
         [Header("HQ Server Refinement")]
         [Tooltip("Server-side atlas super-resolution scale")]
@@ -841,10 +844,17 @@ namespace Genesis.RoomScan
             return tex;
         }
 
+        async Task YieldCompositorFrames(int n)
+        {
+            int frames = Mathf.Max(1, n);
+            for (int i = 0; i < frames; i++)
+                await Task.Yield();
+        }
+
         /// <summary>
-        /// One keyframe per compositor frame. Dispatch, then decode the next
-        /// JPEG on this thread while that GPU work runs, then fence so
-        /// compute cannot pile up on the compositor. Two Texture2D slots so
+        /// One keyframe, split across compositor frames: clear+depth, then
+        /// shade, then idle frames so compute cannot pile up. Decode the next
+        /// JPEG on this thread while that GPU work runs. Two Texture2D slots so
         /// LoadImage never stomps a texture the previous dispatch still reads.
         /// <paramref name="fenceBuf"/> is whatever the shade kernel writes
         /// (atlas or accum) — fencing depth only would race the bake.
@@ -905,7 +915,7 @@ namespace Genesis.RoomScan
                 return true;
             }
 
-            void Dispatch(Texture2D tex, Keyframe kf)
+            void BindKeyframe(Keyframe kf)
             {
                 int imgW = kf.Width, imgH = kf.Height;
                 int imgPixels = imgW * imgH;
@@ -935,9 +945,14 @@ namespace Genesis.RoomScan
 
                 compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
                 compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
+            }
+
+            void DispatchDepth(Keyframe kf)
+            {
+                BindKeyframe(kf);
+                int imgPixels = kf.Width * kf.Height;
                 compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
                 compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
-                shade(tex, kf, depthBuf);
             }
 
             try
@@ -954,9 +969,14 @@ namespace Genesis.RoomScan
                 KickPrefetch(i + 1);
 
                 int slot = 0;
+                int idle = gpuIdleFramesPerStep;
                 while (i >= 0)
                 {
-                    Dispatch(slots[slot], metaList[i]);
+                    DispatchDepth(metaList[i]);
+                    await WaitGpuAsync(depthBuf);
+                    await YieldCompositorFrames(idle);
+
+                    shade(slots[slot], metaList[i], depthBuf);
                     baked++;
                     if (baked % 20 == 0 || baked < 3)
                     {
@@ -964,7 +984,7 @@ namespace Genesis.RoomScan
                         Logger.Info($"[TextureRefine] {statusPrefix} {baked}/{metaList.Count}");
                     }
 
-                    // Fence this dispatch, then decode N+1 into the other
+                    // Fence this shade, then decode N+1 into the other
                     // slot so LoadImage cannot stomp a texture the GPU is
                     // still sampling. Prefetch N+2 while that GPU work runs.
                     var gpu = WaitGpuAsync(fenceBuf);
@@ -975,7 +995,7 @@ namespace Genesis.RoomScan
                     if (next >= 0)
                         KickPrefetch(next + 1);
                     await gpu;
-                    await Task.Yield();
+                    await YieldCompositorFrames(idle);
 
                     if (next < 0) break;
                     i = next;

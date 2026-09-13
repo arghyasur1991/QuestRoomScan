@@ -983,7 +983,7 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
    - **Score**: `dot(surfaceNormal, viewDirection)` — prefers head-on views
    - **Atomic best-score selection**: `InterlockedMax(_ScoreBuf[texelIdx], asuint(score))` — since scores are positive floats, `asuint()` preserves ordering. Color is written only when the thread wins the comparison.
 
-**Keyframe processing** is sequential from C#: decode JPEG → `GetPixels32()` → upload to `ComputeBuffer` → dispatch 3 kernels → `await Task.Yield()`. Score and atlas buffers persist across keyframes (best score accumulates).
+**Keyframe processing** is sequential from C#, split across compositor frames so the bake cannot stall the eye buffer: decode JPEG → `ClearDepth` + `BuildDepth` → idle frames (`gpuIdleFramesPerStep`, default 2) → shade (`BakeAtlas` / `BlendAccum`) → fence + idle frames. Score and atlas buffers persist across keyframes (best score accumulates). Pass 2 multi-view blend still iterates every keyframe.
 
 **Post-processing** (CPU):
 - **Dilation**: Fills empty texels at UV island edges by averaging non-empty neighbors (multiple passes)
