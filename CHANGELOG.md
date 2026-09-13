@@ -62,6 +62,16 @@ All notable changes to this package are documented here. The format follows
 
 ### Added
 
+- **Texel-parallel bake.** `BuildTexelMap` builds a static texel → triangle
+  map once per bake; `BakeAtlas` / `BlendAccum` run one thread per atlas
+  texel with a per-texel score (own point, interpolated normal) instead of
+  one thread per triangle looping its texel box with a per-triangle score.
+  On Quest 3 a keyframe cost ~35 ms of GPU in one frame (30 fps through
+  both passes) and, on a simplified mesh, the per-triangle best view flipped
+  along every edge — the "more seamed" simplified atlas. Occlusion depth
+  rasterises at photo ÷ `occlusionDepthDivisor` (2). `SimplifyGeometry`
+  target error 1e-2 → 3e-3 of the mesh extent (~2 cm) so the simplified
+  surface cannot drift far enough for views to disagree.
 - **xatlas threading control.** `xatlas.cpp` gains `SetThreading(maxThreads,
   workerNice)` (C API `xatlas_set_threading`); `TextureRefinement.xatlasThreads`
   (3) and `xatlasThreadNice` (10) keep the unwrap off five of Quest 3's eight

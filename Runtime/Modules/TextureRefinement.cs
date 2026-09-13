@@ -130,6 +130,10 @@ namespace Genesis.RoomScan
         [Range(1f, 8f)]
         [SerializeField] internal float chartBestViewBoost = 3f;
 
+        [Tooltip("The per-keyframe occlusion depth (dense mesh, one atomic per covered photo pixel) is rasterised at photo resolution divided by this. A 5 cm depth tolerance does not need 1280×960; 2 quarters the heaviest raster of the bake. 1 = full resolution.")]
+        [Range(1, 4)]
+        [SerializeField] internal int occlusionDepthDivisor = 2;
+
         [Header("Diagnostics")]
         [Tooltip("Write one [TextureRefine][Profile] block per refinement: wall time per stage, main-thread and worker time per keyframe, and the compositor frame times the bake ran across (count, max, missed 72 Hz, hitches). Stopwatch reads only.")]
         [SerializeField] internal bool profileRefinement = true;
@@ -784,6 +788,21 @@ namespace Genesis.RoomScan
             compute.SetInt("_OrigTriCount", origTriCount);
             compute.SetInt("_OutTriCount", outTriCount);
 
+            // Texel → triangle map, once. The per-keyframe kernels are one
+            // thread per texel from here on.
+            var texelTriBuf = new ComputeBuffer(texelCount, 4);
+            await ZeroUintBuffer(compute, kClearU, texelTriBuf, texelCount);
+            {
+                int kMap = compute.FindKernel("BuildTexelMap");
+                compute.SetBuffer(kMap, "_OutIdx", outIdxBuf);
+                compute.SetBuffer(kMap, "_RawUV", rawUVBuf);
+                compute.SetBuffer(kMap, "_TexelTriRW", texelTriBuf);
+                compute.Dispatch(kMap, (outTriCount + 63) / 64, 1, 1);
+                await NextFrame();
+            }
+            compute.SetBuffer(kBake, "_TexelTri", texelTriBuf);
+            int texelGroups = (texelCount + 255) / 256;
+
             // Seam pairs are CPU work over the unwrap only — build them on a
             // worker while the GPU bakes and consume them after the blend.
             Task<SeamPair[]> seamPairsTask = null;
@@ -803,7 +822,7 @@ namespace Genesis.RoomScan
                 {
                     compute.SetBuffer(kBake, "_DepthBuf", depth);
                     compute.SetTexture(kBake, "_KfTex", tex);
-                    compute.Dispatch(kBake, (outTriCount + 63) / 64, 1, 1);
+                    compute.Dispatch(kBake, texelGroups, 1, 1);
                 });
 
             Logger.Info($"[TextureRefine] GPU baked {bakeCount} keyframes total (pass 1)");
@@ -885,6 +904,7 @@ namespace Genesis.RoomScan
                 compute.SetInt("_MaxViews", Mathf.Max(1, maxViewsPerTexel));
                 compute.SetBuffer(kAccum, "_TriChart", triChartBuf);
                 compute.SetBuffer(kAccum, "_ChartBest", chartBestBuf);
+                compute.SetBuffer(kAccum, "_TexelTri", texelTriBuf);
 
                 var pass2Scope = _profile?.Stage(refineHook != null ? "pass2+registration" : "pass2");
                 ReportStatus(refineHook != null ? "Registering + blending (pass 2)..." : "Multi-view blending (pass 2)...");
@@ -895,7 +915,7 @@ namespace Genesis.RoomScan
                         compute.SetBuffer(kAccum, "_DepthBuf", depth);
                         compute.SetTexture(kAccum, "_KfTex", tex);
                         compute.SetVector("_KfGain", kf.GainOrOne);
-                        compute.Dispatch(kAccum, (outTriCount + 63) / 64, 1, 1);
+                        compute.Dispatch(kAccum, texelGroups, 1, 1);
                     },
                     refineHook);
 
@@ -1090,6 +1110,7 @@ namespace Genesis.RoomScan
             outPosBuf.Release(); outNormBuf.Release(); outIdxBuf.Release();
             rawUVBuf.Release(); scoreBuf.Release(); atlasBuf.Release();
             triChartBuf.Release(); chartScoreBuf.Release(); chartBestBuf.Release();
+            texelTriBuf.Release();
             atlasSnapshot?.Release();
             reg?.Dispose();
 
@@ -1237,20 +1258,31 @@ namespace Genesis.RoomScan
                     metaList[i] = kf;
                     sw.Restart();
 
-                    int imgPixels = kf.Width * kf.Height;
-                    if (depthBuf == null || depthBuf.count != imgPixels)
+                    // Occlusion depth at a fraction of the photo (dense mesh,
+                    // atomics per covered pixel — the expensive raster), then
+                    // the shade at full photo resolution reading it scaled.
+                    float depthScale = 1f / Mathf.Max(1, occlusionDepthDivisor);
+                    int depthW = Mathf.Max(1, Mathf.RoundToInt(kf.Width * depthScale));
+                    int depthH = Mathf.Max(1, Mathf.RoundToInt(kf.Height * depthScale));
+                    int depthPixels = depthW * depthH;
+                    if (depthBuf == null || depthBuf.count != depthPixels)
                     {
                         depthBuf?.Release();
-                        depthBuf = new ComputeBuffer(imgPixels, 4);
+                        depthBuf = new ComputeBuffer(depthPixels, 4);
                     }
 
-                    BindKeyframeCamera(compute, kf, 1f);
                     compute.SetInt("_KfIndex", i);
                     BindBodyCapsules(compute, kf);
+                    BindKeyframeCamera(compute, kf, depthScale);
                     compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
                     compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
-                    compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
+                    compute.Dispatch(kClear, (depthPixels + 255) / 256, 1, 1);
                     compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
+
+                    BindKeyframeCamera(compute, kf, 1f);
+                    compute.SetInt("_DepthW", depthW);
+                    compute.SetInt("_DepthH", depthH);
+                    compute.SetFloat("_DepthScale", (float)depthW / kf.Width);
                     shade(tex, kf, depthBuf);
                     _profile?.Keyframe(decodeWaitMs, uploadMs, refineMs, sw.Elapsed.TotalMilliseconds,
                         readMs, decodeMs, fallback);

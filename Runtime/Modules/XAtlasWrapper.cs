@@ -253,8 +253,12 @@ namespace Genesis.RoomScan
         public static bool SimplifyGeometry(
             Vector3[] positions, Vector3[] normals, int[] indices, float targetRatio,
             out Vector3[] outPositions, out Vector3[] outNormals, out int[] outIndices,
-            float targetError = 1e-2f)
+            float targetError = 3e-3f)
         {
+            // targetError is relative to the mesh extent: 3e-3 of a ~7 m room
+            // is ~2 cm. Views of a texel disagree by (surface error × baseline /
+            // depth), so a looser bound would trade unwrap speed for seams the
+            // dense mesh did not have. The ratio is a target, not a promise.
             outPositions = positions;
             outNormals = normals;
             outIndices = indices;

@@ -2,6 +2,7 @@
 #pragma kernel ClearBuffer
 #pragma kernel CopyUint
 #pragma kernel BuildDepth
+#pragma kernel BuildTexelMap
 #pragma kernel BakeAtlas
 #pragma kernel SeamDelta
 #pragma kernel SeamDiffuse
@@ -96,7 +97,18 @@ bool BodyOccludes(float3 camPos, float3 worldPt)
 }
 
 // ── Persistent GPU buffers ──────────────────────────────────
-RWStructuredBuffer<uint> _DepthBuf;  // asuint(linearZ), per-keyframe
+RWStructuredBuffer<uint> _DepthBuf;  // asuint(linearZ), per-keyframe, at (_DepthW × _DepthH)
+// The occlusion depth is rasterised at a fraction of the photo: a 5 cm
+// tolerance does not need 1280×960, and BuildDepth over the dense mesh was
+// most of a keyframe's GPU time. _DepthScale maps photo px → depth px.
+int   _DepthW, _DepthH;
+float _DepthScale;
+// Static texel → output triangle (+1, 0 = padding), built once per bake.
+// Per-keyframe kernels run one thread per atlas texel instead of one per
+// triangle looping its texel box: a simplified mesh has few big triangles,
+// and a 64-lane group waiting on one 2000-texel triangle was the bake.
+RWStructuredBuffer<uint> _TexelTriRW;
+StructuredBuffer<uint>   _TexelTri;
 RWStructuredBuffer<uint> _ScoreBuf;  // asuint(score), persists across KFs
 RWStructuredBuffer<uint> _AtlasBuf;  // packed RGBA32, persists across KFs
 RWStructuredBuffer<uint> _AtlasBufSrc;  // snapshot copy (read-only in the pass that binds it)
@@ -235,61 +247,16 @@ void BuildDepth(uint3 id : SV_DispatchThreadID)
 }
 
 // ═════════════════════════════════════════════════════════════
-//  Kernel 2: Bake atlas — one thread per xatlas output triangle
-//  Mirrors CPU RasterizeTriangle + BakeSingleKeyframe exactly.
+//  Kernel 2a: texel → triangle map. One thread per output triangle,
+//  once per bake; UVs are static so this never re-runs per keyframe.
 // ═════════════════════════════════════════════════════════════
 
 [numthreads(64, 1, 1)]
-void BakeAtlas(uint3 id : SV_DispatchThreadID)
+void BuildTexelMap(uint3 id : SV_DispatchThreadID)
 {
     if ((int)id.x >= _OutTriCount) return;
-
     int t = (int)id.x;
-
-    int i0 = _OutIdx[t * 3];
-    int i1 = _OutIdx[t * 3 + 1];
-    int i2 = _OutIdx[t * 3 + 2];
-
-    float3 p0 = _OutPos[i0], p1 = _OutPos[i1], p2 = _OutPos[i2];
-    float3 n0 = _OutNorm[i0];
-
-    float3 fn = cross(p1 - p0, p2 - p0);
-    float fnLen = length(fn);
-    fn = fnLen > 0.001 ? fn / fnLen : n0;
-
-    float3 triCenter = (p0 + p1 + p2) / 3.0;
-    float3 vd = _CamPos.xyz - triCenter;
-    float vdLen = length(vd);
-    if (vdLen < 0.001) return;
-    vd /= vdLen;
-
-    float dotNV = dot(fn, vd);
-    if (dotNV <= 0.05) return;
-
-    float score = dotNV / max(vdLen, 0.1);
-    uint scoreU = asuint(score);
-
-    // Project triangle vertices to keyframe screen space
-    float3 c0 = mul(_ViewMat, float4(p0, 1)).xyz;
-    float3 c1 = mul(_ViewMat, float4(p1, 1)).xyz;
-    float3 c2 = mul(_ViewMat, float4(p2, 1)).xyz;
-
-    float2 sp0 = float2(_Fx * c0.x / max(c0.z, 0.001) + _Cx - _CropX,
-                         _Fy * c0.y / max(c0.z, 0.001) + _Cy - _CropY);
-    float2 sp1 = float2(_Fx * c1.x / max(c1.z, 0.001) + _Cx - _CropX,
-                         _Fy * c1.y / max(c1.z, 0.001) + _Cy - _CropY);
-    float2 sp2 = float2(_Fx * c2.x / max(c2.z, 0.001) + _Cx - _CropX,
-                         _Fy * c2.y / max(c2.z, 0.001) + _Cy - _CropY);
-
-    // Frustum check (with 10% margin)
-    float mw = (float)_ImgW * 0.1, mh = (float)_ImgH * 0.1;
-    bool in0 = sp0.x >= -mw && sp0.x < _ImgW + mw && sp0.y >= -mh && sp0.y < _ImgH + mh;
-    bool in1 = sp1.x >= -mw && sp1.x < _ImgW + mw && sp1.y >= -mh && sp1.y < _ImgH + mh;
-    bool in2 = sp2.x >= -mw && sp2.x < _ImgW + mw && sp2.y >= -mh && sp2.y < _ImgH + mh;
-    if (!in0 && !in1 && !in2) return;
-
-    // UV pixel-space coordinates (raw xatlas output)
-    float2 uv0 = _RawUV[i0], uv1 = _RawUV[i1], uv2 = _RawUV[i2];
+    float2 uv0 = _RawUV[_OutIdx[t * 3]], uv1 = _RawUV[_OutIdx[t * 3 + 1]], uv2 = _RawUV[_OutIdx[t * 3 + 2]];
 
     int minX = max(0, (int)floor(min(uv0.x, min(uv1.x, uv2.x))));
     int maxX = min(_AtlasW - 1, (int)ceil(max(uv0.x, max(uv1.x, uv2.x))));
@@ -299,13 +266,8 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
     float denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
     if (abs(denom) < 1e-8) return;
     float invD = 1.0 / denom;
-
     float a0x = uv1.y - uv2.y, a0y = uv2.x - uv1.x;
     float a1x = uv2.y - uv0.y, a1y = uv0.x - uv2.x;
-
-    // Valid texels this view sees on this triangle, for the chart tally.
-    // One atomic per triangle, not per texel.
-    int validTexels = 0;
 
     for (int y = minY; y <= maxY; y++)
     {
@@ -317,47 +279,113 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
             float bw1 = (a1x * dx + a1y * dy) * invD;
             float bw2 = 1.0 - bw0 - bw1;
             if (bw0 < -0.001 || bw1 < -0.001 || bw2 < -0.001) continue;
+            _TexelTriRW[y * _AtlasW + x] = (uint)t + 1u;
+        }
+    }
+}
 
-            int texelIdx = y * _AtlasW + x;
+// Shared per-texel setup for the keyframe kernels. Returns false when this
+// texel is padding, faces away, is outside the photo, occluded, or hand.
+struct TexelView
+{
+    int   tri;
+    float score;
+    float2 photoPx;   // continuous photo position
+};
 
-            // Interpolate screen position via barycentrics
-            float sx = bw0 * sp0.x + bw1 * sp1.x + bw2 * sp2.x;
-            float sy = bw0 * sp0.y + bw1 * sp1.y + bw2 * sp2.y;
-            int px = (int)round(sx);
-            int py = (int)round(sy);
-            if (px < 0 || px >= _ImgW || py < 0 || py >= _ImgH) continue;
+bool ProjectTexel(int idx, out TexelView v)
+{
+    v = (TexelView)0;
+    uint t1 = _TexelTri[idx];
+    if (t1 == 0) return false;
+    int t = (int)t1 - 1;
+    v.tri = t;
 
-            // Occlusion check (must pass BEFORE we touch the score buffer)
-            float3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
-            float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
-            float closestZ = asfloat(_DepthBuf[py * _ImgW + px]);
-            if (camPt.z > closestZ + 0.05) continue;
-            if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) continue;
+    int i0 = _OutIdx[t * 3], i1 = _OutIdx[t * 3 + 1], i2 = _OutIdx[t * 3 + 2];
+    float3 p0 = _OutPos[i0], p1 = _OutPos[i1], p2 = _OutPos[i2];
 
-            validTexels++;
+    // Barycentrics of this texel centre in the triangle's UV space.
+    float2 uv0 = _RawUV[i0], uv1 = _RawUV[i1], uv2 = _RawUV[i2];
+    float denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
+    if (abs(denom) < 1e-8) return false;
+    float invD = 1.0 / denom;
+    float2 d = float2(idx % _AtlasW, idx / _AtlasW) - uv2;
+    float bw0 = ((uv1.y - uv2.y) * d.x + (uv2.x - uv1.x) * d.y) * invD;
+    float bw1 = ((uv2.y - uv0.y) * d.x + (uv0.x - uv2.x) * d.y) * invD;
+    float bw2 = 1.0 - bw0 - bw1;
+    float3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
 
-            // All validity checks passed — now do atomic score comparison.
-            // Score must only be updated when we are certain a pixel will be
-            // written, otherwise we "poison" the texel with a high score but
-            // no color, creating permanent holes.
-            uint oldS;
-            InterlockedMax(_ScoreBuf[texelIdx], scoreU, oldS);
-            if (oldS >= scoreU) continue;
+    // Score from this texel's own point and the interpolated vertex normal,
+    // not the triangle's centre and face normal: with a simplified mesh a
+    // triangle spans tens of centimetres, and a per-triangle score made the
+    // best view flip along every triangle edge — the atlas read as a mosaic
+    // of facets. Per texel the score is continuous across edges.
+    float3 n = bw0 * _OutNorm[i0] + bw1 * _OutNorm[i1] + bw2 * _OutNorm[i2];
+    float nLen = length(n);
+    float3 fn = cross(p1 - p0, p2 - p0);
+    n = nLen > 1e-4 ? n / nLen : normalize(fn);
+    // Keep the face-normal sign: a vertex normal averaged over a fold can
+    // point away from the side this triangle actually faces.
+    if (dot(n, fn) < 0) n = -n;
 
-            // Keyframe colour at the exact projected position (bilinear);
-            // same byte layout as GetPixels32().
-            uint kfColor = SampleKf(float2(sx, sy));
-            _AtlasBuf[texelIdx] = kfColor | (255u << 24);
+    float3 vd = _CamPos.xyz - worldPt;
+    float vdLen = length(vd);
+    if (vdLen < 0.001) return false;
+    vd /= vdLen;
+    float dotNV = dot(n, vd);
+    if (dotNV <= 0.05) return false;
+    v.score = dotNV / max(vdLen, 0.1);
+
+    float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
+    if (camPt.z <= 0.001) return false;
+    float2 sp = float2(_Fx * camPt.x / camPt.z + _Cx - _CropX,
+                       _Fy * camPt.y / camPt.z + _Cy - _CropY);
+    int px = (int)round(sp.x), py = (int)round(sp.y);
+    if (px < 0 || px >= _ImgW || py < 0 || py >= _ImgH) return false;
+
+    int dx = clamp((int)(sp.x * _DepthScale), 0, _DepthW - 1);
+    int dy = clamp((int)(sp.y * _DepthScale), 0, _DepthH - 1);
+    float closestZ = asfloat(_DepthBuf[dy * _DepthW + dx]);
+    if (camPt.z > closestZ + 0.05) return false;
+    if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) return false;
+
+    v.photoPx = sp;
+    return true;
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Kernel 2b: pass-1 bake — one thread per atlas texel. Best score
+//  wins the texel (InterlockedMax on asuint(score): positive floats
+//  order as uints). Chart tally on every 4th texel each way so the
+//  per-chart atomics stay at 1/16 of the texels.
+// ═════════════════════════════════════════════════════════════
+
+[numthreads(256, 1, 1)]
+void BakeAtlas(uint3 id : SV_DispatchThreadID)
+{
+    int idx = (int)id.x;
+    if (idx >= _AtlasW * _AtlasH) return;
+
+    TexelView v;
+    if (!ProjectTexel(idx, v)) return;
+
+    if (_ChartCount > 0)
+    {
+        int x = idx % _AtlasW, y = idx / _AtlasW;
+        if ((x & 3) == 0 && (y & 3) == 0)
+        {
+            int chart = _TriChart[v.tri];
+            if (chart >= 0 && chart < _ChartCount)
+                InterlockedAdd(_ChartScore[chart * _KfCount + _KfIndex], (uint)(v.score * 64.0 * 16.0));
         }
     }
 
-    if (_ChartCount > 0 && validTexels > 0)
-    {
-        int chart = _TriChart[t];
-        if (chart >= 0 && chart < _ChartCount)
-            InterlockedAdd(_ChartScore[chart * _KfCount + _KfIndex],
-                           (uint)(score * (float)validTexels * 64.0));
-    }
+    uint scoreU = asuint(v.score);
+    uint oldS;
+    InterlockedMax(_ScoreBuf[idx], scoreU, oldS);
+    if (oldS >= scoreU) return;
+
+    _AtlasBuf[idx] = SampleKf(v.photoPx) | (255u << 24);
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -693,138 +721,58 @@ float _BlendMinFraction;            // ramp start: weight 0 at this fraction of 
 float4 _KfGain;                     // per-keyframe RGB exposure gain toward the pass-1 atlas (1 = none)
 int   _MaxViews;                    // at most this many views per texel; more views blur misregistration into mush
 
-[numthreads(64, 1, 1)]
+[numthreads(256, 1, 1)]
 void BlendAccum(uint3 id : SV_DispatchThreadID)
 {
-    if ((int)id.x >= _OutTriCount) return;
+    int idx = (int)id.x;
+    if (idx >= _AtlasW * _AtlasH) return;
 
-    int t = (int)id.x;
+    // Skip texels whose best score is zero (never filled in pass 1)
+    float bestS = asfloat(_BestScore[idx]);
+    if (bestS <= 0) return;
 
-    int i0 = _OutIdx[t * 3];
-    int i1 = _OutIdx[t * 3 + 1];
-    int i2 = _OutIdx[t * 3 + 2];
+    TexelView v;
+    if (!ProjectTexel(idx, v)) return;
 
-    float3 p0 = _OutPos[i0], p1 = _OutPos[i1], p2 = _OutPos[i2];
-    float3 n0 = _OutNorm[i0];
-
-    float3 fn = cross(p1 - p0, p2 - p0);
-    float fnLen = length(fn);
-    fn = fnLen > 0.001 ? fn / fnLen : n0;
-
-    float3 triCenter = (p0 + p1 + p2) / 3.0;
-    float3 vd = _CamPos.xyz - triCenter;
-    float vdLen = length(vd);
-    if (vdLen < 0.001) return;
-    vd /= vdLen;
-
-    float dotNV = dot(fn, vd);
-    if (dotNV <= 0.05) return;
-
-    float score = dotNV / max(vdLen, 0.1);
+    // Admission is a ramp, not a bar: a view's weight rises from 0 at
+    // _BlendMinFraction × best to full at best. Where the best view
+    // changes across a chart the two are near equal and both count;
+    // where one fades out it fades, instead of switching off along a
+    // line and printing a seam inside the chart. The chart's
+    // preferred view rides the same ramp with its boost on top.
+    float ramp = smoothstep(_BlendMinFraction, 1.0, v.score / bestS);
+    if (ramp <= 0.02) return;
 
     bool preferred = false;
     if (_ChartCount > 0)
     {
-        int chart = _TriChart[t];
+        int chart = _TriChart[v.tri];
         preferred = chart >= 0 && chart < _ChartCount && _ChartBest[chart] == _KfIndex;
     }
 
-    float3 c0 = mul(_ViewMat, float4(p0, 1)).xyz;
-    float3 c1 = mul(_ViewMat, float4(p1, 1)).xyz;
-    float3 c2 = mul(_ViewMat, float4(p2, 1)).xyz;
-
-    float2 sp0 = float2(_Fx * c0.x / max(c0.z, 0.001) + _Cx - _CropX,
-                         _Fy * c0.y / max(c0.z, 0.001) + _Cy - _CropY);
-    float2 sp1 = float2(_Fx * c1.x / max(c1.z, 0.001) + _Cx - _CropX,
-                         _Fy * c1.y / max(c1.z, 0.001) + _Cy - _CropY);
-    float2 sp2 = float2(_Fx * c2.x / max(c2.z, 0.001) + _Cx - _CropX,
-                         _Fy * c2.y / max(c2.z, 0.001) + _Cy - _CropY);
-
-    float mw = (float)_ImgW * 0.1, mh = (float)_ImgH * 0.1;
-    bool in0 = sp0.x >= -mw && sp0.x < _ImgW + mw && sp0.y >= -mh && sp0.y < _ImgH + mh;
-    bool in1 = sp1.x >= -mw && sp1.x < _ImgW + mw && sp1.y >= -mh && sp1.y < _ImgH + mh;
-    bool in2 = sp2.x >= -mw && sp2.x < _ImgW + mw && sp2.y >= -mh && sp2.y < _ImgH + mh;
-    if (!in0 && !in1 && !in2) return;
-
-    float2 uv0 = _RawUV[i0], uv1 = _RawUV[i1], uv2 = _RawUV[i2];
-
-    int minX = max(0, (int)floor(min(uv0.x, min(uv1.x, uv2.x))));
-    int maxX = min(_AtlasW - 1, (int)ceil(max(uv0.x, max(uv1.x, uv2.x))));
-    int minY = max(0, (int)floor(min(uv0.y, min(uv1.y, uv2.y))));
-    int maxY = min(_AtlasH - 1, (int)ceil(max(uv0.y, max(uv1.y, uv2.y))));
-
-    float denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
-    if (abs(denom) < 1e-8) return;
-    float invD = 1.0 / denom;
-
-    float a0x = uv1.y - uv2.y, a0y = uv2.x - uv1.x;
-    float a1x = uv2.y - uv0.y, a1y = uv0.x - uv2.x;
-
-    for (int y = minY; y <= maxY; y++)
+    // The chart's best view always contributes and does not spend a
+    // slot; other views are capped. Views arrive in capture order,
+    // all already within the ramp, so the first _MaxViews are near-best;
+    // beyond that each extra view only adds registration error.
+    if (!preferred)
     {
-        float dy = (float)y - uv2.y;
-        for (int x = minX; x <= maxX; x++)
-        {
-            float dx = (float)x - uv2.x;
-            float bw0 = (a0x * dx + a0y * dy) * invD;
-            float bw1 = (a1x * dx + a1y * dy) * invD;
-            float bw2 = 1.0 - bw0 - bw1;
-            if (bw0 < -0.001 || bw1 < -0.001 || bw2 < -0.001) continue;
-
-            int texelIdx = y * _AtlasW + x;
-
-            // Skip texels whose best score is zero (never filled in pass 1)
-            float bestS = asfloat(_BestScore[texelIdx]);
-            if (bestS <= 0) continue;
-
-            // Admission is a ramp, not a bar: a view's weight rises from 0 at
-            // _BlendMinFraction × best to full at best. Where the best view
-            // changes across a chart the two are near equal and both count;
-            // where one fades out it fades, instead of switching off along a
-            // line and printing a seam inside the chart. The chart's
-            // preferred view rides the same ramp with its boost on top.
-            float ramp = smoothstep(_BlendMinFraction, 1.0, score / bestS);
-            if (ramp <= 0.02) continue;
-
-            float sx = bw0 * sp0.x + bw1 * sp1.x + bw2 * sp2.x;
-            float sy = bw0 * sp0.y + bw1 * sp1.y + bw2 * sp2.y;
-            int px = (int)round(sx);
-            int py = (int)round(sy);
-            if (px < 0 || px >= _ImgW || py < 0 || py >= _ImgH) continue;
-
-            // Occlusion check
-            float3 worldPt = bw0 * p0 + bw1 * p1 + bw2 * p2;
-            float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
-            float closestZ = asfloat(_DepthBuf[py * _ImgW + px]);
-            if (camPt.z > closestZ + 0.05) continue;
-            if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) continue;
-
-            // The chart's best view always contributes and does not spend a
-            // slot; other views are capped. Views arrive in capture order,
-            // all already within _BlendMinFraction of the best, so the first
-            // _MaxViews are near-best; beyond that each extra view only adds
-            // registration error.
-            if (!preferred)
-            {
-                uint seen;
-                InterlockedAdd(_AccumN[texelIdx], 1, seen);
-                if ((int)seen >= _MaxViews) continue;
-            }
-
-            uint kfColor = SampleKf(float2(sx, sy));
-            float r = min(255.0, (float)(kfColor & 0xFF) * _KfGain.r);
-            float g = min(255.0, (float)((kfColor >> 8) & 0xFF) * _KfGain.g);
-            float b = min(255.0, (float)((kfColor >> 16) & 0xFF) * _KfGain.b);
-
-            // Fixed-point accumulation: scale by 256 to preserve fractional precision
-            // score is typically 0.01-10.0, so score*256 fits in uint range
-            uint ws = max(1u, (uint)(score * 256.0 * ramp * (preferred ? _ChartBoost : 1.0)));
-            InterlockedAdd(_AccumR[texelIdx], (uint)(r * ws));
-            InterlockedAdd(_AccumG[texelIdx], (uint)(g * ws));
-            InterlockedAdd(_AccumB[texelIdx], (uint)(b * ws));
-            InterlockedAdd(_AccumW[texelIdx], ws);
-        }
+        uint seen;
+        InterlockedAdd(_AccumN[idx], 1, seen);
+        if ((int)seen >= _MaxViews) return;
     }
+
+    uint kfColor = SampleKf(v.photoPx);
+    float r = min(255.0, (float)(kfColor & 0xFF) * _KfGain.r);
+    float g = min(255.0, (float)((kfColor >> 8) & 0xFF) * _KfGain.g);
+    float b = min(255.0, (float)((kfColor >> 16) & 0xFF) * _KfGain.b);
+
+    // Fixed-point accumulation: scale by 256 to preserve fractional precision
+    // score is typically 0.01-10.0, so score*256 fits in uint range
+    uint ws = max(1u, (uint)(v.score * 256.0 * ramp * (preferred ? _ChartBoost : 1.0)));
+    InterlockedAdd(_AccumR[idx], (uint)(r * ws));
+    InterlockedAdd(_AccumG[idx], (uint)(g * ws));
+    InterlockedAdd(_AccumB[idx], (uint)(b * ws));
+    InterlockedAdd(_AccumW[idx], ws);
 }
 
 // ═════════════════════════════════════════════════════════════
