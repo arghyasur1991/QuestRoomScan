@@ -28,7 +28,7 @@ namespace Genesis.RoomScan
     /// of starting capture.
     /// </summary>
     [DefaultExecutionOrder(-50)]
-    public class PassthroughCameraProvider : MonoBehaviour, ICameraProvider
+    public class PassthroughCameraProvider : MonoBehaviour, ICameraProvider, ICameraFrameTiming
     {
         /// <summary>The Horizon OS permission required by PCA on Quest 3+.</summary>
         public const string CameraPermissionId = AndroidRuntimePermission.Camera;
@@ -59,6 +59,12 @@ namespace Genesis.RoomScan
         /// <inheritdoc />
         public Pose CameraPose =>
             _pca != null && _pca.IsPlaying ? _pca.GetCameraPose() : Pose.identity;
+
+        /// <inheritdoc />
+        public double FrameTimeSeconds =>
+            _pca != null && _pca.IsPlaying
+                ? (_pca.Timestamp - DateTime.UnixEpoch).TotalSeconds
+                : Time.realtimeSinceStartupAsDouble;
 
         /// <inheritdoc />
         public Vector2 FocalLength =>

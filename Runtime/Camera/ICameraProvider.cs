@@ -39,4 +39,18 @@ namespace Genesis.RoomScan
         /// <summary>Stops camera frame acquisition and releases resources.</summary>
         void StopCapture();
     }
+
+    /// <summary>
+    /// Optional companion to <see cref="ICameraProvider"/>: the capture time of
+    /// <see cref="ICameraProvider.CurrentFrame"/>, in seconds on a monotonic
+    /// clock. Lets consumers measure head motion between frames from the
+    /// frames' own timestamps rather than from the app frame they were
+    /// noticed in, which is quantised to the display rate.
+    /// </summary>
+    public interface ICameraFrameTiming
+    {
+        /// <summary>Capture time of the current frame, seconds. Any monotonic
+        /// origin; only differences are used.</summary>
+        double FrameTimeSeconds { get; }
+    }
 }

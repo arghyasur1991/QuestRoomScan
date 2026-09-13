@@ -44,6 +44,11 @@ Copyright (c) 2012 Brandon Pelfrey
 #include <condition_variable>
 #include <mutex>
 #include <thread>
+#if defined(__linux__) || defined(__ANDROID__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #include <assert.h>
 #include <float.h> // FLT_MAX
 #include <limits.h>
@@ -3124,14 +3129,42 @@ struct Task
 };
 
 #if XA_MULTITHREADED
+// Host-configurable parallelism (xatlas::SetThreading). By default the
+// scheduler takes every core: on a headset running a 72 Hz app that starves
+// the engine's main and render threads for the length of the unwrap. Read
+// when the scheduler is created (Atlas creation), not per Generate.
+static std::atomic<uint32_t> s_threadLimit(0);   // 0 = hardware concurrency
+static std::atomic<int> s_workerNice(0);         // POSIX nice for worker threads (Linux/Android)
+
+static uint32_t schedulerThreadCount()
+{
+	uint32_t n = std::thread::hardware_concurrency();
+	if (n < 1)
+		n = 1;
+	const uint32_t limit = s_threadLimit.load();
+	if (limit > 0 && limit < n)
+		n = limit;
+	return n;
+}
+
+static void applyWorkerNice()
+{
+#if defined(__linux__) || defined(__ANDROID__)
+	const int nice = s_workerNice.load();
+	if (nice != 0)
+		setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), nice);
+#endif
+}
+
 class TaskScheduler
 {
 public:
 	TaskScheduler() : m_shutdown(false)
 	{
 		m_threadIndex = 0;
+		m_threadCount = schedulerThreadCount();
 		// Max with current task scheduler usage is 1 per thread + 1 deep nesting, but allow for some slop.
-		m_maxGroups = std::thread::hardware_concurrency() * 4;
+		m_maxGroups = m_threadCount * 4;
 		m_groups = XA_ALLOC_ARRAY(MemTag::Default, TaskGroup, m_maxGroups);
 		for (uint32_t i = 0; i < m_maxGroups; i++) {
 			new (&m_groups[i]) TaskGroup();
@@ -3139,7 +3172,7 @@ public:
 			m_groups[i].ref = 0;
 			m_groups[i].userData = nullptr;
 		}
-		m_workers.resize(std::thread::hardware_concurrency() <= 1 ? 1 : std::thread::hardware_concurrency() - 1);
+		m_workers.resize(m_threadCount <= 1 ? 1 : m_threadCount - 1);
 		for (uint32_t i = 0; i < m_workers.size(); i++) {
 			new (&m_workers[i]) Worker();
 			m_workers[i].wakeup = false;
@@ -3168,7 +3201,7 @@ public:
 
 	uint32_t threadCount() const
 	{
-		return max(1u, std::thread::hardware_concurrency()); // Including the main thread.
+		return max(1u, m_threadCount); // Including the main thread.
 	}
 
 	// userData is passed to Task::func as groupUserData.
@@ -3263,11 +3296,13 @@ private:
 	Array<Worker> m_workers;
 	std::atomic<bool> m_shutdown;
 	uint32_t m_maxGroups;
+	uint32_t m_threadCount;
 	static thread_local uint32_t m_threadIndex;
 
 	static void workerThread(TaskScheduler *scheduler, Worker *worker, uint32_t threadIndex)
 	{
 		m_threadIndex = threadIndex;
+		applyWorkerNice();
 		std::unique_lock<std::mutex> lock(worker->mutex);
 		for (;;) {
 			worker->cv.wait(lock, [=]{ return worker->wakeup.load(); });
@@ -3424,7 +3459,7 @@ public:
 	ThreadLocal()
 	{
 #if XA_MULTITHREADED
-		const uint32_t n = std::thread::hardware_concurrency();
+		const uint32_t n = schedulerThreadCount();
 #else
 		const uint32_t n = 1;
 #endif
@@ -3436,7 +3471,7 @@ public:
 	~ThreadLocal()
 	{
 #if XA_MULTITHREADED
-		const uint32_t n = std::thread::hardware_concurrency();
+		const uint32_t n = schedulerThreadCount();
 #else
 		const uint32_t n = 1;
 #endif
@@ -8919,6 +8954,17 @@ static void DestroyOutputMeshes(Context *ctx)
 	}
 	XA_FREE(ctx->atlas.meshes);
 	ctx->atlas.meshes = nullptr;
+}
+
+void SetThreading(uint32_t maxThreads, int workerNice)
+{
+#if XA_MULTITHREADED
+	internal::s_threadLimit.store(maxThreads);
+	internal::s_workerNice.store(workerNice);
+#else
+	(void)maxThreads;
+	(void)workerNice;
+#endif
 }
 
 void Destroy(Atlas *atlas)

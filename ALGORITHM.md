@@ -301,7 +301,7 @@ Temporal blending on the GPU provides implicit convergence-based stability (see 
     splat.ply                      # Auto-saved when GS training completes
     refined_mesh.bin               # Auto-saved when refinement completes
     refined_atlas.raw              # On-device refined atlas (RGBA32)
-    simplified_mesh.bin            # Post-bake simplified mesh (when ratio < 1)
+    simplified_mesh.bin            # Post-bake simplified copy (what is rendered); refined_mesh.bin is the re-refine source
     hq_atlas.png                   # Server-side HQ refined atlas (PNG)
 ```
 
@@ -466,7 +466,7 @@ If an artifact's creation matrix is null (legacy data), it falls back to `baseMa
 MRUK's world-lock can reposition the `TrackingSpace` transform each frame. `DepthCapture.TrackingToWorld(Pose)` converts camera poses from tracking space to world space before passing them to `VolumeIntegrator`, `TriplanarCache`, and `KeyframeCollector`.
 
 ### Startup Sequence
-`RoomScanner.Start()` waits for `RoomAnchorManager.RoomReady` before beginning scanning or loading saved data.
+`RoomScanner.Start()` waits for `RoomAnchorManager.RoomReady` before beginning scanning or loading saved data. That event is MRUK `LoadSceneFromDevice` completing: native discovery adds every room and scene anchor (`OnSceneAnchorAdded`) and then `OnDiscoveryFinished` / `SceneLoadedEvent`. Hosts wait on `WaitUntilRoomReadyAsync` / `RoomReady`, then `CopyHeadsetRoomWallFaces(dest, SceneFaceKind)` for the labels they want. Later room/anchor changes are `RoomScanSession.SceneAnchorsChanged`.
 
 ## 11. Exclusion Zones
 
@@ -790,9 +790,10 @@ Passthrough **visualization** (`OVRPassthroughLayer`) is unrelated and stays on.
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `textureResolution` | 4096 | Triplanar texture resolution (per plane, applies to both color and depth) |
-| `moveThreshold` | 0.4m | Min camera displacement for new keyframe (KeyframeCollector) |
-| `rotateThresholdDeg` | 20° | Min camera rotation for new keyframe (KeyframeCollector) |
-| `minCaptureInterval` | 1.0s | Min seconds between keyframe captures |
+| `moveThreshold` | 0.15 m | Min camera displacement for a new keyframe (KeyframeCollector) |
+| `rotateThresholdDeg` | 10° | Min camera rotation for a new keyframe |
+| `minCaptureInterval` | 0.25 s | Min seconds between keyframe captures |
+| `maxAngularVelocity` | 120 °/s | Reject a frame as motion blur |
 
 ### Room Anchoring & Relocation
 | Parameter | Default | Description |
@@ -825,12 +826,13 @@ End-to-end pipeline: on-device keyframe + point cloud capture → server-based C
 
 ### 14.1 KeyframeCollector (Quest, automatic)
 Runs alongside scanning with no user interaction. Saves posed camera frames directly into the active scan package (`keyframes/`):
-- **Selection**: Motion-gated — translation > 0.4m OR rotation > 20 deg from any saved keyframe, and at least 1 s since the last capture
-- **Rejection**: Frames with angular velocity > 120 deg/s are discarded (motion blur)
+- **Selection**: Motion-gated — translation > 0.15 m **or** rotation > 10° from every saved keyframe, and at least 0.25 s since the last capture. A frame is redundant only if it is close in **both** position and rotation.
+- **Rejection**: Angular velocity over 120 °/s (app clock, since the last check) is skipped as motion blur.
+- **Hand footprint**: capsules are clipped at the near plane before projection; a forearm running back past the camera must not project to a full-image footprint and reject the frame as 100 % hand.
 - **Per frame**: JPEG (1280x960, quality 95) + one JSON line in `frames.jsonl` with:
   - Position (px, py, pz), rotation quaternion (qx, qy, qz, qw)
   - Intrinsics (fx, fy, cx, cy), sensor resolution, current resolution
-- **I/O**: `AsyncGPUReadback` → JPEG encode → `Task.Run` file write (zero frame stalls)
+- **I/O**: `AsyncGPUReadback` → main-thread copy of the pixels → `EncodeArrayToJPG` + file write on a worker
 - **Deduplication**: Multiple pose entries per image ID may occur; the server keeps only the last pose per image
 - **Typical output**: 100-300 keyframes, 10-30MB total
 
@@ -925,21 +927,38 @@ Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-tri
 
 ## 15. Texture Refinement Pipeline
 
-Post-processing pipeline that produces a sharp UV-mapped texture atlas from saved keyframes, replacing the blurry triplanar vertex-color texturing. Uses the same keyframes collected for Gaussian Splat training (§13.1).
+Post-processing pipeline that produces a sharp UV-mapped texture atlas from saved keyframes, replacing the blurry triplanar vertex-color texturing. Uses the same keyframes collected for Gaussian Splat training (§14.1).
 
-### 15.1 Post-Bake Mesh Simplification (optional, meshoptimizer)
+### 15.1 Mesh Simplification (optional, meshoptimizer)
 
-After atlas baking, the refined mesh can be optionally simplified using [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplifyWithAttributes`):
+Two placements, `TextureRefinement.simplifyBeforeUnwrap`. Target ratio is `postBakeSimplificationRatio ∈ [0.1, 1.0]` (default 0.5; 1.0 disables). Runs on a background thread.
 
-- **Input**: Baked mesh positions, normals, UVs, and index buffer
-- **Operation**: Quadric error metric simplification with UV coordinates as vertex attributes — penalizes collapses that would distort UVs. `meshopt_SimplifyLockBorder` flag prevents vertices on UV seam boundaries from being collapsed, avoiding seam tearing.
-- **Target**: Configurable ratio, inspector slider `postBakeSimplificationRatio ∈ [0.1, 1.0]`. Default: 0.5 (50% triangles). 1.0 disables.
-- **Performance**: <5ms for 100k triangles on ARM64, runs on background thread (`Task.Run`)
-- **Output**: Compacted vertex/index arrays with preserved UVs. Atlas texture is unchanged — simplification only removes geometry, not texels.
+- **Before the unwrap (default).** `meshopt_simplify` (geometry only, vertices a subset of the input) reduces the extracted mesh; xatlas and both bake passes run on the result. The dense mesh still builds per-keyframe occlusion depth. Target error is 3e-3 of the mesh extent (~2 cm) so the simplified surface cannot drift far enough for views to disagree. The unwrap is the slowest refinement stage and scales with input triangles. One refined mesh; no `simplified_mesh.bin`.
+- **After the bake.** Unwrap and bake the dense mesh, then `meshopt_simplifyWithAttributes` with UV coordinates as vertex attributes and `meshopt_SimplifyLockBorder` so seam vertices are not collapsed. Output is `simplified_mesh.bin`; the atlas is unchanged.
 
-> Running simplification *after* baking (instead of before) preserves atlas quality: the UV unwrap and atlas bake operate on the full-resolution mesh, and only the final game-ready mesh is reduced. This replaces the old pre-bake decimation which degraded baking quality.
+### 15.1a Keyframe Registration (pass 2 pre-step)
+
+Each keyframe is aligned to the pass-1 atlas before it is blended:
+
+1. `BuildDepth` at 1/4 resolution from the dense mesh, then `RenderAtlasView` rasterises the output mesh into the keyframe's image plane, sampling the pass-1 atlas — the room as the mesh *thinks* this photo should look.
+2. `KfLumDownsample` averages the photo to the same 1/4 grid.
+3. `MatchShift` — one 256-thread group per candidate shift, striding the low-res image with a groupshared reduction — computes zero-mean normalized cross-correlation for every integer shift in ±R (R = 6 low-res px ≈ ±1.6° at Quest 3 focal length).
+4. C# reads the (2R+1)² scores, fits a parabola for sub-pixel peak, rejects peaks below `registrationMinNcc` or on the search border, and turns the shift into a yaw/pitch correction of the keyframe rotation (`ApplyImageShift`: `R' = R · ΔR⁻¹`, ΔR = Rx(−dy/fy) · Ry(dx/fx)).
+
+The corrected pose drives that keyframe's depth pass and `BlendAccum`. A pure image shift absorbs the dominant errors — exposure-time pose offset and residual mesh bias — for a mostly rotating head; it costs one light GPU chain and a 676-byte readback per keyframe, no extra JPEG decode. Requires `multiViewBlend` (the pass-1 colours are not re-projected).
+
+### 15.1b Chart-Consistent View Preference
+
+**Admission is a ramp, not a bar.** A view's blend weight is `score × smoothstep(blendMinFraction × best, best, score)`: zero at 0.75× the texel's pass-1 best score, full at the best. Where the best view changes across a chart the two are near equal and both count; where one fades out it fades — a hard threshold switched views along a line and printed a seam *inside* the chart. Views under 2 % weight do not spend a `maxViewsPerTexel` slot.
+
+**Exposure equalisation** (`equalizeExposure`, with registration on). The passthrough camera re-exposes between frames, so two well-registered views of one wall still meet with a brightness step. The registration chain already renders the pass-1 atlas into the keyframe's view at 1/4 res (`RenderAtlasView`, packed RGB) and downsamples the photo (`KfLumDownsample`, packed mean RGB); `ViewGainReduce` sums both over the covered pixels (groupshared partials, one atomic per channel per group) and C# turns the ratio into a per-channel gain clamped to `[1/exposureGainLimit, exposureGainLimit]` (1.6). `BlendAccum` multiplies the photo by `_KfGain`. Means over tens of thousands of pixels are indifferent to the few-pixel shift, so this needs no extra pass and a 28-byte readback.
+
+Pass 1 sums each keyframe's valid texel scores per xatlas chart (one atomic per 4×4 texel block per keyframe into a `charts × keyframes` table); `ChartArgmax` picks the chart's best view. In pass 2 that view is weighted ×`chartBestViewBoost` (default 3) and never spends one of the `maxViewsPerTexel` slots, but it meets the same `blendMinFraction` bar as every other view (admitting a grazing photo below the bar stretches chart corners). A chart therefore reads from one photo wherever that photo sees it well, and view switches move to chart borders, which seam levelling (§15.3.1) then flattens. `ResolveBlend` keeps the pass-1 colour on texels no blend sample reached instead of clearing them.
 
 ### 15.2 UV Unwrapping (xatlas)
+
+**Threads.** xatlas's task scheduler takes `hardware_concurrency` threads by default — every core — and its `wait()` spins the caller. During a long unwrap that starves Unity's main and render threads. The bundled `xatlas.cpp` is patched with `xatlas::SetThreading(maxThreads, workerNice)` (C API `xatlas_set_threading`, read when the atlas is created): `TextureRefinement.xatlasThreads` (default **3**, incl. the calling worker) caps the scheduler and `xatlasThreadNice` (default **10**) sets a POSIX nice on the worker threads and, for the length of `Generate`, on the caller, so the engine's threads win any contended core. Older plugin binaries without the export fall back to every core (the P/Invoke is guarded).
+
 
 [xatlas](https://github.com/jpcy/xatlas) generates a UV atlas via native C++ P/Invoke:
 
@@ -964,32 +983,48 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
 
 ### 15.3 GPU Atlas Baking (Compute Shader)
 
-`AtlasBakeCompute.compute` processes each keyframe to project camera imagery onto the UV atlas. All data is in `StructuredBuffer`s with integer pixel indexing — no render targets, no Y-axis ambiguity.
+`AtlasBakeCompute.compute` projects each keyframe onto the UV atlas. All data is in `StructuredBuffer`s with integer pixel indexing — no render targets, no Y-axis ambiguity.
 
-**Three kernels, dispatched per keyframe:**
+**Once per bake.** `BuildTexelMap` rasterises every output triangle's UV footprint into `_TexelTri` (+1, 0 = padding). Chart tallies sample every 4th texel each way (1/16 of the atomics).
 
-1. **ClearDepth** (`[numthreads(256,1,1)]`): Fills depth buffer with 999 (far sentinel). One dispatch per keyframe to reset occlusion.
+**Per keyframe:**
 
-2. **BuildDepth** (`[numthreads(64,1,1)]`): Per original-mesh triangle, rasterizes in screen space using the keyframe's view/projection. Writes `InterlockedMin(asuint(z))` to build an occlusion depth map. This uses the original mesh vertices/indices to ensure accurate occlusion.
+1. **ClearDepth** (`[numthreads(256,1,1)]`): far sentinel in the occlusion depth buffer.
 
-3. **BakeAtlas** (`[numthreads(64,1,1)]`): Per UV-unwrapped triangle:
-   - Rasterizes bounding box in atlas UV space
-   - Barycentric test for point-in-triangle
-   - Interpolates 3D world position from barycentrics
-   - Projects to keyframe screen space via intrinsics (fx, fy, cx, cy with crop offset)
-   - **Bounds check**: Discards if outside image
-   - **Occlusion check**: Compares projected depth against depth buffer (with 0.05 tolerance)
-   - **Body check**: the keyframe carries the player's hand / forearm capsules at capture (`"cap"` in `frames.jsonl`, written by `KeyframeCollector`, relocated with the pose). A texel whose segment camera → world point passes within `radius × 1.4` of any capsule (`SegSegDistSq`) is skipped — that pixel was the hand, not the wall. Frames where the capsules cover more than `maxHandCoverage` (12 %) of the image are never saved. Same test in `BlendAccum`.
-   - **Score**: `dot(surfaceNormal, viewDirection)` — prefers head-on views
-   - **Atomic best-score selection**: `InterlockedMax(_ScoreBuf[texelIdx], asuint(score))` — since scores are positive floats, `asuint()` preserves ordering. Color is written only when the thread wins the comparison.
+2. **BuildDepth** (`[numthreads(64,1,1)]`): per original-mesh triangle, rasterise in photo space, `InterlockedMin(asuint(z))`. Uses the dense mesh so occlusion stays accurate after a pre-unwrap simplify. Resolution is photo ÷ `occlusionDepthDivisor` (default 2); shade maps photo position through `_DepthScale`. A 5 cm depth tolerance does not need 1280×960.
 
-**Keyframe processing** is sequential from C#: decode JPEG → `GetPixels32()` → upload to `ComputeBuffer` → dispatch 3 kernels → `await Task.Yield()`. Score and atlas buffers persist across keyframes (best score accumulates).
+3. **BakeAtlas** / **BlendAccum** (`[numthreads(64,1,1)]`): **one thread per atlas texel**. Look up the triangle, recompute barycentrics from the texel centre, interpolate position and vertex normal (face-normal sign kept), project via intrinsics (fx, fy, cx, cy with crop offset):
+   - **Bounds check**: discard if outside the image
+   - **Occlusion check**: projected depth vs depth buffer (0.05 m tolerance)
+   - **Body check**: the keyframe carries the player's hand / forearm capsules at capture (`"cap"` in `frames.jsonl`, written by `KeyframeCollector`, relocated with the pose). A texel whose segment camera → world point passes within `radius × 1.4` of any capsule (`SegSegDistSq`) is skipped. Frames where the capsules cover more than `maxHandCoverage` (12 %) of the image are never saved.
+   - **Score**: `dot(surfaceNormal, viewDirection)` at the texel — prefers head-on views. A per-triangle score flipped the best view along every large-triangle edge.
+   - Pass 1: `InterlockedMax(_ScoreBuf[texelIdx], asuint(score))` — scores are positive floats, so `asuint()` preserves order. Colour is written only when the thread wins.
+   - Pass 2: `BlendAccum` accumulates admitted views (see §15.1b).
+
+**Keyframe sampling** is bilinear at the exact projected position (`SampleKf`, four `Load`s): where one photo pixel spans several atlas texels — a far or oblique view — nearest sampling stamped blocks.
+
+**Keyframe processing** is one keyframe per compositor frame, pipelined (`ProcessKeyframesGpuAsync`): keyframe N+1 is read and JPEG-decoded on a worker (prefetch depth 3) while N's GPU work is in flight; the main thread uploads N's pixels into one of two alternating `Texture2D` slots, runs the optional registration hook, binds the camera and issues `ClearDepth` → `BuildDepth` → shade in one submission, then yields once. No fences: Unity orders the next upload behind the previous dispatch in the command stream. Score and atlas buffers persist across keyframes (best score accumulates). Pass 2 iterates every keyframe again.
+
+**JPEG decode is off the main thread.** `ImageConversion.LoadImage` decodes on the calling thread. `KeyframeImageDecoder.ReadAndDecodeAsync` does the file read and the decode in one worker hop: on Android through `BitmapFactory.decodeByteArray` (JNI, thread attached for the call; the bitmap must come back `ARGB_8888`) into a direct `ByteBuffer` over a `NativeArray`, rows flipped to Unity's bottom-up layout; the main thread only does `LoadRawTextureData` + `Apply`. Editor and other platforms, or a JNI failure, fall back to `LoadImage`. On the capture side `KeyframeCollector` copies the readback and encodes with the thread-safe `ImageConversion.EncodeArrayToJPG` on a worker.
+
+**Profile.** With `profileRefinement` on (off by default), every refinement ends with one `[TextureRefine][Profile]` block: wall time per stage (`meshReadback`, `xatlas`, `manifest`, `meshUpload`, `pass1`, `pass2+registration`, `sharpen`, `seamLevel`, `sobel`, `atlasReadback`, `dilate`), per-keyframe main-thread time (waiting on the worker decode, upload, registration hook, dispatch issue) and worker time (read, decode, `LoadImage` fallbacks), and the compositor frames the bake ran across from `Time.unscaledDeltaTime` at each continuation — count, mean, max with the stage it landed in, frames over the 72 Hz budget, hitches over 25 ms — plus managed and native memory deltas. `KeyframeCollector.profileCapture` (off by default) logs a `[KeyframeCollector][Profile]` line every 25 saves and at scan stop: main-thread readback copy, worker encode and write (ms mean/max). Both are Stopwatch reads; the frame statistics are only meaningful in a player.
 
 **Post-processing** (CPU):
 - **Dilation**: Fills empty texels at UV island edges by averaging non-empty neighbors (multiple passes)
 - **Denoise** (optional, `skipDenoise` toggle): Median-like filter to remove speckle noise from misaligned projections. GPU compute bake produces fewer speckles than CPU bake, so this is off by default.
 
 **CPU fallback**: `BakeAtlasCPUAsync` implements identical logic in C# with `unsafe` pointer access. Used when compute shader is null (`forceCpuBake` toggle).
+
+#### 15.3.1 Seam levelling (`SeamDelta` / `SeamDiffuse` / `SeamApply`)
+
+A UV seam is one mesh edge drawn twice in the atlas, once per chart. The two sides were shaded from different photos (different exposure, different residual misregistration) and meet in 3D with a colour step. Blurring in atlas space cannot touch this — the neighbour across the seam is somewhere else in the atlas.
+
+1. **Seam pairs** (CPU, worker, from the unwrap only). xatlas splits a vertex at a seam, so the two copies share an exact position. Every triangle edge is keyed by its endpoints' canonical (position-deduplicated) ids; a key with two entries whose *output* vertex ids differ is a seam edge drawn on two charts. It is sampled one texel apart along its longer side; each sample is nudged half a texel toward the triangle's opposite vertex so it lands on a shaded texel, not the border. Result: `(texelA, texelB)` pairs — two atlas texels on the same 3D point.
+2. **`SeamDelta`**: for each pair with both sides shaded, pin a correction of `(mean − own)` on each side (3 × 10-bit signed fixed point, ¼ level, in one `uint` per texel; bit 30 = pinned, bit 31 = present).
+3. **`SeamDiffuse`** × `seamLevelIterations` (default 40, one a frame, ping-pong): Jacobi step over filled texels — the mean of the 8 neighbours at distance 1 and 2 (walks two texels a step), pinned texels held, unfilled texels not neighbours (Neumann at the chart border, which is where the seam sits). From a zero start this is heat diffusion from the seams: a smooth `erfc` falloff that is ~0.16 of the step at 2√K ≈ 25 texels and ~0.05 at 40, so the step becomes a gradient and the chart interior is untouched.
+4. **`SeamApply`**: `atlas += correction`, clamped, filled texels only. Dilation then carries the levelled colours into the padding.
+
+Runs after sharpening, before the normal map. Memory: two correction buffers of `atlasW × atlasH × 4` bytes during the pass.
 
 ### 15.4 Render Modes
 
@@ -1001,7 +1036,7 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
 | **Vertex** | GPU mesh (`ScanMeshVertexColor.shader`) | Always (default) | Live GPU mesh with vertex colors only (~5cm resolution). Triplanar texturing forced off. |
 | **Triplanar** | GPU mesh (`ScanMeshVertexColor.shader`) | `TriplanarCache` attached | Live GPU mesh with triplanar-projected camera textures (~8mm/texel) with vertex color fallback where data is missing. |
 | **Refined** | `Mesh` object + `RefinedMesh.shader` | After on-device refinement | UV-unwrapped mesh with on-device baked atlas + Sobel normal map for fake lighting. |
-| **Occlusion** | `Mesh` object + `OcclusionMesh.shader` | After on-device refinement | Refined mesh as invisible depth-only occluder for MR. Writes depth via `SRPDefaultUnlit` pass (fragment returns `half4(0,0,0,0)` — Quest compositor shows passthrough via alpha=0). `DepthOnly`/`DepthNormals` passes provide prepass depth for Forward/Deferred URP modes. `Queue=Geometry-1` ensures virtual objects render behind the room mesh. Note: Adreno GPUs skip depth writes with `ColorMask 0` or `Blend Zero One` — the main pass must use default opaque blend with zero-alpha output. |
+| **Occlusion** | `Mesh` object + `OcclusionMesh.shader` | After on-device refinement | Refined mesh as invisible depth-only occluder. `Cull Front`: inward room meshes write depth from outside (back faces) and are a no-op from inside. Writes depth via `SRPDefaultUnlit` pass (fragment returns `half4(0,0,0,0)`). `DepthOnly`/`DepthNormals` passes provide prepass depth. `Queue=Geometry-1`. Adreno skips depth writes with `ColorMask 0` or `Blend Zero One` — the main pass uses default opaque blend with zero-alpha output. |
 | **Splat** | `GaussianSplatRenderer` (UGS) | After GS training completes | Gaussian Splat point cloud rendered from server-trained PLY data. |
 | **None** | — | Always | All scan rendering disabled (GPU mesh hidden, splat hidden, refined hidden). |
 
@@ -1033,7 +1068,7 @@ The refined mesh uses the Sobel normal map for real-time fake lighting:
 - **TBN transform**: Tangent/bitangent/normal from mesh attributes → world-space normal
 - **Fake diffuse**: `abs(dot(worldNormal, normalize(_LightDir))) * 0.4 + 0.6` — half-lambert-like wrap lighting multiplied into atlas albedo
 - **Properties**: `_MainTex` (atlas), `_BumpMap` (Sobel normal map), `_NormalStrength`, `_LightDir`
-- **Passes**: `RefinedUnlit` (SRPDefaultUnlit, double-sided) + `DepthOnly`
+- **Passes**: `RefinedUnlit` (SRPDefaultUnlit, `Cull Off`) + `DepthOnly`. `RefinedMeshBackface.shader` is the same program with `Cull Back`, swapped in by `RoomScanSession.SetRefinedBackfaceCull` — Quest ignores ShaderLab `Cull [_Cull]`.
 
 ### 15.7 Server-Side HQ Refinement
 
@@ -1160,7 +1195,7 @@ Iterates `MRUKRoom.Anchors`, for each:
 4. Special handling for floor/ceiling: wall-aligned bounding box via `FindWallHorizontalRight`
 5. Register as `SceneObject` with `id = mruk_{index}_{label}`, `source = MRUK`
 
-**Scene model**: Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh for reliable detection. Event-driven updates via `MRUKRoom.AnchorCreatedEvent` / `AnchorUpdatedEvent`.
+**Scene model**: Uses `SceneModel.V1` (semantic planes and furniture volumes). V2 is the HiFi room mesh and does not attach those volumes. Event-driven updates via `MRUKRoom.AnchorCreatedEvent` / `AnchorUpdatedEvent`.
 
 ### 17.2 Surface Classification
 

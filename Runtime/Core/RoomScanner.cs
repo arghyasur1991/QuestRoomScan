@@ -361,6 +361,17 @@ namespace Genesis.RoomScan
         public bool HasRefinedTexture { get; private set; }
         public bool HasHQRefinedTexture { get; private set; }
 
+        /// <summary>
+        /// True (default): when on-device refinement finishes, switch to
+        /// the refined mesh and <see cref="RoomScanSession.FinalizeScanAsync"/>
+        /// releases the live TSDF. False: bake into memory
+        /// (<see cref="HasRefinedTexture"/>, <see cref="RefinedMeshReady"/>)
+        /// but keep drawing the live vertex mesh until the host calls
+        /// <see cref="SetRenderMode"/>(<see cref="ScanRenderMode.Refined"/>)
+        /// and then <see cref="ReleaseScanResources"/>.
+        /// </summary>
+        public bool PresentRefinedWhenReady { get; set; } = true;
+
         /// <summary>The refined-mesh renderer, or null until a refined mesh exists.</summary>
         public MeshRenderer RefinedMeshRenderer => _refinedRenderer;
         public bool IsRefining { get; private set; }
@@ -844,6 +855,7 @@ namespace Genesis.RoomScan
             _volumeIntegrator?.ClearShellCells();
             _shellTracker?.Disable();
             _scanRoomUuid = Guid.Empty;
+            _keyframeCollector?.LogProfile();
 
             ScanStopped?.Invoke();
             if (_modules != null)
@@ -1289,16 +1301,17 @@ namespace Genesis.RoomScan
                 LastSimplifiedResult = null;
 
                 var toRender = original;
-                if (_textureRefinement.postBakeSimplificationRatio < 1f)
+                if (_textureRefinement.postBakeSimplificationRatio < 1f && !_textureRefinement.simplifyBeforeUnwrap)
                 {
                     var simplified = await _textureRefinement.SimplifyRefinedMeshAsync(original);
                     LastSimplifiedResult = simplified;
                     toRender = simplified;
                 }
 
-                ApplyRefinedAtlas(toRender);
+                await ApplyRefinedAtlasAsync(toRender);
                 HasRefinedTexture = true;
-                SetRenderMode(ScanRenderMode.Refined);
+                if (PresentRefinedWhenReady)
+                    SetRenderMode(ScanRenderMode.Refined);
 
                 // IMPORTANT: persist refined artifacts BEFORE firing RefinedMeshReady.
                 // RoomScanSession.FinalizeScanAsync wakes on this event and then calls
@@ -1588,8 +1601,16 @@ namespace Genesis.RoomScan
                 _refinedRenderer.material.mainTexture = _refinedAtlasTexture;
         }
 
-        private void ApplyRefinedAtlas(RefinedTextureResult result)
+        /// <summary>
+        /// Build the refined textures and mesh over a few frames: two 19 MB
+        /// texture uploads, a mesh upload and a tangent pass in one frame was
+        /// the hitch at the end of every refinement. Tangents come from a worker.
+        /// </summary>
+        private async Task ApplyRefinedAtlasAsync(RefinedTextureResult result)
         {
+            var tangentTask = Task.Run(() => TextureRefinement.ComputeTangents(
+                result.Positions, result.Normals, result.UVs, result.Indices));
+
             if (_refinedAtlasTexture != null)
                 Destroy(_refinedAtlasTexture);
 
@@ -1597,6 +1618,7 @@ namespace Genesis.RoomScan
                 TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
             _refinedAtlasTexture.Apply();
+            await Task.Yield();
 
             if (_normalMapTexture != null)
                 Destroy(_normalMapTexture);
@@ -1607,17 +1629,19 @@ namespace Genesis.RoomScan
                     TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
                 _normalMapTexture.SetPixelData(result.NormalPixels, 0);
                 _normalMapTexture.Apply();
+                await Task.Yield();
             }
 
             if (_refinedMesh == null)
                 _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
 
+            var tangents = await tangentTask;
             _refinedMesh.Clear();
             _refinedMesh.SetVertices(result.Positions);
             _refinedMesh.SetNormals(result.Normals);
             _refinedMesh.SetUVs(0, result.UVs);
+            _refinedMesh.SetTangents(tangents);
             _refinedMesh.SetTriangles(result.Indices, 0);
-            _refinedMesh.RecalculateTangents();
             _refinedMesh.RecalculateBounds();
 
             Logger.Info($"Refined mesh applied: " +
@@ -1919,6 +1943,21 @@ namespace Genesis.RoomScan
             var occShader = _textureRefinement != null ? _textureRefinement.occlusionMeshShader : null;
             if (occShader != null)
                 _occlusionMaterial = new Material(occShader);
+        }
+
+        /// <summary>
+        /// Swap the refined mesh between two-sided (in-room) and Cull Back
+        /// (outside). Quest ignores ShaderLab <c>Cull [_Cull]</c>; this is a
+        /// second program, not a float.
+        /// </summary>
+        internal void SetRefinedBackfaceCull(bool cullBack)
+        {
+            if (_refinedMaterial == null || _textureRefinement == null) return;
+            var shader = cullBack
+                ? _textureRefinement.refinedMeshBackfaceShader
+                : _textureRefinement.refinedMeshShader;
+            if (shader == null || _refinedMaterial.shader == shader) return;
+            _refinedMaterial.shader = shader;
         }
 
         // ─────────────────────────────────────────────────────────────

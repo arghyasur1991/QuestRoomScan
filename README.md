@@ -64,15 +64,15 @@ This is the case the package was built for. Quest's built-in room mesh gives you
 - **Shell Coverage** — With `RoomUnderstanding`, the captured room hull is sampled into ≤ 16k cells and marched against the TSDF once a second: `ScanCoverage.ShellCoverage` is how much of the shell has scanned matter in front of it (doorways, doors, windows excluded), `LargestGap` / `CopyShellGaps` say where the unscanned patches are, and small wall / floor / ceiling gaps whose neighbours lie on one plane are auto-filled with a soft plane stamp that real depth can still override. Guidance and acceleration only — it never feeds progress.
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
 - **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools) and right detail views. Includes scan browser with load/delete per package (with delete confirmation), "Load Refined Only" for fast game-mode loading, context-sensitive artifact deletion, and dynamic button disabled states. Scene Objects toggle with live count. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
-- **Texture Refinement** — Post-scan texture refinement using captured keyframes. GPU compute shader bakes a UV atlas from the best-scoring keyframe projections per texel, with multi-view blending, occlusion-aware depth testing, GPU unsharp-mask sharpening, and Sobel normal map generation for real-time lighting. Produces sharp, seamless textures with surface detail from captured keyframes. `TextureRefinement` is an instance-based MonoBehaviour module — all configuration (xatlas options, bake settings, sharpen/seam parameters) is via inspector fields on the component.
+- **Texture Refinement** — Post-scan UV atlas from captured keyframes. GPU compute shader bakes one thread per atlas texel from the best-scoring projections, with multi-view blending, per-keyframe pose registration, occlusion-aware depth testing, GPU unsharp-mask sharpening, seam levelling, and Sobel normal maps. `TextureRefinement` is an instance-based MonoBehaviour — unwrap, bake, sharpen and seam settings are inspector fields.
 - **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
 - **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, Occlusion, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
 - **Freeze Tint Toggle** — Independent toggle (not tied to render mode) shows/hides a blue tint overlay on frozen voxels in live mesh modes (Vertex, Triplanar, Wireframe). Bindable via `RoomScanInputHandler`.
 - **Game Integration APIs** — `RoomScanSession` provides a high-level facade auto-installed by the Game-Ready preset: `RequestCameraPermissionAsync()` / `RequestScenePermissionAsync()` / `RequestAnchorPermissionAsync()` → `WaitUntilRoomReadyAsync()` → `StartScanAsync()` → `FreezeInView()` / `UnfreezeInView()` → `await FinalizeScanAsync()` → `ScanResult` with mesh + atlas. `LoadAsync(packageId)` / `LoadLatestAsync()` for later launches. `UnloadActiveScanAsync()` drops the in-memory mesh and spatial-anchor bind without deleting saved packages (needed before a new scan in the same session). `ListSavedScans()` / `DeleteScanAsync(id)` for games that keep several packages; `ClearAllScansAsync()` for a nuclear wipe. `HasSceneRooms` + `IsHeadsetInsideASceneRoom` + `RequestSpaceSetupAndReloadAsync()` for hosts that want to offer Horizon Space Setup themselves — `RoomAnchorManager` loads the scene with `requestSceneCaptureIfNoDataFound: false` so a missing model does **not** pause into Meta's UI. `HasSceneRooms` only means MRUK loaded *a* room. Native `GetCurrentRoom()` returns the last captured room when you leave, and `IsPositionInRoom` is the floor outline (still true just past a doorway). `IsHeadsetInsideASceneRoom` requires the headset inward of every outer wall plane, including invisible doorway faces — a hallway next to a captured room is outside. A loaded package stores that room's Scene API UUID next to the spatial-anchor UUID (`BoundSceneRoomUuid` / `IsHeadsetInsideBoundSceneRoom`) so a look can hide when the headset is in a different captured room. After spatial-data permission is granted, `ReloadSceneFromDeviceAsync()` re-runs discovery without opening Space Setup (the first load often finished with zero rooms while `USE_SCENE` was still denied). `ConfineScanToContainingRoom` (default off) skips TSDF outside that room when `RoomUnderstanding` is attached. MRUK `SCREEN` planes are always stamped as analytic TSDF slabs (TV glass depth is ignored; RGB still projects). For finer control: `LoadRefinedOnlyAsync()` (loads only refined mesh + atlas, no TSDF, < 1 second), `ReleaseScanResources()`, public `RefinedMesh`/`RefinedAtlas` properties, `RefinedMeshReady` event, and `ScanCoverage`/`ScanProgress` metrics for guided UX. Scene understanding accessible via `SceneObjectRegistry` for MRUK + AI detected objects.
-- **Post-Bake Mesh Simplification** — UV-preserving mesh simplification via `meshopt_simplifyWithAttributes` runs after atlas baking (configurable ratio), preserving texture quality. Replaces the old broken pre-bake decimation.
+- **Mesh Simplification** — `simplifyBeforeUnwrap` (default on): `meshopt_simplify` reduces the extracted mesh before xatlas, so unwrap and bake run on the game mesh; the dense mesh still builds occlusion. Off: unwrap and bake the dense mesh, then `meshopt_simplifyWithAttributes` with UV-locked borders into `simplified_mesh.bin`. Keyframes are registered to the first-pass atlas (ZNCC shift → rotation), exposure-equalised, and blended with a per-chart preferred view and seam levelling.
 - **AI Object Detection** — Optional YOLO-based object detection via Unity Inference Engine (Sentis) running during scanning. GPU Non-Maximum Suppression via compute shader (only ~500 bytes readback vs ~200KB for CPU NMS). Detected objects projected to 3D world space via GPU depth projection with temporal snapshot to handle async inference. Head angular velocity gating skips blurry frames. Detection keyframes saved with JSONL metadata for post-processing.
-- **MRUK Scene Understanding** — `RoomUnderstanding` is the MRUK wrapper: occupancy (headset inside a captured room / a specific Scene API UUID), visible `WALL_FACE` planes for world-space pinning, classification, and `SceneObjectRegistry` population (walls, floor, ceiling, bed, TV, doors, windows, furniture). During a scan, `SCREEN` anchors become analytic TSDF plane stamps via a dedicated voxel-AABB dispatch (depth on glass is discarded; RGB is kept). `CopyRoomClipPlanes` / `CopyRoomWorldAabb` feed the opt-in single-room TSDF clip. Without this component the scan is unbounded (no clip, no SCREEN stamps) and occupancy APIs on `RoomScanSession` return false / empty — permissions and MRUK load still live on `RoomAnchorManager` / `DepthCapture`. Never use native `GetCurrentRoom()` — it is last/first after you leave; occupancy walks every loaded room's outer wall planes. Hosts still go through `RoomScanSession` (`IsHeadsetInsideASceneRoom`, `CopyHeadsetRoomWallFaces`, `ConfineScanToContainingRoom`, …). Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh. Event-driven anchor updates.
+- **MRUK Scene Understanding** — `RoomUnderstanding` is the MRUK wrapper: occupancy (headset inside a captured room / a specific Scene API UUID), vertical scene planes filtered by host `SceneFaceKind`, classification, and `SceneObjectRegistry` population (walls, floor, ceiling, bed, TV, doors, windows, furniture). During a scan, `SCREEN` anchors become analytic TSDF plane stamps via a dedicated voxel-AABB dispatch (depth on glass is discarded; RGB is kept). `CopyRoomClipPlanes` / `CopyRoomWorldAabb` feed the opt-in single-room TSDF clip. Without this component the scan is unbounded (no clip, no SCREEN stamps) and occupancy APIs on `RoomScanSession` return false / empty — permissions and MRUK load still live on `RoomAnchorManager` / `DepthCapture`. Never use native `GetCurrentRoom()` — it is last/first after you leave; occupancy walks every loaded room's outer wall planes. Hosts still go through `RoomScanSession` (`IsHeadsetInsideASceneRoom`, `CopyHeadsetRoomWallFaces`, `ConfineScanToContainingRoom`, …). Uses `SceneModel.V2FallbackV1` with high-fidelity scene mesh. Event-driven anchor updates.
 - **Scene Object Debug Visualization** — Toggle world-space wireframe bounding boxes + billboard labels for all detected objects (MRUK + AI). Rendered via `DebugOverlay.shader` with per-source color coding (cyan = MRUK, yellow = AI). Count shown in debug menu button.
 - **Sobel Normal Maps** — GPU Sobel edge detection in `AtlasBakeCompute.compute` generates normal maps from the baked atlas. `RefinedMesh.shader` uses Sobel normals for real-time lighting on the refined mesh, adding depth and surface detail.
 
@@ -113,12 +113,12 @@ Add to your project's `Packages/manifest.json`, pinned to a release tag:
 ```json
 {
   "dependencies": {
-    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.1.0"
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.2.0"
   }
 }
 ```
 
-Drop the `#v1.1.0` suffix to track `main`. Releases and their notes are in
+Drop the `#v1.2.0` suffix to track `main`. Releases and their notes are in
 [`CHANGELOG.md`](CHANGELOG.md); `main` only moves by squash-merged release PR.
 
 For Gaussian Splat support, also add the optional dependency:
@@ -229,7 +229,7 @@ After scanning, you can produce a sharper UV-mapped texture atlas from the captu
    - **GPU readback**: Reads the current mesh from the GPU Surface Nets buffers
    - **UV unwrapping**: xatlas (native C++ via P/Invoke) generates a UV atlas with seam-aware parameterization, with tunable chart/pack options for speed vs quality
    - **GPU atlas baking**: A compute shader (`AtlasBakeCompute.compute`) processes each keyframe — two-pass multi-view blending selects and blends the top-scoring views per texel with occlusion-aware depth testing (~5-10s for 300 keyframes)
-   - **GPU seam blending**: Gaussian-weighted blend across UV chart boundaries reduces color discontinuities
+   - **Seam levelling**: the two atlas sides of every UV seam edge are paired by 3D position, pinned to their mean and the correction diffused into each chart on the GPU; per-keyframe exposure gains and a smooth view-admission ramp keep view switches inside a chart from printing a line
    - **GPU sharpening**: Unsharp mask restores crispness lost during multi-view blending (configurable strength and radius)
    - **Sobel normal map**: GPU Sobel edge detection generates a normal map from the atlas for real-time fake lighting
    - **Dilation**: Fills gaps at UV island edges
@@ -275,7 +275,7 @@ RoomScans/
     splat.ply             # Auto-saved when GS training completes
     refined_mesh.bin      # Auto-saved when on-device refinement completes
     refined_atlas.raw     # Auto-saved with refined mesh
-    simplified_mesh.bin   # Auto-saved when post-bake simplification runs (ratio < 1)
+    simplified_mesh.bin   # Optional: post-bake simplified copy when simplifyBeforeUnwrap is off
     enhanced_mesh.bin     # Auto-saved when server mesh enhancement completes
     hq_atlas.png          # Auto-saved when server atlas enhancement completes
 ```
@@ -650,8 +650,8 @@ For game integration where you want to minimize GPU overhead during scanning. Th
 | Setting | Value | Reason |
 |---------|-------|--------|
 | RoomScanner.meshExtractionHz | **8** | Live Surface Nets dump; 30 Hz was fill-rate expensive |
-| KeyframeCollector move / rotate / interval | **0.4 m / 20° / 1 s** | Atlas bake still needs frames; denser capture is a GPU readback tax |
-| TextureRefinement.postBakeSimplificationRatio | **0.5** | Game-phase triangle count; 1.0 disables |
+| KeyframeCollector move / rotate / interval | **0.15 m / 10° / 0.25 s**, angular velocity **120°/s** | Atlas bake needs density; capture encode is off the main thread |
+| TextureRefinement.postBakeSimplificationRatio | **0.5** | Simplified before unwrap and bake; 1.0 disables |
 | RoomScanner.ConfineScanToContainingRoom | host opt-in | Single-room mesh; default **false**. Needs `RoomUnderstanding` |
 | TriplanarCache | **Disabled** | Saves ~240 MB GPU; vertex colors are sufficient for scan-phase visualization |
 | GaussianSplatRenderer | **Not attached** | Remove unless splat rendering is needed |
@@ -717,9 +717,13 @@ progressBar.value = prog.OverallProgress; // 0.0 – 1.0
 statusText.text = prog.Phase.ToString();  // Discovering → Refining → Stabilized → Complete
 ```
 
-#### Post-Bake Mesh Simplification
+#### Mesh Simplification (before the bake)
 
-Set `TextureRefinement.postBakeSimplificationRatio` in the Inspector (default **0.5** = 50% triangle reduction; 1.0 disables). Simplification runs automatically after atlas baking, preserving UV coordinates via `meshopt_simplifyWithAttributes` with locked border vertices to prevent seam tearing.
+Set `TextureRefinement.postBakeSimplificationRatio` in the Inspector (default **0.5** = 50% triangle reduction; 1.0 disables). Simplification runs **before** the UV unwrap, so the atlas is baked onto the mesh that is displayed; the dense mesh is still used for occlusion during the bake. No separate `simplified_mesh.bin` is produced (older packages that have one still load).
+
+#### Keyframe Registration and Chart-Consistent Blend
+
+`refineKeyframePoses` (default on) aligns each keyframe to the first-pass atlas with a low-resolution ZNCC image shift and folds it into the keyframe rotation before blending. `chartBestViewBoost` (default 3) lets the view that scores best over a whole UV chart carry that chart, moving view switches to chart borders. See ALGORITHM.md §15.1a–b.
 
 ### `RoomScanSession` API Surface
 
@@ -733,7 +737,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `HasCameraPermission` | `bool` | Horizon OS `HEADSET_CAMERA` granted (always true off-Android) |
 | `HasScenePermission` | `bool` | Horizon OS `USE_SCENE` (spatial data) granted |
 | `HasAnchorPermission` | `bool` | Horizon OS `USE_ANCHOR_API` granted |
-| `IsRoomLoaded` | `bool` | MRUK scene discovery finished (including zero rooms) |
+| `IsRoomLoaded` | `bool` | MRUK `LoadSceneFromDevice` finished (including zero rooms). All discovery anchors are already on the rooms. |
 | `HasSceneRooms` | `bool` | At least one MRUK room after discovery (not "headset is in that room") |
 | `IsHeadsetInsideASceneRoom` | `bool` | Headset is inward of every outer wall of **any** loaded room (doorway faces included). Boot / Space Setup: any set-up room is enough. Floor-outline `IsPositionInRoom` is not enough. Always true in the editor |
 | `ConfineScanToContainingRoom` | `bool` | When true, TSDF stays in the MRUK room that contained the headset at scan start (outer walls / floor / ceiling expanded 50 cm outward, then hard-confined). Default **false**. Set before `StartScanAsync`. No-op without `RoomUnderstanding` |
@@ -741,7 +745,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `SetBodyExclusionAnchors(head, left, right)` | `void` | Optional. Pin head + wrist transforms for torso/hand/forearm capsules and mark them host-owned (scanner will not overwrite). For non-OVR rigs. Default is `OVRCameraRig` each integrate. Null wrists skip that side |
 | `BoundSceneRoomUuid` | `Guid` | Scene API UUID of the MRUK room the active package was scanned in (stored with the spatial-anchor UUID). Empty when no package is loaded. Rebound from the localized anchor pose if missing or stale |
 | `IsHeadsetInsideBoundSceneRoom` | `bool` | Headset is inside the active package's bound room — not some other captured space. False when no package is loaded. Always true in the editor |
-| `CopyHeadsetRoomWallFaces(List<SceneWallFace>)` | `int` | Visible `WALL_FACE` and `SCREEN` (TV) planes of the room containing the headset. `IsScreen` marks a television. Empty in the editor and when not inside a captured room. Implemented by `RoomUnderstanding` |
+| `CopyHeadsetRoomWallFaces(List, SceneFaceKind)` | `int` | Vertical planes of every loaded room that contains the headset. Host passes `SceneFaceKind` (`Wall`, `Screen`, or both). Empty in the editor and when not inside a captured room. |
 | `HeadsetSceneRoomUuid` | `Guid` | Scene API UUID of the room that contains the headset, or empty. Not the active scan package (`BoundSceneRoomUuid`) |
 | `TryRebindBoundSceneRoomIfHeadsetMatches()` | `bool` | After `LoadAsync`: true when headset and the localized spatial anchor share a captured room; persists that room's current Scene API UUID (Space Setup redo in the same physical room). False in a hallway or a different set-up room |
 | `ProgressUpdated` | `event Action<ScanProgress>` | Per-frame progress while scanning. `OverallProgress = Coverage.Closure × (1 − 0.4 × (1 − Coverage.Refinement))` — closure is surface ÷ (surface + leak) from the boundary of observed free space; no camera or scene model involved. `Coverage.LeakAreaM2` is the absolute area still open (the natural gate), `HoleCount` / `LargestHole` locate the patches. With `RoomUnderstanding`, `Coverage.ShellCoverage` / `LargestGap` add hull-based guidance and drive auto-fill, but never the progress number. Hosts gate finalize themselves — the package does not |
@@ -750,13 +754,17 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `RequestCameraPermissionAsync()` | `Task<bool>` | Awaits the system permission dialog; resolves true if already granted |
 | `RequestScenePermissionAsync()` | `Task<bool>` | Awaits spatial-data permission |
 | `RequestAnchorPermissionAsync()` | `Task<bool>` | Awaits spatial-anchor permission |
-| `WaitUntilRoomReadyAsync()` | `Task` | Completes when scene discovery has finished |
+| `WaitUntilRoomReadyAsync()` | `Task` | Completes when `LoadSceneFromDevice` has finished. Every scene anchor from that discovery is already present. |
+| `RoomReady` | `event Action` | Same moment as `WaitUntilRoomReadyAsync` |
+| `SceneAnchorsChanged` | `event Action` | Room or scene anchor created/updated after the load (`RoomUpdatedEvent` / `AnchorCreatedEvent`) |
 | `ReloadSceneFromDeviceAsync()` | `Task<bool>` | Re-run discovery with auto-capture **off** (no Space Setup). True if rooms exist. Use after spatial-data permission is granted — the first load often finished empty while `USE_SCENE` was still denied. |
 | `RequestSpaceSetupAndReloadAsync()` | `Task<bool>` | Horizon Space Setup, then reload with auto-capture **off**. True only if rooms exist afterwards (cancel is not success-with-rooms) |
 | `StartScanAsync()` | `Task` | Begin a new scan session (unloads a loaded package on a non-resume start, creates `_tmp/` package + spatial anchor; completes at the first integrated frame) |
 | `FreezeInView()` | `void` | Paint voxels inside the head cone (`FreezeConeHalfAngle`, 15°) as done; integration continues globally |
 | `UnfreezeInView()` | `void` | Inverse of `FreezeInView` for re-capture of bad regions |
-| `FinalizeScanAsync()` | `Task<ScanResult>` | Stop scanning → refine → save → release GPU; returns mesh + atlas + package id |
+| `FinalizeScanAsync()` | `Task<ScanResult>` | Stop scanning → refine → save; returns mesh + atlas + package id + `AnchorFrameMesh`. Releases the live TSDF when `PresentRefinedWhenReady` is true |
+| `PresentRefinedWhenReady` | `bool` | True (default): finalize presents the refined mesh and releases the live TSDF. False: bake into memory and keep the live vertex mesh until the host presents |
+| `SetRefinedBackfaceCull(cullBack)` | `void` | Two-sided in the room, `Cull Back` outside (`RefinedMeshBackface.shader`). Quest ignores ShaderLab `Cull [_Cull]` |
 | `LoadAsync(packageId)` | `Task<ScanResult>` | Load refined mesh + atlas from a specific package (< 1 s) |
 | `LoadLatestAsync()` | `Task<ScanResult>` | Load the newest saved package |
 | `UnloadActiveScanAsync()` | `Task` | Drop in-memory mesh + spatial-anchor bind; does **not** delete `pkg_*` |
@@ -765,7 +773,7 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `ClearAllScansAsync()` | `Task` | Erase every saved `pkg_*/`, the manifest, and per-package spatial anchors (leaves `_tmp/` alone) |
 | `ReleaseScanResources()` | `void` | Free ~400-500 MB of GPU memory (auto-called by `FinalizeScanAsync`) |
 
-`ScanResult` is `{ Mesh, Texture2D Atlas, string PackageId }`.
+`ScanResult` is `{ Mesh, Texture2D Atlas, string PackageId, Mesh AnchorFrameMesh }`. `AnchorFrameMesh` is the same mesh in the spatial-anchor frame, identical across loads — use it for content persisted relative to the room.
 
 ### Minimal Integration Checklist
 
@@ -784,7 +792,7 @@ The TSDF volume integration and Surface Nets meshing approach draws inspiration 
 The texture refinement pipeline uses two open-source native C++ libraries:
 
 - **[xatlas](https://github.com/jpcy/xatlas)** by Jonathan Young (MIT) — automatic UV atlas generation with seam-aware chart parameterization and efficient packing. Used for UV unwrapping the GPU Surface Nets mesh prior to atlas baking.
-- **[meshoptimizer](https://github.com/zeux/meshoptimizer)** v1.0 by Arseny Kapoulkine (MIT) — mesh optimization toolkit. `meshopt_simplifyWithAttributes` is used for optional post-bake mesh simplification that preserves UV coordinates, with `LockBorder` to prevent seam tearing. Set `TextureRefinement.postBakeSimplificationRatio` < 1.0 to enable.
+- **[meshoptimizer](https://github.com/zeux/meshoptimizer)** v1.0 by Arseny Kapoulkine (MIT) — mesh optimization toolkit. `meshopt_simplify` reduces geometry before unwrap (default); `meshopt_simplifyWithAttributes` with `LockBorder` is the post-bake path. Set `TextureRefinement.postBakeSimplificationRatio` < 1.0 to enable.
 
 Both libraries are compiled into a single native shared library (`libxatlas.so` / `libxatlas.bundle`) and invoked via P/Invoke from C#.
 

@@ -19,6 +19,10 @@ namespace Genesis.RoomScan
         internal Vector3[] OrigPositions;
         internal Vector3[] OrigNormals;
         internal int[] OrigIndices;
+        /// <summary>xatlas chart per output vertex, or null when the unwrap was
+        /// reconstructed from disk. Lets the bake prefer one view per chart.</summary>
+        internal int[] ChartIndices;
+        internal int ChartCount;
     }
 
     internal struct RefinedTextureResult
@@ -46,6 +50,7 @@ namespace Genesis.RoomScan
 
         [Header("Bake Pipeline")]
         [SerializeField] internal Shader refinedMeshShader;
+        [SerializeField] internal Shader refinedMeshBackfaceShader;
         [SerializeField] internal Shader occlusionMeshShader;
         [SerializeField] internal ComputeShader atlasBakeCompute;
         [Tooltip("Force CPU bake path instead of GPU compute")]
@@ -60,12 +65,12 @@ namespace Genesis.RoomScan
         [Tooltip("Sharpening kernel radius")]
         [Range(1, 4)]
         [SerializeField] internal int sharpenRadius = 2;
-        [Tooltip("Blend seams between UV charts")]
+        [Tooltip("Level colour across UV seams: the two atlas sides of every seam edge are pulled to their mean and the correction is diffused into each chart, so a view switch at a chart border becomes a gradient instead of a step.")]
         [SerializeField] internal bool enableSeamBlending = true;
-        [Tooltip("Seam blending pixel radius")]
-        [Range(1, 8)]
-        [SerializeField] internal int seamBlendRadius = 3;
-        [Tooltip("Minimum score fraction of the texel's best view for multi-view blend inclusion. 0.75 keeps only near-frontal, near-distance views; lower values average in oblique / far views and the atlas turns to mush.")]
+        [Tooltip("Diffusion steps for the seam correction; each walks ~2 texels into the chart. 40 ≈ 60-80 texel feather. One GPU pass per step, spread over frames.")]
+        [Range(4, 96)]
+        [SerializeField] internal int seamLevelIterations = 40;
+        [Tooltip("Start of the blend admission ramp as a fraction of the texel's best view score: a view's weight rises from 0 here to full at the best score, so views fade in and out across a chart instead of switching along a line. 0.75 keeps only near-frontal, near-distance views; lower values average in oblique / far views and the atlas turns to mush.")]
         [Range(0.1f, 0.95f)]
         [SerializeField] internal float blendMinFraction = 0.75f;
         [Tooltip("At most this many views blended per texel. 2-3 averages sensor noise without stacking registration error from a long scan.")]
@@ -74,7 +79,6 @@ namespace Genesis.RoomScan
         [Tooltip("Sobel normal map strength (0 = skip normal map generation)")]
         [Range(0f, 20f)]
         [SerializeField] internal float normalStrength = 8f;
-
         [Header("HQ Server Refinement")]
         [Tooltip("Server-side atlas super-resolution scale")]
         [Range(1, 4)]
@@ -86,18 +90,84 @@ namespace Genesis.RoomScan
         [Tooltip("Chart growth cost limit")]
         [Range(0.5f, 4f)]
         [SerializeField] internal float xatlasMaxCost = 1.5f;
+        [Tooltip("Threads xatlas may use for the unwrap, including the calling worker (0 = every core). xatlas defaults to all cores; 3 leaves the rest to the frame.")]
+        [Range(0, 8)]
+        [SerializeField] internal int xatlasThreads = 3;
+        [Tooltip("POSIX nice for the unwrap threads on Android (0 = normal, 19 = lowest). With a positive value the engine's threads win every contended core.")]
+        [Range(0, 19)]
+        [SerializeField] internal int xatlasThreadNice = 10;
 
-        [Header("Post-Bake Simplification")]
-        [Tooltip("Simplify after atlas baking to preserve UVs (1.0 = disabled, 0.5 = 50% triangles). Runs on background thread.")]
+        [Header("Simplification")]
+        [Tooltip("Target triangle ratio for the refined mesh (1.0 = disabled, 0.5 = 50% triangles). Applied before the unwrap or after the bake, see below. Runs on a background thread.")]
         [Range(0.1f, 1f)]
         [SerializeField] internal float postBakeSimplificationRatio = 0.5f;
+        [Tooltip("On: simplify geometry before the UV unwrap (meshopt_simplify) so xatlas and both bake passes run on the reduced mesh. The dense mesh still builds occlusion depth. Off: unwrap and bake the dense mesh, then simplify with UV-locked borders.")]
+        [SerializeField] internal bool simplifyBeforeUnwrap = true;
+
+        [Header("Keyframe Registration")]
+        [Tooltip("After the first bake pass, align each keyframe to the atlas rendered from its own " +
+                 "pose (low-res ZNCC image shift → small rotation) before the blend pass. Absorbs " +
+                 "exposure-time pose error and residual mesh bias. One extra light GPU pass per keyframe.")]
+        [SerializeField] internal bool refineKeyframePoses = true;
+        [Tooltip("Search radius in low-res pixels (image downsampled by 4). 6 ≈ ±1.6° at Quest 3 focal length.")]
+        [Range(2, 12)]
+        [SerializeField] internal int registrationSearchRadius = 6;
+        [Tooltip("Minimum normalized cross-correlation at the best shift to accept a correction.")]
+        [Range(0.05f, 0.9f)]
+        [SerializeField] internal float registrationMinNcc = 0.25f;
+
+        [Header("Exposure Equalisation")]
+        [Tooltip("With registration on, measure each keyframe's colour against the pass-1 atlas over the pixels it covers and scale the photo to match before blending. The passthrough camera re-exposes between frames; without this every view switch inside a chart is a brightness step.")]
+        [SerializeField] internal bool equalizeExposure = true;
+        [Tooltip("Gain is clamped to [1/limit, limit] per channel. 1.6 covers a stop of auto-exposure; more and a view that saw mostly a lamp would darken a whole wall.")]
+        [Range(1.1f, 3f)]
+        [SerializeField] internal float exposureGainLimit = 1.6f;
+
+        [Header("Chart-Consistent Blend")]
+        [Tooltip("Weight multiplier for the view that scores best over a whole UV chart, so a chart " +
+                 "reads from one photo wherever it can and view switches move to chart borders " +
+                 "(which the seam pass already blends). 1 = off.")]
+        [Range(1f, 8f)]
+        [SerializeField] internal float chartBestViewBoost = 3f;
+
+        [Tooltip("The per-keyframe occlusion depth (dense mesh, one atomic per covered photo pixel) is rasterised at photo resolution divided by this. A 5 cm depth tolerance does not need 1280×960; 2 quarters the heaviest raster of the bake. 1 = full resolution.")]
+        [Range(1, 4)]
+        [SerializeField] internal int occlusionDepthDivisor = 2;
+
+        [Header("Diagnostics")]
+        [Tooltip("Write one [TextureRefine][Profile] block per refinement: wall time per stage, main-thread and worker time per keyframe, and the compositor frame times the bake ran across (count, max, missed 72 Hz, hitches). Off by default.")]
+        [SerializeField] internal bool profileRefinement = false;
 
         private RoomScanner _scanner;
+        private RefineProfile _profile;
+
+        /// <summary>One frame later, counted by the profile.</summary>
+        async Task NextFrame()
+        {
+            await Task.Yield();
+            _profile?.Frame();
+        }
+
+        /// <summary>
+        /// Await a worker task while sampling every compositor frame it spans,
+        /// so a long native stage (xatlas, meshopt) shows in the profile as the
+        /// frames it cost the player rather than as a gap.
+        /// </summary>
+        async Task AwaitSampled(Task work)
+        {
+            if (_profile == null) { await work; return; }
+            while (!work.IsCompleted)
+                await NextFrame();
+            await work;   // rethrow
+        }
 
         public void OnModuleInitialize(RoomScanner scanner)
         {
             _scanner = scanner;
         }
+
+        /// <summary>Keyframe reads + decodes kept in flight ahead of the bake.</summary>
+        const int DecodePrefetchDepth = 3;
 
         // pos @ 0 is the extractor dump. prevPos @ 12 is presentation-only.
         const int VertStride = GPUSurfaceNets.VertexStride;
@@ -118,6 +188,8 @@ namespace Genesis.RoomScan
             opts.Resolution = (uint)atlasResolution;
             opts.MaxCost = xatlasMaxCost;
             opts.BlockAlign = useBlockAlign;
+            opts.MaxThreads = xatlasThreads;
+            opts.WorkerNice = xatlasThreadNice;
             return UnwrapMeshAsync(keyframeDir, keyframeRelocation, opts);
         }
 
@@ -125,9 +197,13 @@ namespace Genesis.RoomScan
             string keyframeDir, Matrix4x4 keyframeRelocation,
             XAtlasWrapper.UnwrapOptions opts)
         {
+            _profile = profileRefinement ? new RefineProfile() : null;
+            var readScope = _profile?.Stage("meshReadback");
             ReportStatus("Reading mesh from GPU...");
             MeshExtractor.Instance?.ExtractForAuthoring();
             var (positions, normals, colors, indices) = await ReadbackMeshAsync();
+            _profile?.Frame();   // the extraction + readback frame lands on this stage, not the next
+            readScope?.Dispose();
             if (positions == null || positions.Length == 0)
                 throw new InvalidOperationException("Mesh readback returned no vertices");
 
@@ -137,10 +213,41 @@ namespace Genesis.RoomScan
             Vector3[] inNorm = normals;
             int[] inIdx = indices;
 
+            if (simplifyBeforeUnwrap && postBakeSimplificationRatio < 1f)
+            {
+                using var _ = _profile?.Stage("simplify") ?? default;
+                float ratio = Mathf.Clamp(postBakeSimplificationRatio, 0.05f, 1f);
+                ReportStatus($"Simplifying mesh ({ratio:P0})...");
+                Vector3[] sPos = null, sNorm = null;
+                int[] sIdx = null;
+                bool ok = false;
+                await AwaitSampled(Task.Run(() =>
+                {
+                    try
+                    {
+                        ok = XAtlasWrapper.SimplifyGeometry(positions, normals, indices, ratio, out sPos, out sNorm, out sIdx);
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Warning($"[TextureRefine] Pre-unwrap simplify unavailable ({e.Message}); unwrapping the dense mesh.");
+                    }
+                }));
+                if (ok)
+                {
+                    inPos = sPos;
+                    inNorm = sNorm;
+                    inIdx = sIdx;
+                }
+            }
+
+            var unwrapScope = _profile?.Stage("xatlas");
             ReportStatus("UV unwrapping...");
             XAtlasWrapper.Result uvResult = default;
+            Vector3[] outPos = null;
+            Vector3[] outNorm = null;
+            Vector2[] outUVs = null;
 
-            await Task.Run(() =>
+            await AwaitSampled(Task.Run(() =>
             {
                 float[] flatPos = new float[inPos.Length * 3];
                 float[] flatNorm = new float[inNorm.Length * 3];
@@ -155,28 +262,33 @@ namespace Genesis.RoomScan
                 }
                 uvResult = XAtlasWrapper.Unwrap(flatPos, flatNorm, inPos.Length,
                     inIdx, inIdx.Length, opts);
-            });
+                if (uvResult.VertexCount == 0) return;
 
-            if (uvResult.VertexCount == 0)
+                int aw = uvResult.AtlasWidth;
+                int ah = uvResult.AtlasHeight;
+                outPos = new Vector3[uvResult.VertexCount];
+                outNorm = new Vector3[uvResult.VertexCount];
+                outUVs = new Vector2[uvResult.VertexCount];
+                for (int i = 0; i < uvResult.VertexCount; i++)
+                {
+                    int src = uvResult.Xrefs[i];
+                    outPos[i] = inPos[src];
+                    outNorm[i] = inNorm[src];
+                    outUVs[i] = new Vector2(
+                        uvResult.UVs[i * 2] / aw,
+                        uvResult.UVs[i * 2 + 1] / ah);
+                }
+            }));
+
+            if (uvResult.VertexCount == 0 || outPos == null)
                 throw new InvalidOperationException("xatlas produced no output vertices");
 
             int atlasW = uvResult.AtlasWidth;
             int atlasH = uvResult.AtlasHeight;
             Logger.Info($"[TextureRefine] xatlas: {uvResult.VertexCount} verts, " +
                       $"{uvResult.IndexCount / 3} tris, atlas {atlasW}x{atlasH}");
-
-            Vector3[] outPos = new Vector3[uvResult.VertexCount];
-            Vector3[] outNorm = new Vector3[uvResult.VertexCount];
-            Vector2[] outUVs = new Vector2[uvResult.VertexCount];
-            for (int i = 0; i < uvResult.VertexCount; i++)
-            {
-                int src = uvResult.Xrefs[i];
-                outPos[i] = inPos[src];
-                outNorm[i] = inNorm[src];
-                outUVs[i] = new Vector2(
-                    uvResult.UVs[i * 2] / atlasW,
-                    uvResult.UVs[i * 2 + 1] / atlasH);
-            }
+            unwrapScope?.Dispose();
+            await NextFrame();
 
             return new UnwrappedMeshResult
             {
@@ -187,9 +299,11 @@ namespace Genesis.RoomScan
                 Indices = uvResult.Indices,
                 AtlasWidth = atlasW,
                 AtlasHeight = atlasH,
-                OrigPositions = inPos,
-                OrigNormals = inNorm,
-                OrigIndices = inIdx,
+                OrigPositions = positions,
+                OrigNormals = normals,
+                OrigIndices = indices,
+                ChartIndices = uvResult.ChartIndices,
+                ChartCount = uvResult.ChartCount,
             };
         }
 
@@ -197,17 +311,24 @@ namespace Genesis.RoomScan
         //  MESH READBACK
         // ═══════════════════════════════════════════════════════════════
 
-        static Task<byte[]> ReadbackBytesAsync(GraphicsBuffer buffer)
+        /// <summary>Read back the first <paramref name="byteCount"/> bytes (0 = whole buffer).
+        /// The extractor's buffers are sized to a voxel budget, tens of MB; the
+        /// mesh in them is a few MB. Reading the capacity was a 100 ms frame.</summary>
+        static Task<byte[]> ReadbackBytesAsync(GraphicsBuffer buffer, int byteCount = 0)
         {
             var tcs = new System.Threading.Tasks.TaskCompletionSource<byte[]>();
-            AsyncGPUReadback.Request(buffer, request =>
+            System.Action<AsyncGPUReadbackRequest> onDone = request =>
             {
                 if (request.hasError) { tcs.SetResult(null); return; }
                 var native = request.GetData<byte>();
                 byte[] managed = new byte[native.Length];
                 NativeArray<byte>.Copy(native, managed, native.Length);
                 tcs.SetResult(managed);
-            });
+            };
+            if (byteCount > 0)
+                AsyncGPUReadback.Request(buffer, byteCount, 0, onDone);
+            else
+                AsyncGPUReadback.Request(buffer, onDone);
             return tcs.Task;
         }
 
@@ -242,55 +363,54 @@ namespace Genesis.RoomScan
                 return (null, null, null, null);
             }
 
-            byte[] vertData = await ReadbackBytesAsync(gpuSN.VertexBuffer);
-            if (vertData == null)
+            vertCount = Mathf.Min(vertCount, gpuSN.VertexBuffer.count);
+            idxCount = Mathf.Min(idxCount, gpuSN.IndexBuffer.count);
+
+            var vertTask = ReadbackBytesAsync(gpuSN.VertexBuffer, vertCount * VertStride);
+            var idxTask = ReadbackBytesAsync(gpuSN.IndexBuffer, idxCount * 4);
+            byte[] vertData = await vertTask;
+            byte[] idxData = await idxTask;
+            if (vertData == null || idxData == null)
             {
-                Logger.Error("[TextureRefine] Vertex readback failed");
+                Logger.Error("[TextureRefine] Mesh readback failed");
                 return (null, null, null, null);
             }
 
-            byte[] idxData = await ReadbackBytesAsync(gpuSN.IndexBuffer);
-            if (idxData == null)
+            // Parse on a worker: a few MB of BitConverter is still a frame's worth.
+            Vector3[] positions = null, normals = null;
+            Color32[] colors = null;
+            int[] indices = null;
+            await Task.Run(() =>
             {
-                Logger.Error("[TextureRefine] Index readback failed");
-                return (null, null, null, null);
-            }
+                int vc = Mathf.Min(vertCount, vertData.Length / VertStride);
+                int ic = Mathf.Min(idxCount, idxData.Length / 4);
+                indices = new int[ic];
+                Buffer.BlockCopy(idxData, 0, indices, 0, ic * 4);
 
-            int bufferCap = vertData.Length / VertStride;
-            if (vertCount > bufferCap) vertCount = bufferCap;
+                positions = new Vector3[vc];
+                normals = new Vector3[vc];
+                colors = new Color32[vc];
+                for (int i = 0; i < vc; i++)
+                {
+                    int off = i * VertStride;
+                    positions[i] = new Vector3(
+                        BitConverter.ToSingle(vertData, off + VertPos),
+                        BitConverter.ToSingle(vertData, off + VertPos + 4),
+                        BitConverter.ToSingle(vertData, off + VertPos + 8));
+                    normals[i] = new Vector3(
+                        BitConverter.ToSingle(vertData, off + VertNorm),
+                        BitConverter.ToSingle(vertData, off + VertNorm + 4),
+                        BitConverter.ToSingle(vertData, off + VertNorm + 8));
+                    uint packed = BitConverter.ToUInt32(vertData, off + VertPacked);
+                    colors[i] = new Color32(
+                        (byte)(packed & 0xFF),
+                        (byte)((packed >> 8) & 0xFF),
+                        (byte)((packed >> 16) & 0xFF),
+                        255);
+                }
+            });
 
-            int idxCap = idxData.Length / 4;
-            if (idxCount > idxCap) idxCount = idxCap;
-
-            // Parse indices
-            int[] indices = new int[idxCount];
-            Buffer.BlockCopy(idxData, 0, indices, 0, idxCount * 4);
-
-            // Parse GPU vertices
-            var positions = new Vector3[vertCount];
-            var normals = new Vector3[vertCount];
-            var colors = new Color32[vertCount];
-
-            for (int i = 0; i < vertCount; i++)
-            {
-                int off = i * VertStride;
-                positions[i] = new Vector3(
-                    BitConverter.ToSingle(vertData, off + VertPos),
-                    BitConverter.ToSingle(vertData, off + VertPos + 4),
-                    BitConverter.ToSingle(vertData, off + VertPos + 8));
-                normals[i] = new Vector3(
-                    BitConverter.ToSingle(vertData, off + VertNorm),
-                    BitConverter.ToSingle(vertData, off + VertNorm + 4),
-                    BitConverter.ToSingle(vertData, off + VertNorm + 8));
-                uint packed = BitConverter.ToUInt32(vertData, off + VertPacked);
-                colors[i] = new Color32(
-                    (byte)(packed & 0xFF),
-                    (byte)((packed >> 8) & 0xFF),
-                    (byte)((packed >> 16) & 0xFF),
-                    255);
-            }
-
-            Logger.Info($"[TextureRefine] Readback complete: {vertCount} verts, {idxCount / 3} tris");
+            Logger.Info($"[TextureRefine] Readback complete: {positions.Length} verts, {indices.Length / 3} tris");
             return (positions, normals, colors, indices);
         }
 
@@ -309,6 +429,9 @@ namespace Genesis.RoomScan
             public string JpgPath; // deferred: path to JPEG, read on demand to avoid OOM
             /// <summary>Hand / forearm capsules at capture (xyz + radius per end), or null.</summary>
             public Vector4[] BodyCapP0, BodyCapP1;
+            /// <summary>RGB exposure gain toward the pass-1 atlas, set by registration; zero = unset (1).</summary>
+            public Vector3 Gain;
+            public Vector4 GainOrOne => Gain == Vector3.zero ? Vector4.one : new Vector4(Gain.x, Gain.y, Gain.z, 1f);
         }
 
         const int BodyCapMax = 8;
@@ -557,10 +680,15 @@ namespace Genesis.RoomScan
                 return (await BakeAtlasCPUAsync(mesh, keyframeDir, keyframeRelocation), null);
             }
 
+            if (profileRefinement) _profile ??= new RefineProfile();
+            var manifestScope = _profile?.Stage("manifest");
             ReportStatus("Loading keyframe metadata...");
-            var metaList = ParseKeyframeManifest(keyframeDir, keyframeRelocation);
+            var relocation = keyframeRelocation;
+            var metaList = await Task.Run(() => ParseKeyframeManifest(keyframeDir, relocation));
             if (metaList.Count == 0)
                 throw new InvalidOperationException("No keyframes available for baking");
+            manifestScope?.Dispose();
+            await NextFrame();
 
             int total = metaList.Count;
             Logger.Info($"[TextureRefine] GPU compute bake: {total} keyframes" +
@@ -576,6 +704,24 @@ namespace Genesis.RoomScan
             int kClear = compute.FindKernel("ClearDepth");
             int kDepth = compute.FindKernel("BuildDepth");
             int kBake  = compute.FindKernel("BakeAtlas");
+            int kClearU = -1;
+            int kCopyU = -1;
+            try { kClearU = compute.FindKernel("ClearBuffer"); }
+            catch { /* shader variant without the GPU zero kernel */ }
+            try { kCopyU = compute.FindKernel("CopyUint"); }
+            catch { /* shader variant without the GPU copy kernel */ }
+
+            var uploadScope = _profile?.Stage("meshUpload");
+            ReportStatus("Uploading mesh to GPU...");
+            Vector2[] rawUV2 = null;
+            var rawUVs = mesh.RawUVs;
+            int vertCount = mesh.Positions.Length;
+            await Task.Run(() =>
+            {
+                rawUV2 = new Vector2[vertCount];
+                for (int i = 0; i < rawUV2.Length; i++)
+                    rawUV2[i] = new Vector2(rawUVs[i * 2], rawUVs[i * 2 + 1]);
+            });
 
             // ── Create persistent GPU buffers (mesh data + atlas) ──
             var origPosBuf = new ComputeBuffer(mesh.OrigPositions.Length, 12);
@@ -590,16 +736,50 @@ namespace Genesis.RoomScan
             var outIdxBuf = new ComputeBuffer(mesh.Indices.Length, 4);
             outIdxBuf.SetData(mesh.Indices);
 
-            var rawUV2 = new Vector2[mesh.Positions.Length];
-            for (int i = 0; i < rawUV2.Length; i++)
-                rawUV2[i] = new Vector2(mesh.RawUVs[i * 2], mesh.RawUVs[i * 2 + 1]);
             var rawUVBuf = new ComputeBuffer(rawUV2.Length, 8);
             rawUVBuf.SetData(rawUV2);
 
             var scoreBuf = new ComputeBuffer(texelCount, 4);
-            scoreBuf.SetData(new uint[texelCount]);
+            await ZeroUintBuffer(compute, kClearU, scoreBuf, texelCount);
             var atlasBuf = new ComputeBuffer(texelCount, 4);
-            atlasBuf.SetData(new uint[texelCount]);
+            await ZeroUintBuffer(compute, kClearU, atlasBuf, texelCount);
+
+            // ── Chart preference: per-triangle chart ids and a charts×keyframes
+            // score table. Off when the unwrap came back from disk without charts.
+            int chartCount = mesh.ChartIndices != null && mesh.ChartCount > 0 && chartBestViewBoost > 1.001f
+                ? mesh.ChartCount : 0;
+            // Always bound, 1 element when off: an unbound StructuredBuffer is
+            // undefined on Vulkan even behind a branch that never reads it.
+            var triChartBuf = new ComputeBuffer(Mathf.Max(1, chartCount > 0 ? outTriCount : 1), 4);
+            var chartScoreBuf = new ComputeBuffer(Mathf.Max(1, chartCount * total), 4);
+            var chartBestBuf = new ComputeBuffer(Mathf.Max(1, chartCount), 4);
+            if (chartCount > 0)
+            {
+                int[] triChart = null;
+                var chartIdx = mesh.ChartIndices;
+                var idx = mesh.Indices;
+                await Task.Run(() =>
+                {
+                    triChart = new int[outTriCount];
+                    for (int t = 0; t < outTriCount; t++)
+                    {
+                        int v = idx[t * 3];
+                        triChart[t] = v < chartIdx.Length ? chartIdx[v] : -1;
+                    }
+                });
+                triChartBuf.SetData(triChart);
+                await ZeroUintBuffer(compute, kClearU, chartScoreBuf, chartCount * total);
+            }
+            else
+            {
+                triChartBuf.SetData(new[] { -1 });
+                chartBestBuf.SetData(new[] { -1 });
+            }
+            compute.SetBuffer(kBake, "_TriChart", triChartBuf);
+            compute.SetBuffer(kBake, "_ChartScore", chartScoreBuf);
+            compute.SetInt("_ChartCount", chartCount);
+            compute.SetInt("_KfCount", total);
+            compute.SetFloat("_ChartBoost", chartBestViewBoost);
 
             // Bind static buffers to kernels
             compute.SetBuffer(kDepth, "_OrigPos", origPosBuf);
@@ -615,89 +795,88 @@ namespace Genesis.RoomScan
             compute.SetInt("_OrigTriCount", origTriCount);
             compute.SetInt("_OutTriCount", outTriCount);
 
-            // Per-keyframe buffers (created on first use, resized as needed)
-            ComputeBuffer depthBuf = null;
-            ComputeBuffer kfPixelBuf = null;
-
-            ReportStatus("Baking textures (GPU compute)...");
-            int bakeCount = 0;
-
-            for (int ki = 0; ki < total; ki++)
+            // Texel → triangle map, once. The per-keyframe kernels are one
+            // thread per texel from here on.
+            var texelTriBuf = new ComputeBuffer(texelCount, 4);
+            await ZeroUintBuffer(compute, kClearU, texelTriBuf, texelCount);
             {
-                var kf = metaList[ki];
-                if (string.IsNullOrEmpty(kf.JpgPath)) continue;
+                int kMap = compute.FindKernel("BuildTexelMap");
+                compute.SetBuffer(kMap, "_OutIdx", outIdxBuf);
+                compute.SetBuffer(kMap, "_RawUV", rawUVBuf);
+                compute.SetBuffer(kMap, "_TexelTriRW", texelTriBuf);
+                compute.Dispatch(kMap, (outTriCount + 63) / 64, 1, 1);
+                await NextFrame();
+            }
+            compute.SetBuffer(kBake, "_TexelTri", texelTriBuf);
+            int texelGroups = (texelCount + 255) / 256;
 
-                byte[] jpgBytes;
-                try { jpgBytes = await ReadFileAsync(kf.JpgPath); }
-                catch { continue; }
-
-                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                if (!ImageConversion.LoadImage(tex, jpgBytes))
-                {
-                    UnityEngine.Object.Destroy(tex);
-                    continue;
-                }
-                kf.Width = tex.width;
-                kf.Height = tex.height;
-
-                // GetPixels32: same byte layout as CPU kf.Pixels — no Y ambiguity
-                Color32[] colors = tex.GetPixels32();
-                UnityEngine.Object.Destroy(tex);
-
-                int imgW = kf.Width, imgH = kf.Height;
-                int imgPixels = imgW * imgH;
-
-                // Create/resize per-keyframe buffers
-                if (depthBuf == null || depthBuf.count != imgPixels)
-                {
-                    depthBuf?.Release();
-                    depthBuf = new ComputeBuffer(imgPixels, 4);
-                    kfPixelBuf?.Release();
-                    kfPixelBuf = new ComputeBuffer(imgPixels, 4);
-                }
-                kfPixelBuf.SetData(colors);
-
-                // Per-keyframe uniforms
-                int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
-                int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
-                float cropX = (sw - kf.Width) * 0.5f;
-                float cropY = (sh - kf.Height) * 0.5f;
-                Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
-
-                compute.SetMatrix("_ViewMat", viewMat);
-                compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
-                compute.SetFloat("_Fx", kf.Fx);
-                compute.SetFloat("_Fy", kf.Fy);
-                compute.SetFloat("_Cx", kf.Cx);
-                compute.SetFloat("_Cy", kf.Cy);
-                compute.SetFloat("_CropX", cropX);
-                compute.SetFloat("_CropY", cropY);
-                compute.SetInt("_ImgW", imgW);
-                compute.SetInt("_ImgH", imgH);
-                BindBodyCapsules(compute, kf);
-
-                // Bind per-keyframe buffers
-                compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
-                compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
-                compute.SetBuffer(kBake, "_DepthBuf", depthBuf);
-                compute.SetBuffer(kBake, "_KfPixels", kfPixelBuf);
-
-                // Dispatch: clear depth → build depth → bake atlas
-                compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
-                compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
-                compute.Dispatch(kBake, (outTriCount + 63) / 64, 1, 1);
-
-                bakeCount++;
-                if (bakeCount % 20 == 0 || bakeCount < 3)
-                {
-                    ReportStatus($"Baking (GPU)... {bakeCount}/{total}");
-                    Logger.Info($"[TextureRefine] GPU baked keyframe {bakeCount}/{total}");
-                }
-
-                await Task.Yield();
+            // Seam pairs are CPU work over the unwrap only — build them on a
+            // worker while the GPU bakes and consume them after the blend.
+            Task<SeamPair[]> seamPairsTask = null;
+            if (enableSeamBlending)
+            {
+                var sPos = mesh.Positions; var sUV = mesh.RawUVs; var sIdx = mesh.Indices;
+                seamPairsTask = Task.Run(() => BuildSeamPairs(sPos, sUV, sIdx, atlasW, atlasH));
             }
 
+            uploadScope?.Dispose();
+
+            var pass1Scope = _profile?.Stage("pass1");
+            ReportStatus("Baking textures (GPU compute)...");
+            int bakeCount = await ProcessKeyframesGpuAsync(
+                metaList, compute, kClear, kDepth, origTriCount, "Baking (GPU)...",
+                (tex, kf, depth) =>
+                {
+                    compute.SetBuffer(kBake, "_DepthBuf", depth);
+                    compute.SetTexture(kBake, "_KfTex", tex);
+                    compute.Dispatch(kBake, texelGroups, 1, 1);
+                });
+
             Logger.Info($"[TextureRefine] GPU baked {bakeCount} keyframes total (pass 1)");
+            pass1Scope?.Dispose();
+
+            if (chartCount > 0)
+            {
+                int kArgmax = compute.FindKernel("ChartArgmax");
+                compute.SetBuffer(kArgmax, "_ChartScore", chartScoreBuf);
+                compute.SetBuffer(kArgmax, "_ChartBestRW", chartBestBuf);
+                compute.Dispatch(kArgmax, (chartCount + 63) / 64, 1, 1);
+                await NextFrame();
+                Logger.Info($"[TextureRefine] Chart preference: {chartCount} charts, boost ×{chartBestViewBoost:F1}");
+            }
+
+            // ── Registration: align each keyframe to the pass-1 atlas before it
+            // is blended. Needs the blend pass to have any effect on colour.
+            RegistrationScratch reg = null;
+            ComputeBuffer atlasSnapshot = null;
+            System.Func<Texture2D, Keyframe, Task<Keyframe>> refineHook = null;
+            if (refineKeyframePoses && multiViewBlend)
+            {
+                int kRender = -1, kDown = -1, kMatch = -1, kGain = -1;
+                try
+                {
+                    kRender = compute.FindKernel("RenderAtlasView");
+                    kDown = compute.FindKernel("KfLumDownsample");
+                    kMatch = compute.FindKernel("MatchShift");
+                }
+                catch { /* shader variant without registration kernels */ }
+                try { kGain = compute.FindKernel("ViewGainReduce"); }
+                catch { /* shader variant without exposure equalisation */ }
+
+                if (kRender >= 0 && kDown >= 0 && kMatch >= 0)
+                {
+                    atlasSnapshot = new ComputeBuffer(texelCount, 4);
+                    await CopyUintBuffer(compute, kCopyU, atlasBuf, atlasSnapshot, texelCount);
+                    reg = new RegistrationScratch(4, registrationSearchRadius);
+                    compute.SetBuffer(kRender, "_OutPos", outPosBuf);
+                    compute.SetBuffer(kRender, "_OutIdx", outIdxBuf);
+                    compute.SetBuffer(kRender, "_RawUV", rawUVBuf);
+                    var regScratch = reg;
+                    refineHook = (tex, kf) => RefineKeyframeAsync(
+                        compute, regScratch, kClear, kClearU, kDepth, kRender, kDown, kMatch, kGain,
+                        origTriCount, outTriCount, atlasSnapshot, tex, kf);
+                }
+            }
 
             // ── Pass 2: Multi-view blend accumulation (optional) ──
             // Re-iterates keyframes, accumulating score-weighted colors from all
@@ -712,12 +891,11 @@ namespace Genesis.RoomScan
                 var accumB = new ComputeBuffer(texelCount, 4);
                 var accumW = new ComputeBuffer(texelCount, 4);
                 var accumN = new ComputeBuffer(texelCount, 4);
-                var zeros = new uint[texelCount];
-                accumR.SetData(zeros);
-                accumG.SetData(zeros);
-                accumB.SetData(zeros);
-                accumW.SetData(zeros);
-                accumN.SetData(zeros);
+                await ZeroUintBuffer(compute, kClearU, accumR, texelCount);
+                await ZeroUintBuffer(compute, kClearU, accumG, texelCount);
+                await ZeroUintBuffer(compute, kClearU, accumB, texelCount);
+                await ZeroUintBuffer(compute, kClearU, accumW, texelCount);
+                await ZeroUintBuffer(compute, kClearU, accumN, texelCount);
 
                 compute.SetBuffer(kAccum, "_OutPos", outPosBuf);
                 compute.SetBuffer(kAccum, "_OutNorm", outNormBuf);
@@ -731,81 +909,31 @@ namespace Genesis.RoomScan
                 compute.SetBuffer(kAccum, "_BestScore", scoreBuf);
                 compute.SetFloat("_BlendMinFraction", blendMinFraction);
                 compute.SetInt("_MaxViews", Mathf.Max(1, maxViewsPerTexel));
+                compute.SetBuffer(kAccum, "_TriChart", triChartBuf);
+                compute.SetBuffer(kAccum, "_ChartBest", chartBestBuf);
+                compute.SetBuffer(kAccum, "_TexelTri", texelTriBuf);
 
-                ReportStatus("Multi-view blending (pass 2)...");
-                int blendCount = 0;
-
-                for (int ki = 0; ki < total; ki++)
-                {
-                    var kf = metaList[ki];
-                    if (string.IsNullOrEmpty(kf.JpgPath)) continue;
-
-                    byte[] jpgBytes;
-                    try { jpgBytes = await ReadFileAsync(kf.JpgPath); }
-                    catch { continue; }
-
-                    var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    if (!ImageConversion.LoadImage(tex, jpgBytes))
+                var pass2Scope = _profile?.Stage(refineHook != null ? "pass2+registration" : "pass2");
+                ReportStatus(refineHook != null ? "Registering + blending (pass 2)..." : "Multi-view blending (pass 2)...");
+                int blendCount = await ProcessKeyframesGpuAsync(
+                    metaList, compute, kClear, kDepth, origTriCount, "Multi-view blend...",
+                    (tex, kf, depth) =>
                     {
-                        UnityEngine.Object.Destroy(tex);
-                        continue;
-                    }
-                    kf.Width = tex.width;
-                    kf.Height = tex.height;
-
-                    Color32[] colors = tex.GetPixels32();
-                    UnityEngine.Object.Destroy(tex);
-
-                    int imgW = kf.Width, imgH = kf.Height;
-                    int imgPixels = imgW * imgH;
-
-                    if (depthBuf == null || depthBuf.count != imgPixels)
-                    {
-                        depthBuf?.Release();
-                        depthBuf = new ComputeBuffer(imgPixels, 4);
-                        kfPixelBuf?.Release();
-                        kfPixelBuf = new ComputeBuffer(imgPixels, 4);
-                    }
-                    kfPixelBuf.SetData(colors);
-
-                    int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
-                    int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
-                    float cropX = (sw - kf.Width) * 0.5f;
-                    float cropY = (sh - kf.Height) * 0.5f;
-                    Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
-
-                    compute.SetMatrix("_ViewMat", viewMat);
-                    compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
-                    compute.SetFloat("_Fx", kf.Fx);
-                    compute.SetFloat("_Fy", kf.Fy);
-                    compute.SetFloat("_Cx", kf.Cx);
-                    compute.SetFloat("_Cy", kf.Cy);
-                    compute.SetFloat("_CropX", cropX);
-                    compute.SetFloat("_CropY", cropY);
-                    compute.SetInt("_ImgW", imgW);
-                    compute.SetInt("_ImgH", imgH);
-                    BindBodyCapsules(compute, kf);
-
-                    compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
-                    compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
-                    compute.SetBuffer(kAccum, "_DepthBuf", depthBuf);
-                    compute.SetBuffer(kAccum, "_KfPixels", kfPixelBuf);
-
-                    compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
-                    compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
-                    compute.Dispatch(kAccum, (outTriCount + 63) / 64, 1, 1);
-
-                    blendCount++;
-                    if (blendCount % 20 == 0 || blendCount < 3)
-                    {
-                        ReportStatus($"Multi-view blend... {blendCount}/{total}");
-                        Logger.Info($"[TextureRefine] Blend pass keyframe {blendCount}/{total}");
-                    }
-
-                    await Task.Yield();
-                }
+                        compute.SetBuffer(kAccum, "_DepthBuf", depth);
+                        compute.SetTexture(kAccum, "_KfTex", tex);
+                        compute.SetVector("_KfGain", kf.GainOrOne);
+                        compute.Dispatch(kAccum, texelGroups, 1, 1);
+                    },
+                    refineHook);
 
                 Logger.Info($"[TextureRefine] Blend pass 2 complete: {blendCount} keyframes");
+                if (reg != null)
+                {
+                    Logger.Info($"[TextureRefine] Registration: {reg.Refined} refined, {reg.Rejected} rejected, " +
+                                $"mean shift {(reg.Refined > 0 ? reg.SumShiftPx / reg.Refined : 0f):F1} px, " +
+                                $"max {reg.MaxShiftPx:F1} px (radius ±{reg.Radius * reg.Scale} px, minNcc {registrationMinNcc:F2}); " +
+                                $"exposure gain on {reg.Gained} keyframes, luma {reg.MinGain:F2}..{reg.MaxGain:F2}");
+                }
 
                 // Resolve: divide accumulated colors by weights → final atlas
                 compute.SetBuffer(kResolve, "_AccumRIn", accumR);
@@ -818,17 +946,17 @@ namespace Genesis.RoomScan
                 accumR.Release(); accumG.Release();
                 accumB.Release(); accumW.Release(); accumN.Release();
                 Logger.Info($"[TextureRefine] Multi-view blend resolved (minFraction={blendMinFraction:F2}, maxViews={maxViewsPerTexel})");
+                pass2Scope?.Dispose();
             }
 
             // ── Sharpening pass (GPU unsharp mask) ──
             if (sharpenStrength > 0.01f)
             {
+                using var _ = _profile?.Stage("sharpen") ?? default;
                 ReportStatus("Sharpening...");
                 int kSharpen = compute.FindKernel("SharpenAtlas");
                 var sharpenSrcBuf = new ComputeBuffer(texelCount, 4);
-                var tmp = new uint[texelCount];
-                atlasBuf.GetData(tmp);
-                sharpenSrcBuf.SetData(tmp);
+                await CopyUintBuffer(compute, kCopyU, atlasBuf, sharpenSrcBuf, texelCount);
 
                 compute.SetFloat("_SharpenStrength", sharpenStrength);
                 compute.SetInt("_SharpenRadius", sharpenRadius);
@@ -845,45 +973,84 @@ namespace Genesis.RoomScan
                 Logger.Info($"[TextureRefine] Sharpening complete (strength={sharpenStrength}, radius={sharpenRadius})");
             }
 
-            // ── Seam blending pass (GPU) ──
-            int kSeam = -1;
-            try { kSeam = compute.FindKernel("BlendSeams"); }
-            catch { /* kernel not available in older shader variants */ }
-
-            if (kSeam >= 0 && enableSeamBlending)
+            // ── Seam levelling pass (GPU, spread over frames) ──
+            if (seamPairsTask != null)
             {
-                ReportStatus("Blending seams...");
-                var seamSrcBuf = new ComputeBuffer(texelCount, 4);
-                var tmp = new uint[texelCount];
-                atlasBuf.GetData(tmp);
-                seamSrcBuf.SetData(tmp);
+                SeamPair[] pairs = null;
+                try { pairs = await seamPairsTask; }
+                catch (Exception e) { Logger.Warning($"[TextureRefine] Seam pairs failed: {e.Message}"); }
 
-                compute.SetInt("_AtlasW", atlasW);
-                compute.SetInt("_AtlasH", atlasH);
-                compute.SetInt("_BlendRadius", seamBlendRadius);
-                compute.SetBuffer(kSeam, "_AtlasBufSrc", seamSrcBuf);
-                compute.SetBuffer(kSeam, "_AtlasBuf", atlasBuf);
+                int kDelta = -1, kDiffuse = -1, kApply = -1;
+                try
+                {
+                    kDelta = compute.FindKernel("SeamDelta");
+                    kDiffuse = compute.FindKernel("SeamDiffuse");
+                    kApply = compute.FindKernel("SeamApply");
+                }
+                catch { /* shader variant without seam kernels */ }
 
-                int groupsX = (atlasW + 7) / 8;
-                int groupsY = (atlasH + 7) / 8;
-                compute.Dispatch(kSeam, groupsX, groupsY, 1);
+                if (pairs != null && pairs.Length > 0 && kDelta >= 0 && kDiffuse >= 0 && kApply >= 0)
+                {
+                    using var _ = _profile?.Stage("seamLevel") ?? default;
+                    ReportStatus("Levelling seams...");
+                    var seamSrcBuf = new ComputeBuffer(texelCount, 4);
+                    await CopyUintBuffer(compute, kCopyU, atlasBuf, seamSrcBuf, texelCount);
+                    var pairBuf = new ComputeBuffer(pairs.Length, 8);
+                    pairBuf.SetData(pairs);
+                    var corrA = new ComputeBuffer(texelCount, 4);
+                    var corrB = new ComputeBuffer(texelCount, 4);
+                    await ZeroUintBuffer(compute, kClearU, corrA, texelCount);
 
-                seamSrcBuf.Release();
-                Logger.Info("[TextureRefine] Seam blending complete");
+                    compute.SetInt("_AtlasW", atlasW);
+                    compute.SetInt("_AtlasH", atlasH);
+                    compute.SetInt("_SeamPairCount", pairs.Length);
+                    compute.SetBuffer(kDelta, "_SeamPairs", pairBuf);
+                    compute.SetBuffer(kDelta, "_AtlasBufSrc", seamSrcBuf);
+                    compute.SetBuffer(kDelta, "_CorrOut", corrA);
+                    compute.Dispatch(kDelta, (pairs.Length + 255) / 256, 1, 1);
+                    await NextFrame();
+
+                    int groupsX = (atlasW + 7) / 8;
+                    int groupsY = (atlasH + 7) / 8;
+                    compute.SetBuffer(kDiffuse, "_AtlasBufSrc", seamSrcBuf);
+                    var src = corrA; var dst = corrB;
+                    int iterations = Mathf.Max(1, seamLevelIterations);
+                    for (int it = 0; it < iterations; it++)
+                    {
+                        compute.SetBuffer(kDiffuse, "_CorrIn", src);
+                        compute.SetBuffer(kDiffuse, "_CorrOut", dst);
+                        compute.Dispatch(kDiffuse, groupsX, groupsY, 1);
+                        (src, dst) = (dst, src);
+                        // One step a frame: an 8-tap pass over the whole atlas.
+                        await NextFrame();
+                    }
+
+                    compute.SetBuffer(kApply, "_AtlasBufSrc", seamSrcBuf);
+                    compute.SetBuffer(kApply, "_CorrIn", src);
+                    compute.SetBuffer(kApply, "_AtlasBuf", atlasBuf);
+                    compute.Dispatch(kApply, (texelCount + 255) / 256, 1, 1);
+                    await NextFrame();
+
+                    seamSrcBuf.Release(); pairBuf.Release(); corrA.Release(); corrB.Release();
+                    Logger.Info($"[TextureRefine] Seam levelling: {pairs.Length} seam samples, {iterations} diffusion steps");
+                }
+                else if (pairs != null)
+                {
+                    Logger.Info("[TextureRefine] Seam levelling skipped: no seam samples");
+                }
             }
 
             // ── Sobel normal map pass (GPU) ──
             ComputeBuffer normalBuf = null;
             if (normalStrength > 0.01f)
             {
+                using var _ = _profile?.Stage("sobel") ?? default;
                 ReportStatus("Generating normal map...");
                 int kSobel = compute.FindKernel("SobelNormalMap");
                 normalBuf = new ComputeBuffer(texelCount, 4);
 
                 var sobelSrcBuf = new ComputeBuffer(texelCount, 4);
-                var tmp = new uint[texelCount];
-                atlasBuf.GetData(tmp);
-                sobelSrcBuf.SetData(tmp);
+                await CopyUintBuffer(compute, kCopyU, atlasBuf, sobelSrcBuf, texelCount);
 
                 compute.SetFloat("_NormalStrength", normalStrength);
                 compute.SetInt("_AtlasW", atlasW);
@@ -900,6 +1067,7 @@ namespace Genesis.RoomScan
             }
 
             // Readback atlas buffer
+            var readbackScope = _profile?.Stage("atlasReadback");
             ReportStatus("Reading back atlas...");
             byte[] atlasPixels = await ReadbackComputeBufferAsync(atlasBuf, texelCount);
 
@@ -910,11 +1078,18 @@ namespace Genesis.RoomScan
                 normalBuf.Release();
             }
 
-            // Log fill stats
+            readbackScope?.Dispose();
+            _profile?.Frame();
+
+            // Log fill stats (worker: 4-5 M texels is a frame of main-thread time)
             {
-                int filled = 0;
-                for (int i = 0; i < texelCount; i++)
-                    if (atlasPixels[i * 4 + 3] != 0) filled++;
+                int filled = await Task.Run(() =>
+                {
+                    int n = 0;
+                    for (int i = 0; i < texelCount; i++)
+                        if (atlasPixels[i * 4 + 3] != 0) n++;
+                    return n;
+                });
                 Logger.Info($"[TextureRefine] GPU bake pre-dilation: {filled}/{texelCount} texels filled " +
                     $"({100f * filled / texelCount:F1}%)");
             }
@@ -922,10 +1097,12 @@ namespace Genesis.RoomScan
             // Post-process on background thread
             if (!skipDenoise)
             {
+                using var _ = _profile?.Stage("denoise") ?? default;
                 ReportStatus("Denoising...");
                 await Task.Run(() => DenoiseAtlas(atlasPixels, atlasW, atlasH));
             }
 
+            var dilateScope = _profile?.Stage("dilate");
             ReportStatus("Filling gaps...");
             await Task.Run(() =>
             {
@@ -933,15 +1110,24 @@ namespace Genesis.RoomScan
                 if (normalPixels != null)
                     DilateAtlas(normalPixels, atlasW, atlasH, 8);
             });
+            dilateScope?.Dispose();
 
             // Cleanup
             origPosBuf.Release(); origIdxBuf.Release();
             outPosBuf.Release(); outNormBuf.Release(); outIdxBuf.Release();
             rawUVBuf.Release(); scoreBuf.Release(); atlasBuf.Release();
-            depthBuf?.Release(); kfPixelBuf?.Release();
+            triChartBuf.Release(); chartScoreBuf.Release(); chartBestBuf.Release();
+            texelTriBuf.Release();
+            atlasSnapshot?.Release();
+            reg?.Dispose();
 
             ReportStatus("Done");
             Logger.Info($"[TextureRefine] GPU compute bake complete: {atlasW}x{atlasH} atlas");
+            if (_profile != null)
+            {
+                Logger.Info(_profile.Report($"bake {total} keyframes → {atlasW}x{atlasH}"));
+                _profile = null;
+            }
 
             return (atlasPixels, normalPixels);
         }
@@ -950,13 +1136,523 @@ namespace Genesis.RoomScan
         //  GPU COMPUTE HELPERS
         // ═══════════════════════════════════════════════════════════════
 
-        static async Task<byte[]> ReadFileAsync(string path)
+        static Texture2D MakeKfTexture()
         {
-#if UNITY_2021_3_OR_NEWER
-            return await File.ReadAllBytesAsync(path);
-#else
-            return await Task.Run(() => File.ReadAllBytes(path));
-#endif
+            var tex = new Texture2D(8, 8, TextureFormat.RGBA32, false, true)
+            {
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp,
+            };
+            return tex;
+        }
+
+        async Task ZeroUintBuffer(ComputeShader compute, int kClear, ComputeBuffer buf, int count)
+        {
+            if (kClear >= 0)
+            {
+                compute.SetInt("_ClearCount", count);
+                compute.SetBuffer(kClear, "_ClearBuf", buf);
+                compute.Dispatch(kClear, (count + 255) / 256, 1, 1);
+                await Task.Yield();
+                return;
+            }
+            var zeros = await Task.Run(() => new uint[count]);
+            buf.SetData(zeros);
+            await Task.Yield();
+        }
+
+        async Task CopyUintBuffer(
+            ComputeShader compute, int kCopy, ComputeBuffer src, ComputeBuffer dst, int count)
+        {
+            if (kCopy >= 0)
+            {
+                compute.SetInt("_ClearCount", count);
+                compute.SetBuffer(kCopy, "_CopySrc", src);
+                compute.SetBuffer(kCopy, "_CopyDst", dst);
+                compute.Dispatch(kCopy, (count + 255) / 256, 1, 1);
+                await Task.Yield();
+                return;
+            }
+            var tmp = new uint[count];
+            src.GetData(tmp);
+            dst.SetData(tmp);
+            await Task.Yield();
+        }
+
+        /// <summary>
+        /// One keyframe per compositor frame, pipelined: keyframe N+1 is read
+        /// and JPEG-decoded on a worker while N's GPU work is in flight, so the
+        /// main thread only uploads pixels, binds the camera and issues
+        /// clear → depth → shade in one submission, then yields once. Two
+        /// Texture2D slots alternate; Unity orders the upload for N+1 behind
+        /// N's dispatch in the command stream, so no fence is needed.
+        /// </summary>
+        /// <param name="refine">Optional: runs after the keyframe is uploaded and
+        /// before its depth pass, may return a corrected keyframe (pose, gain).
+        /// The corrected keyframe is written back to <paramref name="metaList"/>.</param>
+        async Task<int> ProcessKeyframesGpuAsync(
+            System.Collections.Generic.List<Keyframe> metaList,
+            ComputeShader compute,
+            int kClear, int kDepth,
+            int origTriCount,
+            string statusPrefix,
+            System.Action<Texture2D, Keyframe, ComputeBuffer> shade,
+            System.Func<Texture2D, Keyframe, Task<Keyframe>> refine = null)
+        {
+            int First(int from)
+            {
+                for (int i = from; i < metaList.Count; i++)
+                    if (!string.IsNullOrEmpty(metaList[i].JpgPath)) return i;
+                return -1;
+            }
+
+            var slots = new[] { MakeKfTexture(), MakeKfTexture() };
+            ComputeBuffer depthBuf = null;
+            int baked = 0;
+
+            // A JPEG decode is ~37 ms on a Quest worker core and a keyframe's
+            // GPU work is one frame, so a single decode in flight left the
+            // bake waiting on the worker two frames out of three. Keep a few
+            // in flight; each holds one decoded frame (~5 MB) until consumed.
+            var pending = new System.Collections.Generic.Queue<(int index, Task<KeyframeImageDecoder.Decoded> task)>();
+            int nextToQueue = First(0);
+            void FillPrefetch()
+            {
+                while (nextToQueue >= 0 && pending.Count < DecodePrefetchDepth)
+                {
+                    pending.Enqueue((nextToQueue, KeyframeImageDecoder.ReadAndDecodeAsync(metaList[nextToQueue].JpgPath)));
+                    nextToQueue = First(nextToQueue + 1);
+                }
+            }
+            FillPrefetch();
+
+            try
+            {
+                int slot = 0;
+                var sw = new System.Diagnostics.Stopwatch();
+                while (pending.Count > 0)
+                {
+                    var (i, task) = pending.Dequeue();
+                    FillPrefetch();
+
+                    KeyframeImageDecoder.Decoded img = null;
+                    sw.Restart();
+                    bool waited = !task.IsCompleted;
+                    try { img = await task; }
+                    catch (Exception e) { Logger.Warning($"[TextureRefine] Keyframe {i} unreadable: {e.Message}"); }
+                    if (waited) _profile?.Frame();
+                    double decodeWaitMs = sw.Elapsed.TotalMilliseconds;
+
+                    var tex = slots[slot];
+                    sw.Restart();
+                    bool ok = img != null && img.ApplyTo(tex);
+                    double uploadMs = sw.Elapsed.TotalMilliseconds;
+                    double readMs = img?.ReadMs ?? 0, decodeMs = img?.DecodeMs ?? 0;
+                    bool fallback = img?.IsFallback ?? false;
+                    img?.Dispose();
+                    if (!ok) continue;
+
+                    var kf = metaList[i];
+                    kf.Width = tex.width;
+                    kf.Height = tex.height;
+                    sw.Restart();
+                    if (refine != null)
+                    {
+                        kf = await refine(tex, kf);
+                        _profile?.Frame();
+                    }
+                    double refineMs = sw.Elapsed.TotalMilliseconds;
+                    metaList[i] = kf;
+                    sw.Restart();
+
+                    // Occlusion depth at a fraction of the photo (dense mesh,
+                    // atomics per covered pixel — the expensive raster), then
+                    // the shade at full photo resolution reading it scaled.
+                    float depthScale = 1f / Mathf.Max(1, occlusionDepthDivisor);
+                    int depthW = Mathf.Max(1, Mathf.RoundToInt(kf.Width * depthScale));
+                    int depthH = Mathf.Max(1, Mathf.RoundToInt(kf.Height * depthScale));
+                    int depthPixels = depthW * depthH;
+                    if (depthBuf == null || depthBuf.count != depthPixels)
+                    {
+                        depthBuf?.Release();
+                        depthBuf = new ComputeBuffer(depthPixels, 4);
+                    }
+
+                    compute.SetInt("_KfIndex", i);
+                    BindBodyCapsules(compute, kf);
+                    BindKeyframeCamera(compute, kf, depthScale);
+                    compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
+                    compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
+                    compute.Dispatch(kClear, (depthPixels + 255) / 256, 1, 1);
+                    compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
+
+                    BindKeyframeCamera(compute, kf, 1f);
+                    compute.SetInt("_DepthW", depthW);
+                    compute.SetInt("_DepthH", depthH);
+                    compute.SetFloat("_DepthScale", (float)depthW / kf.Width);
+                    shade(tex, kf, depthBuf);
+                    _profile?.Keyframe(decodeWaitMs, uploadMs, refineMs, sw.Elapsed.TotalMilliseconds,
+                        readMs, decodeMs, fallback);
+
+                    baked++;
+                    if (baked % 20 == 0 || baked < 3)
+                    {
+                        ReportStatus($"{statusPrefix} {baked}/{metaList.Count}");
+                        Logger.Info($"[TextureRefine] {statusPrefix} {baked}/{metaList.Count}");
+                    }
+
+                    slot = 1 - slot;
+                    await NextFrame();
+                }
+            }
+            finally
+            {
+                while (pending.Count > 0)
+                {
+                    try { (await pending.Dequeue().task)?.Dispose(); } catch { }
+                }
+                foreach (var t in slots)
+                {
+                    if (t == null) continue;
+                    if (Application.isPlaying) UnityEngine.Object.Destroy(t);
+                    else UnityEngine.Object.DestroyImmediate(t);
+                }
+                depthBuf?.Release();
+            }
+
+            return baked;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  SEAM PAIRS
+        // ═══════════════════════════════════════════════════════════════
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        internal struct SeamPair
+        {
+            public uint A, B;
+        }
+
+        /// <summary>
+        /// Points along every UV seam as pairs of atlas texels that sit on the
+        /// same 3D point. xatlas splits a vertex at a seam, so the two copies
+        /// share an exact position; an edge whose endpoints share positions
+        /// but not output vertices is drawn on two charts. Sampled one texel
+        /// apart along the longer side, nudged half a texel into each
+        /// triangle so the sample lands on a shaded texel, not the border.
+        /// Pure CPU over the unwrap — runs on a worker.
+        /// </summary>
+        internal static SeamPair[] BuildSeamPairs(Vector3[] pos, float[] rawUV, int[] idx, int atlasW, int atlasH)
+        {
+            if (pos == null || rawUV == null || idx == null || pos.Length == 0) return System.Array.Empty<SeamPair>();
+
+            var canonOf = new System.Collections.Generic.Dictionary<Vector3, int>(pos.Length);
+            var canon = new int[pos.Length];
+            for (int i = 0; i < pos.Length; i++)
+            {
+                if (!canonOf.TryGetValue(pos[i], out int c))
+                {
+                    c = canonOf.Count;
+                    canonOf.Add(pos[i], c);
+                }
+                canon[i] = c;
+            }
+
+            // (a, b, opposite) per directed edge, keyed by canonical endpoints.
+            var edges = new System.Collections.Generic.Dictionary<long, System.Collections.Generic.List<(int a, int b, int o)>>();
+            int triCount = idx.Length / 3;
+            for (int t = 0; t < triCount; t++)
+            {
+                for (int e = 0; e < 3; e++)
+                {
+                    int va = idx[t * 3 + e], vb = idx[t * 3 + (e + 1) % 3], vo = idx[t * 3 + (e + 2) % 3];
+                    int ca = canon[va], cb = canon[vb];
+                    if (ca == cb) continue;
+                    long key = ca < cb ? ((long)ca << 32) | (uint)cb : ((long)cb << 32) | (uint)ca;
+                    var entry = ca < cb ? (va, vb, vo) : (vb, va, vo);
+                    if (!edges.TryGetValue(key, out var list))
+                    {
+                        list = new System.Collections.Generic.List<(int, int, int)>(2);
+                        edges.Add(key, list);
+                    }
+                    list.Add(entry);
+                }
+            }
+
+            Vector2 UV(int v) => new Vector2(rawUV[v * 2], rawUV[v * 2 + 1]);
+            uint Texel(Vector2 p)
+            {
+                int x = Mathf.Clamp((int)p.x, 0, atlasW - 1);
+                int y = Mathf.Clamp((int)p.y, 0, atlasH - 1);
+                return (uint)(y * atlasW + x);
+            }
+
+            var pairs = new System.Collections.Generic.List<SeamPair>(edges.Count);
+            foreach (var kv in edges)
+            {
+                var list = kv.Value;
+                if (list.Count < 2) continue;
+                var e0 = list[0];
+                (int a, int b, int o) e1 = default;
+                bool found = false;
+                for (int k = 1; k < list.Count && !found; k++)
+                {
+                    if (list[k].a != e0.a || list[k].b != e0.b) { e1 = list[k]; found = true; }
+                }
+                if (!found) continue;   // same output verts on both sides: an interior edge
+
+                Vector2 a0 = UV(e0.a), a1 = UV(e0.b), b0 = UV(e1.a), b1 = UV(e1.b);
+                Vector2 oa = UV(e0.o), ob = UV(e1.o);
+                float len = Mathf.Max((a1 - a0).magnitude, (b1 - b0).magnitude);
+                int n = Mathf.Clamp(Mathf.CeilToInt(len) + 1, 2, 1024);
+                for (int k = 0; k < n; k++)
+                {
+                    float t = (float)k / (n - 1);
+                    Vector2 pa = Vector2.Lerp(a0, a1, t), pb = Vector2.Lerp(b0, b1, t);
+                    // Half a texel toward the opposite vertex keeps the sample inside the chart.
+                    Vector2 da = oa - pa, db = ob - pb;
+                    if (da.sqrMagnitude > 1e-6f) pa += da.normalized * 0.5f;
+                    if (db.sqrMagnitude > 1e-6f) pb += db.normalized * 0.5f;
+                    uint ta = Texel(pa), tb = Texel(pb);
+                    if (ta == tb) continue;
+                    pairs.Add(new SeamPair { A = ta, B = tb });
+                }
+            }
+            return pairs.ToArray();
+        }
+
+        /// <summary>
+        /// Bind one keyframe's camera. <paramref name="scale"/> below 1 binds the
+        /// same camera for an image downsampled by that factor (intrinsics and
+        /// crop scale together; the pose does not).
+        /// </summary>
+        static void BindKeyframeCamera(ComputeShader compute, in Keyframe kf, float scale)
+        {
+            int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
+            int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
+            float cropX = (sw - kf.Width) * 0.5f;
+            float cropY = (sh - kf.Height) * 0.5f;
+            Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+
+            compute.SetMatrix("_ViewMat", viewMat);
+            compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
+            compute.SetFloat("_Fx", kf.Fx * scale);
+            compute.SetFloat("_Fy", kf.Fy * scale);
+            compute.SetFloat("_Cx", kf.Cx * scale);
+            compute.SetFloat("_Cy", kf.Cy * scale);
+            compute.SetFloat("_CropX", cropX * scale);
+            compute.SetFloat("_CropY", cropY * scale);
+            compute.SetInt("_ImgW", Mathf.Max(1, Mathf.RoundToInt(kf.Width * scale)));
+            compute.SetInt("_ImgH", Mathf.Max(1, Mathf.RoundToInt(kf.Height * scale)));
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  KEYFRAME REGISTRATION
+        // ═══════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Per-keyframe GPU state for the registration step: low-res depth,
+        /// the atlas rendered into this view, the photo downsampled, and the
+        /// ZNCC score per candidate shift. Allocated once per bake.
+        /// </summary>
+        sealed class RegistrationScratch : IDisposable
+        {
+            public readonly int Scale;
+            public readonly int Radius;
+            public ComputeBuffer DepthLow, ViewLum, KfLum, MatchOut, GainSums;
+            public int LowW, LowH;
+            public int Refined, Rejected, Gained;
+            public float SumShiftPx, MaxShiftPx, MinGain = 1f, MaxGain = 1f;
+
+            public RegistrationScratch(int scale, int radius)
+            {
+                Scale = Mathf.Max(1, scale);
+                Radius = Mathf.Max(1, radius);
+                int side = 2 * Radius + 1;
+                MatchOut = new ComputeBuffer(side * side, 4);
+                GainSums = new ComputeBuffer(7, 4);
+            }
+
+            public void EnsureImage(int imgW, int imgH)
+            {
+                int w = Mathf.Max(1, imgW / Scale), h = Mathf.Max(1, imgH / Scale);
+                if (DepthLow != null && LowW == w && LowH == h) return;
+                LowW = w; LowH = h;
+                DepthLow?.Release(); ViewLum?.Release(); KfLum?.Release();
+                DepthLow = new ComputeBuffer(w * h, 4);
+                ViewLum = new ComputeBuffer(w * h, 4);
+                KfLum = new ComputeBuffer(w * h, 4);
+            }
+
+            public void Dispose()
+            {
+                DepthLow?.Release(); ViewLum?.Release(); KfLum?.Release(); MatchOut?.Release(); GainSums?.Release();
+                DepthLow = ViewLum = KfLum = MatchOut = GainSums = null;
+            }
+        }
+
+        /// <summary>
+        /// Align one decoded keyframe against the pass-1 atlas rendered from
+        /// its own pose and fold the best image shift into its rotation.
+        /// Everything runs at 1/<see cref="RegistrationScratch.Scale"/>
+        /// resolution: one depth pass over the dense mesh, one raster of the
+        /// output mesh, one downsample, one ZNCC sweep, one small readback.
+        /// </summary>
+        async Task<Keyframe> RefineKeyframeAsync(
+            ComputeShader compute, RegistrationScratch s,
+            int kClear, int kClearU, int kDepth, int kRender, int kDown, int kMatch, int kGain,
+            int origTriCount, int outTriCount, ComputeBuffer atlasSnapshot,
+            Texture2D tex, Keyframe kf)
+        {
+            s.EnsureImage(kf.Width, kf.Height);
+            int lowPixels = s.LowW * s.LowH;
+            float scale = 1f / s.Scale;
+
+            BindKeyframeCamera(compute, kf, scale);
+            compute.SetInt("_LowScale", s.Scale);
+            compute.SetInt("_SearchR", s.Radius);
+            BindBodyCapsules(compute, kf);
+
+            compute.SetBuffer(kClear, "_DepthBuf", s.DepthLow);
+            compute.Dispatch(kClear, (lowPixels + 255) / 256, 1, 1);
+            compute.SetBuffer(kDepth, "_DepthBuf", s.DepthLow);
+            compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
+
+            if (kClearU >= 0)
+            {
+                compute.SetInt("_ClearCount", lowPixels);
+                compute.SetBuffer(kClearU, "_ClearBuf", s.ViewLum);
+                compute.Dispatch(kClearU, (lowPixels + 255) / 256, 1, 1);
+            }
+
+            compute.SetBuffer(kRender, "_DepthBuf", s.DepthLow);
+            compute.SetBuffer(kRender, "_ViewLum", s.ViewLum);
+            compute.SetBuffer(kRender, "_AtlasBufSrc", atlasSnapshot);
+            compute.Dispatch(kRender, (outTriCount + 63) / 64, 1, 1);
+
+            compute.SetTexture(kDown, "_KfTex", tex);
+            compute.SetBuffer(kDown, "_KfLum", s.KfLum);
+            compute.Dispatch(kDown, (s.LowW + 7) / 8, (s.LowH + 7) / 8, 1);
+
+            compute.SetBuffer(kMatch, "_ViewLum", s.ViewLum);
+            compute.SetBuffer(kMatch, "_KfLum", s.KfLum);
+            compute.SetBuffer(kMatch, "_MatchOut", s.MatchOut);
+            int side = 2 * s.Radius + 1;
+            compute.Dispatch(kMatch, side * side, 1, 1);   // one group per candidate shift
+
+            // Exposure gain: atlas colour this pose sees vs the photo, over
+            // the covered low-res pixels. Independent of the shift result.
+            bool gain = kGain >= 0 && kClearU >= 0 && equalizeExposure;
+            if (gain)
+            {
+                compute.SetInt("_ClearCount", 7);
+                compute.SetBuffer(kClearU, "_ClearBuf", s.GainSums);
+                compute.Dispatch(kClearU, 1, 1, 1);
+                compute.SetBuffer(kGain, "_ViewLum", s.ViewLum);
+                compute.SetBuffer(kGain, "_KfLum", s.KfLum);
+                compute.SetBuffer(kGain, "_GainSums", s.GainSums);
+                compute.Dispatch(kGain, (lowPixels + 255) / 256, 1, 1);
+            }
+
+            // Both readbacks are requested in the same frame so they land in
+            // the same frame; awaiting them in turn cost a round trip each.
+            var matchTask = ReadbackComputeBufferAsync(s.MatchOut, side * side);
+            var gainTask = gain ? ReadbackComputeBufferAsync(s.GainSums, 7) : null;
+            byte[] raw = await matchTask;
+            var scores = new float[side * side];
+            Buffer.BlockCopy(raw, 0, scores, 0, raw.Length);
+
+            if (gain)
+            {
+                byte[] graw = await gainTask;
+                var sums = new uint[7];
+                Buffer.BlockCopy(graw, 0, sums, 0, graw.Length);
+                // Need a real overlap and a photo that is not black.
+                if (sums[6] >= 2000 && sums[3] > 0 && sums[4] > 0 && sums[5] > 0)
+                {
+                    float lo = 1f / exposureGainLimit, hi = exposureGainLimit;
+                    var g = new Vector3(
+                        Mathf.Clamp((float)sums[0] / sums[3], lo, hi),
+                        Mathf.Clamp((float)sums[1] / sums[4], lo, hi),
+                        Mathf.Clamp((float)sums[2] / sums[5], lo, hi));
+                    kf.Gain = g;
+                    s.Gained++;
+                    float lum = (g.x * 0.3f + g.y * 0.59f + g.z * 0.11f);
+                    if (lum < s.MinGain) s.MinGain = lum;
+                    if (lum > s.MaxGain) s.MaxGain = lum;
+                }
+            }
+
+            if (!BestShift(scores, side, registrationMinNcc, out Vector2 shiftLow, out float ncc))
+            {
+                s.Rejected++;
+                return kf;
+            }
+
+            // Reject a peak sitting on the search border: the true shift is
+            // beyond the window and a clamped correction is worse than none.
+            if (Mathf.Abs(shiftLow.x) >= s.Radius - 0.5f || Mathf.Abs(shiftLow.y) >= s.Radius - 0.5f)
+            {
+                s.Rejected++;
+                return kf;
+            }
+
+            Vector2 shiftPx = shiftLow * s.Scale;
+            kf.Rotation = ApplyImageShift(kf.Rotation, shiftPx, new Vector2(kf.Fx, kf.Fy));
+            s.Refined++;
+            float mag = shiftPx.magnitude;
+            s.SumShiftPx += mag;
+            if (mag > s.MaxShiftPx) s.MaxShiftPx = mag;
+            return kf;
+        }
+
+        /// <summary>
+        /// Peak of the ZNCC grid with a parabolic sub-pixel fit on each axis.
+        /// False when nothing reaches <paramref name="minNcc"/>.
+        /// </summary>
+        internal static bool BestShift(float[] scores, int side, float minNcc, out Vector2 shift, out float best)
+        {
+            int r = side / 2;
+            int bi = -1;
+            best = -3f;
+            for (int i = 0; i < scores.Length; i++)
+                if (scores[i] > best) { best = scores[i]; bi = i; }
+            shift = Vector2.zero;
+            if (bi < 0 || best < minNcc) return false;
+
+            int bx = bi % side, by = bi / side;
+            float fx = bx, fy = by;
+            if (bx > 0 && bx < side - 1)
+            {
+                float l = scores[by * side + bx - 1], c = best, rr = scores[by * side + bx + 1];
+                float d = l - 2f * c + rr;
+                if (d < -1e-6f) fx += 0.5f * (l - rr) / d;
+            }
+            if (by > 0 && by < side - 1)
+            {
+                float u = scores[(by - 1) * side + bx], c = best, dn = scores[(by + 1) * side + bx];
+                float d = u - 2f * c + dn;
+                if (d < -1e-6f) fy += 0.5f * (u - dn) / d;
+            }
+            shift = new Vector2(fx - r, fy - r);
+            return true;
+        }
+
+        /// <summary>
+        /// Rotate a camera so that what it projected at pixel p now projects
+        /// at p + <paramref name="shiftPx"/>. Camera space is x right, y up,
+        /// z forward (the bake's convention); a small yaw moves projections
+        /// along +x by fx·yaw, a small pitch about −x moves them along +y by
+        /// fy·pitch. The correction is applied in camera space, so the world
+        /// rotation becomes R · ΔR⁻¹.
+        /// </summary>
+        internal static Quaternion ApplyImageShift(Quaternion rotation, Vector2 shiftPx, Vector2 focal)
+        {
+            if (focal.x <= 1f || focal.y <= 1f) return rotation;
+            float yaw = Mathf.Atan(shiftPx.x / focal.x) * Mathf.Rad2Deg;
+            float pitch = -Mathf.Atan(shiftPx.y / focal.y) * Mathf.Rad2Deg;
+            Quaternion delta = Quaternion.AngleAxis(pitch, Vector3.right) * Quaternion.AngleAxis(yaw, Vector3.up);
+            return rotation * Quaternion.Inverse(delta);
         }
 
         static Task<byte[]> ReadbackComputeBufferAsync(ComputeBuffer buffer, int elementCount)
@@ -1438,25 +2134,64 @@ namespace Genesis.RoomScan
         internal async Task<RefinedTextureResult> SimplifyRefinedMeshAsync(RefinedTextureResult source)
         {
             float ratio = postBakeSimplificationRatio;
-            if (ratio >= 1f) return source;
+            if (ratio >= 1f || simplifyBeforeUnwrap) return source;
             ratio = Mathf.Clamp(ratio, 0.05f, 1f);
 
             ReportStatus($"Simplifying baked mesh ({ratio:P0})...");
 
             RefinedTextureResult result = source;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             await Task.Run(() =>
             {
                 result = XAtlasWrapper.SimplifyWithUVs(
                     source.Positions, source.Normals, source.UVs,
                     source.Indices, ratio);
                 result.AtlasPixels = source.AtlasPixels;
+                result.NormalPixels = source.NormalPixels;
                 result.AtlasWidth = source.AtlasWidth;
                 result.AtlasHeight = source.AtlasHeight;
             });
 
             Logger.Info($"[TextureRefine] Post-bake simplify: {result.Indices.Length / 3} tris " +
-                        $"(was {source.Indices.Length / 3}, ratio={ratio:F2})");
+                        $"(was {source.Indices.Length / 3}, ratio={ratio:F2}) in {sw.ElapsedMilliseconds} ms (worker)");
             return result;
+        }
+
+        /// <summary>
+        /// Per-vertex tangents (xyz + handedness) for a normal-mapped mesh,
+        /// Lengyel's method, on any thread. <c>Mesh.RecalculateTangents</c> is
+        /// main-thread only and cost a frame on the refined mesh.
+        /// </summary>
+        internal static Vector4[] ComputeTangents(Vector3[] pos, Vector3[] nrm, Vector2[] uv, int[] idx)
+        {
+            int n = pos.Length;
+            var tan1 = new Vector3[n];
+            var tan2 = new Vector3[n];
+            for (int t = 0; t + 2 < idx.Length; t += 3)
+            {
+                int i0 = idx[t], i1 = idx[t + 1], i2 = idx[t + 2];
+                Vector3 e1 = pos[i1] - pos[i0], e2 = pos[i2] - pos[i0];
+                Vector2 d1 = uv[i1] - uv[i0], d2 = uv[i2] - uv[i0];
+                float det = d1.x * d2.y - d2.x * d1.y;
+                if (Mathf.Abs(det) < 1e-12f) continue;
+                float r = 1f / det;
+                Vector3 sdir = (e1 * d2.y - e2 * d1.y) * r;
+                Vector3 tdir = (e2 * d1.x - e1 * d2.x) * r;
+                tan1[i0] += sdir; tan1[i1] += sdir; tan1[i2] += sdir;
+                tan2[i0] += tdir; tan2[i1] += tdir; tan2[i2] += tdir;
+            }
+            var tangents = new Vector4[n];
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 nv = nrm[i], tv = tan1[i];
+                Vector3 ortho = tv - nv * Vector3.Dot(nv, tv);
+                if (ortho.sqrMagnitude < 1e-12f)
+                    ortho = Vector3.Cross(nv, Mathf.Abs(nv.x) < 0.9f ? Vector3.right : Vector3.up);
+                ortho.Normalize();
+                float w = Vector3.Dot(Vector3.Cross(nv, tv), tan2[i]) < 0f ? -1f : 1f;
+                tangents[i] = new Vector4(ortho.x, ortho.y, ortho.z, w);
+            }
+            return tangents;
         }
 
         void ReportStatus(string status)

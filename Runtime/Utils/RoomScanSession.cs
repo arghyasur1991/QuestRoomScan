@@ -11,9 +11,23 @@ namespace Genesis.RoomScan
     /// </summary>
     public struct ScanResult
     {
+        /// <summary>The game-ready mesh in world space, relocated with the
+        /// anchor pose sampled when the anchor localized. Render this.</summary>
         public Mesh Mesh;
         public Texture2D Atlas;
         public string PackageId;
+
+        /// <summary>
+        /// The same mesh in the spatial-anchor frame, rebuilt from package
+        /// constants only (see
+        /// <see cref="RoomScanPersistence.BuildAnchorFrameMesh"/>). Use this,
+        /// not <c>Mesh × root.worldToLocal</c>, for anything you generate once
+        /// and persist relative to the room: it is identical across loads and
+        /// sessions, where the world mesh moves with tracking. Present the
+        /// result under a root bound to the anchor (<see cref="RoomSpaceRoot"/>).
+        /// Null when no persistence component is present.
+        /// </summary>
+        public Mesh AnchorFrameMesh;
     }
 
     /// <summary>
@@ -33,6 +47,19 @@ namespace Genesis.RoomScan
 
         /// <summary>Raised each frame during scanning with the latest progress.</summary>
         public event Action<ScanProgress> ProgressUpdated;
+
+        /// <summary>
+        /// Raised when MRUK discovery finishes (<see cref="IsRoomLoaded"/>).
+        /// All scene anchors from that load are already on the rooms.
+        /// </summary>
+        public event Action RoomReady;
+
+        /// <summary>
+        /// Raised when a room or scene anchor is created or updated after
+        /// the initial load (<c>RoomUpdatedEvent</c>,
+        /// <c>AnchorCreatedEvent</c>).
+        /// </summary>
+        public event Action SceneAnchorsChanged;
 
         /// <summary>
         /// When true, TSDF stays inside the MRUK room that contained
@@ -128,28 +155,75 @@ namespace Genesis.RoomScan
 
         private RoomScanner _scanner;
         private RoomScanPersistence _persistence;
+        RoomUnderstanding _understandingHooked;
+        RoomAnchorManager _anchorHooked;
 
         RoomUnderstanding Understanding()
         {
-            if (RoomUnderstanding.Instance != null)
-                return RoomUnderstanding.Instance;
-            return GetComponent<RoomUnderstanding>();
+            var u = RoomUnderstanding.Instance != null
+                ? RoomUnderstanding.Instance
+                : GetComponent<RoomUnderstanding>();
+            HookUnderstanding(u);
+            return u;
         }
+
+        void HookUnderstanding(RoomUnderstanding u)
+        {
+            if (u == null || _understandingHooked == u) return;
+            if (_understandingHooked != null)
+                _understandingHooked.AnchorsChanged -= ForwardSceneAnchorsChanged;
+            _understandingHooked = u;
+            u.AnchorsChanged += ForwardSceneAnchorsChanged;
+        }
+
+        void HookAnchorManager()
+        {
+            var mgr = RoomAnchorManager.Instance;
+            if (mgr == null || _anchorHooked == mgr) return;
+            if (_anchorHooked != null)
+                _anchorHooked.RoomReady -= ForwardRoomReady;
+            _anchorHooked = mgr;
+            mgr.RoomReady += ForwardRoomReady;
+            if (mgr.IsRoomLoaded)
+                ForwardRoomReady();
+        }
+
+        void ForwardRoomReady() => RoomReady?.Invoke();
+        void ForwardSceneAnchorsChanged() => SceneAnchorsChanged?.Invoke();
 
         private void Awake()
         {
             Instance = this;
             _scanner = GetComponent<RoomScanner>();
             _persistence = GetComponent<RoomScanPersistence>();
+            HookUnderstanding(GetComponent<RoomUnderstanding>());
+            HookAnchorManager();
+        }
+
+        private void OnEnable()
+        {
+            HookUnderstanding(Understanding());
+            HookAnchorManager();
         }
 
         private void OnDestroy()
         {
+            if (_understandingHooked != null)
+            {
+                _understandingHooked.AnchorsChanged -= ForwardSceneAnchorsChanged;
+                _understandingHooked = null;
+            }
+            if (_anchorHooked != null)
+            {
+                _anchorHooked.RoomReady -= ForwardRoomReady;
+                _anchorHooked = null;
+            }
             if (Instance == this) Instance = null;
         }
 
         private void Update()
         {
+            if (_anchorHooked == null) HookAnchorManager();
             if (_scanner != null && _scanner.IsScanning)
                 ProgressUpdated?.Invoke(_scanner.CurrentProgress);
         }
@@ -218,6 +292,15 @@ namespace Genesis.RoomScan
         public float FreezeConeHalfAngle => _scanner != null ? _scanner.FreezeConeHalfAngle : 15f;
 
         /// <summary>
+        /// See <see cref="RoomScanner.PresentRefinedWhenReady"/>.
+        /// </summary>
+        public bool PresentRefinedWhenReady
+        {
+            get => _scanner != null && _scanner.PresentRefinedWhenReady;
+            set { if (_scanner != null) _scanner.PresentRefinedWhenReady = value; }
+        }
+
+        /// <summary>
         /// Inverse of <see cref="FreezeInView"/>: unfreezes voxels in the same
         /// cone so depth integration can refine them again. Useful when you
         /// painted too aggressively or part of the scan needs re-capturing.
@@ -230,7 +313,11 @@ namespace Genesis.RoomScan
 
         /// <summary>
         /// Stops scanning, runs on-device texture refinement (UV unwrap + atlas bake + simplification),
-        /// saves to a permanent package, and releases heavy GPU resources (~400-500 MB).
+        /// and saves to a permanent package. When
+        /// <see cref="PresentRefinedWhenReady"/> is true (default), also
+        /// switches to the refined mesh and releases the live TSDF
+        /// (~400-500 MB). When false, the live vertex mesh stays until the
+        /// host presents and releases.
         /// Returns a <see cref="ScanResult"/> with the game-ready mesh and atlas.
         /// </summary>
         public async Task<ScanResult> FinalizeScanAsync()
@@ -263,13 +350,15 @@ namespace Genesis.RoomScan
             if (!saved)
                 Logger.Warning("RoomScanSession: save failed — result is in memory only");
 
-            _scanner.ReleaseScanResources();
+            if (_scanner.PresentRefinedWhenReady)
+                _scanner.ReleaseScanResources();
 
             return new ScanResult
             {
                 Mesh = _scanner.RefinedMesh,
                 Atlas = _scanner.RefinedAtlas,
-                PackageId = _persistence?.ActivePackageId
+                PackageId = _persistence?.ActivePackageId,
+                AnchorFrameMesh = _persistence?.BuildAnchorFrameMesh(_scanner.RefinedMesh)
             };
         }
 
@@ -290,7 +379,8 @@ namespace Genesis.RoomScan
             {
                 Mesh = _scanner.RefinedMesh,
                 Atlas = _scanner.RefinedAtlas,
-                PackageId = packageId
+                PackageId = packageId,
+                AnchorFrameMesh = _persistence?.BuildAnchorFrameMesh(_scanner.RefinedMesh)
             };
         }
 
@@ -427,8 +517,9 @@ namespace Genesis.RoomScan
         public Task<bool> RequestAnchorPermissionAsync()
             => AndroidRuntimePermission.RequestAsync(AndroidRuntimePermission.Anchors);
 
-        /// <summary>True after MRUK scene discovery has finished, including
-        /// an empty space (no rooms). Distinct from <see cref="HasSceneRooms"/>.</summary>
+        /// <summary>True after MRUK <c>LoadSceneFromDevice</c> finished,
+        /// including an empty space. All discovery anchors are present.
+        /// Distinct from <see cref="HasSceneRooms"/>.</summary>
         public bool IsRoomLoaded =>
             RoomAnchorManager.Instance != null && RoomAnchorManager.Instance.IsRoomLoaded;
 
@@ -498,14 +589,12 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Visible <c>WALL_FACE</c> and <c>SCREEN</c> (TV) planes of the
-        /// room that contains the headset. Empty in the editor and when
-        /// the headset is not inside a captured room. Hosts pin
-        /// world-space UI without taking an MRUK dependency. Clears
-        /// <paramref name="dest"/>. A <see cref="SceneWallFace.IsScreen"/>
-        /// row is the television.
+        /// Vertical Scene API planes of every loaded room that contains
+        /// the headset. <paramref name="kind"/> is the labels the host
+        /// wants. Empty in the editor and when the headset is not inside
+        /// a captured room. Clears <paramref name="dest"/>.
         /// </summary>
-        public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest)
+        public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest, SceneFaceKind kind)
         {
             var u = Understanding();
             if (u == null)
@@ -513,7 +602,7 @@ namespace Genesis.RoomScan
                 dest?.Clear();
                 return 0;
             }
-            return u.CopyHeadsetRoomWallFaces(dest);
+            return u.CopyHeadsetRoomWallFaces(dest, kind);
         }
 
         /// <summary>
@@ -566,8 +655,18 @@ namespace Genesis.RoomScan
         public MeshRenderer RefinedMeshRenderer =>
             _scanner != null ? _scanner.RefinedMeshRenderer : null;
 
-        /// <summary>Completes when scene discovery has finished. Completed
-        /// immediately if it already has.</summary>
+        /// <summary>
+        /// Two-sided in the room, Cull Back outside so the near walls vanish
+        /// and the interior reads as a shell. No-op if shaders are unwired.
+        /// </summary>
+        public void SetRefinedBackfaceCull(bool cullBack)
+        {
+            _scanner?.SetRefinedBackfaceCull(cullBack);
+        }
+
+        /// <summary>Completes when MRUK <c>LoadSceneFromDevice</c> has
+        /// finished. Every scene anchor from that discovery is already on
+        /// the rooms. Completed immediately if it already has.</summary>
         public Task WaitUntilRoomReadyAsync()
         {
             var mgr = RoomAnchorManager.Instance;

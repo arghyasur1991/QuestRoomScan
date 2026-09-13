@@ -140,7 +140,7 @@ namespace Genesis.RoomScan.Editor
             _computeShaderWired = _meshExtractor != null && AreFieldsAssigned(_meshExtractor,
                 "surfaceNetsCompute");
             _refinedShaderWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
-                "refinedMeshShader");
+                "refinedMeshShader", "refinedMeshBackfaceShader");
             _occlusionShaderWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
                 "occlusionMeshShader");
             _atlasBakeComputeWired = _textureRefinement != null && AreFieldsAssigned(_textureRefinement,
@@ -986,7 +986,7 @@ namespace Genesis.RoomScan.Editor
                 {
                     float val = simplifyProp.floatValue;
                     bool configured = val < 1f;
-                    StatusRowOptional($"Post-bake simplification ({val:P0})", configured);
+                    StatusRowOptional($"Mesh simplification ({val:P0})", configured);
                 }
             }
 
@@ -1266,11 +1266,11 @@ namespace Genesis.RoomScan.Editor
             {
                 var so = new SerializedObject(kf);
                 var move = so.FindProperty("moveThreshold");
-                if (move != null) move.floatValue = 0.4f;
+                if (move != null) move.floatValue = 0.15f;
                 var rot = so.FindProperty("rotateThresholdDeg");
-                if (rot != null) rot.floatValue = 20f;
+                if (rot != null) rot.floatValue = 10f;
                 var interval = so.FindProperty("minCaptureInterval");
-                if (interval != null) interval.floatValue = 1f;
+                if (interval != null) interval.floatValue = 0.25f;
                 so.ApplyModifiedProperties();
                 EditorUtility.SetDirty(kf);
             }
@@ -1631,6 +1631,7 @@ namespace Genesis.RoomScan.Editor
                 {
                     var so = new SerializedObject(tr);
                     AssignAsset<Shader>(so, "refinedMeshShader", PKG_SHADERS + "RefinedMesh.shader");
+                    AssignAsset<Shader>(so, "refinedMeshBackfaceShader", PKG_SHADERS + "RefinedMeshBackface.shader");
                     AssignAsset<Shader>(so, "occlusionMeshShader", PKG_SHADERS + "OcclusionMesh.shader");
                     AssignAsset<ComputeShader>(so, "atlasBakeCompute", PKG_SHADERS + "AtlasBakeCompute.compute");
                     so.ApplyModifiedProperties();

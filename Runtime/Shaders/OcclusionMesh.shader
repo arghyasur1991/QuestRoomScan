@@ -1,6 +1,6 @@
-// Depth-only occluder for MR — writes depth, produces no visible output.
-// Mirrors RefinedMesh.shader structure (SRPDefaultUnlit + DepthOnly) which is
-// proven to write depth correctly in this project's URP Deferred config.
+// Depth-only occluder. Cull Front: inward room meshes write depth from
+// outside (back faces) and are a no-op from inside. Adreno skips depth with
+// ColorMask 0 on the main pass — return zero with default opaque blend.
 Shader "Genesis/OcclusionMesh"
 {
     SubShader
@@ -13,7 +13,7 @@ Shader "Genesis/OcclusionMesh"
             Tags { "LightMode"="SRPDefaultUnlit" }
             ZWrite On
             ZTest LEqual
-            Cull Off
+            Cull Front
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -54,7 +54,7 @@ Shader "Genesis/OcclusionMesh"
             ZWrite On
             ZTest LEqual
             ColorMask 0
-            Cull Off
+            Cull Front
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -95,7 +95,7 @@ Shader "Genesis/OcclusionMesh"
             ZWrite On
             ZTest LEqual
             ColorMask 0
-            Cull Off
+            Cull Front
 
             HLSLPROGRAM
             #pragma vertex vert

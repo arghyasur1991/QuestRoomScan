@@ -7,8 +7,10 @@ namespace Genesis.RoomScan
     /// Deprecated on Quest (use PassthroughCameraProvider instead),
     /// but useful for editor testing or non-Quest XR platforms.
     /// </summary>
-    internal class WebCamProvider : MonoBehaviour, ICameraProvider
+    internal class WebCamProvider : MonoBehaviour, ICameraProvider, ICameraFrameTiming
     {
+        public double FrameTimeSeconds => Time.realtimeSinceStartupAsDouble;
+
         [SerializeField] private int requestedWidth = 1280;
         [SerializeField] private int requestedHeight = 960;
         [SerializeField] private int requestedFPS = 30;

@@ -99,6 +99,11 @@ Atlas *Create();
 
 void Destroy(Atlas *atlas);
 
+// Cap the scheduler's threads (0 = every core) and set a POSIX nice value for
+// its worker threads (Linux/Android; ignored elsewhere). Takes effect for
+// atlases created afterwards. Lets a host keep cores for its own render loop.
+void SetThreading(uint32_t maxThreads, int workerNice);
+
 enum class IndexFormat
 {
 	UInt16,
