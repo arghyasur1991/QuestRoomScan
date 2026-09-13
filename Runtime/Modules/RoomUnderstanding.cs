@@ -737,7 +737,29 @@ namespace Genesis.RoomScan
                 for (int i = 0; i < room.Anchors.Count; i++)
                     TryAddPinSurface(room, room.Anchors[i], floorY, dst);
 
+                LogRoomInventory(room, dst.Count);
                 return dst.Count;
+            }
+
+            static float s_invLogAt;
+
+            static void LogRoomInventory(MRUKRoom room, int pinCount)
+            {
+                if (Time.unscaledTime - s_invLogAt < 1.5f) return;
+                s_invLogAt = Time.unscaledTime;
+                var sb = new System.Text.StringBuilder(128);
+                int screens = 0;
+                for (int i = 0; i < room.Anchors.Count; i++)
+                {
+                    var a = room.Anchors[i];
+                    if (a == null) continue;
+                    if (sb.Length > 0) sb.Append(' ');
+                    sb.Append(a.Label);
+                    if (a.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN)) screens++;
+                }
+                Logger.Info(
+                    $"[PinFace] room anchors={room.Anchors.Count} pin={pinCount} " +
+                    $"screens={screens} labels={sb}");
             }
 
             static void TryAddPinSurface(
