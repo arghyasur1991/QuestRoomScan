@@ -26,8 +26,8 @@ StructuredBuffer<float3> _OutNorm;
 StructuredBuffer<float2> _RawUV;     // pixel-space UVs from xatlas
 StructuredBuffer<int>    _OutIdx;
 
-// ── Per-keyframe pixel data (Color32 packed as uint) ────────
-StructuredBuffer<uint>   _KfPixels;
+// ── Per-keyframe pixel data (Color32 packed as uint via Texture2D.Load) ─
+Texture2D<float4> _KfTex;
 
 // ── Per-keyframe body capsules (hands / forearms at capture) ─
 //  A texel whose line of sight from this view passes through one of
@@ -90,6 +90,15 @@ bool BodyOccludes(float3 camPos, float3 worldPt)
 RWStructuredBuffer<uint> _DepthBuf;  // asuint(linearZ), per-keyframe
 RWStructuredBuffer<uint> _ScoreBuf;  // asuint(score), persists across KFs
 RWStructuredBuffer<uint> _AtlasBuf;  // packed RGBA32, persists across KFs
+
+uint LoadKf(int px, int py)
+{
+    float4 c = _KfTex.Load(int3(px, py, 0));
+    return (uint)(c.r * 255.0 + 0.5)
+         | ((uint)(c.g * 255.0 + 0.5) << 8)
+         | ((uint)(c.b * 255.0 + 0.5) << 16)
+         | ((uint)(c.a * 255.0 + 0.5) << 24);
+}
 
 // ═════════════════════════════════════════════════════════════
 //  Kernel 0: Clear depth buffer to large value before each KF
@@ -264,7 +273,7 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
             if (oldS >= scoreU) continue;
 
             // Read keyframe pixel: same layout as GetPixels32() byte array
-            uint kfColor = _KfPixels[py * _ImgW + px];
+            uint kfColor = LoadKf(px, py);
             _AtlasBuf[texelIdx] = kfColor | (255u << 24);
         }
     }
@@ -469,7 +478,7 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
             InterlockedAdd(_AccumN[texelIdx], 1, seen);
             if ((int)seen >= _MaxViews) continue;
 
-            uint kfColor = _KfPixels[py * _ImgW + px];
+            uint kfColor = LoadKf(px, py);
             float r = (float)(kfColor & 0xFF);
             float g = (float)((kfColor >> 8) & 0xFF);
             float b = (float)((kfColor >> 16) & 0xFF);

@@ -615,87 +615,15 @@ namespace Genesis.RoomScan
             compute.SetInt("_OrigTriCount", origTriCount);
             compute.SetInt("_OutTriCount", outTriCount);
 
-            // Per-keyframe buffers (created on first use, resized as needed)
-            ComputeBuffer depthBuf = null;
-            ComputeBuffer kfPixelBuf = null;
-
             ReportStatus("Baking textures (GPU compute)...");
-            int bakeCount = 0;
-
-            for (int ki = 0; ki < total; ki++)
-            {
-                var kf = metaList[ki];
-                if (string.IsNullOrEmpty(kf.JpgPath)) continue;
-
-                byte[] jpgBytes;
-                try { jpgBytes = await ReadFileAsync(kf.JpgPath); }
-                catch { continue; }
-
-                var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                if (!ImageConversion.LoadImage(tex, jpgBytes))
+            int bakeCount = await ProcessKeyframesGpuAsync(
+                metaList, compute, kClear, kDepth, origTriCount, atlasBuf, "Baking (GPU)...",
+                (tex, kf, depth) =>
                 {
-                    UnityEngine.Object.Destroy(tex);
-                    continue;
-                }
-                kf.Width = tex.width;
-                kf.Height = tex.height;
-
-                // GetPixels32: same byte layout as CPU kf.Pixels — no Y ambiguity
-                Color32[] colors = tex.GetPixels32();
-                UnityEngine.Object.Destroy(tex);
-
-                int imgW = kf.Width, imgH = kf.Height;
-                int imgPixels = imgW * imgH;
-
-                // Create/resize per-keyframe buffers
-                if (depthBuf == null || depthBuf.count != imgPixels)
-                {
-                    depthBuf?.Release();
-                    depthBuf = new ComputeBuffer(imgPixels, 4);
-                    kfPixelBuf?.Release();
-                    kfPixelBuf = new ComputeBuffer(imgPixels, 4);
-                }
-                kfPixelBuf.SetData(colors);
-
-                // Per-keyframe uniforms
-                int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
-                int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
-                float cropX = (sw - kf.Width) * 0.5f;
-                float cropY = (sh - kf.Height) * 0.5f;
-                Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
-
-                compute.SetMatrix("_ViewMat", viewMat);
-                compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
-                compute.SetFloat("_Fx", kf.Fx);
-                compute.SetFloat("_Fy", kf.Fy);
-                compute.SetFloat("_Cx", kf.Cx);
-                compute.SetFloat("_Cy", kf.Cy);
-                compute.SetFloat("_CropX", cropX);
-                compute.SetFloat("_CropY", cropY);
-                compute.SetInt("_ImgW", imgW);
-                compute.SetInt("_ImgH", imgH);
-                BindBodyCapsules(compute, kf);
-
-                // Bind per-keyframe buffers
-                compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
-                compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
-                compute.SetBuffer(kBake, "_DepthBuf", depthBuf);
-                compute.SetBuffer(kBake, "_KfPixels", kfPixelBuf);
-
-                // Dispatch: clear depth → build depth → bake atlas
-                compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
-                compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
-                compute.Dispatch(kBake, (outTriCount + 63) / 64, 1, 1);
-
-                bakeCount++;
-                if (bakeCount % 20 == 0 || bakeCount < 3)
-                {
-                    ReportStatus($"Baking (GPU)... {bakeCount}/{total}");
-                    Logger.Info($"[TextureRefine] GPU baked keyframe {bakeCount}/{total}");
-                }
-
-                await Task.Yield();
-            }
+                    compute.SetBuffer(kBake, "_DepthBuf", depth);
+                    compute.SetTexture(kBake, "_KfTex", tex);
+                    compute.Dispatch(kBake, (outTriCount + 63) / 64, 1, 1);
+                });
 
             Logger.Info($"[TextureRefine] GPU baked {bakeCount} keyframes total (pass 1)");
 
@@ -733,77 +661,14 @@ namespace Genesis.RoomScan
                 compute.SetInt("_MaxViews", Mathf.Max(1, maxViewsPerTexel));
 
                 ReportStatus("Multi-view blending (pass 2)...");
-                int blendCount = 0;
-
-                for (int ki = 0; ki < total; ki++)
-                {
-                    var kf = metaList[ki];
-                    if (string.IsNullOrEmpty(kf.JpgPath)) continue;
-
-                    byte[] jpgBytes;
-                    try { jpgBytes = await ReadFileAsync(kf.JpgPath); }
-                    catch { continue; }
-
-                    var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    if (!ImageConversion.LoadImage(tex, jpgBytes))
+                int blendCount = await ProcessKeyframesGpuAsync(
+                    metaList, compute, kClear, kDepth, origTriCount, accumR, "Multi-view blend...",
+                    (tex, kf, depth) =>
                     {
-                        UnityEngine.Object.Destroy(tex);
-                        continue;
-                    }
-                    kf.Width = tex.width;
-                    kf.Height = tex.height;
-
-                    Color32[] colors = tex.GetPixels32();
-                    UnityEngine.Object.Destroy(tex);
-
-                    int imgW = kf.Width, imgH = kf.Height;
-                    int imgPixels = imgW * imgH;
-
-                    if (depthBuf == null || depthBuf.count != imgPixels)
-                    {
-                        depthBuf?.Release();
-                        depthBuf = new ComputeBuffer(imgPixels, 4);
-                        kfPixelBuf?.Release();
-                        kfPixelBuf = new ComputeBuffer(imgPixels, 4);
-                    }
-                    kfPixelBuf.SetData(colors);
-
-                    int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
-                    int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
-                    float cropX = (sw - kf.Width) * 0.5f;
-                    float cropY = (sh - kf.Height) * 0.5f;
-                    Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
-
-                    compute.SetMatrix("_ViewMat", viewMat);
-                    compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
-                    compute.SetFloat("_Fx", kf.Fx);
-                    compute.SetFloat("_Fy", kf.Fy);
-                    compute.SetFloat("_Cx", kf.Cx);
-                    compute.SetFloat("_Cy", kf.Cy);
-                    compute.SetFloat("_CropX", cropX);
-                    compute.SetFloat("_CropY", cropY);
-                    compute.SetInt("_ImgW", imgW);
-                    compute.SetInt("_ImgH", imgH);
-                    BindBodyCapsules(compute, kf);
-
-                    compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
-                    compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
-                    compute.SetBuffer(kAccum, "_DepthBuf", depthBuf);
-                    compute.SetBuffer(kAccum, "_KfPixels", kfPixelBuf);
-
-                    compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
-                    compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
-                    compute.Dispatch(kAccum, (outTriCount + 63) / 64, 1, 1);
-
-                    blendCount++;
-                    if (blendCount % 20 == 0 || blendCount < 3)
-                    {
-                        ReportStatus($"Multi-view blend... {blendCount}/{total}");
-                        Logger.Info($"[TextureRefine] Blend pass keyframe {blendCount}/{total}");
-                    }
-
-                    await Task.Yield();
-                }
+                        compute.SetBuffer(kAccum, "_DepthBuf", depth);
+                        compute.SetTexture(kAccum, "_KfTex", tex);
+                        compute.Dispatch(kAccum, (outTriCount + 63) / 64, 1, 1);
+                    });
 
                 Logger.Info($"[TextureRefine] Blend pass 2 complete: {blendCount} keyframes");
 
@@ -938,7 +803,6 @@ namespace Genesis.RoomScan
             origPosBuf.Release(); origIdxBuf.Release();
             outPosBuf.Release(); outNormBuf.Release(); outIdxBuf.Release();
             rawUVBuf.Release(); scoreBuf.Release(); atlasBuf.Release();
-            depthBuf?.Release(); kfPixelBuf?.Release();
 
             ReportStatus("Done");
             Logger.Info($"[TextureRefine] GPU compute bake complete: {atlasW}x{atlasH} atlas");
@@ -957,6 +821,175 @@ namespace Genesis.RoomScan
 #else
             return await Task.Run(() => File.ReadAllBytes(path));
 #endif
+        }
+
+        static Task WaitGpuAsync(ComputeBuffer buf)
+        {
+            if (buf == null) return Task.CompletedTask;
+            var tcs = new TaskCompletionSource<bool>();
+            AsyncGPUReadback.Request(buf, 4, 0, _ => tcs.TrySetResult(true));
+            return tcs.Task;
+        }
+
+        static Texture2D MakeKfTexture()
+        {
+            var tex = new Texture2D(8, 8, TextureFormat.RGBA32, false, true)
+            {
+                filterMode = FilterMode.Point,
+                wrapMode = TextureWrapMode.Clamp,
+            };
+            return tex;
+        }
+
+        /// <summary>
+        /// One keyframe per compositor frame. Dispatch, then decode the next
+        /// JPEG on this thread while that GPU work runs, then fence so
+        /// compute cannot pile up on the compositor. Two Texture2D slots so
+        /// LoadImage never stomps a texture the previous dispatch still reads.
+        /// <paramref name="fenceBuf"/> is whatever the shade kernel writes
+        /// (atlas or accum) — fencing depth only would race the bake.
+        /// </summary>
+        async Task<int> ProcessKeyframesGpuAsync(
+            System.Collections.Generic.List<Keyframe> metaList,
+            ComputeShader compute,
+            int kClear, int kDepth,
+            int origTriCount,
+            ComputeBuffer fenceBuf,
+            string statusPrefix,
+            System.Action<Texture2D, Keyframe, ComputeBuffer> shade)
+        {
+            int First(int from)
+            {
+                for (int i = from; i < metaList.Count; i++)
+                    if (!string.IsNullOrEmpty(metaList[i].JpgPath)) return i;
+                return -1;
+            }
+
+            var slots = new[] { MakeKfTexture(), MakeKfTexture() };
+            int baked = 0;
+            ComputeBuffer depthBuf = null;
+            Task<byte[]> prefetch = null;
+            int prefetchIndex = -1;
+
+            void KickPrefetch(int ki)
+            {
+                prefetch = null;
+                prefetchIndex = -1;
+                int n = First(ki);
+                if (n < 0) return;
+                prefetchIndex = n;
+                prefetch = ReadFileAsync(metaList[n].JpgPath);
+            }
+
+            async Task<bool> Decode(int ki, Texture2D tex)
+            {
+                byte[] jpg;
+                try
+                {
+                    if (prefetchIndex == ki && prefetch != null)
+                        jpg = await prefetch;
+                    else
+                        jpg = await ReadFileAsync(metaList[ki].JpgPath);
+                }
+                catch { return false; }
+
+                prefetch = null;
+                prefetchIndex = -1;
+                if (!ImageConversion.LoadImage(tex, jpg)) return false;
+                tex.filterMode = FilterMode.Point;
+                tex.wrapMode = TextureWrapMode.Clamp;
+                var kf = metaList[ki];
+                kf.Width = tex.width;
+                kf.Height = tex.height;
+                metaList[ki] = kf;
+                return true;
+            }
+
+            void Dispatch(Texture2D tex, Keyframe kf)
+            {
+                int imgW = kf.Width, imgH = kf.Height;
+                int imgPixels = imgW * imgH;
+                if (depthBuf == null || depthBuf.count != imgPixels)
+                {
+                    depthBuf?.Release();
+                    depthBuf = new ComputeBuffer(imgPixels, 4);
+                }
+
+                int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
+                int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
+                float cropX = (sw - kf.Width) * 0.5f;
+                float cropY = (sh - kf.Height) * 0.5f;
+                Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+
+                compute.SetMatrix("_ViewMat", viewMat);
+                compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
+                compute.SetFloat("_Fx", kf.Fx);
+                compute.SetFloat("_Fy", kf.Fy);
+                compute.SetFloat("_Cx", kf.Cx);
+                compute.SetFloat("_Cy", kf.Cy);
+                compute.SetFloat("_CropX", cropX);
+                compute.SetFloat("_CropY", cropY);
+                compute.SetInt("_ImgW", imgW);
+                compute.SetInt("_ImgH", imgH);
+                BindBodyCapsules(compute, kf);
+
+                compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
+                compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
+                compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
+                compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
+                shade(tex, kf, depthBuf);
+            }
+
+            try
+            {
+                int i = First(0);
+                if (i < 0) return 0;
+                KickPrefetch(i);
+                while (i >= 0 && !await Decode(i, slots[0]))
+                {
+                    i = First(i + 1);
+                    if (i >= 0) KickPrefetch(i);
+                }
+                if (i < 0) return 0;
+                KickPrefetch(i + 1);
+
+                int slot = 0;
+                while (i >= 0)
+                {
+                    Dispatch(slots[slot], metaList[i]);
+                    baked++;
+                    if (baked % 20 == 0 || baked < 3)
+                    {
+                        ReportStatus($"{statusPrefix} {baked}/{metaList.Count}");
+                        Logger.Info($"[TextureRefine] {statusPrefix} {baked}/{metaList.Count}");
+                    }
+
+                    // Fence this dispatch, then decode N+1 into the other
+                    // slot so LoadImage cannot stomp a texture the GPU is
+                    // still sampling. Prefetch N+2 while that GPU work runs.
+                    var gpu = WaitGpuAsync(fenceBuf);
+                    int next = First(i + 1);
+                    int nextSlot = 1 - slot;
+                    while (next >= 0 && !await Decode(next, slots[nextSlot]))
+                        next = First(next + 1);
+                    if (next >= 0)
+                        KickPrefetch(next + 1);
+                    await gpu;
+                    await Task.Yield();
+
+                    if (next < 0) break;
+                    i = next;
+                    slot = nextSlot;
+                }
+            }
+            finally
+            {
+                for (int s = 0; s < slots.Length; s++)
+                    if (slots[s] != null) UnityEngine.Object.Destroy(slots[s]);
+                depthBuf?.Release();
+            }
+
+            return baked;
         }
 
         static Task<byte[]> ReadbackComputeBufferAsync(ComputeBuffer buffer, int elementCount)
