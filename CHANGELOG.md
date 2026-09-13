@@ -62,6 +62,13 @@ All notable changes to this package are documented here. The format follows
 
 ### Added
 
+- **Refinement's first and last frames.** The mesh readback requested the
+  extractor buffers' full capacity (tens of MB for a few MB of mesh) and
+  parsed them on the main thread — a ~100 ms frame; it now reads
+  `vertCount × stride` / `idxCount × 4` and parses on a worker. The
+  refined atlas, normal map and mesh are applied over three frames with
+  tangents computed on a worker (`TextureRefinement.ComputeTangents`)
+  instead of `Mesh.RecalculateTangents` after two 19 MB uploads in one frame.
 - **`MatchShift` is one thread group per candidate shift** (256 threads
   striding the low-res image, groupshared reduction). It was one thread
   per shift walking all 76 800 pixels alone — 169 serial 77 k-iteration

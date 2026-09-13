@@ -202,6 +202,7 @@ namespace Genesis.RoomScan
             ReportStatus("Reading mesh from GPU...");
             MeshExtractor.Instance?.ExtractForAuthoring();
             var (positions, normals, colors, indices) = await ReadbackMeshAsync();
+            _profile?.Frame();   // the extraction + readback frame lands on this stage, not the next
             readScope?.Dispose();
             if (positions == null || positions.Length == 0)
                 throw new InvalidOperationException("Mesh readback returned no vertices");
@@ -310,17 +311,24 @@ namespace Genesis.RoomScan
         //  MESH READBACK
         // ═══════════════════════════════════════════════════════════════
 
-        static Task<byte[]> ReadbackBytesAsync(GraphicsBuffer buffer)
+        /// <summary>Read back the first <paramref name="byteCount"/> bytes (0 = whole buffer).
+        /// The extractor's buffers are sized to a voxel budget, tens of MB; the
+        /// mesh in them is a few MB. Reading the capacity was a 100 ms frame.</summary>
+        static Task<byte[]> ReadbackBytesAsync(GraphicsBuffer buffer, int byteCount = 0)
         {
             var tcs = new System.Threading.Tasks.TaskCompletionSource<byte[]>();
-            AsyncGPUReadback.Request(buffer, request =>
+            System.Action<AsyncGPUReadbackRequest> onDone = request =>
             {
                 if (request.hasError) { tcs.SetResult(null); return; }
                 var native = request.GetData<byte>();
                 byte[] managed = new byte[native.Length];
                 NativeArray<byte>.Copy(native, managed, native.Length);
                 tcs.SetResult(managed);
-            });
+            };
+            if (byteCount > 0)
+                AsyncGPUReadback.Request(buffer, byteCount, 0, onDone);
+            else
+                AsyncGPUReadback.Request(buffer, onDone);
             return tcs.Task;
         }
 
@@ -355,55 +363,54 @@ namespace Genesis.RoomScan
                 return (null, null, null, null);
             }
 
-            byte[] vertData = await ReadbackBytesAsync(gpuSN.VertexBuffer);
-            if (vertData == null)
+            vertCount = Mathf.Min(vertCount, gpuSN.VertexBuffer.count);
+            idxCount = Mathf.Min(idxCount, gpuSN.IndexBuffer.count);
+
+            var vertTask = ReadbackBytesAsync(gpuSN.VertexBuffer, vertCount * VertStride);
+            var idxTask = ReadbackBytesAsync(gpuSN.IndexBuffer, idxCount * 4);
+            byte[] vertData = await vertTask;
+            byte[] idxData = await idxTask;
+            if (vertData == null || idxData == null)
             {
-                Logger.Error("[TextureRefine] Vertex readback failed");
+                Logger.Error("[TextureRefine] Mesh readback failed");
                 return (null, null, null, null);
             }
 
-            byte[] idxData = await ReadbackBytesAsync(gpuSN.IndexBuffer);
-            if (idxData == null)
+            // Parse on a worker: a few MB of BitConverter is still a frame's worth.
+            Vector3[] positions = null, normals = null;
+            Color32[] colors = null;
+            int[] indices = null;
+            await Task.Run(() =>
             {
-                Logger.Error("[TextureRefine] Index readback failed");
-                return (null, null, null, null);
-            }
+                int vc = Mathf.Min(vertCount, vertData.Length / VertStride);
+                int ic = Mathf.Min(idxCount, idxData.Length / 4);
+                indices = new int[ic];
+                Buffer.BlockCopy(idxData, 0, indices, 0, ic * 4);
 
-            int bufferCap = vertData.Length / VertStride;
-            if (vertCount > bufferCap) vertCount = bufferCap;
+                positions = new Vector3[vc];
+                normals = new Vector3[vc];
+                colors = new Color32[vc];
+                for (int i = 0; i < vc; i++)
+                {
+                    int off = i * VertStride;
+                    positions[i] = new Vector3(
+                        BitConverter.ToSingle(vertData, off + VertPos),
+                        BitConverter.ToSingle(vertData, off + VertPos + 4),
+                        BitConverter.ToSingle(vertData, off + VertPos + 8));
+                    normals[i] = new Vector3(
+                        BitConverter.ToSingle(vertData, off + VertNorm),
+                        BitConverter.ToSingle(vertData, off + VertNorm + 4),
+                        BitConverter.ToSingle(vertData, off + VertNorm + 8));
+                    uint packed = BitConverter.ToUInt32(vertData, off + VertPacked);
+                    colors[i] = new Color32(
+                        (byte)(packed & 0xFF),
+                        (byte)((packed >> 8) & 0xFF),
+                        (byte)((packed >> 16) & 0xFF),
+                        255);
+                }
+            });
 
-            int idxCap = idxData.Length / 4;
-            if (idxCount > idxCap) idxCount = idxCap;
-
-            // Parse indices
-            int[] indices = new int[idxCount];
-            Buffer.BlockCopy(idxData, 0, indices, 0, idxCount * 4);
-
-            // Parse GPU vertices
-            var positions = new Vector3[vertCount];
-            var normals = new Vector3[vertCount];
-            var colors = new Color32[vertCount];
-
-            for (int i = 0; i < vertCount; i++)
-            {
-                int off = i * VertStride;
-                positions[i] = new Vector3(
-                    BitConverter.ToSingle(vertData, off + VertPos),
-                    BitConverter.ToSingle(vertData, off + VertPos + 4),
-                    BitConverter.ToSingle(vertData, off + VertPos + 8));
-                normals[i] = new Vector3(
-                    BitConverter.ToSingle(vertData, off + VertNorm),
-                    BitConverter.ToSingle(vertData, off + VertNorm + 4),
-                    BitConverter.ToSingle(vertData, off + VertNorm + 8));
-                uint packed = BitConverter.ToUInt32(vertData, off + VertPacked);
-                colors[i] = new Color32(
-                    (byte)(packed & 0xFF),
-                    (byte)((packed >> 8) & 0xFF),
-                    (byte)((packed >> 16) & 0xFF),
-                    255);
-            }
-
-            Logger.Info($"[TextureRefine] Readback complete: {vertCount} verts, {idxCount / 3} tris");
+            Logger.Info($"[TextureRefine] Readback complete: {positions.Length} verts, {indices.Length / 3} tris");
             return (positions, normals, colors, indices);
         }
 
@@ -2148,6 +2155,43 @@ namespace Genesis.RoomScan
             Logger.Info($"[TextureRefine] Post-bake simplify: {result.Indices.Length / 3} tris " +
                         $"(was {source.Indices.Length / 3}, ratio={ratio:F2}) in {sw.ElapsedMilliseconds} ms (worker)");
             return result;
+        }
+
+        /// <summary>
+        /// Per-vertex tangents (xyz + handedness) for a normal-mapped mesh,
+        /// Lengyel's method, on any thread. <c>Mesh.RecalculateTangents</c> is
+        /// main-thread only and cost a frame on the refined mesh.
+        /// </summary>
+        internal static Vector4[] ComputeTangents(Vector3[] pos, Vector3[] nrm, Vector2[] uv, int[] idx)
+        {
+            int n = pos.Length;
+            var tan1 = new Vector3[n];
+            var tan2 = new Vector3[n];
+            for (int t = 0; t + 2 < idx.Length; t += 3)
+            {
+                int i0 = idx[t], i1 = idx[t + 1], i2 = idx[t + 2];
+                Vector3 e1 = pos[i1] - pos[i0], e2 = pos[i2] - pos[i0];
+                Vector2 d1 = uv[i1] - uv[i0], d2 = uv[i2] - uv[i0];
+                float det = d1.x * d2.y - d2.x * d1.y;
+                if (Mathf.Abs(det) < 1e-12f) continue;
+                float r = 1f / det;
+                Vector3 sdir = (e1 * d2.y - e2 * d1.y) * r;
+                Vector3 tdir = (e2 * d1.x - e1 * d2.x) * r;
+                tan1[i0] += sdir; tan1[i1] += sdir; tan1[i2] += sdir;
+                tan2[i0] += tdir; tan2[i1] += tdir; tan2[i2] += tdir;
+            }
+            var tangents = new Vector4[n];
+            for (int i = 0; i < n; i++)
+            {
+                Vector3 nv = nrm[i], tv = tan1[i];
+                Vector3 ortho = tv - nv * Vector3.Dot(nv, tv);
+                if (ortho.sqrMagnitude < 1e-12f)
+                    ortho = Vector3.Cross(nv, Mathf.Abs(nv.x) < 0.9f ? Vector3.right : Vector3.up);
+                ortho.Normalize();
+                float w = Vector3.Dot(Vector3.Cross(nv, tv), tan2[i]) < 0f ? -1f : 1f;
+                tangents[i] = new Vector4(ortho.x, ortho.y, ortho.z, w);
+            }
+            return tangents;
         }
 
         void ReportStatus(string status)

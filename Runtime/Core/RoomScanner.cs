@@ -1308,7 +1308,7 @@ namespace Genesis.RoomScan
                     toRender = simplified;
                 }
 
-                ApplyRefinedAtlas(toRender);
+                await ApplyRefinedAtlasAsync(toRender);
                 HasRefinedTexture = true;
                 if (PresentRefinedWhenReady)
                     SetRenderMode(ScanRenderMode.Refined);
@@ -1601,8 +1601,16 @@ namespace Genesis.RoomScan
                 _refinedRenderer.material.mainTexture = _refinedAtlasTexture;
         }
 
-        private void ApplyRefinedAtlas(RefinedTextureResult result)
+        /// <summary>
+        /// Build the refined textures and mesh over a few frames: two 19 MB
+        /// texture uploads, a mesh upload and a tangent pass in one frame was
+        /// the hitch at the end of every refinement. Tangents come from a worker.
+        /// </summary>
+        private async Task ApplyRefinedAtlasAsync(RefinedTextureResult result)
         {
+            var tangentTask = Task.Run(() => TextureRefinement.ComputeTangents(
+                result.Positions, result.Normals, result.UVs, result.Indices));
+
             if (_refinedAtlasTexture != null)
                 Destroy(_refinedAtlasTexture);
 
@@ -1610,6 +1618,7 @@ namespace Genesis.RoomScan
                 TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
             _refinedAtlasTexture.SetPixelData(result.AtlasPixels, 0);
             _refinedAtlasTexture.Apply();
+            await Task.Yield();
 
             if (_normalMapTexture != null)
                 Destroy(_normalMapTexture);
@@ -1620,17 +1629,19 @@ namespace Genesis.RoomScan
                     TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear };
                 _normalMapTexture.SetPixelData(result.NormalPixels, 0);
                 _normalMapTexture.Apply();
+                await Task.Yield();
             }
 
             if (_refinedMesh == null)
                 _refinedMesh = new Mesh { name = "RefinedScanMesh", indexFormat = IndexFormat.UInt32 };
 
+            var tangents = await tangentTask;
             _refinedMesh.Clear();
             _refinedMesh.SetVertices(result.Positions);
             _refinedMesh.SetNormals(result.Normals);
             _refinedMesh.SetUVs(0, result.UVs);
+            _refinedMesh.SetTangents(tangents);
             _refinedMesh.SetTriangles(result.Indices, 0);
-            _refinedMesh.RecalculateTangents();
             _refinedMesh.RecalculateBounds();
 
             Logger.Info($"Refined mesh applied: " +
