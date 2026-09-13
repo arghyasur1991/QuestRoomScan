@@ -293,9 +293,11 @@ struct TexelView
     float2 photoPx;   // continuous photo position
 };
 
-bool ProjectTexel(int idx, out TexelView v)
+bool ProjectTexel(int idx, uint2 texel, out TexelView v)
 {
-    v = (TexelView)0;
+    v.tri = -1;
+    v.score = 0;
+    v.photoPx = float2(0, 0);
     uint t1 = _TexelTri[idx];
     if (t1 == 0) return false;
     int t = (int)t1 - 1;
@@ -309,7 +311,7 @@ bool ProjectTexel(int idx, out TexelView v)
     float denom = (uv1.y - uv2.y) * (uv0.x - uv2.x) + (uv2.x - uv1.x) * (uv0.y - uv2.y);
     if (abs(denom) < 1e-8) return false;
     float invD = 1.0 / denom;
-    float2 d = float2(idx % _AtlasW, idx / _AtlasW) - uv2;
+    float2 d = float2(texel) - uv2;
     float bw0 = ((uv1.y - uv2.y) * d.x + (uv2.x - uv1.x) * d.y) * invD;
     float bw1 = ((uv2.y - uv0.y) * d.x + (uv0.x - uv2.x) * d.y) * invD;
     float bw2 = 1.0 - bw0 - bw1;
@@ -366,13 +368,13 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
     int idx = (int)id.x;
     if (idx >= _AtlasW * _AtlasH) return;
 
+    uint2 texel = uint2((uint)idx % (uint)_AtlasW, (uint)idx / (uint)_AtlasW);
     TexelView v;
-    if (!ProjectTexel(idx, v)) return;
+    if (!ProjectTexel(idx, texel, v)) return;
 
     if (_ChartCount > 0)
     {
-        int x = idx % _AtlasW, y = idx / _AtlasW;
-        if ((x & 3) == 0 && (y & 3) == 0)
+        if ((texel.x & 3u) == 0u && (texel.y & 3u) == 0u)
         {
             int chart = _TriChart[v.tri];
             if (chart >= 0 && chart < _ChartCount)
@@ -534,12 +536,13 @@ void MatchShift(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 
     float sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
     uint count = 0;
-    int pixels = _ImgW * _ImgH;
-    for (int p = (int)gi; p < pixels; p += MATCH_THREADS)
+    uint pixels = (uint)(_ImgW * _ImgH);
+    uint imgW = (uint)_ImgW;
+    for (uint p = gi; p < pixels; p += MATCH_THREADS)
     {
         uint v = _ViewLum[p];
         if ((v & 0x80000000u) == 0) continue;
-        int x = p % _ImgW, y = p / _ImgW;
+        int x = (int)(p % imgW), y = (int)(p / imgW);
         int kx = x + ox, ky = y + oy;
         if (kx < 0 || kx >= _ImgW || ky < 0 || ky >= _ImgH) continue;
         float a = (float)LumOf(v);
@@ -751,8 +754,9 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
     float bestS = asfloat(_BestScore[idx]);
     if (bestS <= 0) return;
 
+    uint2 texel = uint2((uint)idx % (uint)_AtlasW, (uint)idx / (uint)_AtlasW);
     TexelView v;
-    if (!ProjectTexel(idx, v)) return;
+    if (!ProjectTexel(idx, texel, v)) return;
 
     // Admission is a ramp, not a bar: a view's weight rises from 0 at
     // _BlendMinFraction × best to full at best. Where the best view
