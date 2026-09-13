@@ -25,10 +25,13 @@ All notable changes to this package are documented here. The format follows
   shade in one submission. The compositor-frame splitting, per-step fences
   and idle frames (`gpuIdleFramesPerStep`) from 1.1 are removed. Capture-side
   encode is the thread-safe `EncodeArrayToJPG` on a worker.
-- **Simplification is post-bake again** (`meshopt_simplifyWithAttributes`,
-  UV-locked borders, `simplified_mesh.bin`), as in 1.1. Simplifying before
-  the unwrap did not visibly help alignment and made the unwrap the slowest
-  stage of the refinement.
+- **Simplification stage is a toggle.** `simplifyBeforeUnwrap` (default on):
+  geometry-only `meshopt_simplify` before xatlas, so the unwrap and both
+  bake passes run on the reduced mesh (the unwrap scales with input
+  triangles: 66k → 72 s, 29k → 15 s on Quest 3; dense mesh still drives
+  occlusion). Off: the 1.1 path — unwrap the dense mesh, simplify after the
+  bake with UV-locked borders into `simplified_mesh.bin`. The fps collapse
+  seen with the pre-unwrap variant was xatlas taking every core (below).
 - **Seam levelling replaces `BlendSeams`.** The two atlas sides of every
   UV seam edge are paired by position (worker CPU), pinned to their mean
   (`SeamDelta`) and the correction diffused into each chart
@@ -59,6 +62,17 @@ All notable changes to this package are documented here. The format follows
 
 ### Added
 
+- **xatlas threading control.** `xatlas.cpp` gains `SetThreading(maxThreads,
+  workerNice)` (C API `xatlas_set_threading`); `TextureRefinement.xatlasThreads`
+  (3) and `xatlasThreadNice` (10) keep the unwrap off five of Quest 3's eight
+  cores and below the engine's threads in priority. xatlas took every core
+  by default and the app ran at 10-20 fps for the length of the unwrap.
+  Android and macOS plugins rebuilt; Windows / Linux binaries need a rebuild
+  from the wizard (the call is guarded until then).
+- **Bake decode prefetch depth 3.** One decode in flight left the bake
+  waiting on the worker two frames out of three (37 ms decode vs a
+  one-frame keyframe); registration's two readbacks are requested
+  together instead of awaited in turn.
 - **Refinement profile.** `profileRefinement` (default on) ends every
   refinement with one `[TextureRefine][Profile]` block: wall time per
   stage, per-keyframe main-thread and worker time, the compositor frames

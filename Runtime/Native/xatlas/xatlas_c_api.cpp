@@ -1,6 +1,38 @@
 #include "xatlas.h"
 #include "../meshoptimizer/meshoptimizer.h"
 #include <cstring>
+#include <cerrno>
+#if defined(__linux__) || defined(__ANDROID__)
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
+namespace {
+static int g_callerNice = 0;
+
+// The thread that calls Generate runs tasks too (TaskScheduler::wait), so it
+// gets the same nice as the workers for the duration of the call.
+struct ScopedCallerNice {
+    int previous = 0;
+    bool applied = false;
+    ScopedCallerNice() {
+#if defined(__linux__) || defined(__ANDROID__)
+        if (g_callerNice != 0) {
+            id_t tid = (id_t)syscall(SYS_gettid);
+            errno = 0;
+            previous = getpriority(PRIO_PROCESS, tid);
+            applied = setpriority(PRIO_PROCESS, tid, g_callerNice) == 0;
+        }
+#endif
+    }
+    ~ScopedCallerNice() {
+#if defined(__linux__) || defined(__ANDROID__)
+        if (applied) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), previous);
+#endif
+    }
+};
+}
 
 #if defined(_WIN32)
 #define XATLAS_EXPORT __declspec(dllexport)
@@ -16,6 +48,11 @@ XATLAS_EXPORT xatlas::Atlas* xatlas_create() {
 
 XATLAS_EXPORT void xatlas_destroy(xatlas::Atlas* atlas) {
     if (atlas) xatlas::Destroy(atlas);
+}
+
+XATLAS_EXPORT void xatlas_set_threading(int maxThreads, int workerNice) {
+    g_callerNice = workerNice;
+    xatlas::SetThreading(maxThreads > 0 ? (uint32_t)maxThreads : 0u, workerNice);
 }
 
 XATLAS_EXPORT int xatlas_add_mesh(
@@ -44,6 +81,7 @@ XATLAS_EXPORT void xatlas_generate(xatlas::Atlas* atlas, int maxResolution) {
     packOpts.padding = 2;
     packOpts.bilinear = true;
     packOpts.bruteForce = false;
+    ScopedCallerNice nice;
     xatlas::Generate(atlas, chartOpts, packOpts);
 }
 
@@ -122,6 +160,7 @@ XATLAS_EXPORT void xatlas_generate_opts(
     po.rotateChartsToAxis  = rotateChartsToAxis != 0;
     po.rotateCharts        = rotateCharts != 0;
 
+    ScopedCallerNice nice;
     xatlas::Generate(atlas, co, po);
 }
 

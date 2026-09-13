@@ -1301,7 +1301,7 @@ namespace Genesis.RoomScan
                 LastSimplifiedResult = null;
 
                 var toRender = original;
-                if (_textureRefinement.postBakeSimplificationRatio < 1f)
+                if (_textureRefinement.postBakeSimplificationRatio < 1f && !_textureRefinement.simplifyBeforeUnwrap)
                 {
                     var simplified = await _textureRefinement.SimplifyRefinedMeshAsync(original);
                     LastSimplifiedResult = simplified;

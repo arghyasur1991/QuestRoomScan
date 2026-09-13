@@ -928,7 +928,13 @@ Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-tri
 
 Post-processing pipeline that produces a sharp UV-mapped texture atlas from saved keyframes, replacing the blurry triplanar vertex-color texturing. Uses the same keyframes collected for Gaussian Splat training (§13.1).
 
-### 15.1 Post-Bake Mesh Simplification (optional, meshoptimizer)
+### 15.1 Mesh Simplification (optional, meshoptimizer)
+
+Two placements, `TextureRefinement.simplifyBeforeUnwrap`:
+
+- **Before the unwrap (default).** `meshopt_simplify` (geometry only, vertices a subset of the input) reduces the extracted mesh to `postBakeSimplificationRatio`; xatlas and both bake passes run on the result and the dense mesh still builds the per-keyframe occlusion depth. The unwrap is the slowest refinement stage and scales with input triangles — 66k tris took 72 s on Quest 3, 29k took 15 s — so this is where the ratio buys time. One refined mesh; no `simplified_mesh.bin`.
+- **After the bake.** The 1.1 path below.
+
 
 After atlas baking, the refined mesh can be optionally simplified using [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplifyWithAttributes`):
 
@@ -941,6 +947,9 @@ After atlas baking, the refined mesh can be optionally simplified using [meshopt
 > Running simplification *after* baking (instead of before) preserves atlas quality: the UV unwrap and atlas bake operate on the full-resolution mesh, and only the final game-ready mesh is reduced. This replaces the old pre-bake decimation which degraded baking quality.
 
 ### 15.2 UV Unwrapping (xatlas)
+
+**Threads.** xatlas's task scheduler takes `hardware_concurrency` threads by default — every core on Quest 3 — and its `wait()` spins the caller. During a 15-70 s unwrap that starves Unity's main and render threads: the headset fell to 10-20 fps for the whole stage. The bundled `xatlas.cpp` is patched with `xatlas::SetThreading(maxThreads, workerNice)` (C API `xatlas_set_threading`, read when the atlas is created): `TextureRefinement.xatlasThreads` (default **3**, incl. the calling worker) caps the scheduler and `xatlasThreadNice` (default **10**) sets a POSIX nice on the worker threads and, for the length of `Generate`, on the caller, so the engine's threads win any contended core. Older plugin binaries without the export fall back to every core (the P/Invoke is guarded).
+
 
 [xatlas](https://github.com/jpcy/xatlas) generates a UV atlas via native C++ P/Invoke:
 

@@ -986,7 +986,7 @@ namespace Genesis.RoomScan.Editor
                 {
                     float val = simplifyProp.floatValue;
                     bool configured = val < 1f;
-                    StatusRowOptional($"Post-bake simplification ({val:P0})", configured);
+                    StatusRowOptional($"Mesh simplification ({val:P0})", configured);
                 }
             }
 

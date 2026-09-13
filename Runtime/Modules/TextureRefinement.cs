@@ -90,11 +90,19 @@ namespace Genesis.RoomScan
         [Tooltip("Chart growth cost limit")]
         [Range(0.5f, 4f)]
         [SerializeField] internal float xatlasMaxCost = 1.5f;
+        [Tooltip("Threads xatlas may use for the unwrap, including the worker that calls it (0 = every core). xatlas defaults to all cores and a 66k-triangle unwrap on Quest 3 held them for over a minute — main and render threads starved and the app fell to 10-20 fps. 3 leaves five cores to the frame.")]
+        [Range(0, 8)]
+        [SerializeField] internal int xatlasThreads = 3;
+        [Tooltip("POSIX nice for the unwrap threads on Android (0 = normal, 19 = lowest). With a positive value the engine's threads win every contended core; the unwrap only takes what the frame leaves.")]
+        [Range(0, 19)]
+        [SerializeField] internal int xatlasThreadNice = 10;
 
-        [Header("Post-Bake Simplification")]
-        [Tooltip("Simplify after atlas baking to preserve UVs (1.0 = disabled, 0.5 = 50% triangles). Runs on a background thread.")]
+        [Header("Simplification")]
+        [Tooltip("Target triangle ratio for the refined mesh (1.0 = disabled, 0.5 = 50% triangles). Applied before the unwrap or after the bake, see below. Runs on a background thread.")]
         [Range(0.1f, 1f)]
         [SerializeField] internal float postBakeSimplificationRatio = 0.5f;
+        [Tooltip("On: simplify the geometry BEFORE the UV unwrap (meshopt_simplify), so xatlas and both bake passes run on the reduced mesh — the unwrap is the slowest refinement stage and scales with input triangles (66k tris: 72 s on Quest 3; 29k: 15 s). The dense mesh still builds the occlusion depth. Off: unwrap and bake the dense mesh, simplify after the bake with UV-locked borders (meshopt_simplifyWithAttributes), as in 1.1.")]
+        [SerializeField] internal bool simplifyBeforeUnwrap = true;
 
         [Header("Keyframe Registration")]
         [Tooltip("After the first bake pass, align each keyframe to the atlas rendered from its own " +
@@ -136,10 +144,26 @@ namespace Genesis.RoomScan
             _profile?.Frame();
         }
 
+        /// <summary>
+        /// Await a worker task while sampling every compositor frame it spans,
+        /// so a long native stage (xatlas, meshopt) shows in the profile as the
+        /// frames it cost the player rather than as a gap.
+        /// </summary>
+        async Task AwaitSampled(Task work)
+        {
+            if (_profile == null) { await work; return; }
+            while (!work.IsCompleted)
+                await NextFrame();
+            await work;   // rethrow
+        }
+
         public void OnModuleInitialize(RoomScanner scanner)
         {
             _scanner = scanner;
         }
+
+        /// <summary>Keyframe reads + decodes kept in flight ahead of the bake.</summary>
+        const int DecodePrefetchDepth = 3;
 
         // pos @ 0 is the extractor dump. prevPos @ 12 is presentation-only.
         const int VertStride = GPUSurfaceNets.VertexStride;
@@ -160,6 +184,8 @@ namespace Genesis.RoomScan
             opts.Resolution = (uint)atlasResolution;
             opts.MaxCost = xatlasMaxCost;
             opts.BlockAlign = useBlockAlign;
+            opts.MaxThreads = xatlasThreads;
+            opts.WorkerNice = xatlasThreadNice;
             return UnwrapMeshAsync(keyframeDir, keyframeRelocation, opts);
         }
 
@@ -182,6 +208,33 @@ namespace Genesis.RoomScan
             Vector3[] inNorm = normals;
             int[] inIdx = indices;
 
+            if (simplifyBeforeUnwrap && postBakeSimplificationRatio < 1f)
+            {
+                using var _ = _profile?.Stage("simplify") ?? default;
+                float ratio = Mathf.Clamp(postBakeSimplificationRatio, 0.05f, 1f);
+                ReportStatus($"Simplifying mesh ({ratio:P0})...");
+                Vector3[] sPos = null, sNorm = null;
+                int[] sIdx = null;
+                bool ok = false;
+                await AwaitSampled(Task.Run(() =>
+                {
+                    try
+                    {
+                        ok = XAtlasWrapper.SimplifyGeometry(positions, normals, indices, ratio, out sPos, out sNorm, out sIdx);
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Warning($"[TextureRefine] Pre-unwrap simplify unavailable ({e.Message}); unwrapping the dense mesh.");
+                    }
+                }));
+                if (ok)
+                {
+                    inPos = sPos;
+                    inNorm = sNorm;
+                    inIdx = sIdx;
+                }
+            }
+
             var unwrapScope = _profile?.Stage("xatlas");
             ReportStatus("UV unwrapping...");
             XAtlasWrapper.Result uvResult = default;
@@ -189,7 +242,7 @@ namespace Genesis.RoomScan
             Vector3[] outNorm = null;
             Vector2[] outUVs = null;
 
-            await Task.Run(() =>
+            await AwaitSampled(Task.Run(() =>
             {
                 float[] flatPos = new float[inPos.Length * 3];
                 float[] flatNorm = new float[inNorm.Length * 3];
@@ -220,7 +273,7 @@ namespace Genesis.RoomScan
                         uvResult.UVs[i * 2] / aw,
                         uvResult.UVs[i * 2 + 1] / ah);
                 }
-            });
+            }));
 
             if (uvResult.VertexCount == 0 || outPos == null)
                 throw new InvalidOperationException("xatlas produced no output vertices");
@@ -1128,29 +1181,39 @@ namespace Genesis.RoomScan
             var slots = new[] { MakeKfTexture(), MakeKfTexture() };
             ComputeBuffer depthBuf = null;
             int baked = 0;
-            int next = First(0);
-            Task<KeyframeImageDecoder.Decoded> pending =
-                next >= 0 ? KeyframeImageDecoder.ReadAndDecodeAsync(metaList[next].JpgPath) : null;
+
+            // A JPEG decode is ~37 ms on a Quest worker core and a keyframe's
+            // GPU work is one frame, so a single decode in flight left the
+            // bake waiting on the worker two frames out of three. Keep a few
+            // in flight; each holds one decoded frame (~5 MB) until consumed.
+            var pending = new System.Collections.Generic.Queue<(int index, Task<KeyframeImageDecoder.Decoded> task)>();
+            int nextToQueue = First(0);
+            void FillPrefetch()
+            {
+                while (nextToQueue >= 0 && pending.Count < DecodePrefetchDepth)
+                {
+                    pending.Enqueue((nextToQueue, KeyframeImageDecoder.ReadAndDecodeAsync(metaList[nextToQueue].JpgPath)));
+                    nextToQueue = First(nextToQueue + 1);
+                }
+            }
+            FillPrefetch();
 
             try
             {
                 int slot = 0;
                 var sw = new System.Diagnostics.Stopwatch();
-                while (next >= 0)
+                while (pending.Count > 0)
                 {
-                    int i = next;
+                    var (i, task) = pending.Dequeue();
+                    FillPrefetch();
+
                     KeyframeImageDecoder.Decoded img = null;
                     sw.Restart();
-                    bool waited = pending != null && !pending.IsCompleted;
-                    try { img = await pending; }
+                    bool waited = !task.IsCompleted;
+                    try { img = await task; }
                     catch (Exception e) { Logger.Warning($"[TextureRefine] Keyframe {i} unreadable: {e.Message}"); }
                     if (waited) _profile?.Frame();
                     double decodeWaitMs = sw.Elapsed.TotalMilliseconds;
-
-                    // Kick the next read + decode before touching the GPU so the
-                    // worker overlaps everything below and the next frame's wait.
-                    next = First(i + 1);
-                    pending = next >= 0 ? KeyframeImageDecoder.ReadAndDecodeAsync(metaList[next].JpgPath) : null;
 
                     var tex = slots[slot];
                     sw.Restart();
@@ -1205,9 +1268,9 @@ namespace Genesis.RoomScan
             }
             finally
             {
-                if (pending != null)
+                while (pending.Count > 0)
                 {
-                    try { (await pending)?.Dispose(); } catch { }
+                    try { (await pending.Dequeue().task)?.Dispose(); } catch { }
                 }
                 foreach (var t in slots)
                 {
@@ -1452,13 +1515,17 @@ namespace Genesis.RoomScan
                 compute.Dispatch(kGain, (lowPixels + 255) / 256, 1, 1);
             }
 
-            byte[] raw = await ReadbackComputeBufferAsync(s.MatchOut, side * side);
+            // Both readbacks are requested in the same frame so they land in
+            // the same frame; awaiting them in turn cost a round trip each.
+            var matchTask = ReadbackComputeBufferAsync(s.MatchOut, side * side);
+            var gainTask = gain ? ReadbackComputeBufferAsync(s.GainSums, 7) : null;
+            byte[] raw = await matchTask;
             var scores = new float[side * side];
             Buffer.BlockCopy(raw, 0, scores, 0, raw.Length);
 
             if (gain)
             {
-                byte[] graw = await ReadbackComputeBufferAsync(s.GainSums, 7);
+                byte[] graw = await gainTask;
                 var sums = new uint[7];
                 Buffer.BlockCopy(graw, 0, sums, 0, graw.Length);
                 // Need a real overlap and a photo that is not black.
@@ -2028,7 +2095,7 @@ namespace Genesis.RoomScan
         internal async Task<RefinedTextureResult> SimplifyRefinedMeshAsync(RefinedTextureResult source)
         {
             float ratio = postBakeSimplificationRatio;
-            if (ratio >= 1f) return source;
+            if (ratio >= 1f || simplifyBeforeUnwrap) return source;
             ratio = Mathf.Clamp(ratio, 0.05f, 1f);
 
             ReportStatus($"Simplifying baked mesh ({ratio:P0})...");

@@ -19,6 +19,7 @@ namespace Genesis.RoomScan
 
         [DllImport(LIB)] private static extern IntPtr xatlas_create();
         [DllImport(LIB)] private static extern void xatlas_destroy(IntPtr atlas);
+        [DllImport(LIB)] private static extern void xatlas_set_threading(int maxThreads, int workerNice);
         [DllImport(LIB)] private static extern int xatlas_add_mesh(
             IntPtr atlas,
             float[] positions, int positionStride,
@@ -50,6 +51,12 @@ namespace Genesis.RoomScan
         [DllImport(LIB)] private static extern void xatlas_get_chart_indices(
             IntPtr atlas, int meshIndex,
             int[] chartIndices, int maxVerts);
+
+        [DllImport(LIB)] private static extern int meshopt_simplify_mesh(
+            float[] positions, int vertexCount, int positionStride,
+            uint[] indices, int indexCount,
+            int targetIndexCount, float targetError,
+            uint[] outIndices, out float outError);
 
         [DllImport(LIB)] private static extern int meshopt_simplify_with_attrs(
             uint[] destination,
@@ -84,6 +91,15 @@ namespace Genesis.RoomScan
             public bool RotateChartsToAxis;
             public bool RotateCharts;
 
+            // Threading (host-side; applied when the atlas is created)
+            /// <summary>Scheduler threads including the caller; 0 = every core. xatlas
+            /// defaults to hardware concurrency, which starves a 72 Hz app's main and
+            /// render threads for the whole unwrap.</summary>
+            public int MaxThreads;
+            /// <summary>POSIX nice for the unwrap threads (Linux/Android; 0 = unchanged).
+            /// Positive values yield to the engine's threads whenever they contend.</summary>
+            public int WorkerNice;
+
             public static UnwrapOptions Default => new UnwrapOptions
             {
                 MaxChartArea          = 0f,
@@ -103,7 +119,9 @@ namespace Genesis.RoomScan
                 BlockAlign            = true,
                 BruteForce            = false,
                 RotateChartsToAxis    = true,
-                RotateCharts          = true
+                RotateCharts          = true,
+                MaxThreads            = 3,
+                WorkerNice            = 10
             };
         }
 
@@ -127,6 +145,9 @@ namespace Genesis.RoomScan
         public static Result Unwrap(float[] positions, float[] normals, int vertexCount,
             int[] indices, int indexCount, int maxResolution = 2048)
         {
+            var threading = UnwrapOptions.Default;
+            try { xatlas_set_threading(threading.MaxThreads, threading.WorkerNice); }
+            catch (EntryPointNotFoundException) { }
             IntPtr atlas = xatlas_create();
             try
             {
@@ -155,6 +176,8 @@ namespace Genesis.RoomScan
         public static Result Unwrap(float[] positions, float[] normals, int vertexCount,
             int[] indices, int indexCount, UnwrapOptions opts)
         {
+            try { xatlas_set_threading(Math.Max(0, opts.MaxThreads), opts.WorkerNice); }
+            catch (EntryPointNotFoundException) { /* plugin built before threading control; runs on every core */ }
             IntPtr atlas = xatlas_create();
             try
             {
@@ -220,6 +243,65 @@ namespace Genesis.RoomScan
         }
 
         private const uint MeshoptSimplifyLockBorder = 1;
+
+        /// <summary>
+        /// Geometry-only simplification (meshopt_simplify) for the mesh that
+        /// is about to be UV-unwrapped and baked. Vertices are a subset of the
+        /// input, so normals carry over by index. Returns false when meshopt
+        /// produced nothing usable; the caller keeps the input mesh.
+        /// </summary>
+        public static bool SimplifyGeometry(
+            Vector3[] positions, Vector3[] normals, int[] indices, float targetRatio,
+            out Vector3[] outPositions, out Vector3[] outNormals, out int[] outIndices,
+            float targetError = 1e-2f)
+        {
+            outPositions = positions;
+            outNormals = normals;
+            outIndices = indices;
+
+            int vertexCount = positions.Length;
+            int indexCount = indices.Length;
+            int targetIndexCount = Mathf.Max(3, Mathf.RoundToInt(indexCount * Mathf.Clamp01(targetRatio)));
+            targetIndexCount = (targetIndexCount / 3) * 3;
+            if (targetIndexCount >= indexCount) return false;
+
+            float[] flatPos = new float[vertexCount * 3];
+            for (int i = 0; i < vertexCount; i++)
+            {
+                flatPos[i * 3] = positions[i].x;
+                flatPos[i * 3 + 1] = positions[i].y;
+                flatPos[i * 3 + 2] = positions[i].z;
+            }
+            uint[] uIndices = new uint[indexCount];
+            for (int i = 0; i < indexCount; i++) uIndices[i] = (uint)indices[i];
+            uint[] result = new uint[indexCount];
+
+            int resultCount = meshopt_simplify_mesh(
+                flatPos, vertexCount, 12, uIndices, indexCount,
+                targetIndexCount, targetError, result, out float err);
+            if (resultCount < 3) return false;
+
+            bool[] used = new bool[vertexCount];
+            for (int i = 0; i < resultCount; i++) used[result[i]] = true;
+            int[] remap = new int[vertexCount];
+            int newCount = 0;
+            for (int i = 0; i < vertexCount; i++) remap[i] = used[i] ? newCount++ : -1;
+
+            outPositions = new Vector3[newCount];
+            outNormals = new Vector3[newCount];
+            for (int i = 0; i < vertexCount; i++)
+            {
+                if (!used[i]) continue;
+                outPositions[remap[i]] = positions[i];
+                outNormals[remap[i]] = normals[i];
+            }
+            outIndices = new int[resultCount];
+            for (int i = 0; i < resultCount; i++) outIndices[i] = remap[result[i]];
+
+            Logger.Info($"[MeshOpt] Pre-unwrap simplify {indexCount / 3} -> {resultCount / 3} tris " +
+                        $"({vertexCount} -> {newCount} verts, error {err:F4})");
+            return true;
+        }
 
         /// <summary>
         /// Post-bake mesh simplification using meshopt_simplifyWithAttributes (UV-preserving).

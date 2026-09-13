@@ -34,7 +34,7 @@ namespace Genesis.RoomScan
 
         readonly Stopwatch _clock = Stopwatch.StartNew();
         readonly List<(string name, double ms)> _stages = new();
-        readonly long _startManaged, _startGfx;
+        readonly long _startManaged, _startNative;
 
         // Per-keyframe main-thread buckets.
         double _decodeWait, _upload, _refine, _issue;
@@ -52,7 +52,7 @@ namespace Genesis.RoomScan
         public RefineProfile()
         {
             _startManaged = GC.GetTotalMemory(false);
-            _startGfx = UnityEngine.Profiling.Profiler.GetAllocatedMemoryForGraphicsDriver();
+            _startNative = UnityEngine.Profiling.Profiler.GetTotalAllocatedMemoryLong();
         }
 
         public double ElapsedMs => _clock.Elapsed.TotalMilliseconds;
@@ -118,11 +118,13 @@ namespace Genesis.RoomScan
               .Append(" over72Hz=").Append(_framesOverBudget)
               .Append(" hitches>").Append(HitchMs.ToString("F0")).Append("ms=").Append(_hitches);
             long managed = GC.GetTotalMemory(false);
-            long gfx = UnityEngine.Profiling.Profiler.GetAllocatedMemoryForGraphicsDriver();
+            // Unity's native heap (textures, buffers, meshes); the graphics-driver
+            // counter reads 0 on Vulkan Android.
+            long native = UnityEngine.Profiling.Profiler.GetTotalAllocatedMemoryLong();
             sb.Append(" managedMB=").Append((managed / 1048576.0).ToString("F0"))
               .Append('(').Append(((managed - _startManaged) / 1048576.0).ToString("+0;-0")).Append(')')
-              .Append(" gfxMB=").Append((gfx / 1048576.0).ToString("F0"))
-              .Append('(').Append(((gfx - _startGfx) / 1048576.0).ToString("+0;-0")).Append(')');
+              .Append(" nativeMB=").Append((native / 1048576.0).ToString("F0"))
+              .Append('(').Append(((native - _startNative) / 1048576.0).ToString("+0;-0")).Append(')');
             sb.Append('\n').Append("  stages:");
             foreach (var (name, ms) in _stages)
                 sb.Append(' ').Append(name).Append('=').Append(ms.ToString("F0"));
