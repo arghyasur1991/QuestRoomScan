@@ -24,14 +24,21 @@ namespace Genesis.RoomScan
         /// <summary>Singleton instance set in <see cref="Awake"/>.</summary>
         public static RoomAnchorManager Instance { get; private set; }
 
-        /// <summary>Raised once when the MRUK room scene has been loaded and the anchor transform is available.
-        /// Fires even when discovery finds zero rooms (see <see cref="HasSceneRooms"/>).</summary>
+        /// <summary>
+        /// Raised once when <c>LoadSceneFromDevice</c> has finished (including
+        /// zero rooms). Native discovery adds every room and scene anchor
+        /// (<c>OnSceneAnchorAdded</c>) <b>before</b>
+        /// <c>OnDiscoveryFinished</c>; MRUK then raises
+        /// <c>SceneLoadedEvent</c>. Wait here or on
+        /// <see cref="WaitUntilRoomReadyAsync"/>.
+        /// Later room/anchor changes are <c>RoomUpdatedEvent</c> /
+        /// <c>AnchorCreatedEvent</c> (forwarded as
+        /// <c>RoomScanSession.SceneAnchorsChanged</c>).
+        /// </summary>
         public event Action RoomReady;
 
-        /// <summary>True after the MRUK scene discovery attempt has finished
-        /// (including <c>NoRoomsFound</c>, permission failure, or a timeout
-        /// fallback). Hosts should wait on this rather than assuming
-        /// <see cref="RoomReady"/> always arrives via <c>SceneLoadedEvent</c>.</summary>
+        /// <summary>True after <see cref="RoomReady"/> — MRUK discovery
+        /// finished (including <c>NoRoomsFound</c>).</summary>
         public bool IsRoomLoaded { get; private set; }
 
         /// <summary>True when MRUK has at least one room after discovery.
@@ -104,18 +111,22 @@ namespace Genesis.RoomScan
             else
                 Logger.Info($"LoadSceneFromDevice finished result={loadTask.Result}");
 
-            if (!IsRoomLoaded)
-            {
+            // Discovery is done: native OnSceneAnchorAdded has already run
+            // for every wall and furniture volume, then OnDiscoveryFinished
+            // completed this task, then SceneLoadedEvent. No settle wait.
+            BindFloorFromRooms();
+            bool hasRooms = _mruk.Rooms != null && _mruk.Rooms.Count > 0;
+            if (!hasRooms)
                 Logger.Warning(
-                    "MRUK load finished without SceneLoadedEvent — treating as no rooms " +
+                    "MRUK load finished without rooms — treating as empty " +
                     "(IsRoomLoaded/RoomReady still signal so hosts are not stuck).");
-                MarkRoomReady(hasRooms: false);
-            }
+            MarkRoomReady(hasRooms);
         }
 
         /// <summary>
-        /// Completes when <see cref="IsRoomLoaded"/> is true. If discovery
-        /// already finished, returns a completed task.
+        /// Completes when MRUK <c>LoadSceneFromDevice</c> has finished.
+        /// All discovery anchors are already on the rooms. Completed
+        /// immediately if it already has.
         /// </summary>
         public System.Threading.Tasks.Task WaitUntilRoomReadyAsync()
         {
@@ -148,6 +159,7 @@ namespace Genesis.RoomScan
                 Logger.Error($"LoadSceneFromDevice reload failed: {ex.Message}");
             }
 
+            BindFloorFromRooms();
             bool hasRooms = _mruk.Rooms != null && _mruk.Rooms.Count > 0;
             MarkRoomReady(hasRooms);
             return HasSceneRooms;
@@ -175,10 +187,49 @@ namespace Genesis.RoomScan
             return await ReloadSceneFromDeviceAsync();
         }
 
+        int CountLoadedAnchors()
+        {
+            if (_mruk == null || _mruk.Rooms == null) return 0;
+            int n = 0;
+            for (int i = 0; i < _mruk.Rooms.Count; i++)
+            {
+                var room = _mruk.Rooms[i];
+                if (room != null && room.Anchors != null)
+                    n += room.Anchors.Count;
+            }
+            return n;
+        }
+
+        void BindFloorFromRooms()
+        {
+            if (_mruk == null || _mruk.Rooms == null || _mruk.Rooms.Count == 0)
+                return;
+
+            MRUKRoom room = RoomUnderstanding.Query.FindContaining(
+                                _mruk.Rooms,
+                                RoomUnderstanding.Query.HeadsetWorldPosition())
+                            ?? _mruk.Rooms[0];
+            if (room == null) return;
+
+            MRUKAnchor floorAnchor = null;
+            if (room.FloorAnchors != null && room.FloorAnchors.Count > 0)
+                floorAnchor = room.FloorAnchors[0];
+
+            _anchorTransform = floorAnchor != null ? floorAnchor.transform : room.transform;
+            if (floorAnchor != null)
+                Logger.Info($"Using floor MRUKAnchor '{floorAnchor.name}' " +
+                          $"(label={floorAnchor.Label}) pos={_anchorTransform.position}");
+            else if (_anchorTransform != null)
+                Logger.Warning($"No FloorAnchors — falling back to MRUKRoom.transform (pos={_anchorTransform.position})");
+        }
+
         void MarkRoomReady(bool hasRooms)
         {
             HasSceneRooms = hasRooms;
             IsRoomLoaded = true;
+            Logger.Info(
+                $"Room ready — rooms={(_mruk != null && _mruk.Rooms != null ? _mruk.Rooms.Count : 0)} " +
+                $"anchors={CountLoadedAnchors()}");
             if (_readySignaled)
                 return;
             _readySignaled = true;
@@ -197,44 +248,11 @@ namespace Genesis.RoomScan
 
         private void OnSceneLoaded()
         {
-            if (!enabled)
-                return;
-
-            if (_mruk.Rooms == null || _mruk.Rooms.Count == 0)
-            {
-                Logger.Warning("MRUK loaded but no rooms found");
-                MarkRoomReady(hasRooms: false);
-                return;
-            }
-
-            MRUKRoom room = RoomUnderstanding.Query.FindContaining(
-                                _mruk.Rooms,
-                                RoomUnderstanding.Query.HeadsetWorldPosition())
-                            ?? _mruk.Rooms[0];
-
-            Logger.Info($"MRUK rooms={_mruk.Rooms.Count}, " +
-                        $"headset-room anchors={room.Anchors?.Count ?? 0}");
-
-            MRUKAnchor floorAnchor = null;
-            if (room.FloorAnchors != null && room.FloorAnchors.Count > 0)
-                floorAnchor = room.FloorAnchors[0];
-
-            _anchorTransform = floorAnchor != null ? floorAnchor.transform : room.transform;
-            if (_anchorTransform == null)
-            {
-                Logger.Warning("No anchor transform");
-                MarkRoomReady(hasRooms: true);
-                return;
-            }
-
-            if (floorAnchor != null)
-                Logger.Info($"Using floor MRUKAnchor '{floorAnchor.name}' " +
-                          $"(label={floorAnchor.Label}) pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
-            else
-                Logger.Warning($"No FloorAnchors — falling back to MRUKRoom.transform (pos={_anchorTransform.position})");
-
-            Logger.Info($"Room ready — anchor pos={_anchorTransform.position}, rot={_anchorTransform.rotation.eulerAngles}");
-            MarkRoomReady(hasRooms: true);
+            // LoadSceneFromDevice already added every discovery anchor
+            // before this event. Bind the floor; RoomReady is signaled
+            // when that task completes, including NoRoomsFound.
+            if (!enabled) return;
+            BindFloorFromRooms();
         }
 
         // ─────────────────────────────────────────────────────────────

@@ -8,6 +8,12 @@ All notable changes to this package are documented here. The format follows
 
 ### Added
 
+- **`SceneFaceKind` on plane copy.** `CopyHeadsetRoomWallFaces(dest, kind)`
+  takes the labels the host wants (`Wall`, `Screen`, or both). Overlapping
+  rooms are unioned. Copied planes are uniform (no per-label size gate,
+  no `IsScreen` on the result). `RoomReady` is `LoadSceneFromDevice`
+  finished; `SceneAnchorsChanged` is later `RoomUpdated` / `AnchorCreated`.
+
 - **Anchor-frame mesh for persistent room content.**
   `ScanResult.AnchorFrameMesh` and `RoomScanPersistence.BuildAnchorFrameMesh`
   return the game mesh in the spatial-anchor frame, rebuilt from package

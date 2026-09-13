@@ -466,7 +466,7 @@ If an artifact's creation matrix is null (legacy data), it falls back to `baseMa
 MRUK's world-lock can reposition the `TrackingSpace` transform each frame. `DepthCapture.TrackingToWorld(Pose)` converts camera poses from tracking space to world space before passing them to `VolumeIntegrator`, `TriplanarCache`, and `KeyframeCollector`.
 
 ### Startup Sequence
-`RoomScanner.Start()` waits for `RoomAnchorManager.RoomReady` before beginning scanning or loading saved data.
+`RoomScanner.Start()` waits for `RoomAnchorManager.RoomReady` before beginning scanning or loading saved data. That event is MRUK `LoadSceneFromDevice` completing: native discovery adds every room and scene anchor (`OnSceneAnchorAdded`) and then `OnDiscoveryFinished` / `SceneLoadedEvent`. Hosts wait on `WaitUntilRoomReadyAsync` / `RoomReady`, then `CopyHeadsetRoomWallFaces(dest, SceneFaceKind)` for the labels they want. Later room/anchor changes are `RoomScanSession.SceneAnchorsChanged`.
 
 ## 11. Exclusion Zones
 

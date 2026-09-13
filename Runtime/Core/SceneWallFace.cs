@@ -1,11 +1,26 @@
+using System;
 using UnityEngine;
 
 namespace Genesis.RoomScan
 {
     /// <summary>
-    /// One captured pin surface in a Space Setup room: a visible
-    /// <c>WALL_FACE</c> or a <c>SCREEN</c> (TV). Hosts pin world-space UI
-    /// without taking an MRUK dependency.
+    /// Scene API labels the host wants when copying vertical planes.
+    /// <see cref="Wall"/> is visible <c>WALL_FACE</c>; <see cref="Screen"/>
+    /// is <c>SCREEN</c>. This package copies whatever the host asks for.
+    /// </summary>
+    [Flags]
+    public enum SceneFaceKind
+    {
+        None = 0,
+        Wall = 1 << 0,
+        Screen = 1 << 1,
+        All = Wall | Screen,
+    }
+
+    /// <summary>
+    /// One vertical Scene API plane. Hosts query these without taking an
+    /// MRUK dependency. The list is already filtered by the
+    /// <see cref="SceneFaceKind"/> the host passed.
     /// </summary>
     public readonly struct SceneWallFace
     {
@@ -16,11 +31,8 @@ namespace Genesis.RoomScan
         public readonly float Height;
         /// <summary>Floor height under this room (metres, world Y).</summary>
         public readonly float FloorY;
-        /// <summary>True for <c>WALL_ART</c> on a wall — prefer another wall.</summary>
+        /// <summary>True when the plane also has <c>WALL_ART</c>.</summary>
         public readonly bool PreferAvoid;
-        /// <summary>True for a <c>SCREEN</c> (TV). Hosts should pin on this
-        /// plane and scale to its bounds rather than picking a blank wall.</summary>
-        public readonly bool IsScreen;
 
         public SceneWallFace(
             Vector3 center,
@@ -28,8 +40,7 @@ namespace Genesis.RoomScan
             float width,
             float height,
             float floorY,
-            bool preferAvoid,
-            bool isScreen = false)
+            bool preferAvoid)
         {
             Center = center;
             Inward = inward;
@@ -37,7 +48,6 @@ namespace Genesis.RoomScan
             Height = height;
             FloorY = floorY;
             PreferAvoid = preferAvoid;
-            IsScreen = isScreen;
         }
     }
 
@@ -77,9 +87,9 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Build a stamp from a pin face. Thickness covers a typical TV
-        /// volume (~11 cm) plus a little slack; width/height expand for the
-        /// bezel so Surface Nets do not leave a depth-noise rim.
+        /// Build a stamp from a vertical plane. Thickness covers a typical
+        /// TV volume (~11 cm) plus a little slack; width/height expand for
+        /// the bezel so Surface Nets do not leave a depth-noise rim.
         /// </summary>
         public static ScanScreenStamp FromFace(
             SceneWallFace face,

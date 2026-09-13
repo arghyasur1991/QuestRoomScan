@@ -40,6 +40,14 @@ namespace Genesis.RoomScan
             Instance = this;
         }
 
+        void OnEnable()
+        {
+            EnsureMruk();
+            SubscribeToRoomEvents();
+        }
+
+        void OnDisable() => UnsubscribeFromRoomEvents();
+
         /// <summary>
         /// Raised when MRUK anchors change (created, updated, or room updated).
         /// RoomScanner subscribes to this to re-populate the SceneObjectRegistry reactively
@@ -229,29 +237,31 @@ namespace Genesis.RoomScan
             => TryGetRoomUuidAt(Query.HeadsetWorldPosition());
 
         /// <summary>
-        /// Visible <c>WALL_FACE</c> and <c>SCREEN</c> planes of the room that
-        /// contains <paramref name="worldPos"/> (not doorway / inner faces).
-        /// Returns 0 in the editor and when the point is not inside a
-        /// captured room. Clears <paramref name="dest"/>.
+        /// Visible <c>WALL_FACE</c> / <c>SCREEN</c> planes of every loaded
+        /// room that contains <paramref name="worldPos"/>.
+        /// <paramref name="kind"/> selects which labels to include.
+        /// Overlapping captures are unioned. Returns 0 in the editor and
+        /// when the point is not inside a captured room. Clears
+        /// <paramref name="dest"/>.
         /// </summary>
-        public int CopyWallFacesOfRoomContaining(Vector3 worldPos, List<SceneWallFace> dest)
+        public int CopyWallFacesOfRoomContaining(
+            Vector3 worldPos, List<SceneWallFace> dest, SceneFaceKind kind)
         {
             if (dest == null) return 0;
             dest.Clear();
             if (Application.isEditor) return 0;
             EnsureMruk();
+            SubscribeToRoomEvents();
             if (_mruk == null || _mruk.Rooms == null) return 0;
-            return Query.CopyWallFaces(Query.FindContaining(_mruk.Rooms, worldPos), dest);
+            return Query.CopyWallFacesAt(_mruk.Rooms, worldPos, dest, kind);
         }
 
         /// <summary>
-        /// Visible <c>WALL_FACE</c> and <c>SCREEN</c> (TV) planes of the
-        /// room that contains the headset. Hosts pin world-space UI to these
-        /// without taking an MRUK dependency. A <see cref="SceneWallFace.IsScreen"/>
-        /// row is the television — pin on it rather than a blank wall.
+        /// Visible vertical planes of every loaded room that contains the
+        /// headset. <paramref name="kind"/> selects which labels to include.
         /// </summary>
-        public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest)
-            => CopyWallFacesOfRoomContaining(Query.HeadsetWorldPosition(), dest);
+        public int CopyHeadsetRoomWallFaces(List<SceneWallFace> dest, SceneFaceKind kind)
+            => CopyWallFacesOfRoomContaining(Query.HeadsetWorldPosition(), dest, kind);
 
         /// <summary>
         /// True when <paramref name="worldPos"/> is inside the captured
@@ -531,6 +541,16 @@ namespace Genesis.RoomScan
 
             _mruk.RoomCreatedEvent.AddListener(OnRoomCreatedOrUpdated);
             _mruk.RoomUpdatedEvent.AddListener(OnRoomCreatedOrUpdated);
+            if (_mruk.Rooms != null)
+            {
+                for (int i = 0; i < _mruk.Rooms.Count; i++)
+                {
+                    var r = _mruk.Rooms[i];
+                    if (r == null) continue;
+                    r.AnchorCreatedEvent.RemoveListener(OnAnchorCreated);
+                    r.AnchorCreatedEvent.AddListener(OnAnchorCreated);
+                }
+            }
             _subscribedToRoomEvents = true;
         }
 
@@ -542,6 +562,15 @@ namespace Genesis.RoomScan
             {
                 _mruk.RoomCreatedEvent.RemoveListener(OnRoomCreatedOrUpdated);
                 _mruk.RoomUpdatedEvent.RemoveListener(OnRoomCreatedOrUpdated);
+                if (_mruk.Rooms != null)
+                {
+                    for (int i = 0; i < _mruk.Rooms.Count; i++)
+                    {
+                        var r = _mruk.Rooms[i];
+                        if (r != null)
+                            r.AnchorCreatedEvent.RemoveListener(OnAnchorCreated);
+                    }
+                }
             }
 
             if (_room != null)
@@ -552,6 +581,11 @@ namespace Genesis.RoomScan
 
         private void OnRoomCreatedOrUpdated(MRUKRoom room)
         {
+            if (room != null)
+            {
+                room.AnchorCreatedEvent.RemoveListener(OnAnchorCreated);
+                room.AnchorCreatedEvent.AddListener(OnAnchorCreated);
+            }
             EnsureRoom();
             Logger.Info($"[RoomUnderstanding] Room created/updated — " +
                         $"headset room anchors={_room?.Anchors?.Count ?? 0} " +
@@ -665,8 +699,10 @@ namespace Genesis.RoomScan
                 MRUKAnchor.SceneLabels.WALL_FACE
                 | MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE;
 
-            const MRUKAnchor.SceneLabels PinWallAvoidLabels =
+            const MRUKAnchor.SceneLabels WallArtLabels =
                 MRUKAnchor.SceneLabels.WALL_ART;
+
+            const float MinVerticalPlaneMetres = 0.2f;
 
             // Hosts poll occupancy every frame (hide a look when the headset
             // leaves the room), so the rig lookup is cached rather than a
@@ -727,29 +763,60 @@ namespace Genesis.RoomScan
                 return null;
             }
 
-            internal static int CopyWallFaces(MRUKRoom room, List<SceneWallFace> dst)
+            internal static int CopyWallFacesAt(
+                IList<MRUKRoom> rooms,
+                Vector3 worldPos,
+                List<SceneWallFace> dst,
+                SceneFaceKind kind)
             {
                 if (dst == null) return 0;
                 dst.Clear();
-                if (room == null || room.Anchors == null) return 0;
-
-                float floorY = FloorY(room);
-                for (int i = 0; i < room.Anchors.Count; i++)
-                    TryAddPinSurface(room, room.Anchors[i], floorY, dst);
-
+                if (rooms == null || kind == SceneFaceKind.None) return 0;
+                for (int i = 0; i < rooms.Count; i++)
+                {
+                    var room = rooms[i];
+                    if (!Contains(room, worldPos)) continue;
+                    AppendWallFaces(room, dst, kind);
+                }
                 return dst.Count;
             }
 
-            static void TryAddPinSurface(
-                MRUKRoom room, MRUKAnchor a, float floorY, List<SceneWallFace> dst)
+            internal static int CopyWallFaces(
+                MRUKRoom room, List<SceneWallFace> dst, SceneFaceKind kind)
             {
-                if (a == null) return;
+                if (dst == null) return 0;
+                dst.Clear();
+                AppendWallFaces(room, dst, kind);
+                return dst.Count;
+            }
 
-                bool isScreen = a.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN);
-                bool isWall = a.HasAnyLabel(MRUKAnchor.SceneLabels.WALL_FACE)
+            static void AppendWallFaces(MRUKRoom room, List<SceneWallFace> dst, SceneFaceKind kind)
+            {
+                if (room == null || room.Anchors == null) return;
+                float floorY = FloorY(room);
+                for (int i = 0; i < room.Anchors.Count; i++)
+                    TryAddVerticalPlane(room, room.Anchors[i], floorY, dst, kind);
+            }
+
+            static bool MatchesKind(MRUKAnchor a, SceneFaceKind kind)
+            {
+                bool screen = a.HasAnyLabel(MRUKAnchor.SceneLabels.SCREEN);
+                if (screen)
+                    return (kind & SceneFaceKind.Screen) != 0;
+                bool wall = a.HasAnyLabel(MRUKAnchor.SceneLabels.WALL_FACE)
                     && !a.HasAnyLabel(MRUKAnchor.SceneLabels.INVISIBLE_WALL_FACE)
                     && !a.HasAnyLabel(MRUKAnchor.SceneLabels.INNER_WALL_FACE);
-                if (!isScreen && !isWall) return;
+                return wall && (kind & SceneFaceKind.Wall) != 0;
+            }
+
+            static void TryAddVerticalPlane(
+                MRUKRoom room,
+                MRUKAnchor a,
+                float floorY,
+                List<SceneWallFace> dst,
+                SceneFaceKind kind)
+            {
+                if (a == null || !MatchesKind(a, kind)) return;
 
                 Vector3 inward = Inward(room, a);
                 float upDot = Vector3.Dot(inward, Vector3.up);
@@ -759,13 +826,12 @@ namespace Genesis.RoomScan
                 if (!TryPlaneSize(a, out Vector3 center, out float width, out float height))
                     return;
 
-                float min = isScreen ? 0.15f : 0.2f;
-                if (width < min || height < min)
+                if (width < MinVerticalPlaneMetres || height < MinVerticalPlaneMetres)
                     return;
 
-                bool avoid = !isScreen && a.HasAnyLabel(PinWallAvoidLabels);
+                bool avoid = a.HasAnyLabel(WallArtLabels);
                 dst.Add(new SceneWallFace(
-                    center, inward, width, height, floorY, avoid, isScreen));
+                    center, inward, width, height, floorY, avoid));
             }
 
             static bool TryPlaneSize(
@@ -896,12 +962,9 @@ namespace Genesis.RoomScan
                 if (room == null) return 0;
 
                 var faces = new List<SceneWallFace>(4);
-                CopyWallFaces(room, faces);
+                CopyWallFaces(room, faces, SceneFaceKind.Screen);
                 for (int i = 0; i < faces.Count && dst.Count < MaxScreenStamps; i++)
-                {
-                    if (!faces[i].IsScreen) continue;
                     dst.Add(ScanScreenStamp.FromFace(faces[i]));
-                }
 
                 return dst.Count;
             }
