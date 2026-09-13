@@ -301,7 +301,7 @@ Temporal blending on the GPU provides implicit convergence-based stability (see 
     splat.ply                      # Auto-saved when GS training completes
     refined_mesh.bin               # Auto-saved when refinement completes
     refined_atlas.raw              # On-device refined atlas (RGBA32)
-    simplified_mesh.bin            # Post-bake simplified mesh (when ratio < 1)
+    simplified_mesh.bin            # Legacy: separate post-bake copy from pre-1.2 bakes
     hq_atlas.png                   # Server-side HQ refined atlas (PNG)
 ```
 
@@ -825,8 +825,8 @@ End-to-end pipeline: on-device keyframe + point cloud capture → server-based C
 
 ### 14.1 KeyframeCollector (Quest, automatic)
 Runs alongside scanning with no user interaction. Saves posed camera frames directly into the active scan package (`keyframes/`):
-- **Selection**: Motion-gated — translation > 0.4m OR rotation > 20 deg from any saved keyframe, and at least 1 s since the last capture
-- **Rejection**: Frames with angular velocity > 120 deg/s are discarded (motion blur)
+- **Selection**: Motion-gated — translation > 0.5m OR rotation > 25 deg from any saved keyframe, and at least 1 s since the last capture
+- **Rejection**: The head must be still over each of the last **two** camera intervals: angular velocity ≤ 45 deg/s and linear velocity ≤ 0.5 m/s, measured from the frames' own PCA timestamps (`ICameraFrameTiming`), not the app frame they were seen in. Motion blur and exposure-time pose error both scale with head speed; the first still frame after a turn straddled the motion and is skipped
 - **Per frame**: JPEG (1280x960, quality 95) + one JSON line in `frames.jsonl` with:
   - Position (px, py, pz), rotation quaternion (qx, qy, qz, qw)
   - Intrinsics (fx, fy, cx, cy), sensor resolution, current resolution
@@ -927,17 +927,33 @@ Unity uses left-handed Y-up; COLMAP uses right-handed Y-down. The full round-tri
 
 Post-processing pipeline that produces a sharp UV-mapped texture atlas from saved keyframes, replacing the blurry triplanar vertex-color texturing. Uses the same keyframes collected for Gaussian Splat training (§13.1).
 
-### 15.1 Post-Bake Mesh Simplification (optional, meshoptimizer)
+### 15.1 Pre-Bake Mesh Simplification (optional, meshoptimizer)
 
-After atlas baking, the refined mesh can be optionally simplified using [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplifyWithAttributes`):
+Before the UV unwrap, the extracted mesh is simplified with [meshoptimizer](https://github.com/zeux/meshoptimizer) v1.0 (`meshopt_simplify`, geometry only), and the **simplified** mesh is what xatlas unwraps and the bake paints:
 
-- **Input**: Baked mesh positions, normals, UVs, and index buffer
-- **Operation**: Quadric error metric simplification with UV coordinates as vertex attributes — penalizes collapses that would distort UVs. `meshopt_SimplifyLockBorder` flag prevents vertices on UV seam boundaries from being collapsed, avoiding seam tearing.
-- **Target**: Configurable ratio, inspector slider `postBakeSimplificationRatio ∈ [0.1, 1.0]`. Default: 0.5 (50% triangles). 1.0 disables.
-- **Performance**: <5ms for 100k triangles on ARM64, runs on background thread (`Task.Run`)
-- **Output**: Compacted vertex/index arrays with preserved UVs. Atlas texture is unchanged — simplification only removes geometry, not texels.
+- **Input**: GPU readback positions, normals, index buffer
+- **Operation**: Quadric error metric simplification. Vertices are a subset of the input, so normals carry over by index.
+- **Target**: Inspector slider `postBakeSimplificationRatio ∈ [0.1, 1.0]` (name kept for serialized scenes). Default: 0.5 (50% triangles). 1.0 disables.
+- **Occlusion**: The dense readback stays as `OrigPositions/OrigIndices` and builds the per-keyframe depth buffer, so a coarse silhouette cannot let a keyframe paint through a wall.
+- **Performance**: A few ms for 100k triangles on ARM64 on a background thread, and every later stage (xatlas, both bake passes) runs on half the triangles.
+- **Output**: One refined mesh. No separate `simplified_mesh.bin` is written any more; packages from earlier versions that carry one still load it.
 
-> Running simplification *after* baking (instead of before) preserves atlas quality: the UV unwrap and atlas bake operate on the full-resolution mesh, and only the final game-ready mesh is reduced. This replaces the old pre-bake decimation which degraded baking quality.
+> Simplifying *after* the bake (the previous design) registered the atlas to the dense geometry and then moved that geometry under it: `meshopt_simplifyWithAttributes` keeps UVs continuous, but every collapse slides the surface a few millimetres while the texture stays put, and the two sides of a chart border slide by different amounts. Those were seams between views that had agreed perfectly on the dense mesh. Baking onto the displayed mesh makes texture and geometry agree by construction.
+
+### 15.1a Keyframe Registration (pass 2 pre-step)
+
+Each keyframe is aligned to the pass-1 atlas before it is blended:
+
+1. `BuildDepth` at 1/4 resolution from the dense mesh, then `RenderAtlasView` rasterises the output mesh into the keyframe's image plane, sampling the pass-1 atlas — the room as the mesh *thinks* this photo should look.
+2. `KfLumDownsample` averages the photo to the same 1/4 grid.
+3. `MatchShift` computes zero-mean normalized cross-correlation for every integer shift in ±R (R = 6 low-res px ≈ ±1.6° at Quest 3 focal length), one thread per shift.
+4. Host reads the (2R+1)² scores, fits a parabola for sub-pixel peak, rejects peaks below `registrationMinNcc` or on the search border, and turns the shift into a yaw/pitch correction of the keyframe rotation (`ApplyImageShift`: `R' = R · ΔR⁻¹`, ΔR = Rx(−dy/fy) · Ry(dx/fx)).
+
+The corrected pose drives that keyframe's depth pass and `BlendAccum`. A pure image shift absorbs the dominant errors — exposure-time pose offset and residual mesh bias — for a mostly rotating head; it costs one light GPU chain and a 676-byte readback per keyframe, no extra JPEG decode. Requires `multiViewBlend` (the pass-1 colours are not re-projected).
+
+### 15.1b Chart-Consistent View Preference
+
+Pass 1 sums each keyframe's valid texel scores per xatlas chart (one atomic per triangle per keyframe into a `charts × keyframes` table); `ChartArgmax` picks the chart's best view. In pass 2 that view is weighted ×`chartBestViewBoost` (default 3), admitted at 0.7× the usual `blendMinFraction`, and never spends one of the `maxViewsPerTexel` slots. A chart therefore reads from one photo wherever that photo sees it, and view switches move to chart borders, where `BlendSeams` already feathers. `ResolveBlend` keeps the pass-1 colour on texels no blend sample reached instead of clearing them.
 
 ### 15.2 UV Unwrapping (xatlas)
 

@@ -6,6 +6,35 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Texture bake: views agree instead of seaming.** Four registration
+  fixes, all measured against the fixture-era look:
+  - Simplification runs **before** the UV unwrap (`meshopt_simplify`,
+    geometry only), so the atlas is baked onto the mesh that is displayed.
+    The dense mesh still builds the per-keyframe occlusion depth. Baking on
+    the dense mesh and collapsing afterwards slid the surface under a fixed
+    texture, by different amounts on the two sides of every chart border.
+    No `simplified_mesh.bin` is written any more; older packages still load
+    theirs. `postBakeSimplificationRatio` keeps its name for serialized
+    scenes; the Inspector text now says pre-bake.
+  - Keyframe motion gate uses the frames' own PCA timestamps
+    (`ICameraFrameTiming`, implemented by both providers) and requires the
+    head still over the last **two** camera intervals: angular ≤ 45°/s
+    (was 120, app-clock), new linear ≤ 0.5 m/s. The first still frame after
+    a turn is skipped — its exposure straddled the motion.
+  - Per-keyframe registration before the blend pass: the pass-1 atlas is
+    rendered into the keyframe's image at 1/4 resolution, a ZNCC sweep over
+    ±6 px finds the best shift, and a parabolic sub-pixel peak becomes a
+    yaw/pitch correction (`ApplyImageShift`). One light GPU chain per
+    keyframe, no extra JPEG decode. `refineKeyframePoses`,
+    `registrationSearchRadius`, `registrationMinNcc`.
+  - Chart-consistent blend: pass 1 tallies texel scores per xatlas chart,
+    the chart's best view is boosted ×3 (`chartBestViewBoost`), admitted a
+    little below `blendMinFraction`, and exempt from the per-texel view cap,
+    so a chart reads from one photo and view switches land on chart borders.
+    `ResolveBlend` keeps the pass-1 colour where no blend sample reached.
+
 ### Added
 
 - **`SceneFaceKind` on plane copy.** `CopyHeadsetRoomWallFaces(dest, kind)`

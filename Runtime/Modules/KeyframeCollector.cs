@@ -24,8 +24,11 @@ namespace Genesis.RoomScan
         [SerializeField, Range(50, 100)]
         private int jpegQuality = 95;
 
-        [SerializeField, Tooltip("Max angular velocity (deg/s) to accept a frame (rejects motion blur)")]
-        private float maxAngularVelocity = 120f;
+        [SerializeField, Tooltip("Max head angular velocity (deg/s) over each of the last two camera frames to accept a frame. Motion blur and exposure-time pose error scale with this; 45 keeps texture-grade frames, 120 admits blurred ones.")]
+        private float maxAngularVelocity = 45f;
+
+        [SerializeField, Tooltip("Max head linear velocity (m/s) over each of the last two camera frames. Walking while scanning smears the frame just like turning does.")]
+        private float maxLinearVelocity = 0.5f;
 
         [SerializeField, Tooltip("Min seconds between captures to prevent burst saves")]
         private float minCaptureInterval = 1f;
@@ -47,10 +50,20 @@ namespace Genesis.RoomScan
         private readonly List<Quaternion> _savedRotations = new();
         private int _nextId;
         private int _pendingWrites;
-        private Quaternion _prevRot;
-        private float _prevRotTime;
         private float _lastCaptureTime;
         private bool _initialized;
+
+        // Motion history from the frames' own timestamps: the last two
+        // frame-to-frame speeds. A frame is admitted only when both are under
+        // the gates, so the first still frame after a fast turn is rejected
+        // (its exposure straddled the motion) and the second is taken.
+        private Vector3 _prevPos;
+        private Quaternion _prevRot;
+        private double _prevFrameTime;
+        private bool _hasPrevFrame;
+        private float _lastAngVel, _lastLinVel;
+        private float _prevAngVel, _prevLinVel;
+        private int _skippedForMotion;
 
         /// <summary>Number of keyframes saved so far in this session.</summary>
         public int SavedCount => _nextId;
@@ -62,8 +75,6 @@ namespace Genesis.RoomScan
 
         private void Start()
         {
-            _prevRot = Quaternion.identity;
-            _prevRotTime = Time.time;
             _initialized = true;
 
             _scanner = GetComponent<RoomScanner>();
@@ -113,15 +124,18 @@ namespace Genesis.RoomScan
         {
             if (!_initialized || frame == null || _exportDir == null) return;
 
+            // Motion history first, every frame, so the gate below sees the
+            // two most recent intervals even while the interval gate is closed.
+            bool still = UpdateMotion(pos, rot);
+
             if (Time.time - _lastCaptureTime < minCaptureInterval) return;
 
-            float dt = Time.time - _prevRotTime;
-            if (dt > 0.001f)
+            if (!still)
             {
-                float angVel = Quaternion.Angle(_prevRot, rot) / dt;
-                _prevRot = rot;
-                _prevRotTime = Time.time;
-                if (angVel > maxAngularVelocity) return;
+                if (++_skippedForMotion <= 3 || _skippedForMotion % 50 == 0)
+                    Logger.Info($"KeyframeCollector: skipped frame, head moving " +
+                                $"{_lastAngVel:F0}°/s {_lastLinVel:F2} m/s ({_skippedForMotion} so far)");
+                return;
             }
 
             if (!ShouldCapture(pos, rot)) return;
@@ -163,6 +177,46 @@ namespace Genesis.RoomScan
                 SaveKeyframeData(tex2d.EncodeToJPG(jpegQuality), id, timestamp,
                     pos, rot, focalLen, principalPt, sensorRes, currentRes, caps);
             }
+        }
+
+        /// <summary>
+        /// Advance the motion history with this frame and report whether the
+        /// head was still over the last two camera intervals. Time comes from
+        /// the provider's frame timestamps when it has them
+        /// (<see cref="ICameraFrameTiming"/>), else the app clock.
+        /// </summary>
+        bool UpdateMotion(Vector3 pos, Quaternion rot)
+        {
+            double now = _scanner != null && _scanner.ActiveCameraProvider is ICameraFrameTiming timing
+                ? timing.FrameTimeSeconds
+                : Time.realtimeSinceStartupAsDouble;
+
+            if (_hasPrevFrame)
+            {
+                double dt = now - _prevFrameTime;
+                if (dt > 1e-4)
+                {
+                    _prevAngVel = _lastAngVel;
+                    _prevLinVel = _lastLinVel;
+                    _lastAngVel = (float)(Quaternion.Angle(_prevRot, rot) / dt);
+                    _lastLinVel = (float)(Vector3.Distance(_prevPos, pos) / dt);
+                }
+            }
+            else
+            {
+                // No history yet: treat as moving so the very first frame of a
+                // session (often mid-gesture) is not the first keyframe.
+                _lastAngVel = _prevAngVel = float.PositiveInfinity;
+                _lastLinVel = _prevLinVel = float.PositiveInfinity;
+            }
+
+            _prevPos = pos;
+            _prevRot = rot;
+            _prevFrameTime = now;
+            _hasPrevFrame = true;
+
+            return _lastAngVel <= maxAngularVelocity && _prevAngVel <= maxAngularVelocity
+                   && _lastLinVel <= maxLinearVelocity && _prevLinVel <= maxLinearVelocity;
         }
 
         /// <summary>
@@ -337,6 +391,8 @@ namespace Genesis.RoomScan
             _savedPositions.Clear();
             _savedRotations.Clear();
             _nextId = 0;
+            _hasPrevFrame = false;
+            _skippedForMotion = 0;
         }
 
     }

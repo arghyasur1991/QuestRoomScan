@@ -8,6 +8,10 @@
 #pragma kernel ResolveBlend
 #pragma kernel SharpenAtlas
 #pragma kernel SobelNormalMap
+#pragma kernel ChartArgmax
+#pragma kernel RenderAtlasView
+#pragma kernel KfLumDownsample
+#pragma kernel MatchShift
 
 // ── Shared uniforms ──────────────────────────────────────────
 float4x4 _ViewMat;
@@ -92,6 +96,17 @@ bool BodyOccludes(float3 camPos, float3 worldPt)
 RWStructuredBuffer<uint> _DepthBuf;  // asuint(linearZ), per-keyframe
 RWStructuredBuffer<uint> _ScoreBuf;  // asuint(score), persists across KFs
 RWStructuredBuffer<uint> _AtlasBuf;  // packed RGBA32, persists across KFs
+RWStructuredBuffer<uint> _AtlasBufSrc;  // snapshot copy (read-only in the pass that binds it)
+
+// ── Chart-consistent view preference ────────────────────────
+//  Pass 1 sums each keyframe's valid texel scores per UV chart; the blend
+//  pass then boosts the chart's best keyframe so one photo covers as much
+//  of the chart as it can and view switches move to chart borders.
+StructuredBuffer<int>    _TriChart;    // per output tri: xatlas chart, -1 none
+RWStructuredBuffer<uint> _ChartScore;  // [chart * _KfCount + kf], fixed point ×64
+StructuredBuffer<int>    _ChartBest;   // per chart: keyframe index, -1 none
+int   _KfIndex, _KfCount, _ChartCount;
+float _ChartBoost;
 
 uint LoadKf(int px, int py)
 {
@@ -261,6 +276,10 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
     float a0x = uv1.y - uv2.y, a0y = uv2.x - uv1.x;
     float a1x = uv2.y - uv0.y, a1y = uv0.x - uv2.x;
 
+    // Valid texels this view sees on this triangle, for the chart tally.
+    // One atomic per triangle, not per texel.
+    int validTexels = 0;
+
     for (int y = minY; y <= maxY; y++)
     {
         float dy = (float)y - uv2.y;
@@ -288,6 +307,8 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
             if (camPt.z > closestZ + 0.05) continue;
             if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) continue;
 
+            validTexels++;
+
             // All validity checks passed — now do atomic score comparison.
             // Score must only be updated when we are certain a pixel will be
             // written, otherwise we "poison" the texel with a high score but
@@ -301,6 +322,176 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
             _AtlasBuf[texelIdx] = kfColor | (255u << 24);
         }
     }
+
+    if (_ChartCount > 0 && validTexels > 0)
+    {
+        int chart = _TriChart[t];
+        if (chart >= 0 && chart < _ChartCount)
+            InterlockedAdd(_ChartScore[chart * _KfCount + _KfIndex],
+                           (uint)(score * (float)validTexels * 64.0));
+    }
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Chart argmax — one thread per chart, picks the keyframe with the
+//  largest summed texel score. Tiny: charts × keyframes reads.
+// ═════════════════════════════════════════════════════════════
+
+RWStructuredBuffer<int> _ChartBestRW;
+
+[numthreads(64, 1, 1)]
+void ChartArgmax(uint3 id : SV_DispatchThreadID)
+{
+    int chart = (int)id.x;
+    if (chart >= _ChartCount) return;
+    uint best = 0;
+    int bestK = -1;
+    int base = chart * _KfCount;
+    for (int k = 0; k < _KfCount; k++)
+    {
+        uint s = _ChartScore[base + k];
+        if (s > best) { best = s; bestK = k; }
+    }
+    _ChartBestRW[chart] = bestK;
+}
+
+// ═════════════════════════════════════════════════════════════
+//  Keyframe registration — render the pass-1 atlas into the keyframe's
+//  own (downsampled) image plane, then find the image shift that best
+//  matches the photo. A few pixels of shift is the exposure-time pose
+//  error and residual mesh bias; the host turns it into a small
+//  rotation before the blend pass samples this keyframe.
+//  Uniforms _Fx.._CropY / _ImgW / _ImgH are bound at LOW resolution
+//  for these kernels; _DepthBuf is a low-res depth from BuildDepth.
+// ═════════════════════════════════════════════════════════════
+
+RWStructuredBuffer<uint>  _ViewLum;   // low-res: bit 31 = covered, low 8 bits = luminance
+RWStructuredBuffer<uint>  _KfLum;     // low-res photo luminance
+RWStructuredBuffer<float> _MatchOut;  // (2R+1)^2 ZNCC scores, row-major over (oy, ox)
+int _LowScale;
+int _SearchR;
+
+uint LumOf(uint packed)
+{
+    uint cr = packed & 0xFF, cg = (packed >> 8) & 0xFF, cb = (packed >> 16) & 0xFF;
+    return (cr * 77 + cg * 150 + cb * 29) >> 8;
+}
+
+[numthreads(64, 1, 1)]
+void RenderAtlasView(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _OutTriCount) return;
+
+    int t = (int)id.x;
+    int i0 = _OutIdx[t * 3];
+    int i1 = _OutIdx[t * 3 + 1];
+    int i2 = _OutIdx[t * 3 + 2];
+
+    float3 p0 = _OutPos[i0], p1 = _OutPos[i1], p2 = _OutPos[i2];
+    float3 c0 = mul(_ViewMat, float4(p0, 1)).xyz;
+    float3 c1 = mul(_ViewMat, float4(p1, 1)).xyz;
+    float3 c2 = mul(_ViewMat, float4(p2, 1)).xyz;
+    if (c0.z <= 0.01 || c1.z <= 0.01 || c2.z <= 0.01) return;
+
+    // Back-facing to this camera: skip, the depth pass already hides it.
+    float3 fn = cross(p1 - p0, p2 - p0);
+    if (dot(fn, _CamPos.xyz - p0) <= 0) return;
+
+    float2 s0 = float2(_Fx * c0.x / c0.z + _Cx - _CropX, _Fy * c0.y / c0.z + _Cy - _CropY);
+    float2 s1 = float2(_Fx * c1.x / c1.z + _Cx - _CropX, _Fy * c1.y / c1.z + _Cy - _CropY);
+    float2 s2 = float2(_Fx * c2.x / c2.z + _Cx - _CropX, _Fy * c2.y / c2.z + _Cy - _CropY);
+
+    int minX = max(0, (int)floor(min(s0.x, min(s1.x, s2.x))));
+    int maxX = min(_ImgW - 1, (int)ceil(max(s0.x, max(s1.x, s2.x))));
+    int minY = max(0, (int)floor(min(s0.y, min(s1.y, s2.y))));
+    int maxY = min(_ImgH - 1, (int)ceil(max(s0.y, max(s1.y, s2.y))));
+    if (minX > maxX || minY > maxY) return;
+
+    float denom = (s1.y - s2.y) * (s0.x - s2.x) + (s2.x - s1.x) * (s0.y - s2.y);
+    if (abs(denom) < 1e-8) return;
+    float invD = 1.0 / denom;
+    float a0x = s1.y - s2.y, a0y = s2.x - s1.x;
+    float a1x = s2.y - s0.y, a1y = s0.x - s2.x;
+
+    float2 uv0 = _RawUV[i0], uv1 = _RawUV[i1], uv2 = _RawUV[i2];
+
+    for (int y = minY; y <= maxY; y++)
+    {
+        float dy = (float)y - s2.y;
+        for (int x = minX; x <= maxX; x++)
+        {
+            float dx = (float)x - s2.x;
+            float bw0 = (a0x * dx + a0y * dy) * invD;
+            float bw1 = (a1x * dx + a1y * dy) * invD;
+            float bw2 = 1.0 - bw0 - bw1;
+            if (bw0 < -0.001 || bw1 < -0.001 || bw2 < -0.001) continue;
+
+            float z = bw0 * c0.z + bw1 * c1.z + bw2 * c2.z;
+            float closestZ = asfloat(_DepthBuf[y * _ImgW + x]);
+            if (z > closestZ + 0.05) continue;
+
+            float2 uv = bw0 * uv0 + bw1 * uv1 + bw2 * uv2;
+            int tx = clamp((int)uv.x, 0, _AtlasW - 1);
+            int ty = clamp((int)uv.y, 0, _AtlasH - 1);
+            uint packed = _AtlasBufSrc[ty * _AtlasW + tx];
+            if ((packed >> 24) == 0) continue;
+
+            _ViewLum[y * _ImgW + x] = 0x80000000u | LumOf(packed);
+        }
+    }
+}
+
+[numthreads(8, 8, 1)]
+void KfLumDownsample(uint3 id : SV_DispatchThreadID)
+{
+    int x = (int)id.x, y = (int)id.y;
+    if (x >= _ImgW || y >= _ImgH) return;
+    uint sum = 0;
+    for (int by = 0; by < _LowScale; by++)
+    for (int bx = 0; bx < _LowScale; bx++)
+        sum += LumOf(LoadKf(x * _LowScale + bx, y * _LowScale + by));
+    _KfLum[y * _ImgW + x] = sum / (uint)(_LowScale * _LowScale);
+}
+
+// One thread per candidate shift; each walks every covered low-res pixel.
+// (2R+1)^2 × lowW·lowH reads — a few million at R=6, 320×240.
+[numthreads(64, 1, 1)]
+void MatchShift(uint3 id : SV_DispatchThreadID)
+{
+    uint side = (uint)(2 * _SearchR + 1);
+    if (id.x >= side * side) return;
+    int ox = (int)(id.x % side) - _SearchR;
+    int oy = (int)(id.x / side) - _SearchR;
+
+    float sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    int count = 0;
+    for (int y = 0; y < _ImgH; y++)
+    {
+        int ky = y + oy;
+        if (ky < 0 || ky >= _ImgH) continue;
+        for (int x = 0; x < _ImgW; x++)
+        {
+            uint v = _ViewLum[y * _ImgW + x];
+            if ((v & 0x80000000u) == 0) continue;
+            int kx = x + ox;
+            if (kx < 0 || kx >= _ImgW) continue;
+            float a = (float)(v & 0xFF);
+            float b = (float)_KfLum[ky * _ImgW + kx];
+            sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+            count++;
+        }
+    }
+
+    float ncc = -2.0;
+    if (count >= 64)
+    {
+        float inv = 1.0 / (float)count;
+        float va = saa * inv - (sa * inv) * (sa * inv);
+        float vb = sbb * inv - (sb * inv) * (sb * inv);
+        float cov = sab * inv - (sa * inv) * (sb * inv);
+        ncc = (va > 1e-3 && vb > 1e-3) ? cov / sqrt(va * vb) : -2.0;
+    }
+    _MatchOut[id.x] = ncc;
 }
 
 // ═════════════════════════════════════════════════════════════
@@ -310,7 +501,6 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
 //  and blends them with nearby filled neighbors.
 // ═════════════════════════════════════════════════════════════
 
-RWStructuredBuffer<uint> _AtlasBufSrc;  // snapshot copy (read-only during blend)
 int _BlendRadius;
 
 [numthreads(8, 8, 1)]
@@ -430,6 +620,13 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
 
     float score = dotNV / max(vdLen, 0.1);
 
+    bool preferred = false;
+    if (_ChartCount > 0)
+    {
+        int chart = _TriChart[t];
+        preferred = chart >= 0 && chart < _ChartCount && _ChartBest[chart] == _KfIndex;
+    }
+
     float3 c0 = mul(_ViewMat, float4(p0, 1)).xyz;
     float3 c1 = mul(_ViewMat, float4(p1, 1)).xyz;
     float3 c2 = mul(_ViewMat, float4(p2, 1)).xyz;
@@ -478,8 +675,11 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
             float bestS = asfloat(_BestScore[texelIdx]);
             if (bestS <= 0) continue;
 
-            // Only accumulate if this view's score meets the threshold
-            if (score < _BlendMinFraction * bestS) continue;
+            // Only accumulate if this view's score meets the threshold. The
+            // chart's preferred view is admitted a little below it so one
+            // photo can carry the chart into its slightly oblique corners.
+            float minFrac = preferred ? _BlendMinFraction * 0.7 : _BlendMinFraction;
+            if (score < minFrac * bestS) continue;
 
             float sx = bw0 * sp0.x + bw1 * sp1.x + bw2 * sp2.x;
             float sy = bw0 * sp0.y + bw1 * sp1.y + bw2 * sp2.y;
@@ -494,13 +694,17 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
             if (camPt.z > closestZ + 0.05) continue;
             if (_BodyCapCount > 0 && BodyOccludes(_CamPos.xyz, worldPt)) continue;
 
-            // Cap the observations per texel. Views arrive in capture order,
+            // The chart's best view always contributes and does not spend a
+            // slot; other views are capped. Views arrive in capture order,
             // all already within _BlendMinFraction of the best, so the first
             // _MaxViews are near-best; beyond that each extra view only adds
             // registration error.
-            uint seen;
-            InterlockedAdd(_AccumN[texelIdx], 1, seen);
-            if ((int)seen >= _MaxViews) continue;
+            if (!preferred)
+            {
+                uint seen;
+                InterlockedAdd(_AccumN[texelIdx], 1, seen);
+                if ((int)seen >= _MaxViews) continue;
+            }
 
             uint kfColor = LoadKf(px, py);
             float r = (float)(kfColor & 0xFF);
@@ -509,7 +713,7 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
 
             // Fixed-point accumulation: scale by 256 to preserve fractional precision
             // score is typically 0.01-10.0, so score*256 fits in uint range
-            uint ws = (uint)(score * 256.0);
+            uint ws = (uint)(score * 256.0 * (preferred ? _ChartBoost : 1.0));
             InterlockedAdd(_AccumR[texelIdx], (uint)(r * ws));
             InterlockedAdd(_AccumG[texelIdx], (uint)(g * ws));
             InterlockedAdd(_AccumB[texelIdx], (uint)(b * ws));
@@ -534,12 +738,11 @@ void ResolveBlend(uint3 id : SV_DispatchThreadID)
     int idx = (int)id.x;
     if (idx >= _AtlasW * _AtlasH) return;
 
+    // No blend sample landed here (a refined pose moved the best view's
+    // projection off the image edge, say): keep the pass-1 colour rather
+    // than punching a hole for dilation to guess at.
     uint w = _AccumWIn[idx];
-    if (w == 0)
-    {
-        _AtlasBuf[idx] = 0;
-        return;
-    }
+    if (w == 0) return;
 
     uint r = clamp(_AccumRIn[idx] / w, 0, 255);
     uint g = clamp(_AccumGIn[idx] / w, 0, 255);

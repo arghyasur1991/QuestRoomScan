@@ -19,6 +19,10 @@ namespace Genesis.RoomScan
         internal Vector3[] OrigPositions;
         internal Vector3[] OrigNormals;
         internal int[] OrigIndices;
+        /// <summary>xatlas chart per output vertex, or null when the unwrap was
+        /// reconstructed from disk. Lets the bake prefer one view per chart.</summary>
+        internal int[] ChartIndices;
+        internal int ChartCount;
     }
 
     internal struct RefinedTextureResult
@@ -91,10 +95,32 @@ namespace Genesis.RoomScan
         [Range(0.5f, 4f)]
         [SerializeField] internal float xatlasMaxCost = 1.5f;
 
-        [Header("Post-Bake Simplification")]
-        [Tooltip("Simplify after atlas baking to preserve UVs (1.0 = disabled, 0.5 = 50% triangles). Runs on background thread.")]
+        [Header("Simplification")]
+        [Tooltip("Simplify the mesh BEFORE UV unwrap and bake (1.0 = disabled, 0.5 = 50% triangles). " +
+                 "The atlas is then registered to the mesh that is actually displayed; simplifying after " +
+                 "the bake slid the texture off the collapsed geometry and opened seams at chart borders. " +
+                 "The dense mesh is still used for occlusion during the bake. Runs on a background thread.")]
         [Range(0.1f, 1f)]
         [SerializeField] internal float postBakeSimplificationRatio = 0.5f;
+
+        [Header("Keyframe Registration")]
+        [Tooltip("After the first bake pass, align each keyframe to the atlas rendered from its own " +
+                 "pose (low-res ZNCC image shift → small rotation) before the blend pass. Absorbs " +
+                 "exposure-time pose error and residual mesh bias. One extra light GPU pass per keyframe.")]
+        [SerializeField] internal bool refineKeyframePoses = true;
+        [Tooltip("Search radius in low-res pixels (image downsampled by 4). 6 ≈ ±1.6° at Quest 3 focal length.")]
+        [Range(2, 12)]
+        [SerializeField] internal int registrationSearchRadius = 6;
+        [Tooltip("Minimum normalized cross-correlation at the best shift to accept a correction.")]
+        [Range(0.05f, 0.9f)]
+        [SerializeField] internal float registrationMinNcc = 0.25f;
+
+        [Header("Chart-Consistent Blend")]
+        [Tooltip("Weight multiplier for the view that scores best over a whole UV chart, so a chart " +
+                 "reads from one photo wherever it can and view switches move to chart borders " +
+                 "(which the seam pass already blends). 1 = off.")]
+        [Range(1f, 8f)]
+        [SerializeField] internal float chartBestViewBoost = 3f;
 
         private RoomScanner _scanner;
 
@@ -140,6 +166,37 @@ namespace Genesis.RoomScan
             Vector3[] inPos = positions;
             Vector3[] inNorm = normals;
             int[] inIdx = indices;
+
+            // Simplify first, unwrap and bake the result. The dense readback
+            // stays as the occlusion mesh so a coarse silhouette cannot let a
+            // keyframe paint through a wall.
+            float simplifyRatio = postBakeSimplificationRatio;
+            if (simplifyRatio < 1f)
+            {
+                ReportStatus($"Simplifying mesh ({simplifyRatio:P0})...");
+                float ratio = Mathf.Clamp(simplifyRatio, 0.05f, 1f);
+                Vector3[] sPos = null, sNorm = null;
+                int[] sIdx = null;
+                bool ok = false;
+                await Task.Run(() =>
+                {
+                    try
+                    {
+                        ok = XAtlasWrapper.SimplifyGeometry(
+                            positions, normals, indices, ratio, out sPos, out sNorm, out sIdx);
+                    }
+                    catch (Exception e)
+                    {
+                        Logger.Warning($"[TextureRefine] Pre-bake simplify unavailable ({e.Message}); unwrapping the dense mesh.");
+                    }
+                });
+                if (ok)
+                {
+                    inPos = sPos;
+                    inNorm = sNorm;
+                    inIdx = sIdx;
+                }
+            }
 
             ReportStatus("UV unwrapping...");
             XAtlasWrapper.Result uvResult = default;
@@ -198,9 +255,11 @@ namespace Genesis.RoomScan
                 Indices = uvResult.Indices,
                 AtlasWidth = atlasW,
                 AtlasHeight = atlasH,
-                OrigPositions = inPos,
-                OrigNormals = inNorm,
-                OrigIndices = inIdx,
+                OrigPositions = positions,
+                OrigNormals = normals,
+                OrigIndices = indices,
+                ChartIndices = uvResult.ChartIndices,
+                ChartCount = uvResult.ChartCount,
             };
         }
 
@@ -628,6 +687,43 @@ namespace Genesis.RoomScan
             var atlasBuf = new ComputeBuffer(texelCount, 4);
             await ZeroUintBuffer(compute, kClearU, atlasBuf, texelCount);
 
+            // ── Chart preference: per-triangle chart ids and a charts×keyframes
+            // score table. Off when the unwrap came back from disk without charts.
+            int chartCount = mesh.ChartIndices != null && mesh.ChartCount > 0 && chartBestViewBoost > 1.001f
+                ? mesh.ChartCount : 0;
+            // Always bound, 1 element when off: an unbound StructuredBuffer is
+            // undefined on Vulkan even behind a branch that never reads it.
+            var triChartBuf = new ComputeBuffer(Mathf.Max(1, chartCount > 0 ? outTriCount : 1), 4);
+            var chartScoreBuf = new ComputeBuffer(Mathf.Max(1, chartCount * total), 4);
+            var chartBestBuf = new ComputeBuffer(Mathf.Max(1, chartCount), 4);
+            if (chartCount > 0)
+            {
+                int[] triChart = null;
+                var chartIdx = mesh.ChartIndices;
+                var idx = mesh.Indices;
+                await Task.Run(() =>
+                {
+                    triChart = new int[outTriCount];
+                    for (int t = 0; t < outTriCount; t++)
+                    {
+                        int v = idx[t * 3];
+                        triChart[t] = v < chartIdx.Length ? chartIdx[v] : -1;
+                    }
+                });
+                await UploadBuffer(triChartBuf, triChart);
+                await ZeroUintBuffer(compute, kClearU, chartScoreBuf, chartCount * total);
+            }
+            else
+            {
+                triChartBuf.SetData(new[] { -1 });
+                chartBestBuf.SetData(new[] { -1 });
+            }
+            compute.SetBuffer(kBake, "_TriChart", triChartBuf);
+            compute.SetBuffer(kBake, "_ChartScore", chartScoreBuf);
+            compute.SetInt("_ChartCount", chartCount);
+            compute.SetInt("_KfCount", total);
+            compute.SetFloat("_ChartBoost", chartBestViewBoost);
+
             // Bind static buffers to kernels
             compute.SetBuffer(kDepth, "_OrigPos", origPosBuf);
             compute.SetBuffer(kDepth, "_OrigIdx", origIdxBuf);
@@ -653,6 +749,47 @@ namespace Genesis.RoomScan
                 });
 
             Logger.Info($"[TextureRefine] GPU baked {bakeCount} keyframes total (pass 1)");
+
+            if (chartCount > 0)
+            {
+                int kArgmax = compute.FindKernel("ChartArgmax");
+                compute.SetBuffer(kArgmax, "_ChartScore", chartScoreBuf);
+                compute.SetBuffer(kArgmax, "_ChartBestRW", chartBestBuf);
+                compute.Dispatch(kArgmax, (chartCount + 63) / 64, 1, 1);
+                await Task.Yield();
+                Logger.Info($"[TextureRefine] Chart preference: {chartCount} charts, boost ×{chartBestViewBoost:F1}");
+            }
+
+            // ── Registration: align each keyframe to the pass-1 atlas before it
+            // is blended. Needs the blend pass to have any effect on colour.
+            RegistrationScratch reg = null;
+            ComputeBuffer atlasSnapshot = null;
+            System.Func<Texture2D, Keyframe, Task<Keyframe>> refineHook = null;
+            if (refineKeyframePoses && multiViewBlend)
+            {
+                int kRender = -1, kDown = -1, kMatch = -1;
+                try
+                {
+                    kRender = compute.FindKernel("RenderAtlasView");
+                    kDown = compute.FindKernel("KfLumDownsample");
+                    kMatch = compute.FindKernel("MatchShift");
+                }
+                catch { /* shader variant without registration kernels */ }
+
+                if (kRender >= 0 && kDown >= 0 && kMatch >= 0)
+                {
+                    atlasSnapshot = new ComputeBuffer(texelCount, 4);
+                    await CopyUintBuffer(compute, kCopyU, atlasBuf, atlasSnapshot, texelCount);
+                    reg = new RegistrationScratch(4, registrationSearchRadius);
+                    compute.SetBuffer(kRender, "_OutPos", outPosBuf);
+                    compute.SetBuffer(kRender, "_OutIdx", outIdxBuf);
+                    compute.SetBuffer(kRender, "_RawUV", rawUVBuf);
+                    var regScratch = reg;
+                    refineHook = (tex, kf) => RefineKeyframeAsync(
+                        compute, regScratch, kClear, kClearU, kDepth, kRender, kDown, kMatch,
+                        origTriCount, outTriCount, atlasSnapshot, tex, kf);
+                }
+            }
 
             // ── Pass 2: Multi-view blend accumulation (optional) ──
             // Re-iterates keyframes, accumulating score-weighted colors from all
@@ -685,8 +822,10 @@ namespace Genesis.RoomScan
                 compute.SetBuffer(kAccum, "_BestScore", scoreBuf);
                 compute.SetFloat("_BlendMinFraction", blendMinFraction);
                 compute.SetInt("_MaxViews", Mathf.Max(1, maxViewsPerTexel));
+                compute.SetBuffer(kAccum, "_TriChart", triChartBuf);
+                compute.SetBuffer(kAccum, "_ChartBest", chartBestBuf);
 
-                ReportStatus("Multi-view blending (pass 2)...");
+                ReportStatus(refineHook != null ? "Registering + blending (pass 2)..." : "Multi-view blending (pass 2)...");
                 int blendCount = await ProcessKeyframesGpuAsync(
                     metaList, compute, kClear, kDepth, origTriCount, accumR, "Multi-view blend...",
                     (tex, kf, depth) =>
@@ -694,9 +833,16 @@ namespace Genesis.RoomScan
                         compute.SetBuffer(kAccum, "_DepthBuf", depth);
                         compute.SetTexture(kAccum, "_KfTex", tex);
                         compute.Dispatch(kAccum, (outTriCount + 63) / 64, 1, 1);
-                    });
+                    },
+                    refineHook);
 
                 Logger.Info($"[TextureRefine] Blend pass 2 complete: {blendCount} keyframes");
+                if (reg != null)
+                {
+                    Logger.Info($"[TextureRefine] Registration: {reg.Refined} refined, {reg.Rejected} rejected, " +
+                                $"mean shift {(reg.Refined > 0 ? reg.SumShiftPx / reg.Refined : 0f):F1} px, " +
+                                $"max {reg.MaxShiftPx:F1} px (radius ±{reg.Radius * reg.Scale} px, minNcc {registrationMinNcc:F2})");
+                }
 
                 // Resolve: divide accumulated colors by weights → final atlas
                 compute.SetBuffer(kResolve, "_AccumRIn", accumR);
@@ -823,6 +969,9 @@ namespace Genesis.RoomScan
             origPosBuf.Release(); origIdxBuf.Release();
             outPosBuf.Release(); outNormBuf.Release(); outIdxBuf.Release();
             rawUVBuf.Release(); scoreBuf.Release(); atlasBuf.Release();
+            triChartBuf.Release(); chartScoreBuf.Release(); chartBestBuf.Release();
+            atlasSnapshot?.Release();
+            reg?.Dispose();
 
             ReportStatus("Done");
             Logger.Info($"[TextureRefine] GPU compute bake complete: {atlasW}x{atlasH} atlas");
@@ -915,6 +1064,9 @@ namespace Genesis.RoomScan
         /// <paramref name="fenceBuf"/> is whatever the shade kernel writes
         /// (atlas or accum) — fencing depth only would race the bake.
         /// </summary>
+        /// <param name="refine">Optional: runs after the keyframe is decoded and
+        /// before its depth pass, may return a corrected keyframe (pose). The
+        /// corrected keyframe is written back to <paramref name="metaList"/>.</param>
         async Task<int> ProcessKeyframesGpuAsync(
             System.Collections.Generic.List<Keyframe> metaList,
             ComputeShader compute,
@@ -922,7 +1074,8 @@ namespace Genesis.RoomScan
             int origTriCount,
             ComputeBuffer fenceBuf,
             string statusPrefix,
-            System.Action<Texture2D, Keyframe, ComputeBuffer> shade)
+            System.Action<Texture2D, Keyframe, ComputeBuffer> shade,
+            System.Func<Texture2D, Keyframe, Task<Keyframe>> refine = null)
         {
             int First(int from)
             {
@@ -972,7 +1125,7 @@ namespace Genesis.RoomScan
                 return true;
             }
 
-            void BindKeyframe(Keyframe kf)
+            void BindKeyframe(Keyframe kf, int kfIndex)
             {
                 int imgW = kf.Width, imgH = kf.Height;
                 int imgPixels = imgW * imgH;
@@ -982,31 +1135,17 @@ namespace Genesis.RoomScan
                     depthBuf = new ComputeBuffer(imgPixels, 4);
                 }
 
-                int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
-                int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
-                float cropX = (sw - kf.Width) * 0.5f;
-                float cropY = (sh - kf.Height) * 0.5f;
-                Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
-
-                compute.SetMatrix("_ViewMat", viewMat);
-                compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
-                compute.SetFloat("_Fx", kf.Fx);
-                compute.SetFloat("_Fy", kf.Fy);
-                compute.SetFloat("_Cx", kf.Cx);
-                compute.SetFloat("_Cy", kf.Cy);
-                compute.SetFloat("_CropX", cropX);
-                compute.SetFloat("_CropY", cropY);
-                compute.SetInt("_ImgW", imgW);
-                compute.SetInt("_ImgH", imgH);
+                BindKeyframeCamera(compute, kf, 1f);
+                compute.SetInt("_KfIndex", kfIndex);
                 BindBodyCapsules(compute, kf);
 
                 compute.SetBuffer(kClear, "_DepthBuf", depthBuf);
                 compute.SetBuffer(kDepth, "_DepthBuf", depthBuf);
             }
 
-            void DispatchDepth(Keyframe kf)
+            void DispatchDepth(Keyframe kf, int kfIndex)
             {
-                BindKeyframe(kf);
+                BindKeyframe(kf, kfIndex);
                 int imgPixels = kf.Width * kf.Height;
                 compute.Dispatch(kClear, (imgPixels + 255) / 256, 1, 1);
                 compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
@@ -1029,7 +1168,14 @@ namespace Genesis.RoomScan
                 int idle = gpuIdleFramesPerStep;
                 while (i >= 0)
                 {
-                    DispatchDepth(metaList[i]);
+                    if (refine != null)
+                    {
+                        // Corrected pose first: the depth pass and the shade
+                        // below must both see the same camera.
+                        metaList[i] = await refine(slots[slot], metaList[i]);
+                    }
+
+                    DispatchDepth(metaList[i], i);
                     await WaitGpuAsync(depthBuf);
                     await YieldCompositorFrames(idle);
 
@@ -1067,6 +1213,200 @@ namespace Genesis.RoomScan
             }
 
             return baked;
+        }
+
+        /// <summary>
+        /// Bind one keyframe's camera. <paramref name="scale"/> below 1 binds the
+        /// same camera for an image downsampled by that factor (intrinsics and
+        /// crop scale together; the pose does not).
+        /// </summary>
+        static void BindKeyframeCamera(ComputeShader compute, in Keyframe kf, float scale)
+        {
+            int sw = kf.SensorWidth > 0 ? kf.SensorWidth : kf.Width;
+            int sh = kf.SensorHeight > 0 ? kf.SensorHeight : kf.Height;
+            float cropX = (sw - kf.Width) * 0.5f;
+            float cropY = (sh - kf.Height) * 0.5f;
+            Matrix4x4 viewMat = Matrix4x4.TRS(kf.Position, kf.Rotation, Vector3.one).inverse;
+
+            compute.SetMatrix("_ViewMat", viewMat);
+            compute.SetVector("_CamPos", new Vector4(kf.Position.x, kf.Position.y, kf.Position.z, 1f));
+            compute.SetFloat("_Fx", kf.Fx * scale);
+            compute.SetFloat("_Fy", kf.Fy * scale);
+            compute.SetFloat("_Cx", kf.Cx * scale);
+            compute.SetFloat("_Cy", kf.Cy * scale);
+            compute.SetFloat("_CropX", cropX * scale);
+            compute.SetFloat("_CropY", cropY * scale);
+            compute.SetInt("_ImgW", Mathf.Max(1, Mathf.RoundToInt(kf.Width * scale)));
+            compute.SetInt("_ImgH", Mathf.Max(1, Mathf.RoundToInt(kf.Height * scale)));
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        //  KEYFRAME REGISTRATION
+        // ═══════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Per-keyframe GPU state for the registration step: low-res depth,
+        /// the atlas rendered into this view, the photo downsampled, and the
+        /// ZNCC score per candidate shift. Allocated once per bake.
+        /// </summary>
+        sealed class RegistrationScratch : IDisposable
+        {
+            public readonly int Scale;
+            public readonly int Radius;
+            public ComputeBuffer DepthLow, ViewLum, KfLum, MatchOut;
+            public int LowW, LowH;
+            public int Refined, Rejected;
+            public float SumShiftPx, MaxShiftPx;
+
+            public RegistrationScratch(int scale, int radius)
+            {
+                Scale = Mathf.Max(1, scale);
+                Radius = Mathf.Max(1, radius);
+                int side = 2 * Radius + 1;
+                MatchOut = new ComputeBuffer(side * side, 4);
+            }
+
+            public void EnsureImage(int imgW, int imgH)
+            {
+                int w = Mathf.Max(1, imgW / Scale), h = Mathf.Max(1, imgH / Scale);
+                if (DepthLow != null && LowW == w && LowH == h) return;
+                LowW = w; LowH = h;
+                DepthLow?.Release(); ViewLum?.Release(); KfLum?.Release();
+                DepthLow = new ComputeBuffer(w * h, 4);
+                ViewLum = new ComputeBuffer(w * h, 4);
+                KfLum = new ComputeBuffer(w * h, 4);
+            }
+
+            public void Dispose()
+            {
+                DepthLow?.Release(); ViewLum?.Release(); KfLum?.Release(); MatchOut?.Release();
+                DepthLow = ViewLum = KfLum = MatchOut = null;
+            }
+        }
+
+        /// <summary>
+        /// Align one decoded keyframe against the pass-1 atlas rendered from
+        /// its own pose and fold the best image shift into its rotation.
+        /// Everything runs at 1/<see cref="RegistrationScratch.Scale"/>
+        /// resolution: one depth pass over the dense mesh, one raster of the
+        /// output mesh, one downsample, one ZNCC sweep, one small readback.
+        /// </summary>
+        async Task<Keyframe> RefineKeyframeAsync(
+            ComputeShader compute, RegistrationScratch s,
+            int kClear, int kClearU, int kDepth, int kRender, int kDown, int kMatch,
+            int origTriCount, int outTriCount, ComputeBuffer atlasSnapshot,
+            Texture2D tex, Keyframe kf)
+        {
+            s.EnsureImage(kf.Width, kf.Height);
+            int lowPixels = s.LowW * s.LowH;
+            float scale = 1f / s.Scale;
+
+            BindKeyframeCamera(compute, kf, scale);
+            compute.SetInt("_LowScale", s.Scale);
+            compute.SetInt("_SearchR", s.Radius);
+            BindBodyCapsules(compute, kf);
+
+            compute.SetBuffer(kClear, "_DepthBuf", s.DepthLow);
+            compute.Dispatch(kClear, (lowPixels + 255) / 256, 1, 1);
+            compute.SetBuffer(kDepth, "_DepthBuf", s.DepthLow);
+            compute.Dispatch(kDepth, (origTriCount + 63) / 64, 1, 1);
+
+            if (kClearU >= 0)
+            {
+                compute.SetInt("_ClearCount", lowPixels);
+                compute.SetBuffer(kClearU, "_ClearBuf", s.ViewLum);
+                compute.Dispatch(kClearU, (lowPixels + 255) / 256, 1, 1);
+            }
+
+            compute.SetBuffer(kRender, "_DepthBuf", s.DepthLow);
+            compute.SetBuffer(kRender, "_ViewLum", s.ViewLum);
+            compute.SetBuffer(kRender, "_AtlasBufSrc", atlasSnapshot);
+            compute.Dispatch(kRender, (outTriCount + 63) / 64, 1, 1);
+
+            compute.SetTexture(kDown, "_KfTex", tex);
+            compute.SetBuffer(kDown, "_KfLum", s.KfLum);
+            compute.Dispatch(kDown, (s.LowW + 7) / 8, (s.LowH + 7) / 8, 1);
+
+            compute.SetBuffer(kMatch, "_ViewLum", s.ViewLum);
+            compute.SetBuffer(kMatch, "_KfLum", s.KfLum);
+            compute.SetBuffer(kMatch, "_MatchOut", s.MatchOut);
+            int side = 2 * s.Radius + 1;
+            compute.Dispatch(kMatch, (side * side + 63) / 64, 1, 1);
+
+            byte[] raw = await ReadbackComputeBufferAsync(s.MatchOut, side * side);
+            var scores = new float[side * side];
+            Buffer.BlockCopy(raw, 0, scores, 0, raw.Length);
+
+            if (!BestShift(scores, side, registrationMinNcc, out Vector2 shiftLow, out float ncc))
+            {
+                s.Rejected++;
+                return kf;
+            }
+
+            // Reject a peak sitting on the search border: the true shift is
+            // beyond the window and a clamped correction is worse than none.
+            if (Mathf.Abs(shiftLow.x) >= s.Radius - 0.5f || Mathf.Abs(shiftLow.y) >= s.Radius - 0.5f)
+            {
+                s.Rejected++;
+                return kf;
+            }
+
+            Vector2 shiftPx = shiftLow * s.Scale;
+            kf.Rotation = ApplyImageShift(kf.Rotation, shiftPx, new Vector2(kf.Fx, kf.Fy));
+            s.Refined++;
+            float mag = shiftPx.magnitude;
+            s.SumShiftPx += mag;
+            if (mag > s.MaxShiftPx) s.MaxShiftPx = mag;
+            return kf;
+        }
+
+        /// <summary>
+        /// Peak of the ZNCC grid with a parabolic sub-pixel fit on each axis.
+        /// False when nothing reaches <paramref name="minNcc"/>.
+        /// </summary>
+        internal static bool BestShift(float[] scores, int side, float minNcc, out Vector2 shift, out float best)
+        {
+            int r = side / 2;
+            int bi = -1;
+            best = -3f;
+            for (int i = 0; i < scores.Length; i++)
+                if (scores[i] > best) { best = scores[i]; bi = i; }
+            shift = Vector2.zero;
+            if (bi < 0 || best < minNcc) return false;
+
+            int bx = bi % side, by = bi / side;
+            float fx = bx, fy = by;
+            if (bx > 0 && bx < side - 1)
+            {
+                float l = scores[by * side + bx - 1], c = best, rr = scores[by * side + bx + 1];
+                float d = l - 2f * c + rr;
+                if (d < -1e-6f) fx += 0.5f * (l - rr) / d;
+            }
+            if (by > 0 && by < side - 1)
+            {
+                float u = scores[(by - 1) * side + bx], c = best, dn = scores[(by + 1) * side + bx];
+                float d = u - 2f * c + dn;
+                if (d < -1e-6f) fy += 0.5f * (u - dn) / d;
+            }
+            shift = new Vector2(fx - r, fy - r);
+            return true;
+        }
+
+        /// <summary>
+        /// Rotate a camera so that what it projected at pixel p now projects
+        /// at p + <paramref name="shiftPx"/>. Camera space is x right, y up,
+        /// z forward (the bake's convention); a small yaw moves projections
+        /// along +x by fx·yaw, a small pitch about −x moves them along +y by
+        /// fy·pitch. The correction is applied in camera space, so the world
+        /// rotation becomes R · ΔR⁻¹.
+        /// </summary>
+        internal static Quaternion ApplyImageShift(Quaternion rotation, Vector2 shiftPx, Vector2 focal)
+        {
+            if (focal.x <= 1f || focal.y <= 1f) return rotation;
+            float yaw = Mathf.Atan(shiftPx.x / focal.x) * Mathf.Rad2Deg;
+            float pitch = -Mathf.Atan(shiftPx.y / focal.y) * Mathf.Rad2Deg;
+            Quaternion delta = Quaternion.AngleAxis(pitch, Vector3.right) * Quaternion.AngleAxis(yaw, Vector3.up);
+            return rotation * Quaternion.Inverse(delta);
         }
 
         static Task<byte[]> ReadbackComputeBufferAsync(ComputeBuffer buffer, int elementCount)
@@ -1538,35 +1878,6 @@ namespace Genesis.RoomScan
                 Buffer.BlockCopy(temp, 0, atlas, 0, atlas.Length);
                 if (!changed) break;
             }
-        }
-
-        /// <summary>
-        /// Simplifies a baked refined mesh on a background thread, preserving UVs via
-        /// meshopt_simplifyWithAttributes with UV coordinates as vertex attributes and
-        /// border-locked vertices to prevent seam tearing.
-        /// </summary>
-        internal async Task<RefinedTextureResult> SimplifyRefinedMeshAsync(RefinedTextureResult source)
-        {
-            float ratio = postBakeSimplificationRatio;
-            if (ratio >= 1f) return source;
-            ratio = Mathf.Clamp(ratio, 0.05f, 1f);
-
-            ReportStatus($"Simplifying baked mesh ({ratio:P0})...");
-
-            RefinedTextureResult result = source;
-            await Task.Run(() =>
-            {
-                result = XAtlasWrapper.SimplifyWithUVs(
-                    source.Positions, source.Normals, source.UVs,
-                    source.Indices, ratio);
-                result.AtlasPixels = source.AtlasPixels;
-                result.AtlasWidth = source.AtlasWidth;
-                result.AtlasHeight = source.AtlasHeight;
-            });
-
-            Logger.Info($"[TextureRefine] Post-bake simplify: {result.Indices.Length / 3} tris " +
-                        $"(was {source.Indices.Length / 3}, ratio={ratio:F2})");
-            return result;
         }
 
         void ReportStatus(string status)
