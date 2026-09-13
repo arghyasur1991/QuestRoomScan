@@ -1531,7 +1531,7 @@ namespace Genesis.RoomScan
             compute.SetBuffer(kMatch, "_KfLum", s.KfLum);
             compute.SetBuffer(kMatch, "_MatchOut", s.MatchOut);
             int side = 2 * s.Radius + 1;
-            compute.Dispatch(kMatch, (side * side + 63) / 64, 1, 1);
+            compute.Dispatch(kMatch, side * side, 1, 1);   // one group per candidate shift
 
             // Exposure gain: atlas colour this pose sees vs the photo, over
             // the covered low-res pixels. Independent of the shift result.

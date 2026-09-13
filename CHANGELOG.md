@@ -62,6 +62,11 @@ All notable changes to this package are documented here. The format follows
 
 ### Added
 
+- **`MatchShift` is one thread group per candidate shift** (256 threads
+  striding the low-res image, groupshared reduction). It was one thread
+  per shift walking all 76 800 pixels alone — 169 serial 77 k-iteration
+  loops, ~20 ms of GPU per keyframe on a few lanes, the 40-50 fps jitter of
+  pass 2 on the headset.
 - **Texel-parallel bake.** `BuildTexelMap` builds a static texel → triangle
   map once per bake; `BakeAtlas` / `BlendAccum` run one thread per atlas
   texel with a per-texel score (own point, interpolated normal) instead of

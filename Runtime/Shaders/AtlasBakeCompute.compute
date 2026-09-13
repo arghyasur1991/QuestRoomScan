@@ -515,45 +515,65 @@ void KfLumDownsample(uint3 id : SV_DispatchThreadID)
     _KfLum[y * _ImgW + x] = sum.x | (sum.y << 8) | (sum.z << 16);
 }
 
-// One thread per candidate shift; each walks every covered low-res pixel.
-// (2R+1)^2 × lowW·lowH reads — a few million at R=6, 320×240.
-[numthreads(64, 1, 1)]
-void MatchShift(uint3 id : SV_DispatchThreadID)
+// One thread GROUP per candidate shift; the 256 threads stride the low-res
+// image and reduce through groupshared memory. The first version was one
+// thread per shift walking all 76 800 pixels alone: 169 threads, each a
+// 77 k-iteration serial loop, ~20 ms of GPU per keyframe on a handful of
+// lanes — the 40-50 fps jitter of pass 2.
+#define MATCH_THREADS 256
+groupshared float gs_sa[MATCH_THREADS], gs_sb[MATCH_THREADS], gs_saa[MATCH_THREADS], gs_sbb[MATCH_THREADS], gs_sab[MATCH_THREADS];
+groupshared uint  gs_n[MATCH_THREADS];
+
+[numthreads(MATCH_THREADS, 1, 1)]
+void MatchShift(uint3 gid : SV_GroupID, uint gi : SV_GroupIndex)
 {
     uint side = (uint)(2 * _SearchR + 1);
-    if (id.x >= side * side) return;
-    int ox = (int)(id.x % side) - _SearchR;
-    int oy = (int)(id.x / side) - _SearchR;
+    if (gid.x >= side * side) return;
+    int ox = (int)(gid.x % side) - _SearchR;
+    int oy = (int)(gid.x / side) - _SearchR;
 
     float sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
-    int count = 0;
-    for (int y = 0; y < _ImgH; y++)
+    uint count = 0;
+    int pixels = _ImgW * _ImgH;
+    for (int p = (int)gi; p < pixels; p += MATCH_THREADS)
     {
-        int ky = y + oy;
-        if (ky < 0 || ky >= _ImgH) continue;
-        for (int x = 0; x < _ImgW; x++)
+        uint v = _ViewLum[p];
+        if ((v & 0x80000000u) == 0) continue;
+        int x = p % _ImgW, y = p / _ImgW;
+        int kx = x + ox, ky = y + oy;
+        if (kx < 0 || kx >= _ImgW || ky < 0 || ky >= _ImgH) continue;
+        float a = (float)LumOf(v);
+        float b = (float)LumOf(_KfLum[ky * _ImgW + kx]);
+        sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
+        count++;
+    }
+    gs_sa[gi] = sa; gs_sb[gi] = sb; gs_saa[gi] = saa; gs_sbb[gi] = sbb; gs_sab[gi] = sab; gs_n[gi] = count;
+    GroupMemoryBarrierWithGroupSync();
+
+    [unroll]
+    for (uint s = MATCH_THREADS / 2; s > 0; s >>= 1)
+    {
+        if (gi < s)
         {
-            uint v = _ViewLum[y * _ImgW + x];
-            if ((v & 0x80000000u) == 0) continue;
-            int kx = x + ox;
-            if (kx < 0 || kx >= _ImgW) continue;
-            float a = (float)LumOf(v);
-            float b = (float)LumOf(_KfLum[ky * _ImgW + kx]);
-            sa += a; sb += b; saa += a * a; sbb += b * b; sab += a * b;
-            count++;
+            gs_sa[gi] += gs_sa[gi + s]; gs_sb[gi] += gs_sb[gi + s];
+            gs_saa[gi] += gs_saa[gi + s]; gs_sbb[gi] += gs_sbb[gi + s];
+            gs_sab[gi] += gs_sab[gi + s]; gs_n[gi] += gs_n[gi + s];
         }
+        GroupMemoryBarrierWithGroupSync();
     }
 
+    if (gi != 0) return;
     float ncc = -2.0;
-    if (count >= 64)
+    if (gs_n[0] >= 64)
     {
-        float inv = 1.0 / (float)count;
-        float va = saa * inv - (sa * inv) * (sa * inv);
-        float vb = sbb * inv - (sb * inv) * (sb * inv);
-        float cov = sab * inv - (sa * inv) * (sb * inv);
+        float inv = 1.0 / (float)gs_n[0];
+        float ma = gs_sa[0] * inv, mb = gs_sb[0] * inv;
+        float va = gs_saa[0] * inv - ma * ma;
+        float vb = gs_sbb[0] * inv - mb * mb;
+        float cov = gs_sab[0] * inv - ma * mb;
         ncc = (va > 1e-3 && vb > 1e-3) ? cov / sqrt(va * vb) : -2.0;
     }
-    _MatchOut[id.x] = ncc;
+    _MatchOut[gid.x] = ncc;
 }
 
 // Per-keyframe exposure: sum the atlas colour this pose sees and the
