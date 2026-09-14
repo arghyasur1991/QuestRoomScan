@@ -1114,10 +1114,11 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
-        /// Freezes voxels inside the spotlight cone in front of the head
-        /// (see <see cref="FreezeConeHalfAngle"/>), preventing further
-        /// integration updates there. Uses the head pose, which is always
-        /// available — not the passthrough camera, whose intrinsics were not.
+        /// Freezes voxels inside the default spotlight cone in front of the
+        /// head (see <see cref="FreezeConeHalfAngle"/>). Uses the head pose,
+        /// which is always available — not the passthrough camera, whose
+        /// intrinsics were not. Hosts that have their own emitter can call
+        /// the overload with origin, axis, half-angle, and length.
         /// </summary>
         public void FreezeInView()
         {
@@ -1128,7 +1129,18 @@ namespace Genesis.RoomScan
             _volumeIntegrator.FreezeInView(eye, gaze);
         }
 
-        /// <summary>Unfreezes frozen voxels inside the same spotlight cone.</summary>
+        /// <summary>
+        /// Freeze voxels inside a host-supplied spotlight cone instead of the
+        /// headset gaze. <paramref name="maxMetres"/> 0 is unbounded.
+        /// </summary>
+        public void FreezeInView(Vector3 origin, Vector3 direction, float halfAngleDegrees, float maxMetres = 0f)
+        {
+            if (_volumeIntegrator == null) return;
+            RefreshBodyAnchors();
+            _volumeIntegrator.FreezeInView(origin, direction, halfAngleDegrees, maxMetres);
+        }
+
+        /// <summary>Unfreezes frozen voxels inside the default head cone.</summary>
         public void UnfreezeInView()
         {
             if (_volumeIntegrator == null) return;
@@ -1137,7 +1149,14 @@ namespace Genesis.RoomScan
             _volumeIntegrator.UnfreezeInView(eye, gaze);
         }
 
-        /// <summary>Half-angle, degrees, of the freeze / unfreeze cone. Hosts draw a ring at this.</summary>
+        /// <summary>Unfreeze frozen voxels inside a host-supplied spotlight cone.</summary>
+        public void UnfreezeInView(Vector3 origin, Vector3 direction, float halfAngleDegrees, float maxMetres = 0f)
+        {
+            if (_volumeIntegrator == null) return;
+            _volumeIntegrator.UnfreezeInView(origin, direction, halfAngleDegrees, maxMetres);
+        }
+
+        /// <summary>Half-angle, degrees, of the default head freeze cone.</summary>
         public float FreezeConeHalfAngle => _volumeIntegrator != null ? _volumeIntegrator.FreezeConeHalfAngle : 15f;
 
         bool TryGetGaze(out Vector3 eye, out Vector3 gaze)

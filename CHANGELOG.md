@@ -6,6 +6,14 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Custom freeze cone.** `RoomScanSession.FreezeInView(origin, direction,
+  halfAngleDegrees, maxMetres)` (and the matching unfreeze) paint a
+  host-supplied spotlight instead of the headset gaze. Length 0 is
+  unbounded. The no-arg `FreezeInView()` / debug-menu path is still the
+  15° head cone.
+
 ## [1.2.0] - 2026-09-14
 
 Texture refinement is much faster and holds **72 fps** on Quest 3

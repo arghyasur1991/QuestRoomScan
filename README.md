@@ -198,8 +198,8 @@ Call `await RoomScanner.Instance.StartScanningAsync()` to begin (or use the debu
 
 When a region of the mesh looks good and you don't want further integration to degrade it:
 
-- **Freeze In View** (Y/B button): Locks the voxels inside a 15° spotlight cone from your eye along your gaze (`freezeConeHalfAngle`); turn your head to paint more. Hosts can draw a ring at `RoomScanSession.FreezeConeHalfAngle`. Frozen voxels are skipped during integration — their geometry and color are preserved exactly as-is.
-- **Unfreeze In View** (X/A button): Restores frozen voxels in your current frustum to normal integration.
+- **Freeze In View** (Y/B button): Locks the voxels inside a 15° spotlight cone from your eye along your gaze (`freezeConeHalfAngle`); turn your head to paint more. Frozen voxels are skipped during integration — their geometry and color are preserved exactly as-is. Hosts can instead pass a custom cone: `FreezeInView(origin, direction, halfAngleDegrees, maxMetres)` (length 0 is unbounded).
+- **Unfreeze In View** (X/A button): Restores frozen voxels in the same cone to normal integration. Same optional custom-cone overload.
 
 This lets you selectively protect good surfaces while continuing to refine other areas.
 
@@ -513,11 +513,9 @@ await session.StartScanAsync();
 session.ProgressUpdated += p => progressBar.value = p.OverallProgress;
 
 // 3. As the user sweeps the room, paint visible chunks as "done":
-//    FreezeInView locks the voxels in a head-forward spotlight cone so they
-//    stop receiving updates. Frozen voxels count as refined, so painting a
-//    settled region also locks its share of OverallProgress. Use this as
-//    the natural "I'm satisfied with this region" gesture rather than a
-//    global pause.
+//    FreezeInView locks voxels in a spotlight cone so they stop receiving
+//    updates. The no-arg path is the headset gaze. Hosts with their own
+//    emitter pass origin, axis, half-angle, and length (0 = unbounded).
 session.FreezeInView();    // typically bound to a controller button
 session.UnfreezeInView();  // for "I painted too aggressively, redo"
 
@@ -761,7 +759,9 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `RequestSpaceSetupAndReloadAsync()` | `Task<bool>` | Horizon Space Setup, then reload with auto-capture **off**. True only if rooms exist afterwards (cancel is not success-with-rooms) |
 | `StartScanAsync()` | `Task` | Begin a new scan session (unloads a loaded package on a non-resume start, creates `_tmp/` package + spatial anchor; completes at the first integrated frame) |
 | `FreezeInView()` | `void` | Paint voxels inside the head cone (`FreezeConeHalfAngle`, 15°) as done; integration continues globally |
+| `FreezeInView(origin, direction, halfAngleDegrees, maxMetres)` | `void` | Same paint, host-supplied cone. `maxMetres` 0 is unbounded |
 | `UnfreezeInView()` | `void` | Inverse of `FreezeInView` for re-capture of bad regions |
+| `UnfreezeInView(origin, direction, halfAngleDegrees, maxMetres)` | `void` | Inverse of the custom-cone freeze |
 | `FinalizeScanAsync()` | `Task<ScanResult>` | Stop scanning → refine → save; returns mesh + atlas + package id + `AnchorFrameMesh`. Releases the live TSDF when `PresentRefinedWhenReady` is true |
 | `PresentRefinedWhenReady` | `bool` | True (default): finalize presents the refined mesh and releases the live TSDF. False: bake into memory and keep the live vertex mesh until the host presents |
 | `SetRefinedBackfaceCull(cullBack)` | `void` | Two-sided in the room, `Cull Back` outside (`RefinedMeshBackface.shader`). Quest ignores ShaderLab `Cull [_Cull]` |

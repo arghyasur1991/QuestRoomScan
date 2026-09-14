@@ -239,18 +239,21 @@ void StampScreen(uint3 id : SV_DispatchThreadID)
 #pragma kernel FreezeInFrustum
 #pragma kernel UnfreezeInFrustum
 
-// Freeze / unfreeze paint a spotlight cone from the head: apex at the eye,
-// axis along the gaze, half-angle from the host. A cone needs only the head
-// pose, which is always available; the old passthrough-camera frustum needed
-// intrinsics that were not, and its wide window painted the whole view.
-float4 gsFreezeOrigin;   // xyz eye position, w = cos(half angle)
-float4 gsFreezeDir;      // xyz unit gaze direction
+// Freeze / unfreeze paint a spotlight cone: apex at gsFreezeOrigin.xyz,
+// axis gsFreezeDir.xyz, half-angle via w = cos(half). Hosts may pass a
+// custom cone; the default is the headset gaze. gsFreezeDir.w > 0 caps
+// the length (metres); 0 is unbounded.
+float4 gsFreezeOrigin;   // xyz apex, w = cos(half angle)
+float4 gsFreezeDir;      // xyz unit axis, w = max metres (0 = unbounded)
 
 bool gsInFreezeCone(float3 worldPos)
 {
     float3 d = worldPos - gsFreezeOrigin.xyz;
     float len = length(d);
-    return len > 0.05 && dot(d, gsFreezeDir.xyz) >= gsFreezeOrigin.w * len;
+    if (len <= 0.05) return false;
+    float maxLen = gsFreezeDir.w;
+    if (maxLen > 0 && len > maxLen) return false;
+    return dot(d, gsFreezeDir.xyz) >= gsFreezeOrigin.w * len;
 }
 
 [numthreads(4, 4, 4)]
