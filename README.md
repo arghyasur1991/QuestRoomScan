@@ -648,7 +648,8 @@ For game integration where you want to minimize GPU overhead during scanning. Th
 | Setting | Value | Reason |
 |---------|-------|--------|
 | RoomScanner.meshExtractionHz | **8** | Live Surface Nets dump; 30 Hz was fill-rate expensive |
-| KeyframeCollector move / rotate / interval | **0.15 m / 10° / 0.25 s**, angular velocity **120°/s** | Atlas bake needs density; capture encode is off the main thread |
+| KeyframeCollector move / rotate / interval | **0.15 m / 10° / 0.25 s**, angular velocity **120°/s**; band gap **0.5 m**, standing yaw **8°**; hand-heavy frames kept | Atlas bake needs density and both close-up and standing views |
+| TextureRefinement view score | Head-on × 0.8–2 m working distance; close-ups fill holes | Stops 20 cm grazes from beating standing head-on looks |
 | TextureRefinement.postBakeSimplificationRatio | **0.5** | Simplified before unwrap and bake; 1.0 disables |
 | RoomScanner.ConfineScanToContainingRoom | host opt-in | Single-room mesh; default **false**. Needs `RoomUnderstanding` |
 | TriplanarCache | **Disabled** | Saves ~240 MB GPU; vertex colors are sufficient for scan-phase visualization |
