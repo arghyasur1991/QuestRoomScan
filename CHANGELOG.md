@@ -8,9 +8,11 @@ All notable changes to this package are documented here. The format follows
 
 ## [1.3.0] - 2026-09-15
 
-Texture refinement prefers **standing, head-on keyframes** over close-ups.
-Close-up photos stay on disk and still fill holes. Hosts can freeze and
-unfreeze with a custom spotlight cone instead of the headset gaze.
+Fixes a **texture-quality regression** from 1.0–1.1: close-up keyframes
+were beating standing head-on views. Standing, head-on frames now win
+when both exist. Close-up photos stay on disk and still fill holes.
+Hosts can freeze and unfreeze with a custom spotlight cone instead of
+the headset gaze.
 
 ### Added
 
@@ -20,15 +22,18 @@ unfreeze with a custom spotlight cone instead of the headset gaze.
   unbounded. The no-arg `FreezeInView()` / debug-menu path is still the
   15° head cone.
 
-### Changed
+### Fixed
 
-- **Texture bake view selection.** Atlas score is head-on × working
-  distance (peak 0.8–2 m), not `N·V / distance`. Close-up JPEGs stay on
-  disk and still fill holes; standing head-on views win when both exist.
+- **Texture-quality regression (1.0–1.1).** Atlas score was `N·V / distance`,
+  so a 20 cm graze beat a 1.5 m frontal look; 1.1.0 then admitted only
+  those winners. Score is now head-on × working distance (peak 0.8–2 m).
   Blend admission is hero-only; pass 2 walks best-first so the per-texel
   cap is top-K. Chart preference requires a cover floor so a corner
   close-up cannot lock an island. Exposure gains match the standing
   pass-1 atlas (`exposureGainLimit` 1.6).
+
+### Changed
+
 - **Keyframe capture.** Same-pose lean-in / step-back and new wall yaw
   at a given distance band are kept. Frames with hands in view are
   saved (bake still masks capsules per pixel). Optional `"z"` in
