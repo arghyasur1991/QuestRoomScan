@@ -6,6 +6,12 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-15
+
+Texture refinement prefers **standing, head-on keyframes** over close-ups.
+Close-up photos stay on disk and still fill holes. Hosts can freeze and
+unfreeze with a custom spotlight cone instead of the headset gaze.
+
 ### Added
 
 - **Custom freeze cone.** `RoomScanSession.FreezeInView(origin, direction,

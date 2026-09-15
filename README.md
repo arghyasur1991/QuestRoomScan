@@ -64,7 +64,7 @@ This is the case the package was built for. Quest's built-in room mesh gives you
 - **Shell Coverage** — With `RoomUnderstanding`, the captured room hull is sampled into ≤ 16k cells and marched against the TSDF once a second: `ScanCoverage.ShellCoverage` is how much of the shell has scanned matter in front of it (doorways, doors, windows excluded), `LargestGap` / `CopyShellGaps` say where the unscanned patches are, and small wall / floor / ceiling gaps whose neighbours lie on one plane are auto-filled with a soft plane stamp that real depth can still override. Guidance and acceleration only — it never feeds progress.
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
 - **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools) and right detail views. Includes scan browser with load/delete per package (with delete confirmation), "Load Refined Only" for fast game-mode loading, context-sensitive artifact deletion, and dynamic button disabled states. Scene Objects toggle with live count. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
-- **Texture Refinement** — Post-scan UV atlas from captured keyframes. GPU compute shader bakes one thread per atlas texel from the best-scoring projections, with multi-view blending, per-keyframe pose registration, occlusion-aware depth testing, GPU unsharp-mask sharpening, seam levelling, and Sobel normal maps. `TextureRefinement` is an instance-based MonoBehaviour — unwrap, bake, sharpen and seam settings are inspector fields.
+- **Texture Refinement** — Post-scan UV atlas from captured keyframes. GPU compute shader bakes one thread per atlas texel. Score is head-on × working-distance (peak 0.8–2 m), not `N·V / distance`: standing frontal views beat close-ups when both exist; close-ups still fill holes. Multi-view blend is hero-only and top-K, with per-keyframe pose registration, occlusion-aware depth testing, GPU unsharp-mask sharpening, seam levelling, and Sobel normal maps. `TextureRefinement` is an instance-based MonoBehaviour — unwrap, bake, sharpen and seam settings are inspector fields.
 - **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
 - **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, Occlusion, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
@@ -113,12 +113,12 @@ Add to your project's `Packages/manifest.json`, pinned to a release tag:
 ```json
 {
   "dependencies": {
-    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.2.0"
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.3.0"
   }
 }
 ```
 
-Drop the `#v1.2.0` suffix to track `main`. Releases and their notes are in
+Drop the `#v1.3.0` suffix to track `main`. Releases and their notes are in
 [`CHANGELOG.md`](CHANGELOG.md); `main` only moves by squash-merged release PR.
 
 For Gaussian Splat support, also add the optional dependency:
