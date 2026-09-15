@@ -677,7 +677,7 @@ makes the analytic closure above reach 100 % in practice.
 ### ScanCoverage / ScanProgress (CPU)
 - `ScanCoverage` analytic: `AnalysisAvailable`, `Closure`, `Refinement`, `ConfidentSurfaceCount`, `LeakAreaM2`, `SurfaceAreaM2`, `HoleCount`, `LargestHole` (`MeshHole`: centre, area, faces), `LeakFills`. Shell prior: `ShellCoverageAvailable`, `ShellCoverage`, `ShellCellsTotal / Covered / Excluded / Empty`, `ShellGapCount`, `LargestGap`, `ShellFillsApplied`. Raw: `SurfaceVoxelCount`, `FrozenSurfaceCount`, `ColoredSurfaceCount`, `ColorCoverage`, `FrozenFraction` (the freeze tool's own metric), `MeshVertexCount`, `MeshTriangleCount`.
 - `ScanProgress.OverallProgress = Closure × (1 − refinementInfluence × (1 − Refinement))` (0 until the first cycle); phase `< 0.30 Discovering`, `< 0.90 Refining`, `< 0.95 Stabilized`, else `Complete`. There is no plateau or frozen-fraction blend any more.
-- `FreezeInView` / `UnfreezeInView` paint a spotlight cone from the head — apex at the eye, axis along the gaze, half-angle `freezeConeHalfAngle` (15°) — so a press paints what the player is looking straight at and they turn their head for more. The head pose is always available; the earlier passthrough-camera frustum needed intrinsics that were not, and its wide window painted the whole view. Hosts read `RoomScanSession.FreezeConeHalfAngle` to draw a ring.
+- `FreezeInView` / `UnfreezeInView` paint a spotlight cone. The no-arg path is the head — apex at the eye, axis along the gaze, half-angle `freezeConeHalfAngle` (15°). Hosts may pass `FreezeInView(origin, direction, halfAngleDegrees, maxMetres)` (and the matching unfreeze) so a custom emitter owns the volume; `maxMetres` 0 is unbounded. The head pose is always available; the earlier passthrough-camera frustum needed intrinsics that were not, and its wide window painted the whole view. `RoomScanSession.FreezeConeHalfAngle` is the default head angle.
 - `ScanPhase` enum: `NotStarted → Discovering → Refining → Stabilized → Complete`
 
 ## 12b. Depth Subsystem Gating
@@ -826,12 +826,13 @@ End-to-end pipeline: on-device keyframe + point cloud capture → server-based C
 
 ### 14.1 KeyframeCollector (Quest, automatic)
 Runs alongside scanning with no user interaction. Saves posed camera frames directly into the active scan package (`keyframes/`):
-- **Selection**: Motion-gated — translation > 0.15 m **or** rotation > 10° from every saved keyframe, and at least 0.25 s since the last capture. A frame is redundant only if it is close in **both** position and rotation.
-- **Rejection**: Angular velocity over 120 °/s (app clock, since the last check) is skipped as motion blur.
-- **Hand footprint**: capsules are clipped at the near plane before projection; a forearm running back past the camera must not project to a full-image footprint and reject the frame as 100 % hand.
+- **Selection**: Motion-gated — translation > 0.15 m **or** rotation > 10° from every saved keyframe, and at least 0.25 s since the last capture. A frame is redundant only if it is close in **position, rotation, and along-view distance band** (`bandGapM` 0.5 m). A standing look and a lean-in of the same wall are both kept. A yaw change greater than `standingYawDeg` (8°) versus every same-band keyframe is also kept, so wall angles densify even when a close-up already sits at a similar heading.
+- **Rejection**: Angular velocity over 120 °/s (app clock, since the last check) is skipped as motion blur. Hands covering more than `maxHandCoverage` used to drop the frame; the JPEG is now kept and the bake masks those pixels per texel.
 - **Per frame**: JPEG (1280x960, quality 95) + one JSON line in `frames.jsonl` with:
   - Position (px, py, pz), rotation quaternion (qx, qy, qz, qw)
   - Intrinsics (fx, fy, cx, cy), sensor resolution, current resolution
+  - Optional `"z"`: inferred scene distance (m) from along-view relatives, when known
+  - Optional `"cap"`: hand / forearm capsules
 - **I/O**: `AsyncGPUReadback` → main-thread copy of the pixels → `EncodeArrayToJPG` + file write on a worker
 - **Deduplication**: Multiple pose entries per image ID may occur; the server keeps only the last pose per image
 - **Typical output**: 100-300 keyframes, 10-30MB total
@@ -949,11 +950,13 @@ The corrected pose drives that keyframe's depth pass and `BlendAccum`. A pure im
 
 ### 15.1b Chart-Consistent View Preference
 
-**Admission is a ramp, not a bar.** A view's blend weight is `score × smoothstep(blendMinFraction × best, best, score)`: zero at 0.75× the texel's pass-1 best score, full at the best. Where the best view changes across a chart the two are near equal and both count; where one fades out it fades — a hard threshold switched views along a line and printed a seam *inside* the chart. Views under 2 % weight do not spend a `maxViewsPerTexel` slot.
+**Admission is a ramp among hero views, not a fraction of a close-up winner.** A *hero* view is head-on (`N·V > blendFacingMin`, default 0.45) and in the working-distance band (0.45–3.5 m, peak 0.8–2 m). Close-ups still win pass 1 when they are the only view of a texel (`ResolveBlend` keeps that colour); they do not enter `BlendAccum`. Among heroes, weight is `score × smoothstep(blendMinFraction × best, best, score)`. Pass 2 walks keyframes best-hero-first so `maxViewsPerTexel` is top-K, not capture order.
 
-**Exposure equalisation** (`equalizeExposure`, with registration on). The passthrough camera re-exposes between frames, so two well-registered views of one wall still meet with a brightness step. The registration chain already renders the pass-1 atlas into the keyframe's view at 1/4 res (`RenderAtlasView`, packed RGB) and downsamples the photo (`KfLumDownsample`, packed mean RGB); `ViewGainReduce` sums both over the covered pixels (groupshared partials, one atomic per channel per group) and C# turns the ratio into a per-channel gain clamped to `[1/exposureGainLimit, exposureGainLimit]` (1.6). `BlendAccum` multiplies the photo by `_KfGain`. Means over tens of thousands of pixels are indifferent to the few-pixel shift, so this needs no extra pass and a 28-byte readback.
+**Score** is `(N·V)² × distanceWeight(d) × gsdWeight(d, fx)` — not `N·V / d`. The old 1/distance term made a 20 cm graze beat a 1.5 m frontal look. Close-ups keep a small positive score so they still fill holes.
 
-Pass 1 sums each keyframe's valid texel scores per xatlas chart (one atomic per 4×4 texel block per keyframe into a `charts × keyframes` table); `ChartArgmax` picks the chart's best view. In pass 2 that view is weighted ×`chartBestViewBoost` (default 3) and never spends one of the `maxViewsPerTexel` slots, but it meets the same `blendMinFraction` bar as every other view (admitting a grazing photo below the bar stretches chart corners). A chart therefore reads from one photo wherever that photo sees it well, and view switches move to chart borders, which seam levelling (§15.3.1) then flattens. `ResolveBlend` keeps the pass-1 colour on texels no blend sample reached instead of clearing them.
+**Exposure equalisation** (`equalizeExposure`, with registration on). The passthrough camera re-exposes between frames. Pass 1 is now the working-distance winner, so gains match photos to standing brightness rather than to a close-up atlas. `ViewGainReduce` sums atlas vs photo over covered low-res pixels; C# clamps per-channel gain to `[1/exposureGainLimit, exposureGainLimit]` (1.6). `BlendAccum` multiplies the photo by `_KfGain`.
+
+Pass 1 sums each keyframe's **hero** texel scores per xatlas chart (one atomic per 4×4 texel block) plus a cover count; `CountChartTexels` sizes each chart. `ChartArgmax` picks the best hero that covers at least `chartMinCover` (default 0.15, vs 4×4-sampled cover) of the chart — a close-up of a corner cannot lock the island. If none qualify, the chart has no preferred view. In pass 2 the preferred view is weighted ×`chartBestViewBoost` (default 3) and never spends a `maxViewsPerTexel` slot, but it still has to be a hero. View switches move to chart borders, which seam levelling (§15.3.1) then flattens. `ResolveBlend` keeps the pass-1 colour on texels no blend sample reached.
 
 ### 15.2 UV Unwrapping (xatlas)
 
@@ -996,8 +999,8 @@ All xatlas options are exposed through a flat C API (`xatlas_generate_opts`) and
 3. **BakeAtlas** / **BlendAccum** (`[numthreads(64,1,1)]`): **one thread per atlas texel**. Look up the triangle, recompute barycentrics from the texel centre, interpolate position and vertex normal (face-normal sign kept), project via intrinsics (fx, fy, cx, cy with crop offset):
    - **Bounds check**: discard if outside the image
    - **Occlusion check**: projected depth vs depth buffer (0.05 m tolerance)
-   - **Body check**: the keyframe carries the player's hand / forearm capsules at capture (`"cap"` in `frames.jsonl`, written by `KeyframeCollector`, relocated with the pose). A texel whose segment camera → world point passes within `radius × 1.4` of any capsule (`SegSegDistSq`) is skipped. Frames where the capsules cover more than `maxHandCoverage` (12 %) of the image are never saved.
-   - **Score**: `dot(surfaceNormal, viewDirection)` at the texel — prefers head-on views. A per-triangle score flipped the best view along every large-triangle edge.
+  - **Body check**: the keyframe carries the player's hand / forearm capsules at capture (`"cap"` in `frames.jsonl`, written by `KeyframeCollector`, relocated with the pose). A texel whose segment camera → world point passes within `radius × 1.4` of any capsule (`SegSegDistSq`) is skipped. Frames with heavy hand coverage are still saved; the bake masks those pixels.
+  - **Score**: `(N·V)² × working-distance weight × GSD weight` at the texel — prefers head-on views at 0.8–2 m. Close-ups keep a small positive score so they still fill texels no standing view covers. A per-triangle score flipped the best view along every large-triangle edge.
    - Pass 1: `InterlockedMax(_ScoreBuf[texelIdx], asuint(score))` — scores are positive floats, so `asuint()` preserves order. Colour is written only when the thread wins.
    - Pass 2: `BlendAccum` accumulates admitted views (see §15.1b).
 

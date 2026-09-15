@@ -6,6 +6,34 @@ All notable changes to this package are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-15
+
+Texture refinement prefers **standing, head-on keyframes** over close-ups.
+Close-up photos stay on disk and still fill holes. Hosts can freeze and
+unfreeze with a custom spotlight cone instead of the headset gaze.
+
+### Added
+
+- **Custom freeze cone.** `RoomScanSession.FreezeInView(origin, direction,
+  halfAngleDegrees, maxMetres)` (and the matching unfreeze) paint a
+  host-supplied spotlight instead of the headset gaze. Length 0 is
+  unbounded. The no-arg `FreezeInView()` / debug-menu path is still the
+  15° head cone.
+
+### Changed
+
+- **Texture bake view selection.** Atlas score is head-on × working
+  distance (peak 0.8–2 m), not `N·V / distance`. Close-up JPEGs stay on
+  disk and still fill holes; standing head-on views win when both exist.
+  Blend admission is hero-only; pass 2 walks best-first so the per-texel
+  cap is top-K. Chart preference requires a cover floor so a corner
+  close-up cannot lock an island. Exposure gains match the standing
+  pass-1 atlas (`exposureGainLimit` 1.6).
+- **Keyframe capture.** Same-pose lean-in / step-back and new wall yaw
+  at a given distance band are kept. Frames with hands in view are
+  saved (bake still masks capsules per pixel). Optional `"z"` in
+  `frames.jsonl`.
+
 ## [1.2.0] - 2026-09-14
 
 Texture refinement is much faster and holds **72 fps** on Quest 3

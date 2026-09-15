@@ -294,7 +294,7 @@ namespace Genesis.RoomScan
         [SerializeField, Range(1, 16)] private int fineFloodFrames = 3;
         [Tooltip("Min-label link + pointer-jump rounds for hole components, one per frame.")]
         [SerializeField, Range(4, 32)] private int closureLinkRounds = 12;
-        [Tooltip("Half-angle, degrees, of the spotlight cone FreezeInView / UnfreezeInView paint from the eye along the gaze. 15° is a tight spot: a press paints what the player is looking straight at and they turn their head to paint more. Hosts draw a ring at this angle.")]
+        [Tooltip("Half-angle, degrees, of the default FreezeInView / UnfreezeInView cone from the eye along the gaze. Hosts can pass a different cone (origin, axis, angle, length) on the overload.")]
         [SerializeField, Range(5f, 45f)] private float freezeConeHalfAngle = 15f;
 
         /// <summary>Number of voxels near the zero-crossing with sufficient weight (surface voxels).</summary>
@@ -1099,49 +1099,62 @@ namespace Genesis.RoomScan
             RebindKernelTextures();
         }
 
-        /// <summary>Half-angle, degrees, of the freeze / unfreeze spotlight cone. Hosts draw their ring at this.</summary>
+        /// <summary>Half-angle, degrees, of the default head freeze cone.</summary>
         public float FreezeConeHalfAngle => freezeConeHalfAngle;
 
         /// <summary>
-        /// Freeze all voxels inside a spotlight cone from <paramref name="eye"/>
-        /// along <paramref name="gaze"/> (half-angle <see cref="FreezeConeHalfAngle"/>).
-        /// Frozen voxels are encoded as negative weight and skip integration.
-        /// Body capsules are never frozen.
+        /// Freeze voxels inside the default head cone: apex at
+        /// <paramref name="eye"/>, axis <paramref name="gaze"/>, half-angle
+        /// <see cref="FreezeConeHalfAngle"/>. Frozen voxels are encoded as
+        /// negative weight and skip integration. Body capsules are never
+        /// frozen.
         /// </summary>
         public void FreezeInView(Vector3 eye, Vector3 gaze)
+            => FreezeInView(eye, gaze, freezeConeHalfAngle, 0f);
+
+        /// <summary>
+        /// Freeze voxels inside a host-supplied spotlight cone.
+        /// <paramref name="maxMetres"/> 0 is unbounded.
+        /// </summary>
+        public void FreezeInView(Vector3 origin, Vector3 direction, float halfAngleDegrees, float maxMetres = 0f)
         {
             if (_volume == null || _freezeKernel.Shader == null)
             {
                 Logger.Warning("FreezeInView called before GPU resources allocated; ignored.");
                 return;
             }
-            SetFreezeCone(eye, gaze);
+            SetFreezeCone(origin, direction, halfAngleDegrees, maxMetres);
             BindExclusionUniforms(compute);
             _freezeKernel.Set(VolumeRWID, _volume);
             _freezeKernel.DispatchFit(_volume);
-            Logger.Info($"FreezeInView dispatched (cone ±{freezeConeHalfAngle:F0}°)");
+            Logger.Info($"FreezeInView dispatched (cone ±{halfAngleDegrees:F0}° max={maxMetres:F2}m)");
         }
 
-        /// <summary>Unfreeze all frozen voxels inside the same spotlight cone.</summary>
+        /// <summary>Unfreeze frozen voxels inside the default head cone.</summary>
         public void UnfreezeInView(Vector3 eye, Vector3 gaze)
+            => UnfreezeInView(eye, gaze, freezeConeHalfAngle, 0f);
+
+        /// <summary>Unfreeze frozen voxels inside a host-supplied spotlight cone.</summary>
+        public void UnfreezeInView(Vector3 origin, Vector3 direction, float halfAngleDegrees, float maxMetres = 0f)
         {
             if (_volume == null || _unfreezeKernel.Shader == null)
             {
                 Logger.Warning("UnfreezeInView called before GPU resources allocated; ignored.");
                 return;
             }
-            SetFreezeCone(eye, gaze);
+            SetFreezeCone(origin, direction, halfAngleDegrees, maxMetres);
             _unfreezeKernel.Set(VolumeRWID, _volume);
             _unfreezeKernel.DispatchFit(_volume);
-            Logger.Info($"UnfreezeInView dispatched (cone ±{freezeConeHalfAngle:F0}°)");
+            Logger.Info($"UnfreezeInView dispatched (cone ±{halfAngleDegrees:F0}° max={maxMetres:F2}m)");
         }
 
-        private void SetFreezeCone(Vector3 eye, Vector3 gaze)
+        void SetFreezeCone(Vector3 origin, Vector3 direction, float halfAngleDegrees, float maxMetres)
         {
-            Vector3 dir = gaze.sqrMagnitude > 1e-6f ? gaze.normalized : Vector3.forward;
-            float cos = Mathf.Cos(freezeConeHalfAngle * Mathf.Deg2Rad);
-            compute.SetVector(FreezeOriginID, new Vector4(eye.x, eye.y, eye.z, cos));
-            compute.SetVector(FreezeDirID, new Vector4(dir.x, dir.y, dir.z, 0f));
+            Vector3 dir = direction.sqrMagnitude > 1e-6f ? direction.normalized : Vector3.forward;
+            float half = Mathf.Clamp(halfAngleDegrees, 1f, 80f);
+            float cos = Mathf.Cos(half * Mathf.Deg2Rad);
+            compute.SetVector(FreezeOriginID, new Vector4(origin.x, origin.y, origin.z, cos));
+            compute.SetVector(FreezeDirID, new Vector4(dir.x, dir.y, dir.z, Mathf.Max(0f, maxMetres)));
         }
 
         /// <summary>

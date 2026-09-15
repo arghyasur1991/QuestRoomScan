@@ -15,11 +15,17 @@ namespace Genesis.RoomScan
     /// </summary>
     public class KeyframeCollector : MonoBehaviour
     {
-        [SerializeField, Tooltip("Min translation (m) from every saved keyframe to trigger a new capture. A frame is redundant only if it is close in BOTH position and rotation to a saved one.")]
+        [SerializeField, Tooltip("Min translation (m) from every saved keyframe to trigger a new capture. A frame is redundant only if it is close in BOTH position and rotation AND in the same along-view distance band.")]
         private float moveThreshold = 0.15f;
 
         [SerializeField, Tooltip("Min rotation (deg) from every saved keyframe to trigger a new capture")]
         private float rotateThresholdDeg = 10f;
+
+        [SerializeField, Tooltip("Along-view gap (m) that counts as a different distance band. A standing look and a lean-in of the same wall are both kept.")]
+        private float bandGapM = 0.5f;
+
+        [SerializeField, Tooltip("Save a frame when its yaw differs by more than this from every saved keyframe in the same distance band, even if pose is otherwise redundant. Fills wall angles at working distance.")]
+        private float standingYawDeg = 8f;
 
         [SerializeField, Range(50, 100)]
         private int jpegQuality = 95;
@@ -30,8 +36,8 @@ namespace Genesis.RoomScan
         [SerializeField, Tooltip("Min seconds between captures to prevent burst saves. A capture costs the main thread one readback copy; the JPEG encode and the disk write run on a worker.")]
         private float minCaptureInterval = 0.25f;
 
-        [SerializeField, Tooltip("Skip a frame when the player's hands / forearms cover more than this fraction of the image. Smaller intrusions are kept and masked out of the texture bake per pixel.")]
-        [Range(0.02f, 0.5f)] private float maxHandCoverage = 0.12f;
+        [SerializeField, Tooltip("Hands covering more than this fraction of the image used to drop the frame; the bake now masks hands per pixel, so the JPEG is kept. Logged only.")]
+        [Range(0.02f, 1f)] private float maxHandCoverage = 0.12f;
 
         [SerializeField, Tooltip("Log [KeyframeCollector][Profile] every 25 saves and at scan stop: main-thread readback copy, worker encode and write. Off by default.")]
         private bool profileCapture = false;
@@ -48,6 +54,7 @@ namespace Genesis.RoomScan
 
         private readonly List<Vector3> _savedPositions = new();
         private readonly List<Quaternion> _savedRotations = new();
+        private readonly List<float> _savedSceneZ = new();
         private int _nextId;
         private int _pendingWrites;
         private float _lastCaptureTime;
@@ -139,15 +146,16 @@ namespace Genesis.RoomScan
                 if (coverage > maxHandCoverage)
                 {
                     if (++_skippedForHands <= 3 || _skippedForHands % 25 == 0)
-                        Logger.Info($"KeyframeCollector: skipped frame, hands cover {coverage:P0} of the image ({_skippedForHands} so far)");
-                    return;
+                        Logger.Info($"KeyframeCollector: hands cover {coverage:P0} of the image — keeping frame, bake will mask ({_skippedForHands} so far)");
                 }
                 caps = FormatCapsules(capCount);
             }
 
+            float sceneZ = EstimateSceneZ(pos, rot);
             int id = _nextId++;
             _savedPositions.Add(pos);
             _savedRotations.Add(rot);
+            _savedSceneZ.Add(sceneZ);
             _lastCaptureTime = Time.time;
 
             float timestamp = Time.realtimeSinceStartup;
@@ -157,12 +165,12 @@ namespace Genesis.RoomScan
                 _pendingWrites++;
                 AsyncGPUReadback.Request(rt, 0, TextureFormat.RGBA32, req =>
                     OnReadbackComplete(req, id, timestamp, pos, rot,
-                        focalLen, principalPt, sensorRes, currentRes, caps));
+                        focalLen, principalPt, sensorRes, currentRes, caps, sceneZ));
             }
             else if (frame is Texture2D tex2d)
             {
                 SaveKeyframeData(tex2d.EncodeToJPG(jpegQuality), id, timestamp,
-                    pos, rot, focalLen, principalPt, sensorRes, currentRes, caps);
+                    pos, rot, focalLen, principalPt, sensorRes, currentRes, caps, sceneZ);
             }
         }
 
@@ -229,19 +237,54 @@ namespace Genesis.RoomScan
 
         private bool ShouldCapture(Vector3 pos, Quaternion rot)
         {
+            bool inBandRedundant = false;
+            bool newStandingYaw = true;
             for (int i = 0; i < _savedPositions.Count; i++)
             {
                 float dist = Vector3.Distance(pos, _savedPositions[i]);
                 float angle = Quaternion.Angle(rot, _savedRotations[i]);
-                if (dist < moveThreshold && angle < rotateThresholdDeg)
-                    return false;
+                Vector3 savedFwd = _savedRotations[i] * Vector3.forward;
+                float along = Vector3.Dot(pos - _savedPositions[i], savedFwd);
+                bool sameBand = Mathf.Abs(along) < bandGapM;
+
+                if (dist < moveThreshold && angle < rotateThresholdDeg && sameBand)
+                    inBandRedundant = true;
+                if (sameBand && angle < standingYawDeg)
+                    newStandingYaw = false;
             }
-            return true;
+            // Keep a lean-in / step-back of the same pose, and keep a new
+            // wall angle at this distance band even when a close-up already
+            // sits at a similar yaw.
+            return !inBandRedundant || newStandingYaw;
+        }
+
+        /// <summary>
+        /// Scene distance for this camera, inferred from the nearest saved
+        /// keyframe that already has a z and looks a similar way. 0 = unknown
+        /// (first frames of a cluster). Not a mesh raycast: relative along-view.
+        /// </summary>
+        float EstimateSceneZ(Vector3 pos, Quaternion rot)
+        {
+            float bestAng = 40f;
+            float z = 0f;
+            for (int i = 0; i < _savedPositions.Count; i++)
+            {
+                if (i >= _savedSceneZ.Count || _savedSceneZ[i] < 0.05f) continue;
+                float angle = Quaternion.Angle(rot, _savedRotations[i]);
+                if (angle >= bestAng) continue;
+                Vector3 savedFwd = _savedRotations[i] * Vector3.forward;
+                float along = Vector3.Dot(pos - _savedPositions[i], savedFwd);
+                float cand = _savedSceneZ[i] - along;
+                if (cand < 0.05f) continue;
+                bestAng = angle;
+                z = cand;
+            }
+            return z;
         }
 
         private void OnReadbackComplete(AsyncGPUReadbackRequest req, int id, float timestamp,
             Vector3 pos, Quaternion rot, Vector2 focalLen, Vector2 principalPt,
-            Vector2 sensorRes, Vector2 currentRes, string caps)
+            Vector2 sensorRes, Vector2 currentRes, string caps, float sceneZ)
         {
             _pendingWrites--;
             if (req.hasError)
@@ -277,7 +320,7 @@ namespace Genesis.RoomScan
                 SaveKeyframeData(() => ImageConversion.EncodeArrayToJPG(
                         pixels, UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_SRGB,
                         (uint)w, (uint)h, 0, quality),
-                    id, timestamp, pos, rot, focalLen, principalPt, sensorRes, currentRes, caps);
+                    id, timestamp, pos, rot, focalLen, principalPt, sensorRes, currentRes, caps, sceneZ);
             }
             catch (Exception e)
             {
@@ -287,12 +330,12 @@ namespace Genesis.RoomScan
 
         private void SaveKeyframeData(byte[] jpgBytes, int id, float timestamp,
             Vector3 pos, Quaternion rot, Vector2 focalLen, Vector2 principalPt,
-            Vector2 sensorRes, Vector2 currentRes, string caps = null)
-            => SaveKeyframeData(() => jpgBytes, id, timestamp, pos, rot, focalLen, principalPt, sensorRes, currentRes, caps);
+            Vector2 sensorRes, Vector2 currentRes, string caps = null, float sceneZ = 0f)
+            => SaveKeyframeData(() => jpgBytes, id, timestamp, pos, rot, focalLen, principalPt, sensorRes, currentRes, caps, sceneZ);
 
         private void SaveKeyframeData(Func<byte[]> encode, int id, float timestamp,
             Vector3 pos, Quaternion rot, Vector2 focalLen, Vector2 principalPt,
-            Vector2 sensorRes, Vector2 currentRes, string caps = null)
+            Vector2 sensorRes, Vector2 currentRes, string caps = null, float sceneZ = 0f)
         {
             Task.Run(() =>
             {
@@ -334,6 +377,8 @@ namespace Genesis.RoomScan
                     sb.Append(",\"sh\":").Append((int)sensorRes.y);
                     sb.Append(",\"w\":").Append((int)currentRes.x);
                     sb.Append(",\"h\":").Append((int)currentRes.y);
+                    if (sceneZ > 0.05f)
+                        sb.Append(",\"z\":").Append(sceneZ.ToString("F3"));
                     // Hand / forearm capsules at capture: "x y z x y z r;..." (no
                     // commas — the manifest reader splits lines on them).
                     if (!string.IsNullOrEmpty(caps))
@@ -370,6 +415,7 @@ namespace Genesis.RoomScan
             int id = _nextId++;
             _savedPositions.Add(pos);
             _savedRotations.Add(rot);
+            _savedSceneZ.Add(0f);
             SaveKeyframeData(jpgBytes, id, timestamp, pos, rot,
                 focalLen, principalPt, sensorRes, currentRes);
             return id;
@@ -382,6 +428,7 @@ namespace Genesis.RoomScan
         {
             _savedPositions.Clear();
             _savedRotations.Clear();
+            _savedSceneZ.Clear();
             _nextId = 0;
             _prevRotTime = 0f;
             _skippedForHands = 0;
@@ -417,7 +464,7 @@ namespace Genesis.RoomScan
                 double n = Math.Max(1, _workerDone);
                 return $"[KeyframeCollector][Profile] saved={_nextId} written={_workerDone} pending={_pendingWrites} " +
                        $"main copy={_mainCopyMs / n:F2}/{_mainCopyMaxMs:F1} | worker encode={_encodeMs / n:F1}/{_encodeMaxMs:F0} " +
-                       $"write={_writeMs / n:F1}/{_writeMaxMs:F0} (ms mean/max) skippedHands={_skippedForHands}";
+                       $"write={_writeMs / n:F1}/{_writeMaxMs:F0} (ms mean/max) heavyHands={_skippedForHands}";
             }
         }
 

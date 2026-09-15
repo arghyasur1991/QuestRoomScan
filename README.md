@@ -64,7 +64,7 @@ This is the case the package was built for. Quest's built-in room mesh gives you
 - **Shell Coverage** — With `RoomUnderstanding`, the captured room hull is sampled into ≤ 16k cells and marched against the TSDF once a second: `ScanCoverage.ShellCoverage` is how much of the shell has scanned matter in front of it (doorways, doors, windows excluded), `LargestGap` / `CopyShellGaps` say where the unscanned patches are, and small wall / floor / ceiling gaps whose neighbours lie on one plane are auto-filled with a soft plane stamp that real depth can still override. Guidance and acceleration only — it never feeds progress.
 - **Gaussian Splat Training & Rendering** — Keyframe capture + point cloud export → PC server training → trained PLY download → on-device UGS rendering
 - **VR Debug Menu** — Two-panel world-space UI Toolkit HUD with left navigation (Scan, Saved Scans, Refine, Gaussian Splat, Tools) and right detail views. Includes scan browser with load/delete per package (with delete confirmation), "Load Refined Only" for fast game-mode loading, context-sensitive artifact deletion, and dynamic button disabled states. Scene Objects toggle with live count. Navigation tabs for Refine and Gaussian Splat are automatically disabled when their respective modules are not attached.
-- **Texture Refinement** — Post-scan UV atlas from captured keyframes. GPU compute shader bakes one thread per atlas texel from the best-scoring projections, with multi-view blending, per-keyframe pose registration, occlusion-aware depth testing, GPU unsharp-mask sharpening, seam levelling, and Sobel normal maps. `TextureRefinement` is an instance-based MonoBehaviour — unwrap, bake, sharpen and seam settings are inspector fields.
+- **Texture Refinement** — Post-scan UV atlas from captured keyframes. GPU compute shader bakes one thread per atlas texel. Score is head-on × working-distance (peak 0.8–2 m), not `N·V / distance`: standing frontal views beat close-ups when both exist; close-ups still fill holes. Multi-view blend is hero-only and top-K, with per-keyframe pose registration, occlusion-aware depth testing, GPU unsharp-mask sharpening, seam levelling, and Sobel normal maps. `TextureRefinement` is an instance-based MonoBehaviour — unwrap, bake, sharpen and seam settings are inspector fields.
 - **Atlas Enhancement (HQ Refine)** — Server-side atlas super-resolution via Real-ESRGAN (2x/4x configurable) + LaMa inpainting. Uploads the on-device refined atlas as PNG, enhances, and downloads the result. Configurable SR scale via inspector.
 - **Mesh Enhancement** — Server-side mesh smoothing via bilateral normal filter + optional RANSAC plane detection and vertex snapping. Enhanced mesh saved as a separate artifact preserving the original refined mesh.
 - **Render Mode Switching** — Cycle between Wireframe, Vertex, Triplanar, Refined, Occlusion, Splat, and None at runtime via debug menu or controller binding (default: A/X button). Unavailable modes are automatically skipped during cycling (e.g., Triplanar requires `TriplanarCache`, Occlusion/Refined require refinement, Splat requires trained data).
@@ -113,12 +113,12 @@ Add to your project's `Packages/manifest.json`, pinned to a release tag:
 ```json
 {
   "dependencies": {
-    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.2.0"
+    "com.genesis.roomscan": "https://github.com/arghyasur1991/QuestRoomScan.git#v1.3.0"
   }
 }
 ```
 
-Drop the `#v1.2.0` suffix to track `main`. Releases and their notes are in
+Drop the `#v1.3.0` suffix to track `main`. Releases and their notes are in
 [`CHANGELOG.md`](CHANGELOG.md); `main` only moves by squash-merged release PR.
 
 For Gaussian Splat support, also add the optional dependency:
@@ -198,8 +198,8 @@ Call `await RoomScanner.Instance.StartScanningAsync()` to begin (or use the debu
 
 When a region of the mesh looks good and you don't want further integration to degrade it:
 
-- **Freeze In View** (Y/B button): Locks the voxels inside a 15° spotlight cone from your eye along your gaze (`freezeConeHalfAngle`); turn your head to paint more. Hosts can draw a ring at `RoomScanSession.FreezeConeHalfAngle`. Frozen voxels are skipped during integration — their geometry and color are preserved exactly as-is.
-- **Unfreeze In View** (X/A button): Restores frozen voxels in your current frustum to normal integration.
+- **Freeze In View** (Y/B button): Locks the voxels inside a 15° spotlight cone from your eye along your gaze (`freezeConeHalfAngle`); turn your head to paint more. Frozen voxels are skipped during integration — their geometry and color are preserved exactly as-is. Hosts can instead pass a custom cone: `FreezeInView(origin, direction, halfAngleDegrees, maxMetres)` (length 0 is unbounded).
+- **Unfreeze In View** (X/A button): Restores frozen voxels in the same cone to normal integration. Same optional custom-cone overload.
 
 This lets you selectively protect good surfaces while continuing to refine other areas.
 
@@ -513,11 +513,9 @@ await session.StartScanAsync();
 session.ProgressUpdated += p => progressBar.value = p.OverallProgress;
 
 // 3. As the user sweeps the room, paint visible chunks as "done":
-//    FreezeInView locks the voxels in a head-forward spotlight cone so they
-//    stop receiving updates. Frozen voxels count as refined, so painting a
-//    settled region also locks its share of OverallProgress. Use this as
-//    the natural "I'm satisfied with this region" gesture rather than a
-//    global pause.
+//    FreezeInView locks voxels in a spotlight cone so they stop receiving
+//    updates. The no-arg path is the headset gaze. Hosts with their own
+//    emitter pass origin, axis, half-angle, and length (0 = unbounded).
 session.FreezeInView();    // typically bound to a controller button
 session.UnfreezeInView();  // for "I painted too aggressively, redo"
 
@@ -650,7 +648,8 @@ For game integration where you want to minimize GPU overhead during scanning. Th
 | Setting | Value | Reason |
 |---------|-------|--------|
 | RoomScanner.meshExtractionHz | **8** | Live Surface Nets dump; 30 Hz was fill-rate expensive |
-| KeyframeCollector move / rotate / interval | **0.15 m / 10° / 0.25 s**, angular velocity **120°/s** | Atlas bake needs density; capture encode is off the main thread |
+| KeyframeCollector move / rotate / interval | **0.15 m / 10° / 0.25 s**, angular velocity **120°/s**; band gap **0.5 m**, standing yaw **8°**; hand-heavy frames kept | Atlas bake needs density and both close-up and standing views |
+| TextureRefinement view score | Head-on × 0.8–2 m working distance; close-ups fill holes | Stops 20 cm grazes from beating standing head-on looks |
 | TextureRefinement.postBakeSimplificationRatio | **0.5** | Simplified before unwrap and bake; 1.0 disables |
 | RoomScanner.ConfineScanToContainingRoom | host opt-in | Single-room mesh; default **false**. Needs `RoomUnderstanding` |
 | TriplanarCache | **Disabled** | Saves ~240 MB GPU; vertex colors are sufficient for scan-phase visualization |
@@ -761,7 +760,9 @@ Everything a game needs lives on one component. `[RequireComponent(typeof(RoomSc
 | `RequestSpaceSetupAndReloadAsync()` | `Task<bool>` | Horizon Space Setup, then reload with auto-capture **off**. True only if rooms exist afterwards (cancel is not success-with-rooms) |
 | `StartScanAsync()` | `Task` | Begin a new scan session (unloads a loaded package on a non-resume start, creates `_tmp/` package + spatial anchor; completes at the first integrated frame) |
 | `FreezeInView()` | `void` | Paint voxels inside the head cone (`FreezeConeHalfAngle`, 15°) as done; integration continues globally |
+| `FreezeInView(origin, direction, halfAngleDegrees, maxMetres)` | `void` | Same paint, host-supplied cone. `maxMetres` 0 is unbounded |
 | `UnfreezeInView()` | `void` | Inverse of `FreezeInView` for re-capture of bad regions |
+| `UnfreezeInView(origin, direction, halfAngleDegrees, maxMetres)` | `void` | Inverse of the custom-cone freeze |
 | `FinalizeScanAsync()` | `Task<ScanResult>` | Stop scanning → refine → save; returns mesh + atlas + package id + `AnchorFrameMesh`. Releases the live TSDF when `PresentRefinedWhenReady` is true |
 | `PresentRefinedWhenReady` | `bool` | True (default): finalize presents the refined mesh and releases the live TSDF. False: bake into memory and keep the live vertex mesh until the host presents |
 | `SetRefinedBackfaceCull(cullBack)` | `void` | Two-sided in the room, `Cull Back` outside (`RefinedMeshBackface.shader`). Quest ignores ShaderLab `Cull [_Cull]` |

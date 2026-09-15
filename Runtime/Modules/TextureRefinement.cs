@@ -70,12 +70,18 @@ namespace Genesis.RoomScan
         [Tooltip("Diffusion steps for the seam correction; each walks ~2 texels into the chart. 40 ≈ 60-80 texel feather. One GPU pass per step, spread over frames.")]
         [Range(4, 96)]
         [SerializeField] internal int seamLevelIterations = 40;
-        [Tooltip("Start of the blend admission ramp as a fraction of the texel's best view score: a view's weight rises from 0 here to full at the best score, so views fade in and out across a chart instead of switching along a line. 0.75 keeps only near-frontal, near-distance views; lower values average in oblique / far views and the atlas turns to mush.")]
+        [Tooltip("Start of the blend admission ramp as a fraction of the texel's best *hero* score. Heroes are head-on views in the working-distance band; close-ups fill holes in pass 1 but do not enter this ramp.")]
         [Range(0.1f, 0.95f)]
         [SerializeField] internal float blendMinFraction = 0.75f;
-        [Tooltip("At most this many views blended per texel. 2-3 averages sensor noise without stacking registration error from a long scan.")]
+        [Tooltip("At most this many hero views blended per texel. Pass 2 walks keyframes best-score-first so the cap keeps the top-K, not capture order.")]
         [Range(1, 8)]
         [SerializeField] internal int maxViewsPerTexel = 3;
+        [Tooltip("Minimum N·V for a view to count as head-on (hero / blend). Grazing close-ups fail this even if they won the old 1/distance score.")]
+        [Range(0.15f, 0.85f)]
+        [SerializeField] internal float blendFacingMin = 0.45f;
+        [Tooltip("A keyframe may be the chart's preferred view only if its hero samples cover this fraction of the chart. Stops a close-up of a corner from locking the whole island.")]
+        [Range(0f, 0.6f)]
+        [SerializeField] internal float chartMinCover = 0.15f;
         [Tooltip("Sobel normal map strength (0 = skip normal map generation)")]
         [Range(0f, 20f)]
         [SerializeField] internal float normalStrength = 8f;
@@ -117,16 +123,15 @@ namespace Genesis.RoomScan
         [SerializeField] internal float registrationMinNcc = 0.25f;
 
         [Header("Exposure Equalisation")]
-        [Tooltip("With registration on, measure each keyframe's colour against the pass-1 atlas over the pixels it covers and scale the photo to match before blending. The passthrough camera re-exposes between frames; without this every view switch inside a chart is a brightness step.")]
+        [Tooltip("With registration on, measure each keyframe's colour against the pass-1 atlas (now the working-distance winner) and scale the photo to match before blending. Close-up auto-exposure no longer sets room brightness.")]
         [SerializeField] internal bool equalizeExposure = true;
         [Tooltip("Gain is clamped to [1/limit, limit] per channel. 1.6 covers a stop of auto-exposure; more and a view that saw mostly a lamp would darken a whole wall.")]
         [Range(1.1f, 3f)]
         [SerializeField] internal float exposureGainLimit = 1.6f;
 
         [Header("Chart-Consistent Blend")]
-        [Tooltip("Weight multiplier for the view that scores best over a whole UV chart, so a chart " +
-                 "reads from one photo wherever it can and view switches move to chart borders " +
-                 "(which the seam pass already blends). 1 = off.")]
+        [Tooltip("Weight multiplier for the working-distance view that covers enough of a UV chart. " +
+                 "View switches move to chart borders (which the seam pass already blends). 1 = off.")]
         [Range(1f, 8f)]
         [SerializeField] internal float chartBestViewBoost = 3f;
 
@@ -168,6 +173,43 @@ namespace Genesis.RoomScan
 
         /// <summary>Keyframe reads + decodes kept in flight ahead of the bake.</summary>
         const int DecodePrefetchDepth = 3;
+
+        // Working-distance band (metres). Peak 0.8–2 m; strong penalty below
+        // 0.45 m (macro / AE / perspective); mild falloff past 3.5 m.
+        internal const float ViewCloseM = 0.45f;
+        internal const float ViewPeak0 = 0.8f;
+        internal const float ViewPeak1 = 2.0f;
+        internal const float ViewFarM = 3.5f;
+
+        internal static float ViewDistanceWeight(float d)
+        {
+            if (d < ViewCloseM) return 0.08f + 0.27f * Mathf.Clamp01(d / ViewCloseM);
+            if (d < ViewPeak0) return Mathf.Lerp(0.35f, 1f, (d - ViewCloseM) / (ViewPeak0 - ViewCloseM));
+            if (d <= ViewPeak1) return 1f;
+            if (d < ViewFarM) return Mathf.Lerp(1f, 0.45f, (d - ViewPeak1) / (ViewFarM - ViewPeak1));
+            return 0.45f * ViewFarM / d;
+        }
+
+        internal static float ViewGsdWeight(float d, float fx)
+        {
+            float pxm = d / Mathf.Max(fx, 1f);
+            float t = (pxm - 0.002f) / 0.0025f;
+            return Mathf.Max(Mathf.Exp(-0.5f * t * t), 0.25f);
+        }
+
+        /// <summary>Head-on × working-distance × GSD. Positive for close-ups so they still fill holes.</summary>
+        internal static float ViewScore(float dotNV, float distM, float fx)
+            => (dotNV * dotNV) * ViewDistanceWeight(distM) * ViewGsdWeight(distM, fx);
+
+        void BindViewSelection(ComputeShader compute)
+        {
+            compute.SetFloat("_BlendFacingMin", blendFacingMin);
+            compute.SetFloat("_ViewCloseM", ViewCloseM);
+            compute.SetFloat("_ViewPeak0", ViewPeak0);
+            compute.SetFloat("_ViewPeak1", ViewPeak1);
+            compute.SetFloat("_ViewFarM", ViewFarM);
+            compute.SetFloat("_ChartMinCover", chartMinCover);
+        }
 
         // pos @ 0 is the extractor dump. prevPos @ 12 is presentation-only.
         const int VertStride = GPUSurfaceNets.VertexStride;
@@ -429,6 +471,8 @@ namespace Genesis.RoomScan
             public string JpgPath; // deferred: path to JPEG, read on demand to avoid OOM
             /// <summary>Hand / forearm capsules at capture (xyz + radius per end), or null.</summary>
             public Vector4[] BodyCapP0, BodyCapP1;
+            /// <summary>Median scene distance at capture (m), 0 = unknown. Written as "z" in frames.jsonl.</summary>
+            public float SceneZ;
             /// <summary>RGB exposure gain toward the pass-1 atlas, set by registration; zero = unset (1).</summary>
             public Vector3 Gain;
             public Vector4 GainOrOne => Gain == Vector3.zero ? Vector4.one : new Vector4(Gain.x, Gain.y, Gain.z, 1f);
@@ -620,6 +664,7 @@ namespace Genesis.RoomScan
             float fx = 0, fy = 0, cx = 0, cy = 0;
             int sw = 0, sh = 0;
             string caps = null;
+            float sceneZ = 0;
 
             foreach (string token in jsonLine.Trim('{', '}', ' ').Split(','))
             {
@@ -630,6 +675,7 @@ namespace Genesis.RoomScan
                 switch (key)
                 {
                     case "cap": caps = val; break;
+                    case "z": sceneZ = float.Parse(val, System.Globalization.CultureInfo.InvariantCulture); break;
                     case "id": id = int.Parse(val); break;
                     case "px": px = float.Parse(val, System.Globalization.CultureInfo.InvariantCulture); break;
                     case "py": py = float.Parse(val, System.Globalization.CultureInfo.InvariantCulture); break;
@@ -653,6 +699,7 @@ namespace Genesis.RoomScan
             kf.Cx = cx; kf.Cy = cy;
             kf.SensorWidth = sw;
             kf.SensorHeight = sh;
+            kf.SceneZ = sceneZ;
             ParseBodyCapsules(caps, ref kf);
 
             string imgPath = Path.Combine(imagesDir, $"{id:D6}.jpg");
@@ -704,6 +751,9 @@ namespace Genesis.RoomScan
             int kClear = compute.FindKernel("ClearDepth");
             int kDepth = compute.FindKernel("BuildDepth");
             int kBake  = compute.FindKernel("BakeAtlas");
+            int kCountCharts = -1;
+            try { kCountCharts = compute.FindKernel("CountChartTexels"); }
+            catch { /* shader variant without coverage count */ }
             int kClearU = -1;
             int kCopyU = -1;
             try { kClearU = compute.FindKernel("ClearBuffer"); }
@@ -752,6 +802,8 @@ namespace Genesis.RoomScan
             // undefined on Vulkan even behind a branch that never reads it.
             var triChartBuf = new ComputeBuffer(Mathf.Max(1, chartCount > 0 ? outTriCount : 1), 4);
             var chartScoreBuf = new ComputeBuffer(Mathf.Max(1, chartCount * total), 4);
+            var chartCoverBuf = new ComputeBuffer(Mathf.Max(1, chartCount * total), 4);
+            var chartSizeBuf = new ComputeBuffer(Mathf.Max(1, chartCount), 4);
             var chartBestBuf = new ComputeBuffer(Mathf.Max(1, chartCount), 4);
             if (chartCount > 0)
             {
@@ -769,6 +821,8 @@ namespace Genesis.RoomScan
                 });
                 triChartBuf.SetData(triChart);
                 await ZeroUintBuffer(compute, kClearU, chartScoreBuf, chartCount * total);
+                await ZeroUintBuffer(compute, kClearU, chartCoverBuf, chartCount * total);
+                await ZeroUintBuffer(compute, kClearU, chartSizeBuf, chartCount);
             }
             else
             {
@@ -777,9 +831,11 @@ namespace Genesis.RoomScan
             }
             compute.SetBuffer(kBake, "_TriChart", triChartBuf);
             compute.SetBuffer(kBake, "_ChartScore", chartScoreBuf);
+            compute.SetBuffer(kBake, "_ChartCover", chartCoverBuf);
             compute.SetInt("_ChartCount", chartCount);
             compute.SetInt("_KfCount", total);
             compute.SetFloat("_ChartBoost", chartBestViewBoost);
+            BindViewSelection(compute);
 
             // Bind static buffers to kernels
             compute.SetBuffer(kDepth, "_OrigPos", origPosBuf);
@@ -810,6 +866,14 @@ namespace Genesis.RoomScan
             compute.SetBuffer(kBake, "_TexelTri", texelTriBuf);
             int texelGroups = (texelCount + 255) / 256;
 
+            if (chartCount > 0 && kCountCharts >= 0)
+            {
+                compute.SetBuffer(kCountCharts, "_TexelTri", texelTriBuf);
+                compute.SetBuffer(kCountCharts, "_TriChart", triChartBuf);
+                compute.SetBuffer(kCountCharts, "_ChartSize", chartSizeBuf);
+                compute.Dispatch(kCountCharts, texelGroups, 1, 1);
+            }
+
             // Seam pairs are CPU work over the unwrap only — build them on a
             // worker while the GPU bakes and consume them after the blend.
             Task<SeamPair[]> seamPairsTask = null;
@@ -839,10 +903,12 @@ namespace Genesis.RoomScan
             {
                 int kArgmax = compute.FindKernel("ChartArgmax");
                 compute.SetBuffer(kArgmax, "_ChartScore", chartScoreBuf);
+                compute.SetBuffer(kArgmax, "_ChartCover", chartCoverBuf);
+                compute.SetBuffer(kArgmax, "_ChartSize", chartSizeBuf);
                 compute.SetBuffer(kArgmax, "_ChartBestRW", chartBestBuf);
                 compute.Dispatch(kArgmax, (chartCount + 63) / 64, 1, 1);
                 await NextFrame();
-                Logger.Info($"[TextureRefine] Chart preference: {chartCount} charts, boost ×{chartBestViewBoost:F1}");
+                Logger.Info($"[TextureRefine] Chart preference: {chartCount} charts, boost ×{chartBestViewBoost:F1}, minCover={chartMinCover:F2}");
             }
 
             // ── Registration: align each keyframe to the pass-1 atlas before it
@@ -915,6 +981,14 @@ namespace Genesis.RoomScan
 
                 var pass2Scope = _profile?.Stage(refineHook != null ? "pass2+registration" : "pass2");
                 ReportStatus(refineHook != null ? "Registering + blending (pass 2)..." : "Multi-view blending (pass 2)...");
+                int[] blendOrder = null;
+                if (chartCount > 0)
+                {
+                    byte[] raw = await ReadbackComputeBufferAsync(chartScoreBuf, chartCount * total);
+                    var table = new uint[chartCount * total];
+                    Buffer.BlockCopy(raw, 0, table, 0, raw.Length);
+                    blendOrder = BlendOrderFromChartScores(table, chartCount, total);
+                }
                 int blendCount = await ProcessKeyframesGpuAsync(
                     metaList, compute, kClear, kDepth, origTriCount, "Multi-view blend...",
                     (tex, kf, depth) =>
@@ -924,7 +998,7 @@ namespace Genesis.RoomScan
                         compute.SetVector("_KfGain", kf.GainOrOne);
                         compute.Dispatch(kAccum, texelGroups, 1, 1);
                     },
-                    refineHook);
+                    refineHook, blendOrder);
 
                 Logger.Info($"[TextureRefine] Blend pass 2 complete: {blendCount} keyframes");
                 if (reg != null)
@@ -1116,7 +1190,8 @@ namespace Genesis.RoomScan
             origPosBuf.Release(); origIdxBuf.Release();
             outPosBuf.Release(); outNormBuf.Release(); outIdxBuf.Release();
             rawUVBuf.Release(); scoreBuf.Release(); atlasBuf.Release();
-            triChartBuf.Release(); chartScoreBuf.Release(); chartBestBuf.Release();
+            triChartBuf.Release(); chartScoreBuf.Release(); chartCoverBuf.Release();
+            chartSizeBuf.Release(); chartBestBuf.Release();
             texelTriBuf.Release();
             atlasSnapshot?.Release();
             reg?.Dispose();
@@ -1180,6 +1255,25 @@ namespace Genesis.RoomScan
         }
 
         /// <summary>
+        /// Pass-2 walk order: keyframes with the highest summed hero-chart
+        /// score first, so <c>maxViewsPerTexel</c> keeps the top-K, not capture order.
+        /// </summary>
+        static int[] BlendOrderFromChartScores(uint[] table, int chartCount, int kfCount)
+        {
+            var q = new float[kfCount];
+            for (int c = 0; c < chartCount; c++)
+            {
+                int row = c * kfCount;
+                for (int k = 0; k < kfCount; k++)
+                    q[k] += table[row + k];
+            }
+            var order = new int[kfCount];
+            for (int i = 0; i < kfCount; i++) order[i] = i;
+            System.Array.Sort(order, (a, b) => q[b].CompareTo(q[a]));
+            return order;
+        }
+
+        /// <summary>
         /// One keyframe per compositor frame, pipelined: keyframe N+1 is read
         /// and JPEG-decoded on a worker while N's GPU work is in flight, so the
         /// main thread only uploads pixels, binds the camera and issues
@@ -1190,6 +1284,8 @@ namespace Genesis.RoomScan
         /// <param name="refine">Optional: runs after the keyframe is uploaded and
         /// before its depth pass, may return a corrected keyframe (pose, gain).
         /// The corrected keyframe is written back to <paramref name="metaList"/>.</param>
+        /// <param name="processOrder">Keyframe indices to walk. Pass 2 supplies
+        /// best-hero-first so <c>maxViewsPerTexel</c> keeps the top-K, not capture order.</param>
         async Task<int> ProcessKeyframesGpuAsync(
             System.Collections.Generic.List<Keyframe> metaList,
             ComputeShader compute,
@@ -1197,14 +1293,27 @@ namespace Genesis.RoomScan
             int origTriCount,
             string statusPrefix,
             System.Action<Texture2D, Keyframe, ComputeBuffer> shade,
-            System.Func<Texture2D, Keyframe, Task<Keyframe>> refine = null)
+            System.Func<Texture2D, Keyframe, Task<Keyframe>> refine = null,
+            int[] processOrder = null)
         {
             int First(int from)
             {
+                if (processOrder != null)
+                {
+                    for (int s = from; s < processOrder.Length; s++)
+                    {
+                        int i = processOrder[s];
+                        if (i >= 0 && i < metaList.Count && !string.IsNullOrEmpty(metaList[i].JpgPath))
+                            return s;
+                    }
+                    return -1;
+                }
                 for (int i = from; i < metaList.Count; i++)
                     if (!string.IsNullOrEmpty(metaList[i].JpgPath)) return i;
                 return -1;
             }
+
+            int IndexAt(int cursor) => processOrder != null ? processOrder[cursor] : cursor;
 
             var slots = new[] { MakeKfTexture(), MakeKfTexture() };
             ComputeBuffer depthBuf = null;
@@ -1220,7 +1329,8 @@ namespace Genesis.RoomScan
             {
                 while (nextToQueue >= 0 && pending.Count < DecodePrefetchDepth)
                 {
-                    pending.Enqueue((nextToQueue, KeyframeImageDecoder.ReadAndDecodeAsync(metaList[nextToQueue].JpgPath)));
+                    int i = IndexAt(nextToQueue);
+                    pending.Enqueue((i, KeyframeImageDecoder.ReadAndDecodeAsync(metaList[i].JpgPath)));
                     nextToQueue = First(nextToQueue + 1);
                 }
             }
@@ -1847,7 +1957,7 @@ namespace Genesis.RoomScan
                     continue;
 
                 float dist = Vector3.Distance(camPos, centroid);
-                float score = dot / Mathf.Max(dist, 0.1f);
+                float score = ViewScore(dot, dist, kf.Fx);
 
                 RasterizeTriangle(atlas, bestScore, atlasW, atlasH,
                     u0, v0, u1, v1, u2, v2,

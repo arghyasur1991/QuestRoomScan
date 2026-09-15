@@ -278,9 +278,10 @@ namespace Genesis.RoomScan
         /// <see cref="FreezeConeHalfAngle"/>) as "frozen" — they stop receiving
         /// integration updates until the user explicitly
         /// <see cref="UnfreezeInView"/>s them. Frozen voxels count as refined,
-        /// so painting a settled region locks its share of progress. Hosts
-        /// should draw a ring at the cone angle so the player sees what a
-        /// press will paint. Integration keeps running on un-painted regions.
+        /// so painting a settled region locks its share of progress.
+        /// Integration keeps running on un-painted regions. The debug menu
+        /// uses this head cone. Hosts with their own emitter should call the
+        /// overload.
         /// </summary>
         public void FreezeInView()
         {
@@ -288,7 +289,19 @@ namespace Genesis.RoomScan
             _scanner.FreezeInView();
         }
 
-        /// <summary>Half-angle, degrees, of the freeze / unfreeze cone. Draw the ring at this.</summary>
+        /// <summary>
+        /// Freeze voxels inside a host-supplied spotlight cone instead of the
+        /// headset gaze. <paramref name="halfAngleDegrees"/> is the cone's
+        /// half-angle; <paramref name="maxMetres"/> 0 is unbounded (same as
+        /// the head cone).
+        /// </summary>
+        public void FreezeInView(Vector3 origin, Vector3 direction, float halfAngleDegrees, float maxMetres = 0f)
+        {
+            if (_scanner == null) { Logger.Error("RoomScanSession: RoomScanner not found"); return; }
+            _scanner.FreezeInView(origin, direction, halfAngleDegrees, maxMetres);
+        }
+
+        /// <summary>Half-angle, degrees, of the default head freeze cone.</summary>
         public float FreezeConeHalfAngle => _scanner != null ? _scanner.FreezeConeHalfAngle : 15f;
 
         /// <summary>
@@ -309,6 +322,13 @@ namespace Genesis.RoomScan
         {
             if (_scanner == null) { Logger.Error("RoomScanSession: RoomScanner not found"); return; }
             _scanner.UnfreezeInView();
+        }
+
+        /// <summary>Unfreeze frozen voxels inside a host-supplied spotlight cone.</summary>
+        public void UnfreezeInView(Vector3 origin, Vector3 direction, float halfAngleDegrees, float maxMetres = 0f)
+        {
+            if (_scanner == null) { Logger.Error("RoomScanSession: RoomScanner not found"); return; }
+            _scanner.UnfreezeInView(origin, direction, halfAngleDegrees, maxMetres);
         }
 
         /// <summary>

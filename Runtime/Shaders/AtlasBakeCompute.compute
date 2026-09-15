@@ -11,6 +11,7 @@
 #pragma kernel ResolveBlend
 #pragma kernel SharpenAtlas
 #pragma kernel SobelNormalMap
+#pragma kernel CountChartTexels
 #pragma kernel ChartArgmax
 #pragma kernel RenderAtlasView
 #pragma kernel KfLumDownsample
@@ -114,14 +115,43 @@ RWStructuredBuffer<uint> _AtlasBuf;  // packed RGBA32, persists across KFs
 RWStructuredBuffer<uint> _AtlasBufSrc;  // snapshot copy (read-only in the pass that binds it)
 
 // ── Chart-consistent view preference ────────────────────────
-//  Pass 1 sums each keyframe's valid texel scores per UV chart; the blend
-//  pass then boosts the chart's best keyframe so one photo covers as much
-//  of the chart as it can and view switches move to chart borders.
+//  Pass 1 sums each keyframe's *hero* texel scores per UV chart (head-on
+//  and in the working-distance band). Close-ups still fill a texel in
+//  pass 1 when no hero sees it, but they cannot become the chart hero.
 StructuredBuffer<int>    _TriChart;    // per output tri: xatlas chart, -1 none
 RWStructuredBuffer<uint> _ChartScore;  // [chart * _KfCount + kf], fixed point ×64
+RWStructuredBuffer<uint> _ChartCover;  // [chart * _KfCount + kf], 4×4-sampled hero texels
+RWStructuredBuffer<uint> _ChartSize;   // per chart: atlas texels (full res)
 StructuredBuffer<int>    _ChartBest;   // per chart: keyframe index, -1 none
 int   _KfIndex, _KfCount, _ChartCount;
 float _ChartBoost;
+float _ChartMinCover;                  // min hero-cover fraction of the chart; 0 = off
+float _BlendFacingMin;                 // N·V gate for hero / blend admission
+float _ViewCloseM, _ViewPeak0, _ViewPeak1, _ViewFarM;
+
+// Head-on × working-distance. Replaces N·V / distance, which made a 20 cm
+// graze beat a 1.5 m frontal look. Close-ups keep a small positive score
+// so they still win texels no standing view covers.
+float ViewDistanceWeight(float d)
+{
+    float closeW = 0.08 + 0.27 * saturate(d / max(_ViewCloseM, 0.01));
+    float rise = lerp(0.35, 1.0, saturate((d - _ViewCloseM) / max(_ViewPeak0 - _ViewCloseM, 0.01)));
+    float fall = lerp(1.0, 0.45, saturate((d - _ViewPeak1) / max(_ViewFarM - _ViewPeak1, 0.01)));
+    float farW = 0.45 * _ViewFarM / max(d, _ViewFarM);
+    return d < _ViewCloseM ? closeW : d < _ViewPeak0 ? rise : d <= _ViewPeak1 ? 1.0 : d < _ViewFarM ? fall : farW;
+}
+
+float ViewGsdWeight(float d, float fx)
+{
+    float pxm = d / max(fx, 1.0);
+    float t = (pxm - 0.002) / 0.0025;
+    return max(exp(-0.5 * t * t), 0.25);
+}
+
+float ViewScore(float dotNV, float d, float fx)
+{
+    return (dotNV * dotNV) * ViewDistanceWeight(d) * ViewGsdWeight(d, fx);
+}
 
 uint PackColor(float4 c)
 {
@@ -289,6 +319,7 @@ void BuildTexelMap(uint3 id : SV_DispatchThreadID)
 struct TexelView
 {
     bool  valid;
+    bool  hero;       // head-on and in the working-distance band
     int   tri;
     float score;
     float2 photoPx;   // continuous photo position
@@ -302,6 +333,7 @@ TexelView ProjectTexel(int idx, uint2 texel)
 {
     TexelView v;
     v.valid = false;
+    v.hero = false;
     v.tri = -1;
     v.score = 0;
     v.photoPx = float2(0, 0);
@@ -343,7 +375,8 @@ TexelView ProjectTexel(int idx, uint2 texel)
     vd /= max(vdLen, 0.001);
     float dotNV = dot(n, vd);
     ok = ok && dotNV > 0.05;
-    float score = dotNV / max(vdLen, 0.1);
+    float score = ViewScore(dotNV, vdLen, _Fx);
+    bool hero = ok && dotNV > _BlendFacingMin && vdLen >= _ViewCloseM && vdLen <= _ViewFarM;
 
     float3 camPt = mul(_ViewMat, float4(worldPt, 1)).xyz;
     ok = ok && camPt.z > 0.001;
@@ -361,6 +394,7 @@ TexelView ProjectTexel(int idx, uint2 texel)
         ok = !BodyOccludes(_CamPos.xyz, worldPt);
 
     v.valid = ok;
+    v.hero = ok && hero;
     v.tri = t;
     v.score = score;
     v.photoPx = sp;
@@ -384,13 +418,17 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
     TexelView v = ProjectTexel(idx, texel);
     if (!v.valid) return;
 
-    if (_ChartCount > 0)
+    if (_ChartCount > 0 && v.hero)
     {
         if ((texel.x & 3u) == 0u && (texel.y & 3u) == 0u)
         {
             int chart = _TriChart[v.tri];
             if (chart >= 0 && chart < _ChartCount)
-                InterlockedAdd(_ChartScore[chart * _KfCount + _KfIndex], (uint)(v.score * 64.0 * 16.0));
+            {
+                int slot = chart * _KfCount + _KfIndex;
+                InterlockedAdd(_ChartScore[slot], (uint)(v.score * 64.0 * 16.0));
+                InterlockedAdd(_ChartCover[slot], 1u);
+            }
         }
     }
 
@@ -403,8 +441,28 @@ void BakeAtlas(uint3 id : SV_DispatchThreadID)
 }
 
 // ═════════════════════════════════════════════════════════════
+//  Count atlas texels per UV chart (once per bake). ChartArgmax
+//  requires a keyframe to cover this fraction with hero samples
+//  before it can be the preferred view; a close-up of a pillow
+//  corner must not lock the whole chart.
+// ═════════════════════════════════════════════════════════════
+
+[numthreads(256, 1, 1)]
+void CountChartTexels(uint3 id : SV_DispatchThreadID)
+{
+    int idx = (int)id.x;
+    if (idx >= _AtlasW * _AtlasH) return;
+    uint t1 = _TexelTri[idx];
+    if (t1 == 0) return;
+    int chart = _TriChart[(int)t1 - 1];
+    if (chart >= 0 && chart < _ChartCount)
+        InterlockedAdd(_ChartSize[chart], 1u);
+}
+
+// ═════════════════════════════════════════════════════════════
 //  Chart argmax — one thread per chart, picks the keyframe with the
-//  largest summed texel score. Tiny: charts × keyframes reads.
+//  largest summed hero-texel score among views that cover enough of
+//  the chart. Tiny: charts × keyframes reads.
 // ═════════════════════════════════════════════════════════════
 
 RWStructuredBuffer<int> _ChartBestRW;
@@ -414,11 +472,15 @@ void ChartArgmax(uint3 id : SV_DispatchThreadID)
 {
     int chart = (int)id.x;
     if (chart >= _ChartCount) return;
+    uint size = _ChartSize[chart];
+    // Cover is 4×4 subsampled; compare against size / 16.
+    uint minCover = (uint)ceil((float)size * _ChartMinCover * 0.0625);
     uint best = 0;
     int bestK = -1;
     int base = chart * _KfCount;
     for (int k = 0; k < _KfCount; k++)
     {
+        if (_ChartCover[base + k] < minCover) continue;
         uint s = _ChartScore[base + k];
         if (s > best) { best = s; bestK = k; }
     }
@@ -770,12 +832,13 @@ void BlendAccum(uint3 id : SV_DispatchThreadID)
     TexelView v = ProjectTexel(idx, texel);
     if (!v.valid) return;
 
-    // Admission is a ramp, not a bar: a view's weight rises from 0 at
-    // _BlendMinFraction × best to full at best. Where the best view
-    // changes across a chart the two are near equal and both count;
-    // where one fades out it fades, instead of switching off along a
-    // line and printing a seam inside the chart. The chart's
-    // preferred view rides the same ramp with its boost on top.
+    // Close-ups stay on disk and still win pass 1 when they are the only
+    // view. They do not enter the blend when a head-on working-distance
+    // view exists — ResolveBlend keeps pass-1 colour on texels no hero
+    // reached. Admission among heroes is a ramp vs the texel's best
+    // score (now itself a hero when one exists).
+    if (!v.hero) return;
+
     float ramp = smoothstep(_BlendMinFraction, 1.0, v.score / bestS);
     if (ramp <= 0.02) return;
 
